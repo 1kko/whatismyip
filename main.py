@@ -148,6 +148,8 @@ async def get_ip_info(request: Request):
 
 @app.get("/{domain_ip}", response_model=WhoisResponse, response_class=ORJSONResponse)
 async def get_ip_info(domain_ip: str, request: Request):
+    if domain_ip in ["favicon.ico"]:
+        raise HTTPException(status_code=404, detail="Not Found")
     # Extract request headers
     request_headers = dict(request.headers)
     # this is considered runnint in a reverse proxy
