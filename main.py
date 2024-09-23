@@ -40,7 +40,7 @@ logger.addHandler(file_handler)
 
 # Define the Pydantic model for the response
 class WhoisResponse(BaseModel):
-    ip_address: str
+    address: str
     datetime: datetime.datetime
     location: dict
     whois: dict
