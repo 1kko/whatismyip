@@ -15,6 +15,7 @@ class WhoisResponse(BaseModel):
     ip_address: str
     location: dict
     whois: dict
+    headers: dict
 
     class Config:
         json_schema_extra = {
@@ -70,6 +71,9 @@ async def get_ip_info(request: Request):
     # Get the client's IP address
     client_ip = request.client.host
 
+    # Extract request headers
+    request_headers = dict(request.headers)
+
     # Create an asyncio task to fetch IP location info
     ip_location_task = asyncio.create_task(fetch_ip_location(client_ip))
 
@@ -86,7 +90,8 @@ async def get_ip_info(request: Request):
     return {
         "ip_address": client_ip,
         "location": ip_data,
-        "whois": whois_data
+        "whois": whois_data,
+        "headers": request_headers,
     }
 
 if __name__ == "__main__":
