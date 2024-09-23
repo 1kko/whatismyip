@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "whatismyip"
-version = "0.1.0"
+version = "0.2.0"
 description = ""
 authors = ["1kko <me@1kko.com>"]
 license = "MIT"
@@ -12,7 +12,13 @@ fastapi = {extras = ["standard"], version = "^0.115.0"}
 pydantic = "^2.9.2"
 uvicorn = "^0.30.6"
 python-whois = "^0.9.4"
+orjson = "^3.10.7"
+geoip2fast = "^1.2.2"
+apscheduler = "^3.10.4"
 
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.6.7"
 
 [build-system]
 requires = ["poetry-core"]
