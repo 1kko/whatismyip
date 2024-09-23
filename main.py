@@ -68,11 +68,12 @@ async def fetch_ip_location(ip: str):
 
 @app.get("/", response_model=WhoisResponse)
 async def get_ip_info(request: Request):
-    # Get the client's IP address
-    client_ip = request.client.host
-
     # Extract request headers
     request_headers = dict(request.headers)
+
+    # Get the client's IP address
+    # this is considered runnint in a reverse proxy
+    client_ip = request_headers.get("x-real-ip", request.client.host)
 
     # Create an asyncio task to fetch IP location info
     ip_location_task = asyncio.create_task(fetch_ip_location(client_ip))
