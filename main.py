@@ -110,6 +110,9 @@ scheduler.add_job(update_geoip2fast, "interval", days=3)
 # Start the scheduler
 scheduler.start()
 
+# run only once to update_geoip2fast function on startup
+update_geoip2fast()
+
 
 @app.get("/", response_model=WhoisResponse, response_class=ORJSONResponse)
 async def get_ip_info(request: Request):
