@@ -49,7 +49,7 @@ class WhoisResponse(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "ip_address": "8.8.8.8",
+                "address": "8.8.8.8",
                 "location": {
                     "ip": "8.8.8.8",
                     "city": "Mountain View",
@@ -137,7 +137,7 @@ async def get_ip_info(request: Request):
 
     # Return the IP info and WHOIS data as JSON
     response_data = {
-        "ip_address": client_ip,
+        "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
         "location": ip_data,
         "whois": whois_data,
@@ -152,6 +152,9 @@ async def get_ip_info(domain_ip: str, request: Request):
         raise HTTPException(status_code=404, detail="Not Found")
     # Extract request headers
     request_headers = dict(request.headers)
+    # remove host header
+    request_headers.pop("host", None)
+
     # this is considered runnint in a reverse proxy
     client_ip = request_headers.get("x-real-ip", request.client.host)
     logging.info(f"client={client_ip} lookup={domain_ip}")
@@ -183,7 +186,7 @@ async def get_ip_info(domain_ip: str, request: Request):
 
     # Return the IP info and WHOIS data as JSON
     response_data = {
-        "ip_address": domain_ip,
+        "address": domain_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
         "location": ip_data,
         "whois": whois_data,

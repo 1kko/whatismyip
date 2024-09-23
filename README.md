@@ -75,25 +75,32 @@ Returns WHOIS and GeoIP information for the provided domain or IP address.
 Response:
 ```
 {
-  "ip_address": "8.8.8.8",
+  "address": "8.8.8.8",
   "datetime": "2023-01-01T00:00:00Z",
   "location": {
-    "ip": "8.8.8.8",
-    "city": "Mountain View",
-    "region": "California",
-    "country": "US",
-    "loc": "37.3860,-122.0838",
-    "org": "AS15169 Google LLC",
-    "postal": "94035",
-    "timezone": "America/Los_Angeles"
+    "ip": "142.250.76.142",
+    "country_code": "US",
+    "country_name": "United States",
+    "city": "",
+    "cidr": "142.250.64.0/18",
+    "hostname": "",
+    "asn_name": "",
+    "asn_cidr": "",
+    "is_private": false
   },
   "whois": {
-    "domain_name": "GOOGLE.COM",
+    "domain_name": [
+      "GOOGLE.COM",
+      "google.com"
+    ],
     "registrar": "MARKMONITOR INC.",
     "whois_server": "whois.markmonitor.com",
     ...
   },
   "headers": {
+    ...
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     ...
   }
 }
