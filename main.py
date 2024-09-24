@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import ORJSONResponse
 from geoip2fast import GeoIP2Fast
 from pydantic import BaseModel
+from typing import Any
 
 app = FastAPI()
 
@@ -50,15 +51,23 @@ class WhoisResponse(BaseModel):
         json_schema_extra = {
             "example": {
                 "address": "8.8.8.8",
+                "datetime": "2024-09-24T06:55:45.597769Z",
                 "location": {
                     "ip": "8.8.8.8",
-                    "city": "Mountain View",
-                    "region": "California",
-                    "country": "US",
-                    "loc": "37.3860,-122.0838",
-                    "org": "AS15169 Google LLC",
-                    "postal": "94035",
-                    "timezone": "America/Los_Angeles"
+                    "country_code": "US",
+                    "country_name": "United States",
+                    "city": {
+                        "name": "",
+                        "subdivision_code": "",
+                        "subdivision_name": "",
+                        "latitude": None,
+                        "longitude": None
+                    },
+                    "cidr": "8.8.8.0/23",
+                    "hostname": "",
+                    "asn_name": "GOOGLE",
+                    "asn_cidr": "8.8.8.0/24",
+                    "is_private": False
                 },
                 "whois": {
                     "domain_name": "GOOGLE.COM",
@@ -90,14 +99,15 @@ class WhoisResponse(BaseModel):
 
 
 # Function to fetch ip location data
-def fetch_ip_location(ip: str):
+def fetch_ip_location(ip: str) -> dict[str, Any]:
     # return whois.whois(ip)
     return GEOIP.lookup(ip).to_dict()
 
 
 # GeoIP2Fast database update
-def update_geoip2fast():
-    update_result = GEOIP.update_all(verbose=False)
+def update_geoip2fast() -> None:
+    update_result = GEOIP.update_file("geoip2fast-city-asn-ipv6.dat.gz",
+                                      "geoip2fast.dat.gz", verbose=False)
     reload_result = GEOIP.reload_data(verbose=False)
     logging.info(f"{update_result=}")
     logging.info(f"{reload_result=}")
@@ -115,7 +125,7 @@ update_geoip2fast()
 
 
 @app.get("/", response_model=WhoisResponse, response_class=ORJSONResponse)
-async def get_ip_info(request: Request):
+async def get_self_info(request: Request) -> dict[str, Any]:
     # Extract request headers
     request_headers = dict(request.headers)
 
@@ -147,8 +157,8 @@ async def get_ip_info(request: Request):
 
 
 @app.get("/{domain_ip}", response_model=WhoisResponse, response_class=ORJSONResponse)
-async def get_ip_info(domain_ip: str, request: Request):
-    if domain_ip in ["favicon.ico"]:
+async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
+    if domain_ip in ["favicon.ico", "robots.txt", "apple-touch-icon.png", "apple-touch-icon-precomposed.png", "apple-touch-icon-120x120.png", "apple-touch-icon-120x120-precomposed.png", "apple-touch-icon-152x152.png", "apple-touch-icon-152x152-precomposed.png"]:
         raise HTTPException(status_code=404, detail="Not Found")
     # Extract request headers
     request_headers = dict(request.headers)
@@ -164,7 +174,7 @@ async def get_ip_info(domain_ip: str, request: Request):
         # It's a domain, resolve it to an IP address
         try:
             resolved_ip = socket.gethostbyname(domain_ip)
-        except socket.gaierror as e:
+        except socket.gaierror:
             raise HTTPException(
                 status_code=400, detail=f"Invalid domain: {domain_ip}")
     else:

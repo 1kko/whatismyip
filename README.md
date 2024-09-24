@@ -73,19 +73,25 @@ Returns WHOIS and GeoIP information for the client's IP address.
 Returns WHOIS and GeoIP information for the provided domain or IP address.
 
 Response:
-```
+```json
 {
   "address": "8.8.8.8",
-  "datetime": "2023-01-01T00:00:00Z",
+  "datetime": "2024-09-24T06:55:45.597769Z",
   "location": {
-    "ip": "142.250.76.142",
+    "ip": "8.8.8.8",
     "country_code": "US",
     "country_name": "United States",
-    "city": "",
-    "cidr": "142.250.64.0/18",
+    "city": {
+      "name": "",
+      "subdivision_code": "",
+      "subdivision_name": "",
+      "latitude": null,
+      "longitude": null
+    },
+    "cidr": "8.8.8.0/23",
     "hostname": "",
-    "asn_name": "",
-    "asn_cidr": "",
+    "asn_name": "GOOGLE",
+    "asn_cidr": "8.8.8.0/24",
     "is_private": false
   },
   "whois": {
