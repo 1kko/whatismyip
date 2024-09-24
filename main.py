@@ -181,9 +181,7 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
         # It's an IP address
         resolved_ip = domain_ip
 
-    # Get the client's IP address
-
-    # Perform a WHOIS lookup for the client's IP address or domain
+    # Perform a WHOIS lookup for given address
     try:
         whois_data = whois.whois(domain_ip)
     except Exception as e:

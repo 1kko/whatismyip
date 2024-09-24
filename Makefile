@@ -2,12 +2,10 @@ PROJECT_NAME = "whatismyip"
 
 all:
 	docker image prune -f
-	poetry export --without-hashes > ./requirements.txt
 	docker build -t ${PROJECT_NAME} .
 
 build:
 	docker image prune -f
-	poetry export --without-hashes > ./requirements.txt
 	docker build -t ${PROJECT_NAME} .
 
 run:

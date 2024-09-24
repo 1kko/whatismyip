@@ -5,10 +5,13 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # python:3.10-slim already has pip. we just need to install uv
-RUN pip3 install uv
+RUN pip3 install uv poetry
 
 # copy only the dependencies that are needed for our application and the source files
-COPY requirements.txt .
+COPY poetry.lock .
+COPY pyproject.toml .
+
+RUN poetry export --without-hashes > ./requirements.txt
 
 # install requirements using uv --system (hence no virtualenv is required)
 RUN uv pip install --system -r requirements.txt
