@@ -22,7 +22,7 @@ serve:
 	echo "removing ${PROJECT_NAME}"
 	-docker container rm ${PROJECT_NAME}
 	echo "start running"
-	docker run -d -p 8000:8000 --name ${PROJECT_NAME} --env-file .env -v $(PWD)/data:/app/data ${PROJECT_NAME}:latest
+	docker run -d --restart unless-stopped -p 8000:8000 --name ${PROJECT_NAME} --env-file .env -v $(PWD)/data:/app/data ${PROJECT_NAME}:latest
 
 shell:
 	docker exec -it ${PROJECT_NAME}:latest /bin/bash
