@@ -113,12 +113,16 @@ def fetch_ip_location(ip: str) -> dict[str, Any]:
 
 # GeoIP2Fast database update
 def update_geoip2fast() -> None:
-    update_result = GEOIP.update_file(
-        "geoip2fast-city-asn-ipv6.dat.gz", "geoip2fast.dat.gz", verbose=False
-    )
-    reload_result = GEOIP.reload_data(verbose=False)
-    logging.info(f"{update_result=}")
-    logging.info(f"{reload_result=}")
+    try:
+        update_result = GEOIP.update_file(
+            "geoip2fast-city-asn-ipv6.dat.gz", "geoip2fast.dat.gz", verbose=False
+        )
+        reload_result = GEOIP.reload_data(verbose=False)
+        logging.info(f"{update_result=}")
+        logging.info(f"{reload_result=}")
+    except Exception as e:
+        logging.exception(f"Error updating GeoIP2Fast database: {str(e)}")
+        pass
 
 
 # check if is ipv4
@@ -146,7 +150,7 @@ def is_domain(domain) -> bool:
         return False
 
 
-def get_domain_records(domain: str) -> dict:
+def get_domain_records(domain: str, ns_servers: list | None = None) -> dict:
     """
     Get the domain records
     """
@@ -158,28 +162,35 @@ def get_domain_records(domain: str) -> dict:
     }
 
     try:
+        resolver = dns.resolver.Resolver(configure=False)
+        resolver.nameservers = dns.resolver.get_default_resolver().nameservers
+        for ns in ns_servers:
+            server = ns if is_ipv4(ns) else dns.resolver.resolve(ns, 'A')[
+                0].address
+            resolver.nameservers.append(server)
+
         # Get MX records
-        mx_records = dns.resolver.resolve(domain, 'MX')
+        mx_records = resolver.resolve(domain, 'MX')
         for r in mx_records:
             records['mx'].append(
                 {'exchange': r.exchange.to_text(), 'ttl': mx_records.rrset.ttl})
 
         # Get NS records
-        ns_records = dns.resolver.resolve(domain, 'NS')
+        ns_records = resolver.resolve(domain, 'NS')
         for r in ns_records:
             records['ns'].append(
                 {'ns': r.target.to_text(), 'ttl': ns_records.rrset.ttl})
 
         # Get CNAME record
         try:
-            cname_record = dns.resolver.resolve(domain, 'CNAME')
+            cname_record = resolver.resolve(domain, 'CNAME')
             records['cname'] = {
                 'cname': cname_record.rrset[0].target.to_text(), 'ttl': cname_record.rrset.ttl}
         except dns.resolver.NoAnswer:
             records['cname'] = None
 
         # Get TXT records
-        txt_records = dns.resolver.resolve(domain, 'TXT')
+        txt_records = resolver.resolve(domain, 'TXT')
         for r in txt_records:
             records['txt'].append(
                 {'text': r.strings, 'ttl': txt_records.rrset.ttl})
@@ -226,6 +237,7 @@ async def get_self_info(request: Request) -> dict[str, Any]:
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
+        "domain": {},
         "location": ip_data,
         "whois": whois_data,
         "headers": request_headers,
@@ -255,19 +267,20 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
     client_ip = request_headers.get("x-real-ip", request.client.host)
     logging.info(f"client={client_ip} lookup={domain_ip}")
 
-    if is_domain(domain_ip):
-        logging.debug(f"domain={domain_ip}")
-        resolved_ip = socket.gethostbyname(domain_ip)
-        domain_data = get_domain_records(domain_ip)
-    elif is_ipv4(domain_ip):
-        logging.debug(f"ip={domain_ip}")
-        resolved_ip = domain_ip
-
     # Perform a WHOIS lookup for given address
     try:
         whois_data = whois.whois(domain_ip)
     except Exception as e:
         whois_data = {"error": str(e)}
+
+    if is_domain(domain_ip):
+        logging.debug(f"domain={domain_ip}")
+        resolved_ip = socket.gethostbyname(domain_ip)
+        domain_data = get_domain_records(
+            domain_ip, ns_servers=whois_data.get("name_servers", []))
+    elif is_ipv4(domain_ip):
+        logging.debug(f"ip={domain_ip}")
+        resolved_ip = domain_ip
 
     # Await the result of the IP location task
     ip_data = fetch_ip_location(resolved_ip)
@@ -279,7 +292,6 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
         "address": domain_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
         "domain": domain_data,
-        "hello": "world",
         "location": ip_data,
         "whois": whois_data,
         "headers": request_headers,
