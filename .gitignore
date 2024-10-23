@@ -164,3 +164,7 @@ cython_debug/
 # vim temporary files
 *.swp
 *.swo
+
+# log files
+service.log
+service.log.*

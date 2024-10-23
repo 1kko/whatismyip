@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 
 import datetime
+import ipaddress
 import logging
 import socket
 from logging.handlers import TimedRotatingFileHandler
+from typing import Any
 
+import dns.resolver
 import uvicorn
 import whois  # whoisdomain for WHOIS lookups
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import ORJSONResponse
 from geoip2fast import GeoIP2Fast
 from pydantic import BaseModel
-from typing import Any
+from tld import exceptions as tld_exceptions
+from tld import get_tld
 
 app = FastAPI()
 
@@ -21,7 +25,8 @@ GEOIP = GeoIP2Fast()
 
 # Configure logging
 log_formatter = logging.Formatter(
-    '%(asctime)s - %(filename)s:%(lineno)d - %(funcName)s - %(message)s')
+    "%(asctime)s - %(filename)s:%(lineno)d - %(funcName)s - %(message)s"
+)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -33,7 +38,8 @@ logger.addHandler(console_handler)
 
 # File handler with rotation every 1 days, keeping 7 days of logs
 file_handler = TimedRotatingFileHandler(
-    'service.log', when='D', interval=1, backupCount=7)
+    "service.log", when="D", interval=1, backupCount=7
+)
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(log_formatter)
 logger.addHandler(file_handler)
@@ -43,6 +49,7 @@ logger.addHandler(file_handler)
 class WhoisResponse(BaseModel):
     address: str
     datetime: datetime.datetime
+    domain: dict
     location: dict
     whois: dict
     headers: dict
@@ -61,13 +68,13 @@ class WhoisResponse(BaseModel):
                         "subdivision_code": "",
                         "subdivision_name": "",
                         "latitude": None,
-                        "longitude": None
+                        "longitude": None,
                     },
                     "cidr": "8.8.8.0/23",
                     "hostname": "",
                     "asn_name": "GOOGLE",
                     "asn_cidr": "8.8.8.0/24",
-                    "is_private": False
+                    "is_private": False,
                 },
                 "whois": {
                     "domain_name": "GOOGLE.COM",
@@ -81,7 +88,7 @@ class WhoisResponse(BaseModel):
                         "NS1.GOOGLE.COM",
                         "NS2.GOOGLE.COM",
                         "NS3.GOOGLE.COM",
-                        "NS4.GOOGLE.COM"
+                        "NS4.GOOGLE.COM",
                     ],
                     "status": "clientUpdateProhibited https://icann.org/epp#clientUpdateProhibited",
                     "emails": "abusecomplaints@markmonitor.com",
@@ -92,8 +99,8 @@ class WhoisResponse(BaseModel):
                     "city": None,
                     "state": "CA",
                     "zipcode": None,
-                    "country": "US"
-                }
+                    "country": "US",
+                },
             }
         }
 
@@ -106,11 +113,81 @@ def fetch_ip_location(ip: str) -> dict[str, Any]:
 
 # GeoIP2Fast database update
 def update_geoip2fast() -> None:
-    update_result = GEOIP.update_file("geoip2fast-city-asn-ipv6.dat.gz",
-                                      "geoip2fast.dat.gz", verbose=False)
+    update_result = GEOIP.update_file(
+        "geoip2fast-city-asn-ipv6.dat.gz", "geoip2fast.dat.gz", verbose=False
+    )
     reload_result = GEOIP.reload_data(verbose=False)
     logging.info(f"{update_result=}")
     logging.info(f"{reload_result=}")
+
+
+# check if is ipv4
+def is_ipv4(ip: str) -> bool:
+    """
+    check if the ip address is valid ipv4
+    """
+    try:
+        ip = ipaddress.ip_address(ip)
+        if ip.version == 4:
+            return True
+        else:
+            return False
+    except ValueError:
+        return False
+
+# check if is valid domain name
+
+
+def is_domain(domain) -> bool:
+    try:
+        _ = get_tld(domain, fix_protocol=True)
+        return True
+    except tld_exceptions.TldDomainNotFound:
+        return False
+
+
+def get_domain_records(domain: str) -> dict:
+    """
+    Get the domain records
+    """
+    records = {
+        'mx': [],
+        'ns': [],
+        'cname': None,
+        'txt': []
+    }
+
+    try:
+        # Get MX records
+        mx_records = dns.resolver.resolve(domain, 'MX')
+        for r in mx_records:
+            records['mx'].append(
+                {'exchange': r.exchange.to_text(), 'ttl': mx_records.rrset.ttl})
+
+        # Get NS records
+        ns_records = dns.resolver.resolve(domain, 'NS')
+        for r in ns_records:
+            records['ns'].append(
+                {'ns': r.target.to_text(), 'ttl': ns_records.rrset.ttl})
+
+        # Get CNAME record
+        try:
+            cname_record = dns.resolver.resolve(domain, 'CNAME')
+            records['cname'] = {
+                'cname': cname_record.rrset[0].target.to_text(), 'ttl': cname_record.rrset.ttl}
+        except dns.resolver.NoAnswer:
+            records['cname'] = None
+
+        # Get TXT records
+        txt_records = dns.resolver.resolve(domain, 'TXT')
+        for r in txt_records:
+            records['txt'].append(
+                {'text': r.strings, 'ttl': txt_records.rrset.ttl})
+
+    except Exception as e:
+        logging.error(f"Error retrieving DNS records for {domain}: {str(e)}")
+
+    return records
 
 
 # Create a BackgroundScheduler instance
@@ -143,7 +220,7 @@ async def get_self_info(request: Request) -> dict[str, Any]:
     # Await the result of the IP location task
     ip_data = fetch_ip_location(client_ip)
     # remove elapsed_time
-    ip_data.pop('elapsed_time', None)
+    ip_data.pop("elapsed_time", None)
 
     # Return the IP info and WHOIS data as JSON
     response_data = {
@@ -158,7 +235,16 @@ async def get_self_info(request: Request) -> dict[str, Any]:
 
 @app.get("/{domain_ip}", response_model=WhoisResponse, response_class=ORJSONResponse)
 async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
-    if domain_ip in ["favicon.ico", "robots.txt", "apple-touch-icon.png", "apple-touch-icon-precomposed.png", "apple-touch-icon-120x120.png", "apple-touch-icon-120x120-precomposed.png", "apple-touch-icon-152x152.png", "apple-touch-icon-152x152-precomposed.png"]:
+    if domain_ip in [
+        "favicon.ico",
+        "robots.txt",
+        "apple-touch-icon.png",
+        "apple-touch-icon-precomposed.png",
+        "apple-touch-icon-120x120.png",
+        "apple-touch-icon-120x120-precomposed.png",
+        "apple-touch-icon-152x152.png",
+        "apple-touch-icon-152x152-precomposed.png",
+    ]:
         raise HTTPException(status_code=404, detail="Not Found")
     # Extract request headers
     request_headers = dict(request.headers)
@@ -169,16 +255,12 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
     client_ip = request_headers.get("x-real-ip", request.client.host)
     logging.info(f"client={client_ip} lookup={domain_ip}")
 
-    # Check if the input is a domain or an IP address
-    if any(c.isalpha() for c in domain_ip):
-        # It's a domain, resolve it to an IP address
-        try:
-            resolved_ip = socket.gethostbyname(domain_ip)
-        except socket.gaierror:
-            raise HTTPException(
-                status_code=400, detail=f"Invalid domain: {domain_ip}")
-    else:
-        # It's an IP address
+    if is_domain(domain_ip):
+        logging.debug(f"domain={domain_ip}")
+        resolved_ip = socket.gethostbyname(domain_ip)
+        domain_data = get_domain_records(domain_ip)
+    elif is_ipv4(domain_ip):
+        logging.debug(f"ip={domain_ip}")
         resolved_ip = domain_ip
 
     # Perform a WHOIS lookup for given address
@@ -190,17 +272,20 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
     # Await the result of the IP location task
     ip_data = fetch_ip_location(resolved_ip)
     # remove elapsed_time
-    ip_data.pop('elapsed_time', None)
+    ip_data.pop("elapsed_time", None)
 
     # Return the IP info and WHOIS data as JSON
     response_data = {
         "address": domain_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
+        "domain": domain_data,
+        "hello": "world",
         "location": ip_data,
         "whois": whois_data,
         "headers": request_headers,
     }
     return response_data
+
 
 if __name__ == "__main__":
     # start the scheduler

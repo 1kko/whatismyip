@@ -15,6 +15,7 @@ python-whois = "^0.9.4"
 orjson = "^3.10.7"
 geoip2fast = "^1.2.2"
 apscheduler = "^3.10.4"
+tld = "^0.13"
 
 
 [tool.poetry.group.dev.dependencies]
