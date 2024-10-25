@@ -8,6 +8,7 @@ from logging.handlers import TimedRotatingFileHandler
 from typing import Any
 
 import dns.resolver
+import dns.reversename
 import uvicorn
 import whois  # whoisdomain for WHOIS lookups
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -201,6 +202,19 @@ def get_domain_records(domain: str, ns_servers: list | None = None) -> dict:
     return records
 
 
+def reverse_lookup(ip: str) -> str:
+    try:
+        # Convert IP address to a reverse name
+        reverse_name = dns.reversename.from_address(ip)
+        # Query the PTR record for the reverse name
+        resolved_name = dns.resolver.resolve(reverse_name, 'PTR')
+        # Return the first result (there can be multiple)
+        return str(resolved_name[0])
+    except Exception as e:
+        logging.error(f"Error performing reverse lookup for IP {ip}: {str(e)}")
+        return None
+
+
 # Create a BackgroundScheduler instance
 scheduler = BackgroundScheduler()
 # Schedule the GeoIP2Fast database update to run every 24 hours
@@ -296,7 +310,8 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
         domain_data = get_domain_records(domain_ip)
     elif is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
-        domain_data = {}
+        domain = reverse_lookup(domain_ip)
+        domain_data = get_domain_records(domain) if domain else {}
         resolved_ip = domain_ip
 
     # Await the result of the IP location task
