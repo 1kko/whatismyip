@@ -212,13 +212,29 @@ scheduler.start()
 update_geoip2fast()
 
 
+def filter_headers(original_headers: dict, exclude_prefixes: list) -> dict:
+    """
+    Filter out headers that start with any of the specified prefixes.
+    """
+    return {
+        k: v
+        for k, v in original_headers.items()
+        if not any(k.lower().startswith(prefix) for prefix in exclude_prefixes)
+    }
+
+
 @app.get("/", response_model=WhoisResponse, response_class=ORJSONResponse)
 async def get_self_info(request: Request) -> dict[str, Any]:
     # Extract request headers
     request_headers = dict(request.headers)
 
+    exclude_prefixes = ["x-forwarded-", "x-real-ip"]
+
+    # Filter out headers starting with 'x-forwarded-'
+    request_headers = filter_headers(dict(request.headers), exclude_prefixes)
+
     # Get the client's IP address
-    # this is considered runnint in a reverse proxy
+    # this is considered running in a reverse proxy
     client_ip = request_headers.get("x-real-ip", request.client.host)
     logging.info(f"client={client_ip} lookup={client_ip} (self)")
 
@@ -237,7 +253,6 @@ async def get_self_info(request: Request) -> dict[str, Any]:
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
-        "domain": {},
         "location": ip_data,
         "whois": whois_data,
         "headers": request_headers,
@@ -258,13 +273,15 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
         "apple-touch-icon-152x152-precomposed.png",
     ]:
         raise HTTPException(status_code=404, detail="Not Found")
-    # Extract request headers
-    request_headers = dict(request.headers)
+
+    client_ip = request.headers.get("x-real-ip", request.client.host)
+
+    # Filter out headers starting with 'x-forwarded-'
+    exclude_prefixes = ["x-forwarded-", "x-real-ip"]
+    request_headers = filter_headers(dict(request.headers), exclude_prefixes)
     # remove host header
     request_headers.pop("host", None)
 
-    # this is considered runnint in a reverse proxy
-    client_ip = request_headers.get("x-real-ip", request.client.host)
     logging.info(f"client={client_ip} lookup={domain_ip}")
 
     # Perform a WHOIS lookup for given address
@@ -276,8 +293,7 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
     if is_domain(domain_ip):
         logging.debug(f"domain={domain_ip}")
         resolved_ip = socket.gethostbyname(domain_ip)
-        domain_data = get_domain_records(
-            domain_ip, ns_servers=whois_data.get("name_servers", []))
+        domain_data = get_domain_records(domain_ip)
     elif is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
         domain_data = {}
