@@ -150,15 +150,17 @@ class DomainManager:
             mx_records = resolver.resolve(domain, "MX")
             for r in mx_records:
                 records["mx"].append({
-                    "exchange": r.exchange.to_text(),
+                    "hostname": r.exchange.to_text(),
                     "ttl": mx_records.rrset.ttl,
+                    "ip": socket.gethostbyname(r.exchange.to_text()),
                 })
 
             ns_records = resolver.resolve(domain, "NS")
             for r in ns_records:
                 records["ns"].append({
-                    "ns": r.target.to_text(),
+                    "hostname": r.target.to_text(),
                     "ttl": ns_records.rrset.ttl,
+                    "ip": socket.gethostbyname(r.target.to_text()),
                 })
 
             try:
@@ -228,9 +230,12 @@ async def get_self_info(request: Request) -> dict[str, Any]:
     ip_data = geo_ip_manager.fetch_location(client_ip)
     ip_data.pop("elapsed_time", None)
 
+    domain = domain_manager.perform_reverse_lookup(client_ip)
+
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
+        "domain": domain_manager.get_records(domain) if domain else {},
         "location": ip_data,
         "whois": whois_data,
         "headers": request_headers,
