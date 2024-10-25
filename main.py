@@ -280,6 +280,7 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
             domain_ip, ns_servers=whois_data.get("name_servers", []))
     elif is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
+        domain_data = {}
         resolved_ip = domain_ip
 
     # Await the result of the IP location task
