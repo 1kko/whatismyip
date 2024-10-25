@@ -5,12 +5,12 @@ import ipaddress
 import logging
 import socket
 from logging.handlers import TimedRotatingFileHandler
-from typing import Any
+from typing import Any, Dict
 
 import dns.resolver
 import dns.reversename
 import uvicorn
-import whois  # whoisdomain for WHOIS lookups
+import whois
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import ORJSONResponse
@@ -20,9 +20,6 @@ from tld import exceptions as tld_exceptions
 from tld import get_tld
 
 app = FastAPI()
-
-# GEOIP2Fast instance for GeoIP lookups
-GEOIP = GeoIP2Fast()
 
 # Configure logging
 log_formatter = logging.Formatter(
@@ -46,7 +43,6 @@ file_handler.setFormatter(log_formatter)
 logger.addHandler(file_handler)
 
 
-# Define the Pydantic model for the response
 class WhoisResponse(BaseModel):
     address: str
     datetime: datetime.datetime
@@ -106,164 +102,132 @@ class WhoisResponse(BaseModel):
         }
 
 
-# Function to fetch ip location data
-def fetch_ip_location(ip: str) -> dict[str, Any]:
-    # return whois.whois(ip)
-    return GEOIP.lookup(ip).to_dict()
+class GeoIpManager:
+    def __init__(self):
+        self.instance = GeoIP2Fast()
 
-
-# GeoIP2Fast database update
-def update_geoip2fast() -> None:
-    try:
-        update_result = GEOIP.update_file(
-            "geoip2fast-city-asn-ipv6.dat.gz", "geoip2fast.dat.gz", verbose=False
-        )
-        reload_result = GEOIP.reload_data(verbose=False)
-        logging.info(f"{update_result=}")
-        logging.info(f"{reload_result=}")
-    except Exception as e:
-        logging.exception(f"Error updating GeoIP2Fast database: {str(e)}")
-        pass
-
-
-# check if is ipv4
-def is_ipv4(ip: str) -> bool:
-    """
-    check if the ip address is valid ipv4
-    """
-    try:
-        ip = ipaddress.ip_address(ip)
-        if ip.version == 4:
-            return True
-        else:
-            return False
-    except ValueError:
-        return False
-
-# check if is valid domain name
-
-
-def is_domain(domain) -> bool:
-    try:
-        _ = get_tld(domain, fix_protocol=True)
-        return True
-    except tld_exceptions.TldDomainNotFound:
-        return False
-
-
-def get_domain_records(domain: str, ns_servers: list | None = None) -> dict:
-    """
-    Get the domain records
-    """
-    records = {
-        'mx': [],
-        'ns': [],
-        'cname': None,
-        'txt': []
-    }
-
-    try:
-        resolver = dns.resolver.Resolver(configure=False)
-        resolver.nameservers = dns.resolver.get_default_resolver().nameservers
-        for ns in ns_servers:
-            server = ns if is_ipv4(ns) else dns.resolver.resolve(ns, 'A')[
-                0].address
-            resolver.nameservers.append(server)
-
-        # Get MX records
-        mx_records = resolver.resolve(domain, 'MX')
-        for r in mx_records:
-            records['mx'].append(
-                {'exchange': r.exchange.to_text(), 'ttl': mx_records.rrset.ttl})
-
-        # Get NS records
-        ns_records = resolver.resolve(domain, 'NS')
-        for r in ns_records:
-            records['ns'].append(
-                {'ns': r.target.to_text(), 'ttl': ns_records.rrset.ttl})
-
-        # Get CNAME record
+    def update_database(self):
         try:
-            cname_record = resolver.resolve(domain, 'CNAME')
-            records['cname'] = {
-                'cname': cname_record.rrset[0].target.to_text(), 'ttl': cname_record.rrset.ttl}
-        except dns.resolver.NoAnswer:
-            records['cname'] = None
+            update_result = self.instance.update_file(
+                "geoip2fast-city-asn-ipv6.dat.gz", "geoip2fast.dat.gz", verbose=False
+            )
+            reload_result = self.instance.reload_data(verbose=False)
+            logging.info(f"{update_result=}")
+            logging.info(f"{reload_result=}")
+        except Exception as e:
+            logging.exception(f"Error updating GeoIP2Fast database: {str(e)}")
 
-        # Get TXT records
-        txt_records = resolver.resolve(domain, 'TXT')
-        for r in txt_records:
-            records['txt'].append(
-                {'text': r.strings, 'ttl': txt_records.rrset.ttl})
-
-    except Exception as e:
-        logging.error(f"Error retrieving DNS records for {domain}: {str(e)}")
-
-    return records
+    def fetch_location(self, ip: str) -> Dict[str, Any]:
+        return self.instance.lookup(ip).to_dict()
 
 
-def reverse_lookup(ip: str) -> str:
-    try:
-        # Convert IP address to a reverse name
-        reverse_name = dns.reversename.from_address(ip)
-        # Query the PTR record for the reverse name
-        resolved_name = dns.resolver.resolve(reverse_name, 'PTR')
-        # Return the first result (there can be multiple)
-        return str(resolved_name[0])
-    except Exception as e:
-        logging.error(f"Error performing reverse lookup for IP {ip}: {str(e)}")
-        return None
+class DomainManager:
+    def is_ipv4(self, ip: str) -> bool:
+        try:
+            return ipaddress.ip_address(ip).version == 4
+        except ValueError:
+            return False
+
+    def is_valid_domain(self, domain) -> bool:
+        try:
+            get_tld(domain, fix_protocol=True)
+            return True
+        except tld_exceptions.TldDomainNotFound:
+            return False
+
+    def get_records(self, domain: str, ns_servers: list = None) -> dict:
+        records = {"mx": [], "ns": [], "cname": None, "txt": []}
+        try:
+            resolver = dns.resolver.Resolver(configure=False)
+            resolver.nameservers = dns.resolver.get_default_resolver().nameservers
+            for ns in ns_servers or []:
+                server = (
+                    ns if self.is_ipv4(ns) else dns.resolver.resolve(
+                        ns, "A")[0].address
+                )
+                resolver.nameservers.append(server)
+
+            mx_records = resolver.resolve(domain, "MX")
+            for r in mx_records:
+                records["mx"].append({
+                    "exchange": r.exchange.to_text(),
+                    "ttl": mx_records.rrset.ttl,
+                })
+
+            ns_records = resolver.resolve(domain, "NS")
+            for r in ns_records:
+                records["ns"].append({
+                    "ns": r.target.to_text(),
+                    "ttl": ns_records.rrset.ttl,
+                })
+
+            try:
+                cname_record = resolver.resolve(domain, "CNAME")
+                records["cname"] = {
+                    "cname": cname_record.rrset[0].target.to_text(),
+                    "ttl": cname_record.rrset.ttl,
+                }
+            except dns.resolver.NoAnswer:
+                records["cname"] = None
+
+            txt_records = resolver.resolve(domain, "TXT")
+            for r in txt_records:
+                records["txt"].append(
+                    {"text": r.strings, "ttl": txt_records.rrset.ttl})
+
+        except Exception as e:
+            logging.error(
+                f"Error retrieving DNS records for {domain}: {str(e)}")
+
+        return records
+
+    def perform_reverse_lookup(self, ip: str) -> str:
+        try:
+            reverse_name = dns.reversename.from_address(ip)
+            return str(dns.resolver.resolve(reverse_name, "PTR")[0])
+        except Exception as e:
+            logging.error(
+                f"Error performing reverse lookup for IP {ip}: {str(e)}")
+            return None
 
 
-# Create a BackgroundScheduler instance
+class HeaderManager:
+    @staticmethod
+    def filter_out_unwanted(original_headers: dict, exclude_prefixes: list) -> dict:
+        return {
+            k: v
+            for k, v in original_headers.items()
+            if not any(k.lower().startswith(prefix) for prefix in exclude_prefixes)
+        }
+
+
+geo_ip_manager = GeoIpManager()
+domain_manager = DomainManager()
+
 scheduler = BackgroundScheduler()
-# Schedule the GeoIP2Fast database update to run every 24 hours
-scheduler.add_job(update_geoip2fast, "interval", days=3)
-# Start the scheduler
+scheduler.add_job(geo_ip_manager.update_database, "interval", days=3)
 scheduler.start()
-
-# run only once to update_geoip2fast function on startup
-update_geoip2fast()
-
-
-def filter_headers(original_headers: dict, exclude_prefixes: list) -> dict:
-    """
-    Filter out headers that start with any of the specified prefixes.
-    """
-    return {
-        k: v
-        for k, v in original_headers.items()
-        if not any(k.lower().startswith(prefix) for prefix in exclude_prefixes)
-    }
+geo_ip_manager.update_database()
 
 
 @app.get("/", response_model=WhoisResponse, response_class=ORJSONResponse)
 async def get_self_info(request: Request) -> dict[str, Any]:
-    # Extract request headers
-    request_headers = dict(request.headers)
+    filter_manager = HeaderManager()
+    request_headers = filter_manager.filter_out_unwanted(
+        dict(request.headers), ["x-forwarded-", "x-real-ip"]
+    )
 
-    exclude_prefixes = ["x-forwarded-", "x-real-ip"]
-
-    # Filter out headers starting with 'x-forwarded-'
-    request_headers = filter_headers(dict(request.headers), exclude_prefixes)
-
-    # Get the client's IP address
-    # this is considered running in a reverse proxy
     client_ip = request_headers.get("x-real-ip", request.client.host)
     logging.info(f"client={client_ip} lookup={client_ip} (self)")
 
-    # Perform a WHOIS lookup for the client's IP address or domain
     try:
         whois_data = whois.whois(client_ip)
     except Exception as e:
         whois_data = {"error": str(e)}
 
-    # Await the result of the IP location task
-    ip_data = fetch_ip_location(client_ip)
-    # remove elapsed_time
+    ip_data = geo_ip_manager.fetch_location(client_ip)
     ip_data.pop("elapsed_time", None)
 
-    # Return the IP info and WHOIS data as JSON
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
@@ -288,38 +252,33 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
     ]:
         raise HTTPException(status_code=404, detail="Not Found")
 
-    client_ip = request.headers.get("x-real-ip", request.client.host)
-
-    # Filter out headers starting with 'x-forwarded-'
-    exclude_prefixes = ["x-forwarded-", "x-real-ip"]
-    request_headers = filter_headers(dict(request.headers), exclude_prefixes)
-    # remove host header
+    filter_manager = HeaderManager()
+    request_headers = filter_manager.filter_out_unwanted(
+        dict(request.headers), ["x-forwarded-", "x-real-ip"]
+    )
     request_headers.pop("host", None)
 
+    client_ip = request.headers.get("x-real-ip", request.client.host)
     logging.info(f"client={client_ip} lookup={domain_ip}")
 
-    # Perform a WHOIS lookup for given address
     try:
         whois_data = whois.whois(domain_ip)
     except Exception as e:
         whois_data = {"error": str(e)}
 
-    if is_domain(domain_ip):
+    if domain_manager.is_valid_domain(domain_ip):
         logging.debug(f"domain={domain_ip}")
         resolved_ip = socket.gethostbyname(domain_ip)
-        domain_data = get_domain_records(domain_ip)
-    elif is_ipv4(domain_ip):
+        domain_data = domain_manager.get_records(domain_ip)
+    elif domain_manager.is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
-        domain = reverse_lookup(domain_ip)
-        domain_data = get_domain_records(domain) if domain else {}
+        domain = domain_manager.perform_reverse_lookup(domain_ip)
+        domain_data = domain_manager.get_records(domain) if domain else {}
         resolved_ip = domain_ip
 
-    # Await the result of the IP location task
-    ip_data = fetch_ip_location(resolved_ip)
-    # remove elapsed_time
+    ip_data = geo_ip_manager.fetch_location(resolved_ip)
     ip_data.pop("elapsed_time", None)
 
-    # Return the IP info and WHOIS data as JSON
     response_data = {
         "address": domain_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
@@ -332,5 +291,4 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # start the scheduler
     uvicorn.run(app, host="0.0.0.0", port=8000)
