@@ -215,11 +215,11 @@ geo_ip_manager.update_database()
 @app.get("/", response_model=WhoisResponse, response_class=ORJSONResponse)
 async def get_self_info(request: Request) -> dict[str, Any]:
     filter_manager = HeaderManager()
+
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
     )
-
-    client_ip = request_headers.get("x-real-ip", request.client.host)
+    client_ip = request.headers.get("x-real-ip", request.client.host)
     logging.info(f"client={client_ip} lookup={client_ip} (self)")
 
     try:
