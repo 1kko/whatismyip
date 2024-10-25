@@ -5,6 +5,7 @@ description = ""
 authors = ["1kko <me@1kko.com>"]
 license = "MIT"
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -16,10 +17,12 @@ orjson = "^3.10.7"
 geoip2fast = "^1.2.2"
 apscheduler = "^3.10.4"
 tld = "^0.13"
+requests = "^2.32.3"
 
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.6.7"
+pytest = "^8.3.3"
 
 [build-system]
 requires = ["poetry-core"]
