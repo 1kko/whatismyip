@@ -7,6 +7,9 @@ WORKDIR /app
 # python:3.10-slim already has pip. we just need to install uv
 RUN pip3 install uv poetry
 
+# Needs to install poetry plugin: export
+RUN poetry self add poetry-plugin-export
+
 # copy only the dependencies that are needed for our application and the source files
 COPY poetry.lock .
 COPY pyproject.toml .
