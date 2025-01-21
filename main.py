@@ -50,7 +50,7 @@ class WhoisResponse(BaseModel):
     domain: dict
     location: dict
     whois: dict
-    ssl: dict
+    ssl: dict | None
     headers: dict
 
     class Config:
@@ -253,6 +253,7 @@ async def get_self_info(request: Request) -> dict[str, Any]:
         "domain": domain_manager.get_records(domain) if domain else {},
         "location": ip_data,
         "whois": whois_data,
+        "ssl": None,
         "headers": request_headers,
     }
     return response_data
