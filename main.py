@@ -4,6 +4,7 @@ import datetime
 import ipaddress
 import logging
 import socket
+import ssl
 from logging.handlers import TimedRotatingFileHandler
 from typing import Any, Dict
 
@@ -49,6 +50,7 @@ class WhoisResponse(BaseModel):
     domain: dict
     location: dict
     whois: dict
+    ssl: dict
     headers: dict
 
     class Config:
@@ -192,6 +194,19 @@ class DomainManager:
                 f"Error performing reverse lookup for IP {ip}: {str(e)}")
             return None
 
+class SSLManager:
+    @staticmethod
+    def get_ssl_info(hostname: str) -> dict|None:
+        cert = None
+        try:
+            ctx = ssl.create_default_context()
+            with ctx.wrap_socket(socket.socket(), server_hostname=hostname) as s:
+                s.connect((hostname, 443))
+                cert = s.getpeercert()
+            return cert
+        except Exception as e:
+            logging.exception(f"Error performing SSL certificate lookup for hostname: {str(hostname)}")
+            return None
 
 class HeaderManager:
     @staticmethod
@@ -271,15 +286,18 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
     except Exception as e:
         whois_data = {"error": str(e)}
 
+    ssl_data = None
     if domain_manager.is_valid_domain(domain_ip):
         logging.debug(f"domain={domain_ip}")
         resolved_ip = socket.gethostbyname(domain_ip)
         domain_data = domain_manager.get_records(domain_ip)
+        ssl_data = SSLManager.get_ssl_info(domain_ip)
     elif domain_manager.is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
         domain = domain_manager.perform_reverse_lookup(domain_ip)
         domain_data = domain_manager.get_records(domain) if domain else {}
         resolved_ip = domain_ip
+
 
     ip_data = geo_ip_manager.fetch_location(resolved_ip)
     ip_data.pop("elapsed_time", None)
@@ -290,6 +308,7 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
         "domain": domain_data,
         "location": ip_data,
         "whois": whois_data,
+        "ssl": ssl_data,
         "headers": request_headers,
     }
     return response_data
