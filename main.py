@@ -14,13 +14,21 @@ import uvicorn
 import whois
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
 from geoip2fast import GeoIP2Fast
 from pydantic import BaseModel
 from tld import exceptions as tld_exceptions
 from tld import get_tld
+import re
+import json
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+
+# Add after app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Configure logging
 log_formatter = logging.Formatter(
@@ -227,10 +235,23 @@ scheduler.start()
 geo_ip_manager.update_database()
 
 
-@app.get("/", response_model=WhoisResponse, response_class=ORJSONResponse)
-async def get_self_info(request: Request) -> dict[str, Any]:
-    filter_manager = HeaderManager()
+class BrowserDetector:
+    @staticmethod
+    def is_browser(user_agent: str) -> bool:
+        browser_patterns = [
+            r'Mozilla',
+            r'Chrome',
+            r'Safari',
+            r'Firefox',
+            r'Edge',
+            r'Opera'
+        ]
+        return any(re.search(pattern, user_agent, re.IGNORECASE) for pattern in browser_patterns)
 
+
+@app.get("/", response_model=None)
+async def get_self_info(request: Request):
+    filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
     )
@@ -256,11 +277,22 @@ async def get_self_info(request: Request) -> dict[str, Any]:
         "ssl": None,
         "headers": request_headers,
     }
-    return response_data
+
+    user_agent = request.headers.get("user-agent", "")
+    if BrowserDetector.is_browser(user_agent):
+        return templates.TemplateResponse(
+            "browser.html",
+            {
+                "request": request,
+                "json_data": json.dumps(response_data, indent=2, default=str)
+            }
+        )
+    
+    return ORJSONResponse(response_data)
 
 
-@app.get("/{domain_ip}", response_model=WhoisResponse, response_class=ORJSONResponse)
-async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
+@app.get("/{domain_ip}", response_model=None)
+async def get_ip_info(domain_ip: str, request: Request):
     if domain_ip in [
         "favicon.ico",
         "robots.txt",
@@ -312,7 +344,18 @@ async def get_ip_info(domain_ip: str, request: Request) -> dict[str, Any]:
         "ssl": ssl_data,
         "headers": request_headers,
     }
-    return response_data
+
+    user_agent = request.headers.get("user-agent", "")
+    if BrowserDetector.is_browser(user_agent):
+        return templates.TemplateResponse(
+            "browser.html",
+            {
+                "request": request,
+                "json_data": json.dumps(response_data, indent=2, default=str)
+            }
+        )
+    
+    return ORJSONResponse(response_data)
 
 
 if __name__ == "__main__":

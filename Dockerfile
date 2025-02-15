@@ -20,6 +20,8 @@ RUN poetry export --without-hashes > ./requirements.txt
 RUN uv pip install --system -r requirements.txt
 
 COPY *.py /app/
+COPY templates /app/templates
+COPY static /app/static
 
 # Expose port 8000 for the FastAPI app to run on
 EXPOSE 8000

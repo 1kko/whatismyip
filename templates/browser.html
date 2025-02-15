@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IP Information Scanner</title>
+    <link href="{{ url_for('static', path='/css/prism-tomorrow.css') }}" rel="stylesheet" />
+    <style>
+        :root {
+            --bg-color: #0a0a0a;
+            --text-color: #00ff00;
+            --section-bg: #1a1a1a;
+            --hover-color: #003300;
+            --header-color: #00cc00;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            position: relative;
+            text-align: center;
+            padding: 20px;
+            border-bottom: 2px solid var(--text-color);
+            margin-bottom: 30px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .header h1 {
+            color: var(--header-color);
+            text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+            margin: 0;
+            font-size: 1.8em;
+        }
+
+        .ip-display {
+            color: var(--text-color);
+            font-size: 1.1em;
+            margin-top: -5px;  /* Adjust spacing with title */
+        }
+
+        .ip-display .highlight {
+            color: var(--header-color);
+            text-shadow: 0 0 5px rgba(0, 255, 0, 0.3);
+        }
+
+        .api-notice {
+            background-color: var(--section-bg);
+            border: 1px solid var(--text-color);
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0, 255, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .api-notice p {
+            margin: 10px 0;
+        }
+
+        .code-examples {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 15px;
+        }
+
+        .full-width {
+            grid-column: 1 / -1;
+        }
+
+        @media (max-width: 768px) {
+            .code-examples {
+                grid-template-columns: 1fr;
+            }
+            .full-width {
+                grid-column: auto;
+            }
+            .github-link {
+                padding: 6px 10px;
+            }
+            
+            .header {
+                padding: 20px 20px 30px;
+            }
+
+            .header h1 {
+                font-size: 1.5em;
+            }
+
+            .ip-display {
+                font-size: 1em;
+            }
+        }
+
+        .example-block {
+            background-color: var(--bg-color);
+            border: 1px solid var(--text-color);
+            border-radius: 5px;
+            padding: 15px;
+        }
+
+        .example-block h3 {
+            color: var(--header-color);
+            margin: 0 0 10px 0;
+            font-size: 1em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .example-block h3 i {
+            font-size: 1.1em;
+        }
+
+        .example-block pre {
+            margin: 0;
+            background-color: #1e1e1e !important;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .example-block code {
+            font-size: 0.9em;
+        }
+
+        .example-block pre::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        .example-block pre::-webkit-scrollbar-track {
+            background: #1e1e1e;
+        }
+
+        .example-block pre::-webkit-scrollbar-thumb {
+            background: #333;
+            border-radius: 4px;
+        }
+
+        .example-block pre::-webkit-scrollbar-thumb:hover {
+            background: #444;
+        }
+
+        .example-block pre {
+            scrollbar-width: thin;
+            scrollbar-color: #333 #1e1e1e;
+        }
+
+        .section {
+            background-color: var(--section-bg);
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+            border: 1px solid var(--text-color);
+        }
+
+        .section h2 {
+            margin-top: 0;
+            color: var(--header-color);
+        }
+
+        .code-container {
+            position: relative;
+        }
+
+        .copy-button {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background-color: transparent;
+            border: none;
+            color: #666;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.2s ease;
+            opacity: 0.5;
+            z-index: 10;
+        }
+
+        .copy-button:hover {
+            color: var(--text-color);
+            opacity: 1;
+            transform: none;
+        }
+
+        .section pre {
+            background-color: #1e1e1e !important;
+            padding: 15px;  /* Reset padding to normal */
+            border-radius: 5px;
+            overflow-x: auto;
+            border: 1px solid #333;
+            margin: 0;
+        }
+
+        .code-container:hover .copy-button {
+            opacity: 0.8;
+        }
+
+        code {
+            font-family: 'Courier New', monospace;
+            color: var(--text-color);
+        }
+
+        .success-message {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background-color: var(--hover-color);
+            color: var(--text-color);
+            padding: 10px 20px;
+            border-radius: 5px;
+            display: none;
+            animation: fadeInOut 2s ease-in-out;
+            z-index: 100;
+        }
+
+        @keyframes fadeInOut {
+            0% { opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+
+        .terminal-cursor {
+            animation: blink 1s step-end infinite;
+        }
+
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+
+        /* Override Prism.js theme colors to match our theme */
+        .token.property { color: #7cdcfe !important; }
+        .token.string { color: #ce9178 !important; }
+        .token.number { color: #b5cea8 !important; }
+        .token.boolean { color: #569cd6 !important; }
+        .token.null { color: #569cd6 !important; }
+
+        /* Add syntax highlighting colors for bash and python */
+        .token.comment { color: #6a9955 !important; }
+        .token.keyword { color: #569cd6 !important; }
+        .token.function { color: #dcdcaa !important; }
+        .token.operator { color: #d4d4d4 !important; }
+
+        .github-link {
+            position: static;
+            color: var(--text-color);
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border: 1px solid var(--text-color);
+            border-radius: 5px;
+            transition: all 0.3s ease;
+            background-color: var(--bg-color);
+            z-index: 10;
+            white-space: nowrap;
+            font-size: 0.9em;
+        }
+
+        .github-link:hover {
+            background-color: var(--hover-color);
+            transform: scale(1.05);
+            box-shadow: 0 0 10px rgba(0, 255, 0, 0.2);
+        }
+
+        .github-link i {
+            font-size: 1.2em;
+        }
+
+        .api-notice-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+            padding: 10px 0;
+        }
+
+        .api-notice-header::after {
+            content: "⌄";
+            margin-left: auto;
+            font-size: 1.5em;
+            transition: transform 0.3s ease;
+        }
+
+        .api-notice.collapsed .api-notice-header::after {
+            transform: rotate(180deg);
+        }
+
+        .api-notice-content {
+            transition: all 0.3s ease;
+            overflow: hidden;
+        }
+
+        .api-notice.collapsed .api-notice-content {
+            max-height: 0;
+            margin-top: 0;
+            opacity: 0;
+        }
+
+        .api-notice .api-notice-content {
+            max-height: 2000px;
+            margin-top: 15px;
+            opacity: 1;
+        }
+
+        .section-header {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            user-select: none;
+        }
+
+        .section-header h2 {
+            margin: 0;
+        }
+
+        .toggle-icon {
+            font-size: 1.5em;
+            transition: transform 0.3s ease;
+        }
+
+        .section-content {
+            transition: all 0.3s ease;
+            overflow: hidden;
+            max-height: 2000px;
+            opacity: 1;
+            position: relative;
+        }
+
+        .section-content.collapsed {
+            max-height: 0;
+            opacity: 0;
+            margin-top: 0;
+        }
+
+        .section-content.collapsed .copy-button,
+        .section-content.collapsed pre {
+            display: none;
+        }
+
+        #full-json-section .section-header.collapsed .toggle-icon {
+            transform: rotate(180deg);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌐 IP Information Scanner <span class="terminal-cursor">█</span></h1>
+            <div class="ip-display">Your IP Address: <span class="highlight" id="ip-address">Loading...</span></div>
+            <a href="https://github.com/1kko/whatismyip" class="github-link" target="_blank" rel="noopener noreferrer">
+                📦 View on GitHub
+            </a>
+        </div>
+
+        <div class="api-notice collapsed">
+            <div class="api-notice-header">
+                🔌 <strong>Looking for API?</strong> 
+                <span>For programmatic access, just make requests without a browser User-Agent.</span>
+            </div>
+            
+            <div class="api-notice-content">
+                <div class="code-examples">
+                    <div class="example-block">
+                        <h3>💻 cURL Examples:</h3>
+                        <pre><code class="language-bash"># Get your own IP info
+curl -X GET "{{ request.base_url }}" \
+    -H "Accept: application/json" \
+    -H "User-Agent: curl/7.64.1"
+
+# Get info for IP address
+curl -X GET "{{ request.base_url }}8.8.8.8" \
+    -H "Accept: application/json" \
+    -H "User-Agent: curl/7.64.1"
+
+# Get info for domain
+curl -X GET "{{ request.base_url }}google.com" \
+    -H "Accept: application/json" \
+    -H "User-Agent: curl/7.64.1"</code></pre>
+                    </div>
+                    
+                    <div class="example-block">
+                        <h3>📄 Example Response:</h3>
+                        <pre><code class="language-json">{
+    "address": "google.com",
+    "datetime": "2024-09-24T06:55:45.597769Z",
+    "domain": {
+        "mx": [
+        {
+            "hostname": "smtp.google.com",
+            "ttl": 300,
+            "ip": "142.250.4.26"
+        }
+        ],
+        "ns": [
+        {
+            "hostname": "ns1.google.com",
+            "ttl": 21600,
+            "ip": "216.239.32.10"
+        },
+        {
+            "hostname": "ns2.google.com",
+            "ttl": 21600,
+            "ip": "216.239.34.10"
+        }
+        ],
+        "txt": [
+        {
+            "text": ["v=spf1 include:_spf.google.com ~all"],
+            "ttl": 300
+        }
+        ],
+        "cname": null
+    },
+    "location": {
+        "ip": "142.250.4.26",
+        "country_code": "US",
+        "country_name": "United States",
+        "city": {
+        "name": "Mountain View",
+        "subdivision_code": "CA",
+        "subdivision_name": "California",
+        "latitude": 37.4056,
+        "longitude": -122.0775
+        },
+        "asn_name": "GOOGLE",
+        "is_private": false
+    },
+    "whois": {
+        "domain_name": "GOOGLE.COM",
+        "registrar": "MARKMONITOR INC.",
+        "whois_server": "whois.markmonitor.com"
+    },
+    "ssl": {
+        "subject": {"CN": "*.google.com"},
+        "issuer": {"CN": "GTS CA 1C3"},
+        "version": 3,
+        "notBefore": "2024-01-08",
+        "notAfter": "2024-04-01"
+    }
+}</code></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="success-message" class="success-message">
+            Copied to clipboard!
+        </div>
+
+        <div class="section" id="location-section">
+            <h2>📍 Location Information</h2>
+            <div class="code-container">
+                <button class="copy-button" onclick="copySection('location-data')">📋</button>
+                <pre><code class="language-json" id="location-data"></code></pre>
+            </div>
+        </div>
+
+        <div class="section" id="whois-section">
+            <h2>ℹ️ WHOIS Information</h2>
+            <div class="code-container">
+                <button class="copy-button" onclick="copySection('whois-data')">📋</button>
+                <pre><code class="language-json" id="whois-data"></code></pre>
+            </div>
+        </div>
+
+        <div class="section" id="dns-section">
+            <h2>🗄️ DNS Information</h2>
+            <div class="code-container">
+                <button class="copy-button" onclick="copySection('dns-data')">📋</button>
+                <pre><code class="language-json" id="dns-data"></code></pre>
+            </div>
+        </div>
+
+        <div class="section" id="browser-section">
+            <h2>🌐 Your Browser Info</h2>
+            <div class="code-container">
+                <button class="copy-button" onclick="copySection('browser-data')">📋</button>
+                <pre><code class="language-json" id="browser-data"></code></pre>
+            </div>
+        </div>
+
+        <div class="section" id="full-json-section">
+            <div class="section-header" onclick="toggleSection('full-json-section')">
+                <h2>📊 Complete JSON Response</h2>
+                <span class="toggle-icon">⌄</span>
+            </div>
+            <div class="section-content collapsed">
+                <div class="code-container">
+                    <button class="copy-button" onclick="copySection('full-json')">📋</button>
+                    <pre><code class="language-json" id="full-json"></code></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', path='/js/prism.js') }}"></script>
+    <script src="{{ url_for('static', path='/js/prism-json.js') }}"></script>
+    <script src="{{ url_for('static', path='/js/prism-python.js') }}"></script>
+    <script src="{{ url_for('static', path='/js/prism-bash.js') }}"></script>
+    <script>
+        // Parse the JSON data
+        const jsonData = {{ json_data | safe }};
+        
+        // Update IP address display
+        document.getElementById('ip-address').textContent = jsonData.location.ip;
+        
+        // Function to update code content with syntax highlighting
+        function updateCodeWithHighlight(elementId, data) {
+            const element = document.getElementById(elementId);
+            const formattedJson = JSON.stringify(data, null, 2);
+            element.textContent = formattedJson;
+            Prism.highlightElement(element);
+        }
+
+        // Update individual sections with syntax highlighting
+        updateCodeWithHighlight('location-data', jsonData.location);
+        updateCodeWithHighlight('whois-data', jsonData.whois);
+        updateCodeWithHighlight('dns-data', jsonData.domain);
+        updateCodeWithHighlight('browser-data', jsonData.headers);
+        updateCodeWithHighlight('full-json', jsonData);
+
+        function copySection(elementId) {
+            const element = document.getElementById(elementId);
+            const text = element.textContent;
+            
+            navigator.clipboard.writeText(text).then(() => {
+                showSuccessMessage();
+            });
+        }
+
+        function showSuccessMessage() {
+            const message = document.getElementById('success-message');
+            message.style.display = 'block';
+            
+            setTimeout(() => {
+                message.style.display = 'none';
+            }, 2000);
+        }
+
+        // Update accordion functionality to work on all screen sizes
+        document.querySelector('.api-notice-header').addEventListener('click', function() {
+            const notice = this.parentElement;
+            notice.classList.toggle('collapsed');
+        });
+
+        // Update initial state to always start collapsed
+        document.addEventListener('DOMContentLoaded', function() {
+            const notice = document.querySelector('.api-notice');
+            notice.classList.add('collapsed');
+            
+            // Add this part
+            const fullJsonContent = document.querySelector('#full-json-section .section-content');
+            const fullJsonHeader = document.querySelector('#full-json-section .section-header');
+            fullJsonContent.classList.add('collapsed');
+            fullJsonHeader.classList.add('collapsed');
+        });
+
+        function toggleSection(sectionId) {
+            const section = document.getElementById(sectionId);
+            const content = section.querySelector('.section-content');
+            const header = section.querySelector('.section-header');
+            content.classList.toggle('collapsed');
+            header.classList.toggle('collapsed');
+        }
+    </script>
+</body>
+</html> 
