@@ -2,7 +2,7 @@
 <html>
 <head>
     <title>IP Information Scanner</title>
-    <link href="{{ url_for('static', path='/css/prism-tomorrow.css') }}" rel="stylesheet" />
+    <link href="/static/css/prism-tomorrow.css" rel="stylesheet" />
     <style>
         :root {
             --bg-color: #0a0a0a;
@@ -512,13 +512,13 @@ curl -X GET "{{ request.base_url }}google.com" \
         </div>
     </div>
 
-    <script src="{{ url_for('static', path='/js/prism.js') }}"></script>
-    <script src="{{ url_for('static', path='/js/prism-json.js') }}"></script>
-    <script src="{{ url_for('static', path='/js/prism-python.js') }}"></script>
-    <script src="{{ url_for('static', path='/js/prism-bash.js') }}"></script>
+    <script src="/static/js/prism.js"></script>
+    <script src="/static/js/prism-json.js"></script>
+    <script src="/static/js/prism-python.js"></script>
+    <script src="/static/js/prism-bash.js"></script>
     <script>
         // Parse the JSON data
-        const jsonData = {{ json_data | safe }};
+        const jsonData = JSON.parse('{{ json_data | safe }}');
         
         // Update IP address display
         document.getElementById('ip-address').textContent = jsonData.location.ip;
