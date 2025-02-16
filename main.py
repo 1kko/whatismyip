@@ -24,11 +24,10 @@ import re
 import json
 from fastapi.staticfiles import StaticFiles
 
+# First, mount static files
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
-
-# Add after app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 # Configure logging
 log_formatter = logging.Formatter(
@@ -293,6 +292,7 @@ async def get_self_info(request: Request):
 
 @app.get("/{domain_ip}", response_model=None)
 async def get_ip_info(domain_ip: str, request: Request):
+    # Remove the static path check since it's handled by the static files mount
     if domain_ip in [
         "favicon.ico",
         "robots.txt",
