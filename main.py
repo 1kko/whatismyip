@@ -50,6 +50,8 @@ file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(log_formatter)
 logger.addHandler(file_handler)
 
+TIMEOUT_SECONDS = 5
+
 
 class WhoisResponse(BaseModel):
     address: str
@@ -195,7 +197,7 @@ class DomainManager:
     def perform_reverse_lookup(self, ip: str) -> str:
         try:
             reverse_name = dns.reversename.from_address(ip)
-            return str(dns.resolver.resolve(reverse_name, "PTR")[0])
+            return str(dns.resolver.resolve(reverse_name, "PTR")[0], lifetime=TIMEOUT_SECONDS)
         except Exception as e:
             logging.error(
                 f"Error performing reverse lookup for IP {ip}: {str(e)}")
@@ -208,6 +210,7 @@ class SSLManager:
         try:
             ctx = ssl.create_default_context()
             with ctx.wrap_socket(socket.socket(), server_hostname=hostname) as s:
+                s.settimeout(TIMEOUT_SECONDS)
                 s.connect((hostname, 443))
                 cert = s.getpeercert()
             return cert

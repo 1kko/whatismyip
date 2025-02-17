@@ -31,6 +31,9 @@ clean:
 	dokcer image prune -f
 	# rm -rf __pycache__/ data email.db ${PROJECT_NAME}.tar
 
+logs:
+	docker logs -f ${PROJECT_NAME}
+
 export:
 	docker save -o ${PROJECT_NAME}.tar ${PROJECT_NAME}:latest
 	echo "Docker image saved as ${PROJECT_NAME}.tar"
