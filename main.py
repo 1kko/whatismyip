@@ -296,18 +296,6 @@ async def get_self_info(request: Request):
 @app.get("/{domain_ip}", response_model=None)
 async def get_ip_info(domain_ip: str, request: Request):
     # Remove the static path check since it's handled by the static files mount
-    if domain_ip in [
-        "favicon.ico",
-        "robots.txt",
-        "apple-touch-icon.png",
-        "apple-touch-icon-precomposed.png",
-        "apple-touch-icon-120x120.png",
-        "apple-touch-icon-120x120-precomposed.png",
-        "apple-touch-icon-152x152.png",
-        "apple-touch-icon-152x152-precomposed.png",
-    ]:
-        raise HTTPException(status_code=404, detail="Not Found")
-
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
