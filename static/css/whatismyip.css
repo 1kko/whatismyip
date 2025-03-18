@@ -334,7 +334,6 @@ code {
 .section-content {
     transition: all 0.3s ease;
     overflow: hidden;
-    max-height: 2000px;
     opacity: 1;
     position: relative;
 }
@@ -352,4 +351,33 @@ code {
 
 #full-json-section .section-header.collapsed .toggle-icon {
     transform: rotate(180deg);
+}
+
+#full-json-section .code-container {
+    max-height: 2000px;
+    overflow-y: auto;
+}
+
+/* Custom scrollbar styles for the entire page */
+*::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+    background: #1e1e1e; /* Track color */
+}
+
+*::-webkit-scrollbar-thumb {
+    background: #333; /* Thumb color */
+    border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: #444; /* Thumb color on hover */
+}
+
+* {
+    scrollbar-width: thin;
+    scrollbar-color: #333 #1e1e1e; /* Thumb and track color for Firefox */
 }
