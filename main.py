@@ -147,31 +147,40 @@ class DomainManager:
             return False
 
     def get_records(self, domain: str, ns_servers: list = None) -> dict:
-        records = {"mx": [], "ns": [], "cname": None, "txt": []}
+        records = {"mx": [], "ns": [], "cname": None, "txt": [], "a": []}
         try:
             resolver = dns.resolver.Resolver(configure=False)
             resolver.nameservers = dns.resolver.get_default_resolver().nameservers
             for ns in ns_servers or []:
                 server = (
-                    ns if self.is_ipv4(ns) else dns.resolver.resolve(
-                        ns, "A")[0].address
+                    ns if self.is_ipv4(ns) else str(dns.resolver.resolve(ns, "A")[0])
                 )
                 resolver.nameservers.append(server)
 
+            # Get A records
+            try:
+                a_records = resolver.resolve(domain, "A")
+                for r in a_records:
+                    records["a"].append({"ip": str(r), "ttl": a_records.rrset.ttl})
+            except dns.resolver.NoAnswer:
+                pass
+
             mx_records = resolver.resolve(domain, "MX")
             for r in mx_records:
+                mx_ip = str(resolver.resolve(str(r.exchange), "A")[0])
                 records["mx"].append({
                     "hostname": r.exchange.to_text(),
                     "ttl": mx_records.rrset.ttl,
-                    "ip": socket.gethostbyname(r.exchange.to_text()),
+                    "ip": mx_ip,
                 })
 
             ns_records = resolver.resolve(domain, "NS")
             for r in ns_records:
+                ns_ip = str(resolver.resolve(str(r.target), "A")[0])
                 records["ns"].append({
                     "hostname": r.target.to_text(),
                     "ttl": ns_records.rrset.ttl,
-                    "ip": socket.gethostbyname(r.target.to_text()),
+                    "ip": ns_ip,
                 })
 
             try:
@@ -185,27 +194,27 @@ class DomainManager:
 
             txt_records = resolver.resolve(domain, "TXT")
             for r in txt_records:
-                records["txt"].append(
-                    {"text": r.strings, "ttl": txt_records.rrset.ttl})
+                records["txt"].append({"text": r.strings, "ttl": txt_records.rrset.ttl})
 
         except Exception as e:
-            logging.error(
-                f"Error retrieving DNS records for {domain}: {str(e)}")
+            logging.error(f"Error retrieving DNS records for {domain}: {str(e)}")
 
         return records
 
     def perform_reverse_lookup(self, ip: str) -> str:
         try:
             reverse_name = dns.reversename.from_address(ip)
-            return str(dns.resolver.resolve(reverse_name, "PTR")[0], lifetime=TIMEOUT_SECONDS)
+            return str(
+                dns.resolver.resolve(reverse_name, "PTR")[0], lifetime=TIMEOUT_SECONDS
+            )
         except Exception as e:
-            logging.error(
-                f"Error performing reverse lookup for IP {ip}: {str(e)}")
+            logging.error(f"Error performing reverse lookup for IP {ip}: {str(e)}")
             return None
+
 
 class SSLManager:
     @staticmethod
-    def get_ssl_info(hostname: str) -> dict|None:
+    def get_ssl_info(hostname: str) -> dict | None:
         cert = None
         try:
             ctx = ssl.create_default_context()
@@ -215,8 +224,11 @@ class SSLManager:
                 cert = s.getpeercert()
             return cert
         except Exception as e:
-            logging.exception(f"Error performing SSL certificate lookup for hostname: {str(hostname)}")
+            logging.exception(
+                f"Error performing SSL certificate lookup for hostname: {str(hostname)}"
+            )
             return None
+
 
 class HeaderManager:
     @staticmethod
@@ -241,14 +253,17 @@ class BrowserDetector:
     @staticmethod
     def is_browser(user_agent: str) -> bool:
         browser_patterns = [
-            r'Mozilla',
-            r'Chrome',
-            r'Safari',
-            r'Firefox',
-            r'Edge',
-            r'Opera'
+            r"Mozilla",
+            r"Chrome",
+            r"Safari",
+            r"Firefox",
+            r"Edge",
+            r"Opera",
         ]
-        return any(re.search(pattern, user_agent, re.IGNORECASE) for pattern in browser_patterns)
+        return any(
+            re.search(pattern, user_agent, re.IGNORECASE)
+            for pattern in browser_patterns
+        )
 
 
 @app.get("/", response_model=None)
@@ -286,10 +301,10 @@ async def get_self_info(request: Request):
             "browser.html",
             {
                 "request": request,
-                "json_data": json.dumps(response_data, indent=2, default=str)
-            }
+                "json_data": json.dumps(response_data, indent=2, default=str),
+            },
         )
-    
+
     return ORJSONResponse(response_data)
 
 
@@ -311,9 +326,16 @@ async def get_ip_info(domain_ip: str, request: Request):
         whois_data = {"error": str(e)}
 
     ssl_data = None
+    resolved_ip = None
+    domain_data = None
+
     if domain_manager.is_valid_domain(domain_ip):
         logging.debug(f"domain={domain_ip}")
-        resolved_ip = socket.gethostbyname(domain_ip)
+        try:
+            a_records = dns.resolver.resolve(domain_ip, "A")
+            resolved_ip = str(a_records[0])  # Get the first A record
+        except Exception as e:
+            logging.exception(f"Error resolving domain {domain_ip}: {str(e)}")
         domain_data = domain_manager.get_records(domain_ip)
         ssl_data = SSLManager.get_ssl_info(domain_ip)
     elif domain_manager.is_ipv4(domain_ip):
@@ -322,9 +344,11 @@ async def get_ip_info(domain_ip: str, request: Request):
         domain_data = domain_manager.get_records(domain) if domain else {}
         resolved_ip = domain_ip
 
-
-    ip_data = geo_ip_manager.fetch_location(resolved_ip)
-    ip_data.pop("elapsed_time", None)
+    if resolved_ip:
+        ip_data = geo_ip_manager.fetch_location(resolved_ip)
+        ip_data.pop("elapsed_time", None)
+    else:
+        ip_data = {}
 
     response_data = {
         "address": domain_ip,
@@ -342,10 +366,10 @@ async def get_ip_info(domain_ip: str, request: Request):
             "browser.html",
             {
                 "request": request,
-                "json_data": json.dumps(response_data, indent=2, default=str)
-            }
+                "json_data": json.dumps(response_data, indent=2, default=str),
+            },
         )
-    
+
     return ORJSONResponse(response_data)
 
 

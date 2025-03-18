@@ -1,6 +1,22 @@
-PROJECT_NAME = "whatismyip"
-
+PROJECT_NAME := $(shell \
+	if [ -f pyproject.toml ]; then \
+		PROJECT_FROM_PROJECT=$$(awk '/^\[project\]/{flag=1; next} /^\[/{flag=0} flag && /^name *=/{gsub(/name *= *"|"/, "", $$0); gsub(/ /, "", $$0); print}' pyproject.toml); \
+		if [ -n "$$PROJECT_FROM_PROJECT" ]; then \
+			echo "$$PROJECT_FROM_PROJECT"; \
+		else \
+			PROJECT_FROM_POETRY=$$(awk '/^\[tool\.poetry\]/{flag=1; next} /^\[/{flag=0} flag && /^name *=/{gsub(/name *= *"|"/, "", $$0); gsub(/ /, "", $$0); print}' pyproject.toml); \
+			if [ -n "$$PROJECT_FROM_POETRY" ]; then \
+				echo "$$PROJECT_FROM_POETRY"; \
+			else \
+				echo "myproject"; \
+			fi; \
+		fi; \
+	else \
+		echo "myproject"; \
+	fi \
+)
 all:
+	echo "Running for ${PROJECT_NAME}"
 	docker image prune -f
 	docker build -t ${PROJECT_NAME} .
 
