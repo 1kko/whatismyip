@@ -350,10 +350,10 @@ async def get_ip_info(domain_ip: str, request: Request):
         try:
             a_records = dns.resolver.resolve(domain_ip, "A")
             resolved_ip = str(a_records[0])  # Get the first A record
+            domain_data = domain_manager.get_records(domain_ip)
+            ssl_data = SSLManager.get_ssl_info(domain_ip)
         except Exception as e:
             logging.exception(f"Error resolving domain {domain_ip}: {str(e)}")
-        domain_data = domain_manager.get_records(domain_ip)
-        ssl_data = SSLManager.get_ssl_info(domain_ip)
     elif domain_manager.is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
         domain = domain_manager.perform_reverse_lookup(domain_ip)
