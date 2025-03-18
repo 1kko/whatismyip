@@ -187,12 +187,15 @@ class DomainManager:
         try:
             mx_records = resolver.resolve(self.remove_subdomains(domain), "MX")
             for r in mx_records:
-                mx_ip = str(resolver.resolve(str(r.exchange), "A")[0])
-            records["mx"].append({
-                "hostname": r.exchange.to_text(),
-                "ttl": mx_records.rrset.ttl,
-                "ip": mx_ip,
-            })
+                try:
+                    mx_ip = str(resolver.resolve(str(r.exchange), "A")[0])
+                except Exception as e:
+                    mx_ip = None
+                records["mx"].append({
+                    "hostname": r.exchange.to_text(),
+                    "ttl": mx_records.rrset.ttl,
+                    "ip": mx_ip,
+                })
         except dns.resolver.NoAnswer:
             pass
 
