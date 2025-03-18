@@ -146,58 +146,71 @@ class DomainManager:
         except tld_exceptions.TldDomainNotFound:
             return False
 
-    def get_records(self, domain: str, ns_servers: list = None) -> dict:
+    def remove_subdomains(self, domain: str) -> str:
+        # remove subdomains
+        return ".".join(domain.split(".")[-2:])
+
+    def get_records(self, domain: str, ns_servers: list | None = None) -> dict:
         records = {"mx": [], "ns": [], "cname": None, "txt": [], "a": []}
-        try:
-            resolver = dns.resolver.Resolver(configure=False)
-            resolver.nameservers = dns.resolver.get_default_resolver().nameservers
-            for ns in ns_servers or []:
+
+        # Get NS records
+        resolver = dns.resolver.Resolver(configure=False)
+        if ns_servers and len(ns_servers) > 1:
+            for ns in ns_servers:
                 server = (
                     ns if self.is_ipv4(ns) else str(dns.resolver.resolve(ns, "A")[0])
                 )
                 resolver.nameservers.append(server)
+        else:
+            resolver.nameservers = dns.resolver.get_default_resolver().nameservers
+            ns_records = resolver.resolve(self.remove_subdomains(domain), "NS")
+            if ns_records:
+                resolver.nameservers = [
+                    str(dns.resolver.resolve(str(r.target), "A")[0]) for r in ns_records
+                ]
+        for r in ns_records:
+            ns_ip = str(dns.resolver.resolve(str(r.target), "A")[0])
+            records["ns"].append({
+                "hostname": r.target.to_text(),
+                "ttl": ns_records.rrset.ttl,
+                "ip": ns_ip,
+            })
 
-            # Get A records
-            try:
-                a_records = resolver.resolve(domain, "A")
-                for r in a_records:
-                    records["a"].append({"ip": str(r), "ttl": a_records.rrset.ttl})
-            except dns.resolver.NoAnswer:
-                pass
+        # Get A records
+        try:
+            a_records = resolver.resolve(domain, "A")
+            for r in a_records:
+                records["a"].append({"ip": str(r), "ttl": a_records.rrset.ttl})
+        except dns.resolver.NoAnswer:
+            pass
 
-            mx_records = resolver.resolve(domain, "MX")
+        try:
+            mx_records = resolver.resolve(self.remove_subdomains(domain), "MX")
             for r in mx_records:
                 mx_ip = str(resolver.resolve(str(r.exchange), "A")[0])
-                records["mx"].append({
-                    "hostname": r.exchange.to_text(),
-                    "ttl": mx_records.rrset.ttl,
-                    "ip": mx_ip,
-                })
+            records["mx"].append({
+                "hostname": r.exchange.to_text(),
+                "ttl": mx_records.rrset.ttl,
+                "ip": mx_ip,
+            })
+        except dns.resolver.NoAnswer:
+            pass
 
-            ns_records = resolver.resolve(domain, "NS")
-            for r in ns_records:
-                ns_ip = str(resolver.resolve(str(r.target), "A")[0])
-                records["ns"].append({
-                    "hostname": r.target.to_text(),
-                    "ttl": ns_records.rrset.ttl,
-                    "ip": ns_ip,
-                })
+        try:
+            cname_record = resolver.resolve(domain, "CNAME")
+            records["cname"] = {
+                "cname": cname_record.rrset[0].target.to_text(),
+                "ttl": cname_record.rrset.ttl,
+            }
+        except dns.resolver.NoAnswer:
+            records["cname"] = None
 
-            try:
-                cname_record = resolver.resolve(domain, "CNAME")
-                records["cname"] = {
-                    "cname": cname_record.rrset[0].target.to_text(),
-                    "ttl": cname_record.rrset.ttl,
-                }
-            except dns.resolver.NoAnswer:
-                records["cname"] = None
-
+        try:
             txt_records = resolver.resolve(domain, "TXT")
             for r in txt_records:
                 records["txt"].append({"text": r.strings, "ttl": txt_records.rrset.ttl})
-
-        except Exception as e:
-            logging.error(f"Error retrieving DNS records for {domain}: {str(e)}")
+        except dns.resolver.NoAnswer:
+            pass
 
         return records
 
