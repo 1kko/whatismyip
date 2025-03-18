@@ -15,6 +15,13 @@ PROJECT_NAME := $(shell \
 		echo "myproject"; \
 	fi \
 )
+
+# Get exposed ports from Dockerfile if it exists
+EXPOSED_PORTS := $(shell if [ -f Dockerfile ]; then grep -oE 'EXPOSE[[:space:]]+[0-9]+' Dockerfile | awk '{print "-p "$$2":"$$2}' | tr '\n' ' '; fi)
+
+# Check if .env file exists and set env flag accordingly
+ENV_FLAG := $(shell if [ -f .env ]; then echo "--env-file .env"; fi)
+
 all:
 	echo "Running for ${PROJECT_NAME}"
 	docker image prune -f
@@ -30,7 +37,7 @@ run:
 	echo "removing ${PROJECT_NAME}"
 	-docker container rm ${PROJECT_NAME}
 	echo "start running"
-	docker run --rm -it -p 8000:8000 --name ${PROJECT_NAME} --env-file .env -v $(PWD)/data:/app/data ${PROJECT_NAME}:latest
+	docker run --rm -it ${EXPOSED_PORTS} --name ${PROJECT_NAME} ${ENV_FLAG} -v $(PWD)/data:/app/data ${PROJECT_NAME}:latest
 
 serve:
 	echo "stopping previous container"
@@ -38,7 +45,7 @@ serve:
 	echo "removing ${PROJECT_NAME}"
 	-docker container rm ${PROJECT_NAME}
 	echo "start running"
-	docker run -d --restart unless-stopped -p 8000:8000 --name ${PROJECT_NAME} --env-file .env -v $(PWD)/data:/app/data ${PROJECT_NAME}:latest
+	docker run -d --restart unless-stopped ${EXPOSED_PORTS} --name ${PROJECT_NAME} ${ENV_FLAG} -v $(PWD)/data:/app/data ${PROJECT_NAME}:latest
 
 shell:
 	docker exec -it ${PROJECT_NAME}:latest /bin/bash
@@ -53,4 +60,7 @@ logs:
 export:
 	docker save -o ${PROJECT_NAME}.tar ${PROJECT_NAME}:latest
 	echo "Docker image saved as ${PROJECT_NAME}.tar"
+
+stop:
+	@docker stop ${PROJECT_NAME}
 

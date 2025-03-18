@@ -2,7 +2,9 @@
 
 import datetime
 import ipaddress
+import json
 import logging
+import re
 import socket
 import ssl
 from logging.handlers import TimedRotatingFileHandler
@@ -13,16 +15,14 @@ import dns.reversename
 import uvicorn
 import whois
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import ORJSONResponse, HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import ORJSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from geoip2fast import GeoIP2Fast
 from pydantic import BaseModel
 from tld import exceptions as tld_exceptions
 from tld import get_tld
-import re
-import json
-from fastapi.staticfiles import StaticFiles
 
 # First, mount static files
 app = FastAPI()
