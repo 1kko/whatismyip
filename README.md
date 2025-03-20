@@ -1,8 +1,11 @@
 # WhatIsMyIp
+![screenshot](https://github.com/user-attachments/assets/d9179bcc-7a74-4e69-8aa1-c78c185e91d8)
+
 # IP and WHOIS Information Service
 A FastAPI-based web service that provides WHOIS and GeoIP information about IP addresses and domain names. This service performs WHOIS lookups, fetches geographical information based on IP, logs the incoming requests, and keeps the GeoIP database up to date.
 
 ## Features
+
 - WHOIS lookup for IP addresses and domain names
 - Geographical information retrieval using GeoIP
 - Logging of incoming requests and responses
