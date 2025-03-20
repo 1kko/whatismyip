@@ -116,7 +116,7 @@ curl -X GET "{{ request.base_url }}google.com" \
                         </div>
                     </div>                    
                     <div class="example-block">
-                        <h3>📄 Current Response (full data)</h3>
+                        <h3>📄 Current Response (full JSON data)</h3>
                         <div class="code-container">
                             <button class="copy-button" onclick="copySection('full-json')">📋</button>
                             <div id="full-json"></div>
@@ -131,15 +131,6 @@ curl -X GET "{{ request.base_url }}google.com" \
     <script>
         // Parse the JSON data. Do not change this line, it's parsed by server using Jinja2 template.
         const jsonData = {{ json_data | safe }};
-
-        function initializeJsonEditor(elementId, data) {
-            const container = document.getElementById(elementId);
-            const options = { mode: 'view', search: false, navigationBar: false, mainMenuBar: false, indentation: 2 };
-            const editor = new JSONEditor(container, options);
-            editor.set(data);
-            editor.expandAll();
-        }
-
         dataMap = {
             'full-json': jsonData,
             'location-data': jsonData.location,
@@ -147,15 +138,14 @@ curl -X GET "{{ request.base_url }}google.com" \
             'dns-data': jsonData.domain,
             'browser-data': jsonData.headers,
         }
-
-        // fillup all sections with json editor
-        for (const [key, value] of Object.entries(dataMap)) {
-            initializeJsonEditor(key, value);
+        
+        function initializeJsonEditor(elementId, data) {
+            const container = document.getElementById(elementId);
+            const options = { mode: 'view', search: false, navigationBar: false, mainMenuBar: false, indentation: 2 };
+            const editor = new JSONEditor(container, options);
+            editor.set(data);
+            editor.expandAll();
         }
-
-        document.addEventListener('DOMContentLoaded', function() {
-            document.getElementById('target-title').textContent = jsonData.address;
-        });
 
         function copySection(elementId) {
             console.log(elementId);
@@ -181,6 +171,21 @@ curl -X GET "{{ request.base_url }}google.com" \
             header.classList.toggle('collapsed');
             content.classList.toggle('collapsed');
         }
+
+        function updateTargetTitle(title) {
+            document.getElementById('target-title').textContent = title;
+        }
+
+        // entry point
+        document.addEventListener('DOMContentLoaded', function() {
+            // update target title
+            updateTargetTitle(jsonData.address);
+            
+            // fillup all sections with json editor
+            for (const [key, value] of Object.entries(dataMap)) {
+                initializeJsonEditor(key, value);
+            }
+        });
     </script>
 </body>
 </html> 
