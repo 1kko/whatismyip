@@ -69,8 +69,8 @@ body {
 .code-examples {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 5px;
-    margin-top: 5px;
+    gap: 10px;
+    margin-top: 20px;
 }
 
 @media (max-width: 768px) {
@@ -106,10 +106,10 @@ body {
 }
 
 .example-block {
-    background-color: var(--bg-color);
-    border: 1px solid var(--hover-color);
+    background-color: transparent;
+    border: none;
     border-radius: 5px;
-    padding: 15px;
+    padding: 0px;
 }
 
 .example-block h3 {
@@ -123,6 +123,7 @@ body {
 
 .example-block pre {
     margin: 0;
+    padding: 15px;
     background-color: #1e1e1e !important;
     max-height: 400px;
     overflow-y: auto;
