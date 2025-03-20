@@ -51,7 +51,7 @@ shell:
 	docker exec -it ${PROJECT_NAME}:latest /bin/bash
 
 clean:
-	dokcer image prune -f
+	docker image prune -f
 	# rm -rf __pycache__/ data email.db ${PROJECT_NAME}.tar
 
 logs:
