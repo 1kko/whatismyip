@@ -36,6 +36,9 @@ body {
 }
 
 .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     text-align: center;
     padding: 5px 0;
     border-bottom: 1px solid var(--hover-color);
@@ -43,9 +46,15 @@ body {
 }
 
 .header h1 {
-    font-size: 2em;
+    font-size: 1.5em;
     color: var(--header-color);
     margin: 0;
+}
+
+.header span {
+    font-size: 2em;
+    color: var(--header-color);
+    font-weight: bold;
 }
 
 .ip-display {
@@ -79,6 +88,10 @@ body {
     overflow-y: auto;
 }
 
+#example-curl {
+    overflow-x: auto;
+}
+
 .full-width {
     grid-column: 1 / -1;
 }
@@ -104,6 +117,10 @@ body {
 
     .ip-display {
         font-size: 1em;
+    }
+
+    .code-container {
+        flex-direction: column; /* Ensure it stacks properly */
     }
 }
 
@@ -367,6 +384,11 @@ code {
     position: relative;
 }
 
+.section-content span {
+    color: var(--text-color);
+    padding: 10px;
+}
+
 .section-content.collapsed {
     max-height: 0;
     opacity: 0;
@@ -382,8 +404,9 @@ code {
     transform: rotate(180deg);
 }
 
-#full-json-section .code-container {
+#full-json {
     overflow-y: auto;
+    max-height: 345px;
 }
 
 /* Custom scrollbar styles for the entire page */

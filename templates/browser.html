@@ -16,46 +16,13 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🌐 IP Information Scanner</h1>
-            <div class="ip-display">Your IP Address: <span class="highlight" id="ip-address">Loading...</span></div>
-            <a href="https://github.com/1kko/whatismyip" class="github-link" target="_blank" rel="noopener noreferrer">
-                📦 View on GitHub
-            </a>
-        </div>
-
-        <div class="section" id="notice-section">
-            <div class="section-header" onclick="toggleSection('notice-section')">
-                🔌 <strong>Looking for API?</strong><span>For programmatic access, just make requests without a browser User-Agent.</span>
-                <span class="toggle-icon">🔺</span>
+            <div class="header-left">
+                <h1>Lookup for <span id="target-title">Loading...</span></h1>
             </div>
-
-            
-            <div class="section-content">
-                <div class="code-examples">
-                    <div class="example-block">
-                        <h3>💻 cURL Examples:</h3>
-                        <pre># Get your own IP info
-curl -X GET "{{ request.base_url }}" \
-    -H "Accept: application/json" \
-    -H "User-Agent: curl/7.64.1"
-
-# Get info for IP address
-curl -X GET "{{ request.base_url }}8.8.8.8" \
-    -H "Accept: application/json" \
-    -H "User-Agent: curl/7.64.1"
-
-# Get info for domain
-curl -X GET "{{ request.base_url }}google.com" \
-    -H "Accept: application/json" \
-    -H "User-Agent: curl/7.64.1"
-                        </pre>
-                    </div>
-                    
-                    <div class="example-block">
-                        <h3>📄 Example Response:</h3>
-                        <div id="example-response"></div>
-                    </div>
-                </div>
+            <div class="header-right">
+                <a href="https://github.com/1kko/whatismyip" class="github-link" target="_blank" rel="noopener noreferrer">
+                    📦 View on GitHub
+                </a>
             </div>
         </div>
 
@@ -63,22 +30,10 @@ curl -X GET "{{ request.base_url }}google.com" \
             JSON copied to clipboard!
         </div>
 
-        <div class="section" id="full-json-section">
-            <div class="section-header" onclick="toggleSection('full-json-section')">
-                <h2>📊 Complete JSON Response</h2>
-                <span class="toggle-icon">🔺</span>
-            </div>
-            <div class="section-content collapsed">
-                <div class="code-container">
-                    <button class="copy-button" onclick="copySection('full-json')">📋</button>
-                    <div id="full-json"></div>
-                </div>
-            </div>
-        </div>
 
         <div class="section" id="location-section">
             <div class="section-header" onclick="toggleSection('location-section')">
-                <h2>📍 Location Information</h2>
+                <h2>📍 Location</h2>
                 <span class="toggle-icon">🔺</span>
             </div>
             <div class="section-content">
@@ -91,7 +46,7 @@ curl -X GET "{{ request.base_url }}google.com" \
 
         <div class="section" id="whois-section">
             <div class="section-header" onclick="toggleSection('whois-section')">
-                <h2>ℹ️ WHOIS Information</h2>
+                <h2>ℹ️ WHOIS</h2>
                 <span class="toggle-icon">🔺</span>
             </div>
             <div class="section-content">
@@ -104,7 +59,7 @@ curl -X GET "{{ request.base_url }}google.com" \
 
         <div class="section" id="dns-section">
             <div class="section-header" onclick="toggleSection('dns-section')">
-                <h2>🗄️ DNS Information</h2>
+                <h2>🗄️ DNS</h2>
                 <span class="toggle-icon">🔺</span>
             </div>
             <div class="section-content">
@@ -117,7 +72,7 @@ curl -X GET "{{ request.base_url }}google.com" \
 
         <div class="section" id="browser-section">
             <div class="section-header" onclick="toggleSection('browser-section')">
-                <h2>🌐 Your Browser Info</h2>
+                <h2>🌐 Your Browser</h2>
                 <span class="toggle-icon">🔺</span>
             </div>
             <div class="section-content">
@@ -128,70 +83,54 @@ curl -X GET "{{ request.base_url }}google.com" \
             </div>
         </div>
 
+        <div class="section" id="notice-section">
+            <div class="section-header" onclick="toggleSection('notice-section')">
+                <div>
+                    🔌 <strong>Looking for API?</strong>
+                </div>
+                <span class="toggle-icon">🔻</span>
+            </div>
+
+            
+            <div class="section-content collapsed">
+                <span>For programmatic access, just make requests without a browser User-Agent.</span>
+                <div class="code-examples">
+                    <div class="example-block">
+                        <h3>💻 cURL Examples</h3>
+                        <div class="code-container">
+                            <pre id="example-curl"># Get your own IP info
+curl -X GET "{{ request.base_url }}" \
+     -H "Accept: application/json" \
+     -H "User-Agent: curl/7.64.1"
+
+# Get info for IP address
+curl -X GET "{{ request.base_url }}8.8.8.8" \
+     -H "Accept: application/json" \
+     -H "User-Agent: curl/7.64.1"
+
+# Get info for domain
+curl -X GET "{{ request.base_url }}google.com" \
+     -H "Accept: application/json" \
+     -H "User-Agent: curl/7.64.1"
+                            </pre>
+                        </div>
+                    </div>                    
+                    <div class="example-block">
+                        <h3>📄 Current Response (full data)</h3>
+                        <div class="code-container">
+                            <button class="copy-button" onclick="copySection('full-json')">📋</button>
+                            <div id="full-json"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <script>
         // Parse the JSON data. Do not change this line, it's parsed by server using Jinja2 template.
         const jsonData = {{ json_data | safe }};
-        const exampleJsonData = {
-            "address": "google.com",
-            "datetime": "2024-09-24T06:55:45.597769Z",
-            "domain": {
-                "mx": [
-                {
-                    "hostname": "smtp.google.com",
-                    "ttl": 300,
-                    "ip": "142.250.4.26"
-                }
-                ],
-                "ns": [
-                {
-                    "hostname": "ns1.google.com",
-                    "ttl": 21600,
-                    "ip": "216.239.32.10"
-                },
-                {
-                    "hostname": "ns2.google.com",
-                    "ttl": 21600,
-                    "ip": "216.239.34.10"
-                }
-                ],
-                "txt": [
-                {
-                    "text": ["v=spf1 include:_spf.google.com ~all"],
-                    "ttl": 300
-                }
-                ],
-                "cname": null
-            },
-            "location": {
-                "ip": "142.250.4.26",
-                "country_code": "US",
-                "country_name": "United States",
-                "city": {
-                "name": "Mountain View",
-                "subdivision_code": "CA",
-                "subdivision_name": "California",
-                "latitude": 37.4056,
-                "longitude": -122.0775
-                },
-                "asn_name": "GOOGLE",
-                "is_private": false
-            },
-            "whois": {
-                "domain_name": "GOOGLE.COM",
-                "registrar": "MARKMONITOR INC.",
-                "whois_server": "whois.markmonitor.com"
-            },
-            "ssl": {
-                "subject": {"CN": "*.google.com"},
-                "issuer": {"CN": "GTS CA 1C3"},
-                "version": 3,
-                "notBefore": "2024-01-08",
-                "notAfter": "2024-04-01"
-            }
-        }
-
 
         function initializeJsonEditor(elementId, data) {
             const container = document.getElementById(elementId);
@@ -207,7 +146,6 @@ curl -X GET "{{ request.base_url }}google.com" \
             'whois-data': jsonData.whois,
             'dns-data': jsonData.domain,
             'browser-data': jsonData.headers,
-            'example-response': exampleJsonData
         }
 
         // fillup all sections with json editor
@@ -215,8 +153,9 @@ curl -X GET "{{ request.base_url }}google.com" \
             initializeJsonEditor(key, value);
         }
 
-        // Update IP address display
-        document.getElementById('ip-address').textContent = jsonData.location.ip;
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('target-title').textContent = jsonData.address;
+        });
 
         function copySection(elementId) {
             console.log(elementId);
@@ -234,20 +173,6 @@ curl -X GET "{{ request.base_url }}google.com" \
                 message.style.display = 'none';
             }, 2000);
         }
-
-        // Update initial state to always start collapsed
-        document.addEventListener('DOMContentLoaded', function() {           
-            // collapse all sections
-            const fullJsonHeader = document.querySelector('#full-json-section .section-header');
-            const fullJsonContent = document.querySelector('#full-json-section .section-content');
-            fullJsonHeader.classList.add('collapsed');
-            fullJsonContent.classList.add('collapsed');
-
-            const noticeHeader = document.querySelector('#notice-section .section-header');
-            const noticeContent = document.querySelector('#notice-section .section-content');
-            noticeHeader.classList.add('collapsed');
-            noticeContent.classList.add('collapsed');
-        });
 
         function toggleSection(sectionId) {
             const section = document.getElementById(sectionId);
