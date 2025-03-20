@@ -1,18 +1,18 @@
 PROJECT_NAME := $(shell \
 	if [ -f pyproject.toml ]; then \
-		PROJECT_FROM_PROJECT=$$(awk '/^\[project\]/{flag=1; next} /^\[/{flag=0} flag && /^name *=/{gsub(/name *= *"|"/, "", $$0); gsub(/ /, "", $$0); print}' pyproject.toml); \
-		if [ -n "$$PROJECT_FROM_PROJECT" ]; then \
-			echo "$$PROJECT_FROM_PROJECT"; \
+		NAME_FROM_PYPROJECT=$$(awk '/^\[project\]/{flag=1; next} /^\[/{flag=0} flag && /^name *=/{gsub(/name *= *"|"/, "", $$0); gsub(/ /, "", $$0); print}' pyproject.toml); \
+		if [ -n "$$NAME_FROM_PYPROJECT" ]; then \
+			echo "$$NAME_FROM_PYPROJECT"; \
 		else \
-			PROJECT_FROM_POETRY=$$(awk '/^\[tool\.poetry\]/{flag=1; next} /^\[/{flag=0} flag && /^name *=/{gsub(/name *= *"|"/, "", $$0); gsub(/ /, "", $$0); print}' pyproject.toml); \
-			if [ -n "$$PROJECT_FROM_POETRY" ]; then \
-				echo "$$PROJECT_FROM_POETRY"; \
+			NAME_FROM_POETRY=$$(awk '/^\[tool\.poetry\]/{flag=1; next} /^\[/{flag=0} flag && /^name *=/{gsub(/name *= *"|"/, "", $$0); gsub(/ /, "", $$0); print}' pyproject.toml); \
+			if [ -n "$$NAME_FROM_POETRY" ]; then \
+				echo "$$NAME_FROM_POETRY"; \
 			else \
-				echo "myproject"; \
+				echo $$(basename $$(pwd)); \
 			fi; \
 		fi; \
 	else \
-		echo "myproject"; \
+		echo $$(basename $$(pwd)); \
 	fi \
 )
 
