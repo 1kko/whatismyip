@@ -155,6 +155,9 @@ class DomainManager:
 
         # Get NS records
         resolver = dns.resolver.Resolver(configure=False)
+        # Use public DNS servers to avoid Docker DNS issues
+        resolver.nameservers = ['8.8.8.8', '1.1.1.1']
+
         if ns_servers and len(ns_servers) > 1:
             for ns in ns_servers:
                 server = (
@@ -162,19 +165,28 @@ class DomainManager:
                 )
                 resolver.nameservers.append(server)
         else:
-            resolver.nameservers = dns.resolver.get_default_resolver().nameservers
-            ns_records = resolver.resolve(self.remove_subdomains(domain), "NS")
-            if ns_records:
-                resolver.nameservers = [
-                    str(dns.resolver.resolve(str(r.target), "A")[0]) for r in ns_records
-                ]
-        for r in ns_records:
-            ns_ip = str(dns.resolver.resolve(str(r.target), "A")[0])
-            records["ns"].append({
-                "hostname": r.target.to_text(),
-                "ttl": ns_records.rrset.ttl,
-                "ip": ns_ip,
-            })
+            try:
+                ns_records = resolver.resolve(self.remove_subdomains(domain), "NS")
+                if ns_records:
+                    resolver.nameservers = [
+                        str(dns.resolver.resolve(str(r.target), "A")[0]) for r in ns_records
+                    ]
+            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers) as e:
+                logging.warning(f"Failed to get NS records for {domain}: {str(e)}")
+                ns_records = None
+
+        # Only process NS records if we successfully retrieved them
+        if ns_servers or (not ns_servers and ns_records):
+            try:
+                for r in ns_records:
+                    ns_ip = str(dns.resolver.resolve(str(r.target), "A")[0])
+                    records["ns"].append({
+                        "hostname": r.target.to_text(),
+                        "ttl": ns_records.rrset.ttl,
+                        "ip": ns_ip,
+                    })
+            except Exception as e:
+                logging.warning(f"Failed to process NS records: {str(e)}")
 
         # Get A records
         try:
