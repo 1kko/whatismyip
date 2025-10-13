@@ -10,6 +10,7 @@ A FastAPI-based web service that provides WHOIS and GeoIP information about IP a
 - Geographical information retrieval using GeoIP
 - Logging of incoming requests and responses
 - Background task to update GeoIP database every 3 days
+- Reverse lookup for ip address
 
 ## Requirements
 - Python 3.10+
