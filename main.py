@@ -220,9 +220,8 @@ class DomainManager:
     def perform_reverse_lookup(self, ip: str) -> str:
         try:
             reverse_name = dns.reversename.from_address(ip)
-            return str(
-                dns.resolver.resolve(reverse_name, "PTR")[0], lifetime=TIMEOUT_SECONDS
-            )
+            ptr_records = dns.resolver.resolve(reverse_name, "PTR", lifetime=TIMEOUT_SECONDS)
+            return str(ptr_records[0])
         except Exception as e:
             logging.error(f"Error performing reverse lookup for IP {ip}: {str(e)}")
             return None
@@ -299,12 +298,14 @@ async def get_self_info(request: Request):
     ip_data = geo_ip_manager.fetch_location(client_ip)
     ip_data.pop("elapsed_time", None)
 
-    domain = domain_manager.perform_reverse_lookup(client_ip)
+    reverse_dns_hostname = domain_manager.perform_reverse_lookup(client_ip)
+    if reverse_dns_hostname:
+        ip_data["reverse_dns"] = reverse_dns_hostname
 
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
-        "domain": domain_manager.get_records(domain) if domain else {},
+        "domain": domain_manager.get_records(reverse_dns_hostname) if reverse_dns_hostname else {},
         "location": ip_data,
         "whois": whois_data,
         "ssl": None,
@@ -356,13 +357,18 @@ async def get_ip_info(domain_ip: str, request: Request):
             logging.exception(f"Error resolving domain {domain_ip}: {str(e)}")
     elif domain_manager.is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
-        domain = domain_manager.perform_reverse_lookup(domain_ip)
-        domain_data = domain_manager.get_records(domain) if domain else {}
+        reverse_dns_hostname = domain_manager.perform_reverse_lookup(domain_ip)
+        domain_data = domain_manager.get_records(reverse_dns_hostname) if reverse_dns_hostname else {}
         resolved_ip = domain_ip
 
     if resolved_ip:
         ip_data = geo_ip_manager.fetch_location(resolved_ip)
         ip_data.pop("elapsed_time", None)
+        # Add reverse DNS for IP lookups
+        if domain_manager.is_ipv4(domain_ip):
+            reverse_dns_hostname = domain_manager.perform_reverse_lookup(resolved_ip)
+            if reverse_dns_hostname:
+                ip_data["reverse_dns"] = reverse_dns_hostname
     else:
         ip_data = {}
 
