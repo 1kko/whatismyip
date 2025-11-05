@@ -18,6 +18,7 @@ geoip2fast = "^1.2.2"
 apscheduler = "^3.10.4"
 tld = "^0.13"
 requests = "^2.32.3"
+python-dotenv = "^1.0.0"
 
 
 [tool.poetry.group.dev.dependencies]

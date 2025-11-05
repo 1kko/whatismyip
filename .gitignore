@@ -168,3 +168,7 @@ cython_debug/
 # log files
 service.log
 service.log.*
+
+# security data files
+data/banned_ips.json
+data/geo_rules.json
