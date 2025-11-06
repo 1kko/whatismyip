@@ -56,6 +56,10 @@ file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(log_formatter)
 logger.addHandler(file_handler)
 
+# Silence APScheduler's job execution logs
+logging.getLogger('apscheduler.scheduler').setLevel(logging.WARNING)
+logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
+
 TIMEOUT_SECONDS = 5
 
 # Security Configuration from Environment Variables
@@ -403,12 +407,11 @@ class IPBanManager:
             if expires_at < now:
                 expired_ips.append(ip)
 
-        for ip in expired_ips:
-            del self.banned_ips[ip]
-
         if expired_ips:
+            for ip in expired_ips:
+                del self.banned_ips[ip]
             self.save_bans()
-            logging.info(f"Cleaned up {len(expired_ips)} expired bans")
+            logging.info(f"Removed {len(expired_ips)} expired ban(s): {', '.join(expired_ips)}")
 
     def get_all_bans(self) -> dict:
         """Get all current bans"""
@@ -473,11 +476,10 @@ class RateLimiter:
             if not timestamps:
                 ips_to_remove.append(ip)
 
-        for ip in ips_to_remove:
-            del self.request_history[ip]
-
         if ips_to_remove:
-            logging.debug(f"Cleaned up rate limit history for {len(ips_to_remove)} IPs")
+            for ip in ips_to_remove:
+                del self.request_history[ip]
+            logging.info(f"Removed {len(ips_to_remove)} IP(s) from rate limit history: {', '.join(ips_to_remove)}")
 
 
 class SuspiciousPatternDetector:
