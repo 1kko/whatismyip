@@ -1,10 +1,10 @@
 # Use an official Python runtime as a parent image
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 # Set the working directory in the container
 WORKDIR /app
 
-# python:3.10-slim already has pip. we just need to install uv
+# python:3.12-slim already has pip. we just need to install uv
 RUN pip3 install uv poetry
 
 # Needs to install poetry plugin: export
