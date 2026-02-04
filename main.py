@@ -253,7 +253,7 @@ class DomainManager:
             for r in mx_records:
                 try:
                     mx_ip = str(resolver.resolve(str(r.exchange), "A")[0])
-                except Exception as e:
+                except Exception:
                     mx_ip = None
                 records["mx"].append({
                     "hostname": r.exchange.to_text(),
@@ -275,7 +275,7 @@ class DomainManager:
         try:
             txt_records = resolver.resolve(domain, "TXT")
             for r in txt_records:
-                records["txt"].append({"text": r.strings, "ttl": txt_records.rrset.ttl})
+                records["txt"].append({"text": [s.decode('utf-8', errors='replace') for s in r.strings], "ttl": txt_records.rrset.ttl})
         except dns.resolver.NoAnswer:
             pass
 
@@ -302,7 +302,7 @@ class SSLManager:
                 s.connect((hostname, 443))
                 cert = s.getpeercert()
             return cert
-        except Exception as e:
+        except Exception:
             logging.exception(
                 f"Error performing SSL certificate lookup for hostname: {str(hostname)}"
             )

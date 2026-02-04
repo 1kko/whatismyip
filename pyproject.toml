@@ -9,11 +9,8 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.10"
-fastapi = {extras = ["standard"], version = "^0.115.0"}
-pydantic = "^2.9.2"
-uvicorn = "^0.30.6"
+fastapi = {extras = ["all"], version = "^0.128.0"}
 python-whois = "^0.9.4"
-orjson = "^3.10.7"
 geoip2fast = "^1.2.2"
 apscheduler = "^3.10.4"
 tld = "^0.13"
@@ -22,8 +19,8 @@ python-dotenv = "^1.0.0"
 
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.6.7"
-pytest = "^8.3.3"
+ruff = "^0.15.0"
+pytest = "^9.0.0"
 
 [build-system]
 requires = ["poetry-core"]

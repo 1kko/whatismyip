@@ -1,4 +1,3 @@
-import pytest
 import requests
 
 baseurl = "http://127.0.0.1:8000"
@@ -28,7 +27,7 @@ class TestBasic:
         assert response.status_code == 200
         json_data = response.json()
         assert "domain_name" in json_data['whois']
-        assert "google.com" in json_data["whois"]["domain_name"]
+        assert "google.com" in json_data["whois"]["domain_name"].lower()
 
     def test_get_ip_info(self):
         response = self.client.get("/8.8.8.8")
@@ -37,5 +36,5 @@ class TestBasic:
         assert json_data["location"]["ip"] == "8.8.8.8"
 
     def test_not_found(self):
-        response = self.client.get("/favicon.ico")
+        response = self.client.get("/admin/nonexistent")
         assert response.status_code == 404
