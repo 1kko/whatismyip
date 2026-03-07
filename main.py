@@ -202,8 +202,8 @@ class DomainManager:
         # remove subdomains
         return ".".join(domain.split(".")[-2:])
 
-    def get_records(self, domain: str, ns_servers: list | None = None) -> dict:
-        records = {"mx": [], "ns": [], "cname": None, "txt": [], "a": []}
+    def get_records(self, domain: str, ns_servers: list | None = None, ip: str | None = None) -> dict:
+        records = {"mx": [], "ns": [], "cname": None, "txt": [], "spf": [], "ptr": [], "a": []}
 
         # Get NS records
         resolver = dns.resolver.Resolver(configure=False)
@@ -245,7 +245,7 @@ class DomainManager:
             a_records = resolver.resolve(domain, "A")
             for r in a_records:
                 records["a"].append({"ip": str(r), "ttl": a_records.rrset.ttl})
-        except dns.resolver.NoAnswer:
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
             pass
 
         try:
@@ -256,11 +256,12 @@ class DomainManager:
                 except Exception:
                     mx_ip = None
                 records["mx"].append({
+                    "preference": r.preference,
                     "hostname": r.exchange.to_text(),
                     "ttl": mx_records.rrset.ttl,
                     "ip": mx_ip,
                 })
-        except dns.resolver.NoAnswer:
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
             pass
 
         try:
@@ -269,15 +270,47 @@ class DomainManager:
                 "cname": cname_record.rrset[0].target.to_text(),
                 "ttl": cname_record.rrset.ttl,
             }
-        except dns.resolver.NoAnswer:
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
             records["cname"] = None
 
         try:
             txt_records = resolver.resolve(domain, "TXT")
             for r in txt_records:
-                records["txt"].append({"text": [s.decode('utf-8', errors='replace') for s in r.strings], "ttl": txt_records.rrset.ttl})
-        except dns.resolver.NoAnswer:
+                text_parts = [s.decode('utf-8', errors='replace') for s in r.strings]
+                records["txt"].append({"text": text_parts, "ttl": txt_records.rrset.ttl})
+                joined = " ".join(text_parts)
+                if joined.startswith("v=spf1"):
+                    records["spf"].append({"text": joined, "ttl": txt_records.rrset.ttl})
+        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
             pass
+
+        # Also check base domain TXT/SPF if querying a subdomain
+        base_domain = self.remove_subdomains(domain)
+        if base_domain != domain:
+            try:
+                base_txt_records = resolver.resolve(base_domain, "TXT")
+                for r in base_txt_records:
+                    text_parts = [s.decode('utf-8', errors='replace') for s in r.strings]
+                    joined = " ".join(text_parts)
+                    if joined.startswith("v=spf1"):
+                        # Avoid duplicates
+                        if not any(s["text"] == joined for s in records["spf"]):
+                            records["spf"].append({"text": joined, "ttl": base_txt_records.rrset.ttl})
+            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
+                pass
+
+        # Get PTR records (reverse DNS)
+        lookup_ip = ip
+        if not lookup_ip and records["a"]:
+            lookup_ip = records["a"][0]["ip"]
+        if lookup_ip:
+            try:
+                reverse_name = dns.reversename.from_address(lookup_ip)
+                ptr_records = resolver.resolve(reverse_name, "PTR", lifetime=TIMEOUT_SECONDS)
+                for r in ptr_records:
+                    records["ptr"].append({"hostname": str(r), "ttl": ptr_records.rrset.ttl})
+            except Exception:
+                pass
 
         return records
 
@@ -847,7 +880,7 @@ async def get_self_info(request: Request):
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
-        "domain": domain_manager.get_records(reverse_dns_hostname) if reverse_dns_hostname else {},
+        "domain": domain_manager.get_records(reverse_dns_hostname, ip=client_ip) if reverse_dns_hostname else {},
         "location": ip_data,
         "whois": whois_data,
         "ssl": None,
@@ -893,14 +926,20 @@ async def get_ip_info(domain_ip: str, request: Request):
         try:
             a_records = dns.resolver.resolve(domain_ip, "A")
             resolved_ip = str(a_records[0])  # Get the first A record
-            domain_data = domain_manager.get_records(domain_ip)
+        except Exception as e:
+            logging.warning(f"No A record for {domain_ip}: {str(e)}")
+        try:
+            domain_data = domain_manager.get_records(domain_ip, ip=resolved_ip)
+        except Exception as e:
+            logging.exception(f"Error getting DNS records for {domain_ip}: {str(e)}")
+        try:
             ssl_data = SSLManager.get_ssl_info(domain_ip)
         except Exception as e:
-            logging.exception(f"Error resolving domain {domain_ip}: {str(e)}")
+            logging.exception(f"Error getting SSL info for {domain_ip}: {str(e)}")
     elif domain_manager.is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
         reverse_dns_hostname = domain_manager.perform_reverse_lookup(domain_ip)
-        domain_data = domain_manager.get_records(reverse_dns_hostname) if reverse_dns_hostname else {}
+        domain_data = domain_manager.get_records(reverse_dns_hostname, ip=domain_ip) if reverse_dns_hostname else {}
         resolved_ip = domain_ip
 
     if resolved_ip:
