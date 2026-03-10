@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import asyncio
 import datetime
+import hmac
 import ipaddress
 import json
 import logging
@@ -31,7 +33,7 @@ from tld import get_tld
 load_dotenv()
 
 # First, mount static files
-app = FastAPI()
+app = FastAPI(docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -57,10 +59,16 @@ file_handler.setFormatter(log_formatter)
 logger.addHandler(file_handler)
 
 # Silence APScheduler's job execution logs
-logging.getLogger('apscheduler.scheduler').setLevel(logging.WARNING)
-logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
 TIMEOUT_SECONDS = 5
+
+
+def sanitize_log_input(value: str) -> str:
+    """Remove control characters from log inputs to prevent log injection."""
+    return value.replace("\n", "").replace("\r", "").replace("\x00", "")
+
 
 # Security Configuration from Environment Variables
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
@@ -68,7 +76,7 @@ if not ADMIN_API_KEY or ADMIN_API_KEY == "CHANGE_ME_TO_SECURE_RANDOM_STRING":
     logger.warning(
         "ADMIN_API_KEY not set or using default value in .env file! "
         "Admin endpoints will be disabled. Generate one with: "
-        "python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        'python -c "import secrets; print(secrets.token_urlsafe(32))"'
     )
     ADMIN_API_KEY = None
 
@@ -85,7 +93,9 @@ BANNED_IPS_FILE = os.getenv("BANNED_IPS_FILE", "data/banned_ips.json")
 GEO_RULES_FILE = os.getenv("GEO_RULES_FILE", "data/geo_rules.json")
 
 # Background Job Intervals
-CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "300"))  # 5 minutes
+CLEANUP_INTERVAL_SECONDS = int(
+    os.getenv("CLEANUP_INTERVAL_SECONDS", "300")
+)  # 5 minutes
 RATE_LIMIT_CLEANUP_INTERVAL = int(
     os.getenv("RATE_LIMIT_CLEANUP_INTERVAL", "60")
 )  # 1 minute
@@ -103,6 +113,28 @@ GEO_ALLOWED_COUNTRIES_INITIAL = (
     else []
 )
 GEO_BLOCK_UNKNOWN_INITIAL = os.getenv("GEO_BLOCK_UNKNOWN", "false").lower() == "true"
+
+TRUSTED_PROXIES = [
+    p.strip() for p in os.getenv("TRUSTED_PROXIES", "").split(",") if p.strip()
+]
+
+
+def is_safe_ip(ip_str: str) -> bool:
+    """Check if an IP address is safe to query (not private/reserved)."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return not (
+            ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        )
+    except ValueError:
+        return False
+
+
+def get_client_ip(request: Request) -> str:
+    """Get client IP, only trusting x-real-ip from configured proxies."""
+    if TRUSTED_PROXIES and request.client and request.client.host in TRUSTED_PROXIES:
+        return request.headers.get("x-real-ip", request.client.host)
+    return request.client.host
 
 
 class WhoisResponse(BaseModel):
@@ -165,6 +197,18 @@ class WhoisResponse(BaseModel):
         }
 
 
+class GeoRulesUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    mode: str | None = None
+    blocked_countries: list[str] | None = None
+    allowed_countries: list[str] | None = None
+    blocked_regions: list[str] | None = None
+    allowed_regions: list[str] | None = None
+    block_unknown: bool | None = None
+    bypass_ips: list[str] | None = None
+
+
 class GeoIpManager:
     def __init__(self):
         self.instance = GeoIP2Fast()
@@ -202,13 +246,23 @@ class DomainManager:
         # remove subdomains
         return ".".join(domain.split(".")[-2:])
 
-    def get_records(self, domain: str, ns_servers: list | None = None, ip: str | None = None) -> dict:
-        records = {"mx": [], "ns": [], "cname": None, "txt": [], "spf": [], "ptr": [], "a": []}
+    def get_records(
+        self, domain: str, ns_servers: list | None = None, ip: str | None = None
+    ) -> dict:
+        records = {
+            "mx": [],
+            "ns": [],
+            "cname": None,
+            "txt": [],
+            "spf": [],
+            "ptr": [],
+            "a": [],
+        }
 
         # Get NS records
         resolver = dns.resolver.Resolver(configure=False)
         # Use public DNS servers to avoid Docker DNS issues
-        resolver.nameservers = ['8.8.8.8', '1.1.1.1']
+        resolver.nameservers = ["8.8.8.8", "1.1.1.1"]
 
         if ns_servers and len(ns_servers) > 1:
             for ns in ns_servers:
@@ -221,9 +275,14 @@ class DomainManager:
                 ns_records = resolver.resolve(self.remove_subdomains(domain), "NS")
                 if ns_records:
                     resolver.nameservers = [
-                        str(dns.resolver.resolve(str(r.target), "A")[0]) for r in ns_records
+                        str(dns.resolver.resolve(str(r.target), "A")[0])
+                        for r in ns_records
                     ]
-            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers) as e:
+            except (
+                dns.resolver.NoAnswer,
+                dns.resolver.NXDOMAIN,
+                dns.resolver.NoNameservers,
+            ) as e:
                 logging.warning(f"Failed to get NS records for {domain}: {str(e)}")
                 ns_records = None
 
@@ -232,11 +291,13 @@ class DomainManager:
             try:
                 for r in ns_records:
                     ns_ip = str(dns.resolver.resolve(str(r.target), "A")[0])
-                    records["ns"].append({
-                        "hostname": r.target.to_text(),
-                        "ttl": ns_records.rrset.ttl,
-                        "ip": ns_ip,
-                    })
+                    records["ns"].append(
+                        {
+                            "hostname": r.target.to_text(),
+                            "ttl": ns_records.rrset.ttl,
+                            "ip": ns_ip,
+                        }
+                    )
             except Exception as e:
                 logging.warning(f"Failed to process NS records: {str(e)}")
 
@@ -245,7 +306,11 @@ class DomainManager:
             a_records = resolver.resolve(domain, "A")
             for r in a_records:
                 records["a"].append({"ip": str(r), "ttl": a_records.rrset.ttl})
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
+        except (
+            dns.resolver.NoAnswer,
+            dns.resolver.NXDOMAIN,
+            dns.resolver.NoNameservers,
+        ):
             pass
 
         try:
@@ -255,13 +320,19 @@ class DomainManager:
                     mx_ip = str(resolver.resolve(str(r.exchange), "A")[0])
                 except Exception:
                     mx_ip = None
-                records["mx"].append({
-                    "preference": r.preference,
-                    "hostname": r.exchange.to_text(),
-                    "ttl": mx_records.rrset.ttl,
-                    "ip": mx_ip,
-                })
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
+                records["mx"].append(
+                    {
+                        "preference": r.preference,
+                        "hostname": r.exchange.to_text(),
+                        "ttl": mx_records.rrset.ttl,
+                        "ip": mx_ip,
+                    }
+                )
+        except (
+            dns.resolver.NoAnswer,
+            dns.resolver.NXDOMAIN,
+            dns.resolver.NoNameservers,
+        ):
             pass
 
         try:
@@ -270,18 +341,30 @@ class DomainManager:
                 "cname": cname_record.rrset[0].target.to_text(),
                 "ttl": cname_record.rrset.ttl,
             }
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
+        except (
+            dns.resolver.NoAnswer,
+            dns.resolver.NXDOMAIN,
+            dns.resolver.NoNameservers,
+        ):
             records["cname"] = None
 
         try:
             txt_records = resolver.resolve(domain, "TXT")
             for r in txt_records:
-                text_parts = [s.decode('utf-8', errors='replace') for s in r.strings]
-                records["txt"].append({"text": text_parts, "ttl": txt_records.rrset.ttl})
+                text_parts = [s.decode("utf-8", errors="replace") for s in r.strings]
+                records["txt"].append(
+                    {"text": text_parts, "ttl": txt_records.rrset.ttl}
+                )
                 joined = " ".join(text_parts)
                 if joined.startswith("v=spf1"):
-                    records["spf"].append({"text": joined, "ttl": txt_records.rrset.ttl})
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
+                    records["spf"].append(
+                        {"text": joined, "ttl": txt_records.rrset.ttl}
+                    )
+        except (
+            dns.resolver.NoAnswer,
+            dns.resolver.NXDOMAIN,
+            dns.resolver.NoNameservers,
+        ):
             pass
 
         # Also check base domain TXT/SPF if querying a subdomain
@@ -290,13 +373,21 @@ class DomainManager:
             try:
                 base_txt_records = resolver.resolve(base_domain, "TXT")
                 for r in base_txt_records:
-                    text_parts = [s.decode('utf-8', errors='replace') for s in r.strings]
+                    text_parts = [
+                        s.decode("utf-8", errors="replace") for s in r.strings
+                    ]
                     joined = " ".join(text_parts)
                     if joined.startswith("v=spf1"):
                         # Avoid duplicates
                         if not any(s["text"] == joined for s in records["spf"]):
-                            records["spf"].append({"text": joined, "ttl": base_txt_records.rrset.ttl})
-            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
+                            records["spf"].append(
+                                {"text": joined, "ttl": base_txt_records.rrset.ttl}
+                            )
+            except (
+                dns.resolver.NoAnswer,
+                dns.resolver.NXDOMAIN,
+                dns.resolver.NoNameservers,
+            ):
                 pass
 
         # Get PTR records (reverse DNS)
@@ -306,9 +397,13 @@ class DomainManager:
         if lookup_ip:
             try:
                 reverse_name = dns.reversename.from_address(lookup_ip)
-                ptr_records = resolver.resolve(reverse_name, "PTR", lifetime=TIMEOUT_SECONDS)
+                ptr_records = resolver.resolve(
+                    reverse_name, "PTR", lifetime=TIMEOUT_SECONDS
+                )
                 for r in ptr_records:
-                    records["ptr"].append({"hostname": str(r), "ttl": ptr_records.rrset.ttl})
+                    records["ptr"].append(
+                        {"hostname": str(r), "ttl": ptr_records.rrset.ttl}
+                    )
             except Exception:
                 pass
 
@@ -317,7 +412,9 @@ class DomainManager:
     def perform_reverse_lookup(self, ip: str) -> str:
         try:
             reverse_name = dns.reversename.from_address(ip)
-            ptr_records = dns.resolver.resolve(reverse_name, "PTR", lifetime=TIMEOUT_SECONDS)
+            ptr_records = dns.resolver.resolve(
+                reverse_name, "PTR", lifetime=TIMEOUT_SECONDS
+            )
             return str(ptr_records[0])
         except Exception as e:
             logging.error(f"Error performing reverse lookup for IP {ip}: {str(e)}")
@@ -369,7 +466,9 @@ class IPBanManager:
                     self.banned_ips = json.load(f)
                     # Remove expired bans on load
                     self.cleanup_expired_bans()
-                logging.info(f"Loaded {len(self.banned_ips)} banned IPs from {self.ban_file}")
+                logging.info(
+                    f"Loaded {len(self.banned_ips)} banned IPs from {self.ban_file}"
+                )
         except Exception as e:
             logging.error(f"Error loading ban list: {e}")
             self.banned_ips = {}
@@ -444,7 +543,9 @@ class IPBanManager:
             for ip in expired_ips:
                 del self.banned_ips[ip]
             self.save_bans()
-            logging.info(f"Removed {len(expired_ips)} expired ban(s): {', '.join(expired_ips)}")
+            logging.info(
+                f"Removed {len(expired_ips)} expired ban(s): {', '.join(expired_ips)}"
+            )
 
     def get_all_bans(self) -> dict:
         """Get all current bans"""
@@ -512,7 +613,9 @@ class RateLimiter:
         if ips_to_remove:
             for ip in ips_to_remove:
                 del self.request_history[ip]
-            logging.info(f"Removed {len(ips_to_remove)} IP(s) from rate limit history: {', '.join(ips_to_remove)}")
+            logging.info(
+                f"Removed {len(ips_to_remove)} IP(s) from rate limit history: {', '.join(ips_to_remove)}"
+            )
 
 
 class SuspiciousPatternDetector:
@@ -537,7 +640,9 @@ class SuspiciousPatternDetector:
             r"\.log$",  # Log files
             r"/\..*",  # Hidden files (dotfiles)
         ]
-        self.compiled_patterns = [re.compile(p, re.IGNORECASE) for p in self.suspicious_patterns]
+        self.compiled_patterns = [
+            re.compile(p, re.IGNORECASE) for p in self.suspicious_patterns
+        ]
 
     def is_suspicious(self, path: str) -> bool:
         """Check if a request path matches suspicious patterns"""
@@ -556,7 +661,9 @@ class WhitelistManager:
             r"^/$",  # Root endpoint
             r"^/[a-zA-Z0-9\.\-]+$",  # Domain/IP lookup (main feature)
         ]
-        self.compiled_patterns = [re.compile(p, re.IGNORECASE) for p in self.whitelist_patterns]
+        self.compiled_patterns = [
+            re.compile(p, re.IGNORECASE) for p in self.whitelist_patterns
+        ]
 
     def is_whitelisted(self, path: str) -> bool:
         """Check if a request path is whitelisted"""
@@ -780,7 +887,7 @@ def verify_admin_key(api_key: str = Header(None, alias="api-key")):
     """Dependency for admin endpoint authentication"""
     if not ADMIN_API_KEY:
         raise HTTPException(status_code=404, detail="Not Found")
-    if api_key != ADMIN_API_KEY:
+    if not hmac.compare_digest(api_key or "", ADMIN_API_KEY):
         raise HTTPException(status_code=404, detail="Not Found")
     return True
 
@@ -789,11 +896,24 @@ def verify_admin_key(api_key: str = Header(None, alias="api-key")):
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     """Security middleware for IP banning, geo-blocking, and rate limiting"""
-    client_ip = request.headers.get("x-real-ip", request.client.host)
+    client_ip = get_client_ip(request)
     request_path = request.url.path
 
-    # Skip security checks for admin endpoints (they have their own auth)
+    # Admin endpoints: still check bans and rate limits, skip geo/suspicious checks
     if request_path.startswith("/admin/"):
+        if ip_ban_manager.is_banned(client_ip):
+            logging.warning(f"SECURITY: Blocked banned IP {client_ip} on admin endpoint")
+            return JSONResponse(
+                status_code=403,
+                content={"error": "IP address is banned"},
+            )
+        if not rate_limiter.allow_request(client_ip):
+            ip_ban_manager.ban_ip(
+                client_ip,
+                reason="rate_limit_admin",
+                duration=BAN_DURATION_RATE_LIMIT,
+            )
+            return JSONResponse(status_code=429, content={"error": "Too many requests"})
         return await call_next(request)
 
     # 1. Check if IP is banned (highest priority)
@@ -862,25 +982,27 @@ async def get_self_info(request: Request):
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
     )
-    client_ip = request.headers.get("x-real-ip", request.client.host)
-    logging.info(f"client={client_ip} lookup={client_ip} (self)")
+    client_ip = get_client_ip(request)
+    logging.info(f"client={sanitize_log_input(client_ip)} lookup={sanitize_log_input(client_ip)} (self)")
 
     try:
-        whois_data = whois.whois(client_ip)
+        whois_data = await asyncio.to_thread(whois.whois, client_ip)
     except Exception as e:
         whois_data = {"error": str(e)}
 
-    ip_data = geo_ip_manager.fetch_location(client_ip)
+    ip_data = await asyncio.to_thread(geo_ip_manager.fetch_location, client_ip)
     ip_data.pop("elapsed_time", None)
 
-    reverse_dns_hostname = domain_manager.perform_reverse_lookup(client_ip)
+    reverse_dns_hostname = await asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
     if reverse_dns_hostname:
         ip_data["reverse_dns"] = reverse_dns_hostname
 
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
-        "domain": domain_manager.get_records(reverse_dns_hostname, ip=client_ip) if reverse_dns_hostname else {},
+        "domain": await asyncio.to_thread(lambda: domain_manager.get_records(reverse_dns_hostname, ip=client_ip))
+        if reverse_dns_hostname
+        else {},
         "location": ip_data,
         "whois": whois_data,
         "ssl": None,
@@ -893,7 +1015,9 @@ async def get_self_info(request: Request):
             "browser.html",
             {
                 "request": request,
-                "json_data": json.dumps(response_data, indent=2, default=str),
+                "json_data": json.dumps(response_data, indent=2, default=str).replace(
+                    "</", "<\\/"
+                ),
             },
         )
 
@@ -909,11 +1033,11 @@ async def get_ip_info(domain_ip: str, request: Request):
     )
     request_headers.pop("host", None)
 
-    client_ip = request.headers.get("x-real-ip", request.client.host)
-    logging.info(f"client={client_ip} lookup={domain_ip}")
+    client_ip = get_client_ip(request)
+    logging.info(f"client={sanitize_log_input(client_ip)} lookup={sanitize_log_input(domain_ip)}")
 
     try:
-        whois_data = whois.whois(domain_ip)
+        whois_data = await asyncio.to_thread(whois.whois, domain_ip)
     except Exception as e:
         whois_data = {"error": str(e)}
 
@@ -924,30 +1048,44 @@ async def get_ip_info(domain_ip: str, request: Request):
     if domain_manager.is_valid_domain(domain_ip):
         logging.debug(f"domain={domain_ip}")
         try:
-            a_records = dns.resolver.resolve(domain_ip, "A")
+            a_records = await asyncio.to_thread(dns.resolver.resolve, domain_ip, "A")
             resolved_ip = str(a_records[0])  # Get the first A record
         except Exception as e:
             logging.warning(f"No A record for {domain_ip}: {str(e)}")
+        if resolved_ip and not is_safe_ip(resolved_ip):
+            raise HTTPException(
+                status_code=400,
+                detail="Private or reserved IP addresses are not allowed",
+            )
         try:
-            domain_data = domain_manager.get_records(domain_ip, ip=resolved_ip)
+            domain_data = await asyncio.to_thread(lambda: domain_manager.get_records(domain_ip, ip=resolved_ip))
         except Exception as e:
             logging.exception(f"Error getting DNS records for {domain_ip}: {str(e)}")
         try:
-            ssl_data = SSLManager.get_ssl_info(domain_ip)
+            ssl_data = await asyncio.to_thread(SSLManager.get_ssl_info, domain_ip)
         except Exception as e:
             logging.exception(f"Error getting SSL info for {domain_ip}: {str(e)}")
     elif domain_manager.is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
-        reverse_dns_hostname = domain_manager.perform_reverse_lookup(domain_ip)
-        domain_data = domain_manager.get_records(reverse_dns_hostname, ip=domain_ip) if reverse_dns_hostname else {}
+        if not is_safe_ip(domain_ip):
+            raise HTTPException(
+                status_code=400,
+                detail="Private or reserved IP addresses are not allowed",
+            )
+        reverse_dns_hostname = await asyncio.to_thread(domain_manager.perform_reverse_lookup, domain_ip)
+        domain_data = (
+            await asyncio.to_thread(lambda: domain_manager.get_records(reverse_dns_hostname, ip=domain_ip))
+            if reverse_dns_hostname
+            else {}
+        )
         resolved_ip = domain_ip
 
     if resolved_ip:
-        ip_data = geo_ip_manager.fetch_location(resolved_ip)
+        ip_data = await asyncio.to_thread(geo_ip_manager.fetch_location, resolved_ip)
         ip_data.pop("elapsed_time", None)
         # Add reverse DNS for IP lookups
         if domain_manager.is_ipv4(domain_ip):
-            reverse_dns_hostname = domain_manager.perform_reverse_lookup(resolved_ip)
+            reverse_dns_hostname = await asyncio.to_thread(domain_manager.perform_reverse_lookup, resolved_ip)
             if reverse_dns_hostname:
                 ip_data["reverse_dns"] = reverse_dns_hostname
     else:
@@ -969,7 +1107,9 @@ async def get_ip_info(domain_ip: str, request: Request):
             "browser.html",
             {
                 "request": request,
-                "json_data": json.dumps(response_data, indent=2, default=str),
+                "json_data": json.dumps(response_data, indent=2, default=str).replace(
+                    "</", "<\\/"
+                ),
             },
         )
 
@@ -985,7 +1125,9 @@ async def get_all_bans(authenticated: bool = Depends(verify_admin_key)):
 
 @app.post("/admin/ban/{ip}")
 async def manual_ban(
-    ip: str, duration: int = BAN_DURATION_SUSPICIOUS, authenticated: bool = Depends(verify_admin_key)
+    ip: str,
+    duration: int = BAN_DURATION_SUSPICIOUS,
+    authenticated: bool = Depends(verify_admin_key),
 ):
     """Manually ban an IP address"""
     ip_ban_manager.ban_ip(ip, reason="manual", duration=duration)
@@ -1007,11 +1149,13 @@ async def get_geo_rules(authenticated: bool = Depends(verify_admin_key)):
 
 @app.put("/admin/geo/rules")
 async def update_geo_rules(
-    rules: dict, authenticated: bool = Depends(verify_admin_key)
+    rules: GeoRulesUpdate, authenticated: bool = Depends(verify_admin_key)
 ):
     """Update geo-blocking configuration"""
+    updates = rules.model_dump(exclude_none=True)
+
     # Validate mode
-    if "mode" in rules and rules["mode"] not in ["disabled", "allowlist", "blocklist"]:
+    if "mode" in updates and updates["mode"] not in ["disabled", "allowlist", "blocklist"]:
         raise HTTPException(status_code=400, detail="Invalid mode")
 
     # Update configuration
@@ -1024,15 +1168,17 @@ async def update_geo_rules(
         "block_unknown",
         "bypass_ips",
     ]:
-        if key in rules:
-            geo_block_manager.config[key] = rules[key]
+        if key in updates:
+            geo_block_manager.config[key] = updates[key]
 
     geo_block_manager.save_config()
     return {"status": "updated", "config": geo_block_manager.config}
 
 
 @app.post("/admin/geo/block/country/{country_code}")
-async def block_country(country_code: str, authenticated: bool = Depends(verify_admin_key)):
+async def block_country(
+    country_code: str, authenticated: bool = Depends(verify_admin_key)
+):
     """Add a country to the blocklist"""
     country_code = country_code.upper()
     if country_code not in geo_block_manager.config["blocked_countries"]:
@@ -1043,7 +1189,9 @@ async def block_country(country_code: str, authenticated: bool = Depends(verify_
 
 
 @app.delete("/admin/geo/block/country/{country_code}")
-async def unblock_country(country_code: str, authenticated: bool = Depends(verify_admin_key)):
+async def unblock_country(
+    country_code: str, authenticated: bool = Depends(verify_admin_key)
+):
     """Remove a country from the blocklist"""
     country_code = country_code.upper()
     if country_code in geo_block_manager.config["blocked_countries"]:
@@ -1054,7 +1202,9 @@ async def unblock_country(country_code: str, authenticated: bool = Depends(verif
 
 
 @app.post("/admin/geo/allow/country/{country_code}")
-async def allow_country(country_code: str, authenticated: bool = Depends(verify_admin_key)):
+async def allow_country(
+    country_code: str, authenticated: bool = Depends(verify_admin_key)
+):
     """Add a country to the allowlist"""
     country_code = country_code.upper()
     if country_code not in geo_block_manager.config["allowed_countries"]:

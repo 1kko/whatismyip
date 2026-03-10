@@ -19,12 +19,17 @@ RUN poetry export --without-hashes > ./requirements.txt
 # install requirements using uv --system (hence no virtualenv is required)
 RUN uv pip install --system -r requirements.txt
 
+RUN useradd -m -r appuser
+
 COPY *.py /app/
 COPY templates /app/templates
 COPY static /app/static
+
+RUN mkdir -p /app/data && chown -R appuser:appuser /app
+USER appuser
 
 # Expose port 8000 for the FastAPI app to run on
 EXPOSE 8000
 
 # Command to run the FastAPI app using uvicorn
-ENTRYPOINT ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+ENTRYPOINT ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
