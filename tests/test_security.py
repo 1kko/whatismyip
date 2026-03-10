@@ -23,6 +23,7 @@ from main import (
     RateLimiter,
     SuspiciousPatternDetector,
     WhitelistManager,
+    _extract_forwarded_ip,
     app,
     get_client_ip,
     ip_ban_manager,
@@ -137,12 +138,13 @@ class TestIPSpoofingPrevention:
     def setup_method(self):
         _reset_security_state()
 
-    def test_untrusted_proxy_ignores_x_real_ip(self):
-        """IP Spoofing: x-real-ip should be ignored from untrusted sources."""
-        # TestClient connects from "testclient" which is not in TRUSTED_PROXIES
+    def test_untrusted_proxy_ignores_headers(self):
+        """IP Spoofing: proxy headers should be ignored from untrusted sources."""
         mock_request = MagicMock()
         mock_request.client.host = "192.168.1.100"
-        mock_request.headers = {"x-real-ip": "1.2.3.4"}
+        headers = {"x-real-ip": "1.2.3.4", "x-forwarded-for": "5.6.7.8"}
+        mock_request.headers = MagicMock()
+        mock_request.headers.get = lambda key, default=None: headers.get(key, default)
         result = get_client_ip(mock_request)
         assert result == "192.168.1.100"
 
@@ -153,12 +155,21 @@ class TestIPSpoofingPrevention:
         headers = {"x-real-ip": "203.0.113.50"}
         mock_request.headers = MagicMock()
         mock_request.headers.get = lambda key, default=None: headers.get(key, default)
-        mock_request.headers.__contains__ = lambda self, key: key in headers
         result = get_client_ip(mock_request)
         assert result == "203.0.113.50"
 
-    def test_trusted_proxy_without_x_real_ip_falls_back(self):
-        """IP Spoofing: trusted proxy without x-real-ip uses client.host."""
+    def test_trusted_proxy_uses_x_forwarded_for(self):
+        """IP Spoofing: x-forwarded-for should be used when x-real-ip absent."""
+        mock_request = MagicMock()
+        mock_request.client.host = "127.0.0.1"  # In TRUSTED_PROXIES
+        headers = {"x-forwarded-for": "203.0.113.50, 10.0.0.1"}
+        mock_request.headers = MagicMock()
+        mock_request.headers.get = lambda key, default=None: headers.get(key, default)
+        result = get_client_ip(mock_request)
+        assert result == "203.0.113.50"
+
+    def test_trusted_proxy_without_proxy_headers_falls_back(self):
+        """IP Spoofing: trusted proxy without proxy headers uses client.host."""
         mock_request = MagicMock()
         mock_request.client.host = "127.0.0.1"
         mock_request.headers = MagicMock()
@@ -167,9 +178,8 @@ class TestIPSpoofingPrevention:
         assert result == "127.0.0.1"
 
     @patch("main.TRUSTED_PROXIES", [])
-    def test_no_trusted_proxies_configured_trusts_x_real_ip(self):
-        """IP Spoofing: when TRUSTED_PROXIES is empty, trust x-real-ip for
-        backward compatibility with reverse proxy setups (e.g. Docker)."""
+    def test_no_trusted_proxies_trusts_x_real_ip(self):
+        """IP Spoofing: when TRUSTED_PROXIES is empty, trust x-real-ip."""
         mock_request = MagicMock()
         mock_request.client.host = "172.20.0.9"
         headers = {"x-real-ip": "203.0.113.50"}
@@ -177,6 +187,44 @@ class TestIPSpoofingPrevention:
         mock_request.headers.get = lambda key, default=None: headers.get(key, default)
         result = get_client_ip(mock_request)
         assert result == "203.0.113.50"
+
+    @patch("main.TRUSTED_PROXIES", [])
+    def test_no_trusted_proxies_trusts_x_forwarded_for(self):
+        """IP Spoofing: when TRUSTED_PROXIES is empty, trust x-forwarded-for
+        for reverse proxies like Traefik/Coolify that don't set x-real-ip."""
+        mock_request = MagicMock()
+        mock_request.client.host = "172.20.0.9"
+        headers = {"x-forwarded-for": "98.76.54.32, 172.20.0.1"}
+        mock_request.headers = MagicMock()
+        mock_request.headers.get = lambda key, default=None: headers.get(key, default)
+        result = get_client_ip(mock_request)
+        assert result == "98.76.54.32"
+
+    def test_extract_forwarded_ip_prefers_x_real_ip(self):
+        """x-real-ip takes precedence over x-forwarded-for."""
+        mock_request = MagicMock()
+        headers = {"x-real-ip": "1.1.1.1", "x-forwarded-for": "2.2.2.2"}
+        mock_request.headers = MagicMock()
+        mock_request.headers.get = lambda key, default=None: headers.get(key, default)
+        result = _extract_forwarded_ip(mock_request)
+        assert result == "1.1.1.1"
+
+    def test_extract_forwarded_ip_parses_chain(self):
+        """x-forwarded-for with multiple IPs returns the first (client)."""
+        mock_request = MagicMock()
+        headers = {"x-forwarded-for": "  203.0.113.50 , 10.0.0.1 , 172.20.0.9 "}
+        mock_request.headers = MagicMock()
+        mock_request.headers.get = lambda key, default=None: headers.get(key, default)
+        result = _extract_forwarded_ip(mock_request)
+        assert result == "203.0.113.50"
+
+    def test_extract_forwarded_ip_returns_none_when_no_headers(self):
+        """No proxy headers returns None."""
+        mock_request = MagicMock()
+        mock_request.headers = MagicMock()
+        mock_request.headers.get = lambda key, default=None: default
+        result = _extract_forwarded_ip(mock_request)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
