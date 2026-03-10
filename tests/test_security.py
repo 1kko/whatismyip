@@ -166,6 +166,18 @@ class TestIPSpoofingPrevention:
         result = get_client_ip(mock_request)
         assert result == "127.0.0.1"
 
+    @patch("main.TRUSTED_PROXIES", [])
+    def test_no_trusted_proxies_configured_trusts_x_real_ip(self):
+        """IP Spoofing: when TRUSTED_PROXIES is empty, trust x-real-ip for
+        backward compatibility with reverse proxy setups (e.g. Docker)."""
+        mock_request = MagicMock()
+        mock_request.client.host = "172.20.0.9"
+        headers = {"x-real-ip": "203.0.113.50"}
+        mock_request.headers = MagicMock()
+        mock_request.headers.get = lambda key, default=None: headers.get(key, default)
+        result = get_client_ip(mock_request)
+        assert result == "203.0.113.50"
+
 
 # ---------------------------------------------------------------------------
 # Fix 3: SSRF - Internal network probing

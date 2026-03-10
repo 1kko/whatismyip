@@ -131,8 +131,14 @@ def is_safe_ip(ip_str: str) -> bool:
 
 
 def get_client_ip(request: Request) -> str:
-    """Get client IP, only trusting x-real-ip from configured proxies."""
-    if TRUSTED_PROXIES and request.client and request.client.host in TRUSTED_PROXIES:
+    """Get client IP, only trusting x-real-ip from configured proxies.
+
+    When TRUSTED_PROXIES is not configured, falls back to trusting x-real-ip
+    from any source for backward compatibility with reverse proxy setups.
+    """
+    if not TRUSTED_PROXIES:
+        return request.headers.get("x-real-ip", request.client.host)
+    if request.client and request.client.host in TRUSTED_PROXIES:
         return request.headers.get("x-real-ip", request.client.host)
     return request.client.host
 
