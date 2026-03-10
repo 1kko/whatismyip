@@ -130,16 +130,28 @@ def is_safe_ip(ip_str: str) -> bool:
         return False
 
 
-def get_client_ip(request: Request) -> str:
-    """Get client IP, only trusting x-real-ip from configured proxies.
+def _extract_forwarded_ip(request: Request) -> str | None:
+    """Extract client IP from proxy headers (x-real-ip or x-forwarded-for)."""
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        # X-Forwarded-For format: "client, proxy1, proxy2" - first is the client
+        return forwarded_for.split(",")[0].strip()
+    return None
 
-    When TRUSTED_PROXIES is not configured, falls back to trusting x-real-ip
-    from any source for backward compatibility with reverse proxy setups.
+
+def get_client_ip(request: Request) -> str:
+    """Get client IP from proxy headers or direct connection.
+
+    When TRUSTED_PROXIES is not configured, falls back to trusting proxy
+    headers from any source for backward compatibility with reverse proxy setups.
     """
     if not TRUSTED_PROXIES:
-        return request.headers.get("x-real-ip", request.client.host)
+        return _extract_forwarded_ip(request) or request.client.host
     if request.client and request.client.host in TRUSTED_PROXIES:
-        return request.headers.get("x-real-ip", request.client.host)
+        return _extract_forwarded_ip(request) or request.client.host
     return request.client.host
 
 
