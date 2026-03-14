@@ -423,7 +423,7 @@ class DomainManager:
                         {"hostname": str(r), "ttl": ptr_records.rrset.ttl}
                     )
             except Exception:
-                pass
+                logging.debug("PTR record lookup failed for %s", lookup_ip)
 
         return records
 
@@ -537,7 +537,8 @@ class IPBanManager:
         }
         self.save_bans()
         logging.warning(
-            f"Banned IP {ip} ({country or 'UNKNOWN'}) for {duration}s - Reason: {reason}"
+            f"Banned IP {ip} ({country or 'UNKNOWN'}) "
+            f"for {duration}s - Reason: {reason}"
         )
 
     def unban_ip(self, ip: str):
@@ -632,7 +633,8 @@ class RateLimiter:
             for ip in ips_to_remove:
                 del self.request_history[ip]
             logging.info(
-                f"Removed {len(ips_to_remove)} IP(s) from rate limit history: {', '.join(ips_to_remove)}"
+                f"Removed {len(ips_to_remove)} IP(s) from "
+                f"rate limit history: {', '.join(ips_to_remove)}"
             )
 
 
@@ -920,7 +922,10 @@ async def security_middleware(request: Request, call_next):
     # Admin endpoints: still check bans and rate limits, skip geo/suspicious checks
     if request_path.startswith("/admin/"):
         if ip_ban_manager.is_banned(client_ip):
-            logging.warning(f"SECURITY: Blocked banned IP {client_ip} on admin endpoint")
+            logging.warning(
+                "SECURITY: Blocked banned IP %s on admin endpoint",
+                client_ip,
+            )
             return JSONResponse(
                 status_code=403,
                 content={"error": "IP address is banned"},
@@ -1001,7 +1006,8 @@ async def get_self_info(request: Request):
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
     )
     client_ip = get_client_ip(request)
-    logging.info(f"client={sanitize_log_input(client_ip)} lookup={sanitize_log_input(client_ip)} (self)")
+    sanitized_ip = sanitize_log_input(client_ip)
+    logging.info("client=%s lookup=%s (self)", sanitized_ip, sanitized_ip)
 
     try:
         whois_data = await asyncio.to_thread(whois.whois, client_ip)
@@ -1011,16 +1017,23 @@ async def get_self_info(request: Request):
     ip_data = await asyncio.to_thread(geo_ip_manager.fetch_location, client_ip)
     ip_data.pop("elapsed_time", None)
 
-    reverse_dns_hostname = await asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
+    reverse_dns_hostname = await asyncio.to_thread(
+        domain_manager.perform_reverse_lookup, client_ip
+    )
     if reverse_dns_hostname:
         ip_data["reverse_dns"] = reverse_dns_hostname
 
+    domain_records = (
+        await asyncio.to_thread(
+            lambda: domain_manager.get_records(reverse_dns_hostname, ip=client_ip)
+        )
+        if reverse_dns_hostname
+        else {}
+    )
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
-        "domain": await asyncio.to_thread(lambda: domain_manager.get_records(reverse_dns_hostname, ip=client_ip))
-        if reverse_dns_hostname
-        else {},
+        "domain": domain_records,
         "location": ip_data,
         "whois": whois_data,
         "ssl": None,
@@ -1052,7 +1065,11 @@ async def get_ip_info(domain_ip: str, request: Request):
     request_headers.pop("host", None)
 
     client_ip = get_client_ip(request)
-    logging.info(f"client={sanitize_log_input(client_ip)} lookup={sanitize_log_input(domain_ip)}")
+    logging.info(
+        "client=%s lookup=%s",
+        sanitize_log_input(client_ip),
+        sanitize_log_input(domain_ip),
+    )
 
     try:
         whois_data = await asyncio.to_thread(whois.whois, domain_ip)
@@ -1076,7 +1093,9 @@ async def get_ip_info(domain_ip: str, request: Request):
                 detail="Private or reserved IP addresses are not allowed",
             )
         try:
-            domain_data = await asyncio.to_thread(lambda: domain_manager.get_records(domain_ip, ip=resolved_ip))
+            domain_data = await asyncio.to_thread(
+                lambda: domain_manager.get_records(domain_ip, ip=resolved_ip)
+            )
         except Exception as e:
             logging.exception(f"Error getting DNS records for {domain_ip}: {str(e)}")
         try:
@@ -1090,9 +1109,13 @@ async def get_ip_info(domain_ip: str, request: Request):
                 status_code=400,
                 detail="Private or reserved IP addresses are not allowed",
             )
-        reverse_dns_hostname = await asyncio.to_thread(domain_manager.perform_reverse_lookup, domain_ip)
+        reverse_dns_hostname = await asyncio.to_thread(
+            domain_manager.perform_reverse_lookup, domain_ip
+        )
         domain_data = (
-            await asyncio.to_thread(lambda: domain_manager.get_records(reverse_dns_hostname, ip=domain_ip))
+            await asyncio.to_thread(
+                lambda: domain_manager.get_records(reverse_dns_hostname, ip=domain_ip)
+            )
             if reverse_dns_hostname
             else {}
         )
@@ -1103,7 +1126,10 @@ async def get_ip_info(domain_ip: str, request: Request):
         ip_data.pop("elapsed_time", None)
         # Add reverse DNS for IP lookups
         if domain_manager.is_ipv4(domain_ip):
-            reverse_dns_hostname = await asyncio.to_thread(domain_manager.perform_reverse_lookup, resolved_ip)
+            reverse_dns_hostname = await asyncio.to_thread(
+                domain_manager.perform_reverse_lookup,
+                resolved_ip,
+            )
             if reverse_dns_hostname:
                 ip_data["reverse_dns"] = reverse_dns_hostname
     else:
@@ -1173,7 +1199,8 @@ async def update_geo_rules(
     updates = rules.model_dump(exclude_none=True)
 
     # Validate mode
-    if "mode" in updates and updates["mode"] not in ["disabled", "allowlist", "blocklist"]:
+    valid_modes = ["disabled", "allowlist", "blocklist"]
+    if "mode" in updates and updates["mode"] not in valid_modes:
         raise HTTPException(status_code=400, detail="Invalid mode")
 
     # Update configuration
@@ -1254,7 +1281,8 @@ async def lookup_ip_location(ip: str, authenticated: bool = Depends(verify_admin
         "country_code": location.get("country_code"),
         "country_name": location.get("country_name"),
         "region": (
-            f"{location.get('country_code')}-{location.get('city', {}).get('subdivision_code')}"
+            f"{location.get('country_code')}"
+            f"-{location.get('city', {}).get('subdivision_code')}"
             if location.get("city", {}).get("subdivision_code")
             else None
         ),
@@ -1344,4 +1372,4 @@ async def get_security_stats(authenticated: bool = Depends(verify_admin_key)):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)  # noqa: S104

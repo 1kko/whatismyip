@@ -3,12 +3,12 @@ import requests
 baseurl = "http://127.0.0.1:8000"
 
 
-class Client():
+class Client:
     def __init__(self, baseurl):
         self.baseurl = baseurl
 
     def get(self, url):
-        return requests.get(self.baseurl + url)
+        return requests.get(self.baseurl + url, timeout=30)
 
 
 class TestBasic:
@@ -26,7 +26,7 @@ class TestBasic:
         response = self.client.get("/google.com")
         assert response.status_code == 200
         json_data = response.json()
-        assert "domain_name" in json_data['whois']
+        assert "domain_name" in json_data["whois"]
         assert "google.com" in json_data["whois"]["domain_name"].lower()
 
     def test_get_ip_info(self):

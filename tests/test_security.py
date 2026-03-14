@@ -105,7 +105,9 @@ class TestXSSPrevention:
         # Ensure no unescaped </script> in the JSON data portion
         script_sections = body.split("<script>")
         for section in script_sections[1:]:
-            json_part = section.split("</script>")[0] if "</script>" in section else section
+            json_part = (
+                section.split("</script>")[0] if "</script>" in section else section
+            )
             # Within script blocks, </script> should not appear literally
             # (it should be <\/script> if present at all)
             assert "</script>" not in json_part or json_part.endswith("")
@@ -674,9 +676,9 @@ class TestRateLimiter:
         rl = RateLimiter(requests_per_minute=100, requests_per_second=100)
         rl.allow_request("5.5.5.5")
         # Artificially age the timestamps
-        old_time = datetime.datetime.now(
-            tz=datetime.timezone.utc
-        ) - datetime.timedelta(minutes=10)
+        old_time = datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(
+            minutes=10
+        )
         rl.request_history["5.5.5.5"] = [old_time]
         rl.cleanup_old_records()
         assert "5.5.5.5" not in rl.request_history

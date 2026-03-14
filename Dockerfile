@@ -14,10 +14,10 @@ RUN poetry self add poetry-plugin-export
 COPY poetry.lock .
 COPY pyproject.toml .
 
-RUN poetry export --without-hashes > ./requirements.txt
+RUN poetry export > ./requirements.txt
 
-# install requirements using uv --system (hence no virtualenv is required)
-RUN uv pip install --system -r requirements.txt
+# install requirements using uv --system with hash verification
+RUN uv pip install --system --require-hashes -r requirements.txt
 
 RUN useradd -m -r appuser
 
