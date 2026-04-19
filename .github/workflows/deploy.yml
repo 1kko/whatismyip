@@ -15,7 +15,5 @@ jobs:
   deploy:
     uses: 1kko/ops_svc_coolify/.github/workflows/coolify-deploy.yml@main
     with:
-      uuid: ${{ secrets.COOLIFY_UUID }}
-      ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       force: ${{ inputs.force || false }}
     secrets: inherit
