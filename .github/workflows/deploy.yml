@@ -13,7 +13,30 @@ on:
 
 jobs:
   deploy:
-    uses: 1kko/ops_svc_coolify/.github/workflows/coolify-deploy.yml@main
-    with:
-      force: ${{ inputs.force || false }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Join tailnet
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - name: Trigger Coolify deploy
+        env:
+          HOST: svc.1kko.com
+          UUID: ${{ secrets.COOLIFY_UUID }}
+          FORCE: ${{ inputs.force || false }}
+          TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Deploying (force=${FORCE})"
+          curl --fail-with-body --show-error --silent \
+               --max-time 30 \
+               -X GET "https://${HOST}/api/v1/deploy?uuid=${UUID}&force=${FORCE}" \
+               -H "Authorization: Bearer ${TOKEN}" \
+               -H "Accept: application/json"
+          echo
+          echo "Deploy request accepted."
