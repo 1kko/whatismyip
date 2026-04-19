@@ -31,5 +31,5 @@ USER appuser
 # Expose port 8000 for the FastAPI app to run on
 EXPOSE 8000
 
-# Command to run the FastAPI app using uvicorn
-ENTRYPOINT ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Command to run the FastAPI app using uvicorn, wrapped with OpenTelemetry
+ENTRYPOINT ["opentelemetry-instrument", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

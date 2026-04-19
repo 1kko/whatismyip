@@ -16,6 +16,11 @@ apscheduler = "^3.10.4"
 tld = "^0.13"
 requests = "^2.32.3"
 python-dotenv = "^1.0.0"
+opentelemetry-distro = ">=0.50b0,<1.0"
+opentelemetry-exporter-otlp = ">=1.29,<2.0"
+opentelemetry-instrumentation-fastapi = ">=0.50b0,<1.0"
+opentelemetry-instrumentation-requests = ">=0.50b0,<1.0"
+opentelemetry-instrumentation-logging = ">=0.50b0,<1.0"
 
 
 [tool.poetry.group.dev.dependencies]
