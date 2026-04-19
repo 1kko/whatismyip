@@ -91,6 +91,9 @@ BAN_DURATION_SUSPICIOUS = int(os.getenv("BAN_DURATION_SUSPICIOUS", "86400"))  # 
 # File Paths
 BANNED_IPS_FILE = os.getenv("BANNED_IPS_FILE", "data/banned_ips.json")
 GEO_RULES_FILE = os.getenv("GEO_RULES_FILE", "data/geo_rules.json")
+# GeoIP DB lives in a writable volume; the bundled DB inside the
+# geoip2fast package directory is read-only when the container runs as a non-root user.
+GEOIP_DATA_FILE = os.getenv("GEOIP_DATA_FILE", "data/geoip2fast.dat.gz")
 
 # Background Job Intervals
 CLEANUP_INTERVAL_SECONDS = int(
@@ -229,21 +232,33 @@ class GeoRulesUpdate(BaseModel):
 
 class GeoIpManager:
     def __init__(self):
-        self.instance = GeoIP2Fast()
+        if os.path.exists(GEOIP_DATA_FILE):
+            self.instance = GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE)
+        else:
+            self.instance = GeoIP2Fast()
 
     def update_database(self):
         try:
+            data_dir = os.path.dirname(GEOIP_DATA_FILE)
+            if data_dir:
+                os.makedirs(data_dir, exist_ok=True)
             update_result = self.instance.update_file(
-                "geoip2fast-city-asn-ipv6.dat.gz", "geoip2fast.dat.gz", verbose=False
+                "geoip2fast-city-asn-ipv6.dat.gz", GEOIP_DATA_FILE, verbose=False
             )
-            reload_result = self.instance.reload_data(verbose=False)
+            # Re-instantiate so the running process picks up the new file.
+            self.instance = GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE)
             logging.info(f"{update_result=}")
-            logging.info(f"{reload_result=}")
         except Exception as e:
             logging.exception(f"Error updating GeoIP2Fast database: {str(e)}")
 
     def fetch_location(self, ip: str) -> Dict[str, Any]:
-        return self.instance.lookup(ip).to_dict()
+        location = self.instance.lookup(ip).to_dict()
+        # geoip2fast returns "city" as an empty string when using the
+        # country-only DB. Normalise to a dict so downstream callers can
+        # safely use .get() without type checks.
+        if not isinstance(location.get("city"), dict):
+            location["city"] = {}
+        return location
 
 
 class DomainManager:
