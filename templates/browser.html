@@ -32,59 +32,59 @@
 
 
         <div class="section" id="location-section">
-            <div class="section-header" onclick="toggleSection('location-section')">
+            <div class="section-header" data-toggle="location-section">
                 <h2>📍 Location</h2>
                 <span class="toggle-icon">🔺</span>
             </div>
             <div class="section-content">
                 <div class="code-container">
-                    <button class="copy-button" onclick="copySection('location-data')">📋</button>
+                    <button class="copy-button" data-copy="location-data">📋</button>
                     <div id="location-data"></div>
                 </div>
             </div>
         </div>
 
         <div class="section" id="whois-section">
-            <div class="section-header" onclick="toggleSection('whois-section')">
+            <div class="section-header" data-toggle="whois-section">
                 <h2>ℹ️ WHOIS</h2>
                 <span class="toggle-icon">🔺</span>
             </div>
             <div class="section-content">
                 <div class="code-container">
-                    <button class="copy-button" onclick="copySection('whois-data')">📋</button>
+                    <button class="copy-button" data-copy="whois-data">📋</button>
                     <div id="whois-data"></div>
                 </div>
             </div>
         </div>
 
         <div class="section" id="dns-section">
-            <div class="section-header" onclick="toggleSection('dns-section')">
+            <div class="section-header" data-toggle="dns-section">
                 <h2>🗄️ DNS</h2>
                 <span class="toggle-icon">🔺</span>
             </div>
             <div class="section-content">
                 <div class="code-container">
-                    <button class="copy-button" onclick="copySection('dns-data')">📋</button>
+                    <button class="copy-button" data-copy="dns-data">📋</button>
                     <div id="dns-data"></div>
                 </div>
             </div>
         </div>
 
         <div class="section" id="browser-section">
-            <div class="section-header" onclick="toggleSection('browser-section')">
+            <div class="section-header" data-toggle="browser-section">
                 <h2>🌐 Your Browser</h2>
                 <span class="toggle-icon">🔺</span>
             </div>
             <div class="section-content">
                 <div class="code-container">
-                    <button class="copy-button" onclick="copySection('browser-data')">📋</button>
+                    <button class="copy-button" data-copy="browser-data">📋</button>
                     <div id="browser-data"></div>
                 </div>
             </div>
         </div>
 
         <div class="section" id="notice-section">
-            <div class="section-header" onclick="toggleSection('notice-section')">
+            <div class="section-header" data-toggle="notice-section">
                 <div>
                     🔌 <strong>Looking for API?</strong>
                 </div>
@@ -118,7 +118,7 @@ curl -X GET "{{ request.base_url }}google.com" \
                     <div class="example-block">
                         <h3>📄 Current Response (full JSON data)</h3>
                         <div class="code-container">
-                            <button class="copy-button" onclick="copySection('full-json')">📋</button>
+                            <button class="copy-button" data-copy="full-json">📋</button>
                             <div id="full-json"></div>
                         </div>
                     </div>
@@ -180,11 +180,23 @@ curl -X GET "{{ request.base_url }}google.com" \
         document.addEventListener('DOMContentLoaded', function() {
             // update target title
             updateTargetTitle(jsonData.address);
-            
+
             // fillup all sections with json editor
             for (const [key, value] of Object.entries(dataMap)) {
                 initializeJsonEditor(key, value);
             }
+
+            // Wire click handlers via data-* attributes (CSP nonce doesn't
+            // cover inline event handlers, so onclick="..." is forbidden).
+            document.querySelectorAll('[data-toggle]').forEach(el => {
+                el.addEventListener('click', () => toggleSection(el.dataset.toggle));
+            });
+            document.querySelectorAll('[data-copy]').forEach(el => {
+                el.addEventListener('click', (e) => {
+                    e.stopPropagation();  // don't also toggle the section
+                    copySection(el.dataset.copy);
+                });
+            });
         });
     </script>
 </body>
