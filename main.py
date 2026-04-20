@@ -93,7 +93,11 @@ BANNED_IPS_FILE = os.getenv("BANNED_IPS_FILE", "data/banned_ips.json")
 GEO_RULES_FILE = os.getenv("GEO_RULES_FILE", "data/geo_rules.json")
 # GeoIP DB lives in a writable volume; the bundled DB inside the
 # geoip2fast package directory is read-only when the container runs as a non-root user.
-GEOIP_DATA_FILE = os.getenv("GEOIP_DATA_FILE", "data/geoip2fast.dat.gz")
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+GEOIP_DATA_FILE = os.getenv(
+    "GEOIP_DATA_FILE",
+    os.path.join(_APP_DIR, "data", "geoip2fast.dat.gz"),
+)
 
 # Background Job Intervals
 CLEANUP_INTERVAL_SECONDS = int(
