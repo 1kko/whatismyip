@@ -1118,9 +1118,9 @@ async def get_self_info(request: Request):
     user_agent = request.headers.get("user-agent", "")
     if BrowserDetector.is_browser(user_agent):
         return templates.TemplateResponse(
+            request,
             "browser.html",
             {
-                "request": request,
                 "json_data": json.dumps(response_data, indent=2, default=str).replace(
                     "</", "<\\/"
                 ),
@@ -1226,9 +1226,9 @@ async def get_ip_info(domain_ip: str, request: Request):
     user_agent = request.headers.get("user-agent", "")
     if BrowserDetector.is_browser(user_agent):
         return templates.TemplateResponse(
+            request,
             "browser.html",
             {
-                "request": request,
                 "json_data": json.dumps(response_data, indent=2, default=str).replace(
                     "</", "<\\/"
                 ),
