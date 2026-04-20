@@ -26,7 +26,8 @@ Copy `.env.example` to `.env` and update the values:
 
 ```bash
 cp .env.example .env
-nano .env  # Edit and paste your API key
+chmod 600 .env   # restrict the file to the owner (contains ADMIN_API_KEY)
+nano .env        # edit and paste your API key
 ```
 
 **Important:** Change `ADMIN_API_KEY` to the generated secure key!
@@ -517,6 +518,69 @@ curl http://localhost:8000/static/style.css
 curl http://localhost:8000/
 curl http://localhost:8000/google.com
 ```
+
+## Transport & Response Hardening
+
+Set by `security_headers_middleware` in `main.py` on every response.
+
+| Header | Value | Purpose |
+|---|---|---|
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | Enforce HTTPS for 2 years |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'nonce-XXX'; …; frame-ancestors 'none'` | Per-request nonce, no `'unsafe-inline'` for scripts |
+| `X-Frame-Options` | `DENY` | Clickjacking defense |
+| `X-Content-Type-Options` | `nosniff` | Prevent MIME sniffing |
+| `Referrer-Policy` | `no-referrer` | Don't leak URLs cross-site |
+| `Permissions-Policy` | `interest-cohort=(), browsing-topics=()` | Opt out of FLoC/Topics |
+| `Cross-Origin-Opener-Policy` | `same-origin` | Process isolation |
+| `Server` | `hidden` | Obscure fingerprinting (+ `uvicorn --no-server-header`) |
+
+The inline `<script>` in `templates/browser.html` gets a fresh nonce
+per request from `request.state.csp_nonce`; click handlers are wired
+via `addEventListener` on `data-toggle` / `data-copy` attributes
+(CSP nonces do not cover `onclick="..."`).
+
+The FastAPI app is constructed with `openapi_url=None` so
+`/openapi.json` does not publish the admin attack surface.
+
+## SSRF and DNS Rebinding
+
+User-supplied domains/IPs flow into WHOIS, DNS, GeoIP, and SSL
+certificate lookups. Two defenses:
+
+1. **Private/reserved IP filter** (`is_safe_ip`). Any IP that falls
+   in RFC1918, loopback, link-local, or reserved ranges is rejected
+   with HTTP 400 before any outbound request.
+2. **SSL lookup requires a verified IP** (`SSLManager.get_ssl_info`).
+   The caller resolves DNS once, runs `is_safe_ip`, and passes the
+   verified IP. The socket connects to that IP directly and uses the
+   hostname only for SNI/cert validation. If no verified IP is
+   available the SSL lookup is skipped. This closes the TOCTOU
+   rebinding window between the safety check and the TCP connect.
+
+## Reverse Proxy Trust (`TRUSTED_PROXIES`)
+
+The app distrusts `X-Forwarded-For` and `X-Real-IP` by default.
+
+- **Explicit allowlist**: set `TRUSTED_PROXIES=ip1,ip2,…` in `.env`
+  to honor proxy headers only when the direct peer matches.
+- **Unset (default)**: a private-peer heuristic kicks in. Proxy
+  headers are honored only when the direct peer is RFC1918,
+  loopback, or link-local — which covers Docker / Kubernetes /
+  Traefik sidecar setups automatically. If the app is accidentally
+  exposed without a reverse proxy, the attacker's public peer IP is
+  used instead, so rate limiting and banning still track them.
+
+## Dependency & Supply Chain
+
+- `poetry.lock` pins every Python dep by hash. Docker install uses
+  `uv pip install --require-hashes`.
+- `pip-audit` runs in CI on every push (`.github/workflows/ci.yml`).
+- Third-party and first-party GitHub Actions are pinned by commit
+  SHA, not floating tags.
+- The `python:3.12-slim` base image is pinned by multi-arch manifest
+  digest.
+- `.github/dependabot.yml` raises weekly PRs across GitHub Actions,
+  pip, and Docker ecosystems, so pinned SHAs and digests stay fresh.
 
 ## Support
 

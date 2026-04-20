@@ -1,5 +1,7 @@
-# Use an official Python runtime as a parent image
-FROM python:3.12-slim
+# Use an official Python runtime as a parent image.
+# Pinned to the multi-arch manifest digest for supply-chain reproducibility;
+# Dependabot keeps this up to date.
+FROM python:3.12-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286
 
 # Set the working directory in the container
 WORKDIR /app
@@ -30,6 +32,12 @@ USER appuser
 
 # Expose port 8000 for the FastAPI app to run on
 EXPOSE 8000
+
+# Liveness probe using only the Python stdlib (no extra install).
+# Succeeds when uvicorn is bound to 8000; start-period covers the
+# geoip2fast DB download at boot.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1', 8000))"
 
 # Command to run the FastAPI app using uvicorn, wrapped with OpenTelemetry
 ENTRYPOINT ["opentelemetry-instrument", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]

@@ -387,14 +387,21 @@ class TestAsyncIO:
     def test_get_ip_info_uses_to_thread(self):
         """Async: get_ip_info should use asyncio.to_thread for blocking calls."""
         import inspect
+        import re as _re
+
         from main import get_ip_info
 
         source = inspect.getsource(get_ip_info)
-        assert "asyncio.to_thread" in source
-        assert "await asyncio.to_thread(whois.whois" in source
-        assert "await asyncio.to_thread(dns.resolver.resolve" in source
-        assert "await asyncio.to_thread(SSLManager.get_ssl_info" in source
-        assert "await asyncio.to_thread(geo_ip_manager.fetch_location" in source
+        # Allow line breaks / whitespace inside the to_thread(...) call so the
+        # assertions survive `ruff format` changes.
+        for target in (
+            "whois.whois",
+            "dns.resolver.resolve",
+            "SSLManager.get_ssl_info",
+            "geo_ip_manager.fetch_location",
+        ):
+            pattern = rf"await asyncio\.to_thread\(\s*{_re.escape(target)}"
+            assert _re.search(pattern, source), f"missing to_thread wrap for {target}"
 
     @patch("main.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
@@ -713,3 +720,140 @@ class TestIPBanManager:
         # Ban with 0 second duration (already expired)
         mgr.ban_ip("1.2.3.4", reason="test", duration=0)
         assert not mgr.is_banned("1.2.3.4")
+
+
+# ---------------------------------------------------------------------------
+# Response security headers (regression guard for /cso hardening)
+# ---------------------------------------------------------------------------
+class TestResponseSecurityHeaders:
+    def setup_method(self):
+        _reset_security_state()
+
+    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
+    @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
+    def _fetch_root(self, mock_rev, mock_geo, mock_whois):
+        return client.get("/")
+
+    def test_hsts_header_present(self):
+        resp = self._fetch_root()
+        hsts = resp.headers.get("strict-transport-security", "")
+        assert "max-age=" in hsts
+        assert "includeSubDomains" in hsts
+
+    def test_frame_options_deny(self):
+        resp = self._fetch_root()
+        assert resp.headers.get("x-frame-options") == "DENY"
+
+    def test_content_type_options_nosniff(self):
+        resp = self._fetch_root()
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+
+    def test_referrer_policy_no_referrer(self):
+        resp = self._fetch_root()
+        assert resp.headers.get("referrer-policy") == "no-referrer"
+
+    def test_permissions_policy_present(self):
+        resp = self._fetch_root()
+        assert "interest-cohort" in resp.headers.get("permissions-policy", "")
+
+    def test_coop_same_origin(self):
+        resp = self._fetch_root()
+        assert resp.headers.get("cross-origin-opener-policy") == "same-origin"
+
+    def test_csp_has_nonce_and_hardened_directives(self):
+        resp = self._fetch_root()
+        csp = resp.headers.get("content-security-policy", "")
+        assert "'nonce-" in csp
+        assert "'unsafe-inline'" not in csp.split("script-src")[1].split(";")[0]
+        assert "frame-ancestors 'none'" in csp
+        assert "object-src 'none'" in csp
+        assert "base-uri 'self'" in csp
+
+    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
+    @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
+    def test_csp_nonce_matches_template_script(self, mock_rev, mock_geo, mock_whois):
+        """The nonce in the CSP header must match the nonce on the inline
+        <script> tag rendered in browser.html, or the browser blocks it."""
+        resp = client.get("/", headers={"User-Agent": "Mozilla/5.0"})
+        assert resp.status_code == 200
+        csp = resp.headers.get("content-security-policy", "")
+        # Extract nonce from CSP: script-src 'self' 'nonce-XYZ'
+        import re as _re
+
+        header_nonce = _re.search(r"'nonce-([A-Za-z0-9_-]+)'", csp)
+        assert header_nonce, "CSP missing nonce"
+        script_nonce = _re.search(r'<script[^>]*nonce="([^"]+)"', resp.text)
+        assert script_nonce, "template <script> missing nonce attribute"
+        assert header_nonce.group(1) == script_nonce.group(1)
+
+    def test_openapi_schema_not_exposed(self):
+        """`/openapi.json` should no longer serve the FastAPI schema.
+        Falls through to the catch-all route (treated as a domain lookup)."""
+        resp = client.get("/openapi.json")
+        # Either 404, or 200 catch-all with no `paths` key (schema marker).
+        if resp.status_code == 200:
+            body = resp.json()
+            assert "paths" not in body
+            assert "openapi" not in body
+
+
+# ---------------------------------------------------------------------------
+# DNS rebinding defense: SSLManager must require verified_ip
+# ---------------------------------------------------------------------------
+class TestSSLRebindingDefense:
+    def test_get_ssl_info_skips_without_verified_ip(self):
+        from main import SSLManager
+
+        # Must return None without attempting any network I/O when the
+        # caller could not safely verify the IP.
+        with patch("socket.socket") as mock_sock:
+            result = SSLManager.get_ssl_info("evil.example", verified_ip=None)
+            assert result is None
+            mock_sock.assert_not_called()
+
+    def test_get_ssl_info_connects_to_verified_ip(self):
+        from main import SSLManager
+
+        # When verified_ip is provided, socket.connect must use the IP,
+        # not the hostname (prevents DNS re-resolution / rebinding).
+        mock_sock_instance = MagicMock()
+        mock_sock_instance.connect = MagicMock()
+        with (
+            patch("socket.socket", return_value=mock_sock_instance),
+            patch("ssl.create_default_context") as mock_ctx,
+        ):
+            _wrap = mock_ctx.return_value.wrap_socket.return_value
+            _wrap.__enter__.return_value.getpeercert.return_value = {}
+            SSLManager.get_ssl_info("example.com", verified_ip="93.184.216.34")
+            mock_sock_instance.connect.assert_called_once_with(("93.184.216.34", 443))
+
+
+# ---------------------------------------------------------------------------
+# Private-peer heuristic for TRUSTED_PROXIES (Finding #7)
+# ---------------------------------------------------------------------------
+class TestPrivatePeerHeuristic:
+    def test_private_peer_trusts_forwarded_headers(self):
+        from main import _peer_is_trusted
+
+        # RFC1918 / loopback / link-local peers are trusted even with no
+        # explicit TRUSTED_PROXIES (covers Docker/Traefik default case).
+        # Note: the test env sets TRUSTED_PROXIES=127.0.0.1,10.0.0.1 so
+        # explicit allowlist takes precedence; verify the listed ones pass.
+        assert _peer_is_trusted("127.0.0.1")
+        assert _peer_is_trusted("10.0.0.1")
+
+    def test_public_peer_not_trusted(self):
+        from main import _peer_is_trusted
+
+        # Public IPs must never be trusted (fail-closed on direct exposure).
+        assert not _peer_is_trusted("8.8.8.8")
+        assert not _peer_is_trusted("210.95.66.123")
+
+    def test_malformed_peer_not_trusted(self):
+        from main import _peer_is_trusted
+
+        assert not _peer_is_trusted(None)
+        assert not _peer_is_trusted("")
+        assert not _peer_is_trusted("not-an-ip")
