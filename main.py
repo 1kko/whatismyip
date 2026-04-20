@@ -479,9 +479,7 @@ class SSLManager:
         # would re-resolve DNS and reopen the rebinding window between an
         # earlier is_safe_ip() check and this socket connection.
         if not verified_ip:
-            logging.debug(
-                "SSL lookup skipped for %s: no verified IP", str(hostname)
-            )
+            logging.debug("SSL lookup skipped for %s: no verified IP", str(hostname))
             return None
         cert = None
         try:

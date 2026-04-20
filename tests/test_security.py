@@ -379,7 +379,10 @@ class TestAsyncIO:
         # Verify specific blocking calls are wrapped
         assert "await asyncio.to_thread(whois.whois" in source
         assert "await asyncio.to_thread(geo_ip_manager.fetch_location" in source
-        assert "asyncio.to_thread(" in source and "domain_manager.perform_reverse_lookup" in source
+        assert (
+            "asyncio.to_thread(" in source
+            and "domain_manager.perform_reverse_lookup" in source
+        )
 
     def test_get_ip_info_uses_to_thread(self):
         """Async: get_ip_info should use asyncio.to_thread for blocking calls."""
