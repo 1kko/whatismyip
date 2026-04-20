@@ -468,7 +468,9 @@ class DomainManager:
             )
             return str(ptr_records[0])
         except Exception as e:
-            logging.error(f"Error performing reverse lookup for IP {ip}: {str(e)}")
+            # Most reverse lookups miss because client IPs lack a PTR record
+            # (NXDOMAIN). Log at warning level so SigNoz error metrics stay clean.
+            logging.warning(f"Reverse lookup failed for IP {ip}: {str(e)}")
             return None
 
 
@@ -1083,7 +1085,7 @@ async def get_self_info(request: Request):
     logging.info("client=%s lookup=%s (self)", sanitized_ip, sanitized_ip)
 
     try:
-        whois_data = await asyncio.to_thread(whois.whois, client_ip)
+        whois_data = await asyncio.to_thread(whois.whois, client_ip, quiet=True)
     except Exception as e:
         whois_data = {"error": str(e)}
 
@@ -1146,7 +1148,7 @@ async def get_ip_info(domain_ip: str, request: Request):
     )
 
     try:
-        whois_data = await asyncio.to_thread(whois.whois, domain_ip)
+        whois_data = await asyncio.to_thread(whois.whois, domain_ip, quiet=True)
     except Exception as e:
         whois_data = {"error": str(e)}
 
