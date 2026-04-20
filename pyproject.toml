@@ -24,7 +24,7 @@ opentelemetry-instrumentation-logging = ">=0.50b0,<1.0"
 
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.15.0"
+ruff = "^0.15.11"
 pytest = "^9.0.0"
 pip-audit = "^2.7.0"
 
