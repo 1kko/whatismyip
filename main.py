@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import ssl
 from collections import defaultdict
@@ -33,7 +34,7 @@ from tld import get_tld
 load_dotenv()
 
 # First, mount static files
-app = FastAPI(docs_url=None, redoc_url=None)
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -149,17 +150,30 @@ def _extract_forwarded_ip(request: Request) -> str | None:
     return None
 
 
-def get_client_ip(request: Request) -> str:
-    """Get client IP from proxy headers or direct connection.
+def _peer_is_trusted(peer: str | None) -> bool:
+    # Explicit allowlist wins.
+    if TRUSTED_PROXIES:
+        return bool(peer) and peer in TRUSTED_PROXIES
+    # No allowlist: only trust proxy headers when the direct peer is a
+    # private-range address. Docker/K8s/Traefik sidecars always talk from
+    # RFC1918 / CGNAT / link-local space, so this correctly covers the
+    # intended reverse-proxy case without requiring per-deploy config.
+    # If the app is accidentally exposed directly, peer is the attacker's
+    # public IP and headers are ignored (fail-closed).
+    if not peer:
+        return False
+    try:
+        ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
 
-    When TRUSTED_PROXIES is not configured, falls back to trusting proxy
-    headers from any source for backward compatibility with reverse proxy setups.
-    """
-    if not TRUSTED_PROXIES:
-        return _extract_forwarded_ip(request) or request.client.host
-    if request.client and request.client.host in TRUSTED_PROXIES:
-        return _extract_forwarded_ip(request) or request.client.host
-    return request.client.host
+
+def get_client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else None
+    if _peer_is_trusted(peer):
+        return _extract_forwarded_ip(request) or peer or "unknown"
+    return peer or "unknown"
 
 
 class WhoisResponse(BaseModel):
@@ -460,13 +474,22 @@ class DomainManager:
 
 class SSLManager:
     @staticmethod
-    def get_ssl_info(hostname: str) -> dict | None:
+    def get_ssl_info(hostname: str, verified_ip: str | None = None) -> dict | None:
+        # Connect only to the caller-verified IP. Falling back to hostname
+        # would re-resolve DNS and reopen the rebinding window between an
+        # earlier is_safe_ip() check and this socket connection.
+        if not verified_ip:
+            logging.debug(
+                "SSL lookup skipped for %s: no verified IP", str(hostname)
+            )
+            return None
         cert = None
         try:
             ctx = ssl.create_default_context()
-            with ctx.wrap_socket(socket.socket(), server_hostname=hostname) as s:
-                s.settimeout(TIMEOUT_SECONDS)
-                s.connect((hostname, 443))
+            sock = socket.socket()
+            sock.settimeout(TIMEOUT_SECONDS)
+            sock.connect((verified_ip, 443))
+            with ctx.wrap_socket(sock, server_hostname=hostname) as s:
                 cert = s.getpeercert()
             return cert
         except Exception:
@@ -1018,6 +1041,39 @@ async def security_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_SECURITY_HEADERS = {
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "interest-cohort=(), browsing-topics=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    # Per-request nonce lets the inline <script> in browser.html run without
+    # 'unsafe-inline'. External scripts are permitted via 'self'.
+    nonce = secrets.token_urlsafe(16)
+    request.state.csp_nonce = nonce
+    response = await call_next(request)
+    for key, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'"
+    )
+    # Obscure server fingerprinting.
+    response.headers["server"] = "hidden"
+    return response
+
+
 @app.get("/", response_model=None)
 async def get_self_info(request: Request):
     filter_manager = HeaderManager()
@@ -1068,6 +1124,7 @@ async def get_self_info(request: Request):
                 "json_data": json.dumps(response_data, indent=2, default=str).replace(
                     "</", "<\\/"
                 ),
+                "nonce": getattr(request.state, "csp_nonce", ""),
             },
         )
 
@@ -1118,7 +1175,9 @@ async def get_ip_info(domain_ip: str, request: Request):
         except Exception as e:
             logging.exception(f"Error getting DNS records for {domain_ip}: {str(e)}")
         try:
-            ssl_data = await asyncio.to_thread(SSLManager.get_ssl_info, domain_ip)
+            ssl_data = await asyncio.to_thread(
+                SSLManager.get_ssl_info, domain_ip, resolved_ip
+            )
         except Exception as e:
             logging.exception(f"Error getting SSL info for {domain_ip}: {str(e)}")
     elif domain_manager.is_ipv4(domain_ip):
@@ -1173,6 +1232,7 @@ async def get_ip_info(domain_ip: str, request: Request):
                 "json_data": json.dumps(response_data, indent=2, default=str).replace(
                     "</", "<\\/"
                 ),
+                "nonce": getattr(request.state, "csp_nonce", ""),
             },
         )
 

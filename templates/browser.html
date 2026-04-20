@@ -128,7 +128,7 @@ curl -X GET "{{ request.base_url }}google.com" \
 
     </div>
 
-    <script>
+    <script nonce="{{ nonce }}">
         // Parse the JSON data. Do not change this line, it's parsed by server using Jinja2 template.
         const jsonData = {{ json_data | safe }};
         dataMap = {
