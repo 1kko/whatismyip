@@ -26,7 +26,7 @@ jobs:
 
       - name: Trigger Coolify deploy
         env:
-          HOST: svc.1kko.com
+          HOST: ${{ secrets.SVC_1KKO_COM }}
           UUID: ${{ secrets.COOLIFY_UUID }}
           FORCE: ${{ inputs.force || false }}
           TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
