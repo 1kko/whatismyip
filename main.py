@@ -17,6 +17,7 @@ from typing import Any, Dict
 
 import dns.resolver
 import dns.reversename
+import orjson
 import uvicorn
 import whois
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -64,6 +65,13 @@ logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
 TIMEOUT_SECONDS = 5
+
+
+class SafeORJSONResponse(ORJSONResponse):
+    # python-whois returns sets and other non-JSON-native types; fall back to str
+    # so the API path matches the browser path's json.dumps(default=str) behavior.
+    def render(self, content: Any) -> bytes:
+        return orjson.dumps(content, default=str)
 
 
 def sanitize_log_input(value: str) -> str:
@@ -1128,7 +1136,7 @@ async def get_self_info(request: Request):
             },
         )
 
-    return ORJSONResponse(response_data)
+    return SafeORJSONResponse(response_data)
 
 
 @app.get("/{domain_ip}", response_model=None)
@@ -1236,7 +1244,7 @@ async def get_ip_info(domain_ip: str, request: Request):
             },
         )
 
-    return ORJSONResponse(response_data)
+    return SafeORJSONResponse(response_data)
 
 
 # Admin endpoints for security management
