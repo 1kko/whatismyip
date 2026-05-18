@@ -1,0 +1,67 @@
+name: Scheduled Security Audit
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install poetry
+          poetry install
+          poetry run pip install --upgrade pip
+
+      - name: Run pip-audit (no ignores)
+        id: audit
+        run: |
+          set +e
+          poetry run pip-audit > audit.txt 2>&1
+          status=$?
+          set -e
+          {
+            echo "status=$status"
+          } >> "$GITHUB_OUTPUT"
+          cat audit.txt
+
+      - name: Ensure security-audit label exists
+        if: steps.audit.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create security-audit \
+            --description "Findings from the weekly pip-audit run" \
+            --color B60205 2>/dev/null || true
+
+      - name: Open or update tracking issue
+        if: steps.audit.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body=$(printf '## pip-audit findings (%s)\n\nThe weekly audit reported vulnerabilities. Review and either bump the affected package or, if no fix exists yet, add the CVE to `--ignore-vuln` in `.github/workflows/ci.yml`.\n\n```\n%s\n```\n\nWorkflow run: %s' \
+            "$(date -u +%Y-%m-%d)" \
+            "$(cat audit.txt)" \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
+          existing=$(gh issue list --label security-audit --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create \
+              --title "Security audit: vulnerable dependencies detected" \
+              --label security-audit \
+              --body "$body"
+          fi

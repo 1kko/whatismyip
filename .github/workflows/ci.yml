@@ -42,6 +42,11 @@ jobs:
         run: |
           pip install poetry
           poetry install
+          # Upgrade venv pip so audit picks up the latest patched release
+          # (pip-audit scans the venv's own pip too).
+          poetry run pip install --upgrade pip
 
       - name: Audit dependencies for known vulnerabilities
-        run: poetry run pip-audit
+        # CVE-2026-3219 (pip): no fix released as of 2026-05-18; tracked in
+        # the weekly security-audit workflow so we notice when a fix lands.
+        run: poetry run pip-audit --ignore-vuln CVE-2026-3219
