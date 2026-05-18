@@ -494,6 +494,7 @@ class SSLManager:
         cert = None
         try:
             ctx = ssl.create_default_context()
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             sock = socket.socket()
             sock.settimeout(TIMEOUT_SECONDS)
             sock.connect((verified_ip, 443))
@@ -1094,8 +1095,9 @@ async def get_self_info(request: Request):
 
     try:
         whois_data = await asyncio.to_thread(whois.whois, client_ip, quiet=True)
-    except Exception as e:
-        whois_data = {"error": str(e)}
+    except Exception:
+        logging.exception("WHOIS lookup failed for %s", sanitized_ip)
+        whois_data = {"error": "WHOIS lookup failed"}
 
     ip_data = await asyncio.to_thread(geo_ip_manager.fetch_location, client_ip)
     ip_data.pop("elapsed_time", None)
@@ -1157,8 +1159,9 @@ async def get_ip_info(domain_ip: str, request: Request):
 
     try:
         whois_data = await asyncio.to_thread(whois.whois, domain_ip, quiet=True)
-    except Exception as e:
-        whois_data = {"error": str(e)}
+    except Exception:
+        logging.exception("WHOIS lookup failed for %s", sanitize_log_input(domain_ip))
+        whois_data = {"error": "WHOIS lookup failed"}
 
     ssl_data = None
     resolved_ip = None
