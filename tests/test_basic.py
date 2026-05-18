@@ -27,7 +27,8 @@ class TestBasic:
         assert response.status_code == 200
         json_data = response.json()
         assert "domain_name" in json_data["whois"]
-        assert "google.com" in json_data["whois"]["domain_name"].lower()
+        domain = json_data["whois"]["domain_name"].lower()
+        assert domain == "google.com" or domain.endswith(".google.com")
 
     def test_get_ip_info(self):
         response = self.client.get("/8.8.8.8")
