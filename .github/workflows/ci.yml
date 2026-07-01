@@ -50,6 +50,7 @@ jobs:
           poetry run pip install --upgrade pip
 
       - name: Audit dependencies for known vulnerabilities
-        # CVE-2026-3219 (pip): no fix released as of 2026-05-18; tracked in
-        # the weekly security-audit workflow so we notice when a fix lands.
-        run: poetry run pip-audit --ignore-vuln CVE-2026-3219
+        # No ignores: the pip CVEs (incl. CVE-2026-3219) are fixed in pip >= 26.1,
+        # which the pip upgrade above pulls in. Keep this in sync with the
+        # ignore-free weekly security-audit workflow.
+        run: poetry run pip-audit
