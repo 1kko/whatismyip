@@ -975,44 +975,52 @@ def build_map_payload(
     return payload, (round(distance_km, 1) if distance_km else None), origin
 
 
+def _record_value(kind: str, record) -> str:
+    """The part of a record a human reads, not its Python repr.
+
+    DomainManager returns each type with its own shape: A is {ip, ttl}, MX is
+    {preference, hostname, ttl, ip}, NS is {hostname, ttl, ip} and TXT is
+    {text: [...], ttl}.
+    """
+    if not isinstance(record, dict):
+        return str(record)
+
+    if kind == "A":
+        return str(record.get("ip", ""))
+    if kind == "MX":
+        preference = record.get("preference")
+        hostname = record.get("hostname", "")
+        if preference is None:
+            return hostname
+        return f"{preference} {hostname}".strip()
+    if kind == "NS":
+        return str(record.get("hostname", ""))
+    if kind == "TXT":
+        text = record.get("text", "")
+        return " ".join(text) if isinstance(text, list) else str(text)
+    return str(record)
+
+
 def _dns_rows(response_data: dict) -> list[dict]:
     """Flatten the DNS record dict into table rows."""
     domain = response_data.get("domain") or {}
     address = response_data.get("address", "")
+
     rows = []
-    for record in domain.get("a") or []:
-        rows.append(
-            {
-                "type": "A",
-                "name": address,
-                "value": record.get("ip", ""),
-                "ttl": record.get("ttl", ""),
-            }
-        )
-    for record in domain.get("mx") or []:
-        rows.append(
-            {
-                "type": "MX",
-                "name": address,
-                "value": str(record.get("host", record))
-                if isinstance(record, dict)
-                else str(record),
-                "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
-            }
-        )
-    for record in domain.get("ns") or []:
-        rows.append(
-            {
-                "type": "NS",
-                "name": address,
-                "value": str(record.get("hostname", record))
-                if isinstance(record, dict)
-                else str(record),
-                "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
-            }
-        )
-    for record in domain.get("txt") or []:
-        rows.append({"type": "TXT", "name": address, "value": str(record), "ttl": ""})
+    for kind, key in (("A", "a"), ("MX", "mx"), ("NS", "ns"), ("TXT", "txt")):
+        for record in domain.get(key) or []:
+            rows.append(
+                {
+                    "type": kind,
+                    "name": address,
+                    "value": _record_value(kind, record),
+                    "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
+                }
+            )
+
+    cname = domain.get("cname")
+    if cname:
+        rows.append({"type": "CNAME", "name": address, "value": str(cname), "ttl": ""})
     return rows
 
 

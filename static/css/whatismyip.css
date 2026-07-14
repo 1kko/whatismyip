@@ -372,6 +372,30 @@ table.records td {
 table.records tr:last-child td { border-bottom: 0; }
 table.records td:first-child { color: var(--accent); width: 140px; }
 
+/* The DNS table is the only four-column one. Type and TTL are tiny and must not
+   wrap; the value takes whatever is left and breaks there instead. */
+table.records--dns { table-layout: fixed; }
+table.records--dns th:nth-child(1),
+table.records--dns td:nth-child(1) { width: 56px; }
+table.records--dns th:nth-child(2),
+table.records--dns td:nth-child(2) {
+  width: 170px;
+  padding-right: 16px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+table.records--dns td:nth-child(3) { overflow-wrap: anywhere; }
+table.records--dns th:nth-child(4),
+table.records--dns td:nth-child(4) {
+  width: 64px;
+  padding-right: 0;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
 /* API example inside the Raw JSON accordion */
 .api-note { margin: 0 0 10px; color: var(--text-secondary); font-size: 13px; }
 .code {
@@ -562,4 +586,10 @@ table.records td:first-child { color: var(--accent); width: 140px; }
   .footer .wordmark { display: none; }
   .icon-link { width: 28px; height: 28px; }
   table.records td:first-child { width: 90px; }
+  table.records--dns th:nth-child(1),
+  table.records--dns td:nth-child(1) { width: 48px; }
+  table.records--dns th:nth-child(2),
+  table.records--dns td:nth-child(2) { width: 96px; padding-right: 10px; }
+  table.records--dns th:nth-child(4),
+  table.records--dns td:nth-child(4) { width: 52px; }
 }

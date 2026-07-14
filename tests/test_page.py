@@ -82,6 +82,60 @@ class TestMapPayload:
             assert key in body
 
 
+class TestDnsRows:
+    DOMAIN = {
+        "a": [{"ip": "223.130.192.248", "ttl": 300}],
+        "mx": [
+            {
+                "preference": 10,
+                "hostname": "mx1.mail.naver.com.",
+                "ttl": 300,
+                "ip": "223.130.202.36",
+            }
+        ],
+        "ns": [{"hostname": "ns1.naver.com.", "ttl": 20675, "ip": "61.247.220.6"}],
+        "txt": [{"text": ["google-site-verification=fK9dDF"], "ttl": 300}],
+        "cname": None,
+    }
+
+    def _rows(self):
+        from main import _dns_rows
+
+        return _dns_rows({"address": "naver.com", "domain": self.DOMAIN})
+
+    def test_records_are_rendered_not_dumped_as_python_dicts(self):
+        for row in self._rows():
+            assert "{" not in row["value"], row
+            assert "'" not in row["value"], row
+
+    def test_each_record_type_reads_the_fields_that_matter(self):
+        values = {row["type"]: row["value"] for row in self._rows()}
+        assert values["A"] == "223.130.192.248"
+        assert values["MX"] == "10 mx1.mail.naver.com."
+        assert values["NS"] == "ns1.naver.com."
+        assert values["TXT"] == "google-site-verification=fK9dDF"
+
+    def test_ttl_comes_from_the_record(self):
+        ttls = {row["type"]: row["ttl"] for row in self._rows()}
+        assert ttls["NS"] == 20675
+        assert ttls["A"] == 300
+
+    def test_cname_is_listed_when_present(self):
+        from main import _dns_rows
+
+        rows = _dns_rows(
+            {"address": "www.example.com", "domain": {"cname": "example.com."}}
+        )
+        assert rows == [
+            {
+                "type": "CNAME",
+                "name": "www.example.com",
+                "value": "example.com.",
+                "ttl": "",
+            }
+        ]
+
+
 class TestSecurityHeaders:
     def test_csp_allows_only_the_osm_tile_host(self):
         csp = client.get("/", headers=JSON_UA).headers["content-security-policy"]

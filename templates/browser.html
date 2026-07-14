@@ -113,7 +113,7 @@
                     </div>
                     <div id="raw-json"></div>
                     {% elif item.id == 'dns' %}
-                    <table class="records">
+                    <table class="records records--dns">
                         <thead><tr><th>TYPE</th><th>NAME</th><th>VALUE</th><th>TTL</th></tr></thead>
                         <tbody>
                         {% for record in dns_rows %}
