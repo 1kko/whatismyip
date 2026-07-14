@@ -1,6 +1,26 @@
+import re
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from main import app
+
+CSS = Path("static/css/whatismyip.css")
+
+REQUIRED_TOKENS = {
+    "--bg": "#0B0D12",
+    "--surface": "#151922",
+    "--surface-2": "#1B2130",
+    "--border": "#232A36",
+    "--border-strong": "#2E3746",
+    "--text-primary": "#E8ECF3",
+    "--text-secondary": "#8B97AC",
+    "--text-muted": "#606C82",
+    "--accent": "#5B8CFF",
+    "--success": "#34D399",
+    "--warning": "#FBBF24",
+    "--danger": "#FB7185",
+}
 
 JSON_UA = {"user-agent": "curl/8.0"}
 SEOUL_IP = "118.235.14.201"
@@ -67,3 +87,20 @@ class TestSecurityHeaders:
         csp = client.get("/", headers=JSON_UA).headers["content-security-policy"]
         assert "img-src 'self' data: https://tile.openstreetmap.org" in csp
         assert "script-src 'self' 'nonce-" in csp
+
+
+class TestDesignTokens:
+    def test_all_tokens_are_defined_with_the_spec_values(self):
+        css = CSS.read_text(encoding="utf-8")
+        for token, value in REQUIRED_TOKENS.items():
+            assert re.search(rf"{token}:\s*{value};", css, re.IGNORECASE), token
+
+    def test_every_font_file_referenced_by_css_exists(self):
+        css = CSS.read_text(encoding="utf-8")
+        sources = re.findall(r"url\(['\"]?(/static/fonts/[^'\")]+)", css)
+        assert sources, "no @font-face sources found"
+        for source in sources:
+            assert Path(source.lstrip("/")).is_file(), source
+
+    def test_no_light_mode_branch(self):
+        assert "prefers-color-scheme" not in CSS.read_text(encoding="utf-8")
