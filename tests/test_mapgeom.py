@@ -97,18 +97,25 @@ class TestBuildCanvas:
         assert min(t["y"] for t in canvas["tiles"]) <= 0
         assert max(t["y"] for t in canvas["tiles"]) + span >= DESKTOP[1]
 
-    def test_tiles_are_fetched_one_zoom_out_and_drawn_at_double_size(self):
+    def test_tiles_are_native_resolution_by_default(self):
+        # Roads and place names have to stay legible, so tiles are not upscaled.
         canvas = build_canvas(SEOUL, None, *DESKTOP)
         tile_zoom = int(canvas["tiles"][0]["url"].split("/")[-3])
-        assert tile_zoom == canvas["zoom"] - 1
-        assert canvas["tile_size"] == TILE_SIZE * 2
+        assert tile_zoom == canvas["zoom"]
+        assert canvas["tile_size"] == TILE_SIZE
 
-    def test_tile_requests_stay_cheap(self):
-        # OSM's tile policy assumes low volume: one page view must not fan out
-        # into a dozen tile requests.
-        assert len(build_canvas(SEOUL, None, *DESKTOP)["tiles"]) <= 8
-        assert len(build_canvas(MOUNTAIN_VIEW, SEOUL, *DESKTOP)["tiles"]) <= 8
-        assert len(build_canvas(SEOUL, None, 350, 170)["tiles"]) <= 4
+    def test_tile_zoom_offset_trades_sharpness_for_fewer_requests(self):
+        sharp = build_canvas(SEOUL, None, *DESKTOP)
+        soft = build_canvas(SEOUL, None, *DESKTOP, tile_zoom_offset=1)
+        assert soft["tile_size"] == TILE_SIZE * 2
+        assert len(soft["tiles"]) < len(sharp["tiles"])
+
+    def test_tile_requests_stay_bounded(self):
+        # OSM's tile policy assumes low volume: a page view must not fan out
+        # into an unbounded number of requests.
+        assert len(build_canvas(SEOUL, None, *DESKTOP)["tiles"]) <= 21
+        assert len(build_canvas(MOUNTAIN_VIEW, SEOUL, *DESKTOP)["tiles"]) <= 21
+        assert len(build_canvas(SEOUL, None, 350, 170)["tiles"]) <= 6
 
     def test_tile_x_wraps_around_the_dateline(self):
         canvas = build_canvas(MOUNTAIN_VIEW, SEOUL, *DESKTOP)

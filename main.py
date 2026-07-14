@@ -11,6 +11,7 @@ import re
 import secrets
 import socket
 import ssl
+import time
 from collections import defaultdict
 from logging.handlers import TimedRotatingFileHandler
 from typing import Any, Dict
@@ -922,7 +923,9 @@ domain_manager = DomainManager()
 gazetteer = Gazetteer.load()
 
 # The desktop hero text sits over the left half of the band, so the map is
-# focused right of centre and fitted into the free width beside it.
+# focused right of centre and fitted into the free width beside it. Both canvases
+# fetch tiles at native zoom (tile_zoom_offset 0) so roads and place names stay
+# legible; that costs ~15 tile requests on desktop and ~6 on mobile.
 DESKTOP_CANVAS = {"width": 1440, "height": 300, "focus_x": 0.58, "fit_ratio": 0.4}
 MOBILE_CANVAS = {"width": 350, "height": 170, "focus_x": 0.5, "fit_ratio": 0.78}
 
@@ -1199,6 +1202,7 @@ async def security_headers_middleware(request: Request, call_next):
 
 @app.get("/", response_model=None)
 async def get_self_info(request: Request):
+    started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
@@ -1245,6 +1249,7 @@ async def get_self_info(request: Request):
         "map": map_payload,
         "distance_km": None,
         "origin": origin,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
 
     user_agent = request.headers.get("user-agent", "")
@@ -1257,6 +1262,7 @@ async def get_self_info(request: Request):
 @app.get("/{domain_ip}", response_model=None)
 async def get_ip_info(domain_ip: str, request: Request):
     # Remove the static path check since it's handled by the static files mount
+    started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
@@ -1354,6 +1360,7 @@ async def get_ip_info(domain_ip: str, request: Request):
         "map": map_payload,
         "distance_km": distance_km,
         "origin": origin,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
 
     user_agent = request.headers.get("user-agent", "")

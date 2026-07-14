@@ -26,6 +26,16 @@ def format_distance(distance_km: float | None) -> str | None:
     return f"≈ {round(distance_km):,} km from you"
 
 
+def format_meta(elapsed_ms: int | None, when: Any) -> str:
+    """Footer line: how long the lookup took, and the server's clock."""
+    parts = []
+    if elapsed_ms:
+        parts.append(f"resolved in {elapsed_ms} ms")
+    if isinstance(when, datetime.datetime):
+        parts.append(f"{when.astimezone(datetime.timezone.utc):%Y-%m-%d %H:%M} UTC")
+    return " · ".join(parts)
+
+
 def _count(items: Any, unit: str = "record") -> str:
     total = len(items or [])
     if not total:
@@ -282,6 +292,7 @@ def build_view(response: dict, is_self: bool) -> dict:
         "city_line": city_line,
         "asn_line": location.get("asn_name") or "",
         "distance_text": format_distance(response.get("distance_km")),
+        "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
         "accordions": _accordions(response),
     }

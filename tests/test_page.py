@@ -111,10 +111,28 @@ class TestBrowserPage:
         assert "onclick=" not in html
         assert "onsubmit=" not in html
 
-    def test_osm_attribution_and_privacy_notice_are_present(self):
+    def test_footer_reports_timing_and_links_github_as_an_icon(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        assert "OpenStreetMap contributors" in html
-        assert "openstreetmap.org" in html
+        assert "resolved in" in html
+        assert "UTC" in html
+        assert 'aria-label="Source on GitHub"' in html
+        # The curl example moved into the Raw JSON accordion.
+        assert "curl" not in html.split("<footer")[1]
+
+    def test_curl_example_lives_in_the_raw_json_accordion(self):
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        raw_block = html.split('id="acc-raw"')[1]
+        assert 'id="curl-example"' in raw_block
+        assert "curl http://testserver/8.8.8.8" in raw_block
+
+    def test_osm_attribution_is_rendered_on_the_map(self):
+        # OSM only requires attribution on or beside the map; map.js paints the
+        # chip, so the footer no longer repeats it.
+        css = CSS.read_text(encoding="utf-8")
+        assert ".map__attribution" in css
+        js = Path("static/js/map.js").read_text(encoding="utf-8")
+        assert "openstreetmap.org/copyright" in js
+        assert "contributors" in js
 
     def test_json_editor_is_not_loaded_eagerly(self):
         html = client.get("/", headers=BROWSER_UA).text

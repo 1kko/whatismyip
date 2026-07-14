@@ -1,4 +1,8 @@
+import datetime
+
 from viewmodel import build_view, country_flag, format_distance
+
+UTC = datetime.timezone.utc
 
 IP_RESPONSE = {
     "address": "8.8.8.8",
@@ -167,6 +171,29 @@ class TestAccordions:
         }
         assert items["whois"] == "lookup failed"
         assert items["headers"] == "1 header"
+
+
+class TestMetaLine:
+    def test_reports_elapsed_time_and_server_clock(self):
+        response = dict(
+            IP_RESPONSE,
+            elapsed_ms=243,
+            datetime=datetime.datetime(2026, 7, 14, 16, 40, 12, tzinfo=UTC),
+        )
+        assert (
+            build_view(response, is_self=True)["meta_line"]
+            == "resolved in 243 ms · 2026-07-14 16:40 UTC"
+        )
+
+    def test_falls_back_to_the_clock_when_timing_is_missing(self):
+        response = dict(
+            IP_RESPONSE,
+            datetime=datetime.datetime(2026, 7, 14, 16, 40, 12, tzinfo=UTC),
+        )
+        assert build_view(response, is_self=True)["meta_line"] == "2026-07-14 16:40 UTC"
+
+    def test_empty_when_there_is_nothing_to_report(self):
+        assert build_view(IP_RESPONSE, is_self=True)["meta_line"] == ""
 
 
 class TestFormatDistance:

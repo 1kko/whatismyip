@@ -10,11 +10,6 @@ from __future__ import annotations
 import math
 
 TILE_SIZE = 256
-# Tiles are fetched one zoom level out and painted at double size. The visual
-# scale is identical, but a 1440x300 band costs ~4 tile requests instead of
-# ~14 — OSM's tile policy assumes low volume, and the map is a dimmed
-# background, so the softness is invisible under the scrim.
-TILE_ZOOM_OFFSET = 1
 TILE_URL_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 CITY_ZOOM = 10
 MIN_ZOOM = 1
@@ -119,12 +114,17 @@ def build_canvas(
     height: int,
     focus_x: float = 0.5,
     fit_ratio: float = FIT_MARGIN,
+    tile_zoom_offset: int = 0,
 ) -> dict:
     """Tiles, pin positions and the projected arc for one fixed canvas.
 
     focus_x places the horizontal centre of what matters (the pin, or the whole
     arc) at that fraction of the canvas width. The desktop band pushes it right
     so the map does not fight the hero text on the left.
+
+    tile_zoom_offset fetches tiles that many zoom levels out and paints them
+    upscaled: 0 keeps roads and place names crisp, 1 quarters the number of tile
+    requests at the cost of a soft basemap.
     """
     target_point = (target["lat"], target["lon"])
 
@@ -151,7 +151,7 @@ def build_canvas(
             _world_y(lat) * scale - top,
         )
 
-    tile_zoom = max(zoom - TILE_ZOOM_OFFSET, 0)
+    tile_zoom = max(zoom - tile_zoom_offset, 0)
     # One tile of tile_zoom covers this many canvas pixels at the current zoom.
     tile_span = TILE_SIZE * (2 ** (zoom - tile_zoom))
     tile_count = 2**tile_zoom

@@ -27,15 +27,16 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-const copyButton = document.getElementById("copy-target");
-copyButton.addEventListener("click", async () => {
-  await navigator.clipboard.writeText(copyButton.dataset.value);
-  const original = copyButton.textContent;
-  copyButton.textContent = "Copied";
-  setTimeout(() => {
-    copyButton.textContent = original;
-  }, 1500);
-});
+for (const button of document.querySelectorAll(".copy-btn[data-value]")) {
+  button.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(button.dataset.value);
+    const original = button.textContent;
+    button.textContent = "Copied";
+    setTimeout(() => {
+      button.textContent = original;
+    }, 1500);
+  });
+}
 
 // JSONEditor is 200KB+; only pay for it if Raw JSON is actually opened.
 const rawAccordion = document.getElementById("acc-raw");

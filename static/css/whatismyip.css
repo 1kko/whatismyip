@@ -291,6 +291,30 @@ table.records td {
 table.records tr:last-child td { border-bottom: 0; }
 table.records td:first-child { color: var(--accent); width: 140px; }
 
+/* API example inside the Raw JSON accordion */
+.api-note { margin: 0 0 10px; color: var(--text-secondary); font-size: 13px; }
+.code {
+  position: relative;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.code pre {
+  margin: 0;
+  color: var(--text-primary);
+  font: 500 12.5px/1.5 var(--font-mono);
+}
+.code .copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
 /* JSONEditor: its stylesheet is injected lazily, after this one, so the dark
    theme has to win the cascade with !important. */
 #raw-json { height: 420px; }
@@ -325,22 +349,33 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 }
 .footer a { color: var(--text-secondary); text-decoration: none; }
 .footer a:hover { color: var(--accent); }
+.icon-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.icon-link:hover { background: var(--surface); }
 
 /* Map */
 .map { position: absolute; inset: 0; }
 .map__tiles { position: absolute; inset: 0; overflow: hidden; }
 /* OSM's standard tiles are a light theme. Grayscale + invert turns them into a
-   dark basemap that matches the palette, so no third-party dark tile provider
-   (and no API key) is needed. */
+   monochrome dark basemap that matches the palette, so no third-party dark tile
+   provider (and no API key) is needed. Roads and place names have to survive
+   this, so the filter stays gentle and the scrim does the dimming. */
 .map__tiles img {
   position: absolute;
-  filter: grayscale(1) invert(1) brightness(0.62) contrast(1.15);
-  opacity: 0.75;
+  filter: grayscale(1) invert(1) brightness(1) contrast(1.12);
+  opacity: 1;
 }
 .map__scrim {
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, #0B0D12F2 0%, #0B0D12CC 45%, #0B0D1280 100%);
+  background: linear-gradient(90deg, #0B0D12E6 0%, #0B0D12B3 40%, #0B0D1214 100%);
 }
 .map__fade {
   position: absolute;
