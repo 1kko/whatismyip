@@ -196,8 +196,7 @@ body {
 .hero .ip,
 .hero .origin__country,
 .hero .origin__city,
-.hero .origin__asn,
-.hero .origin__distance {
+.hero .origin__asn {
   text-shadow: 0 0 14px #0B0D12, 0 1px 3px #0B0D12;
 }
 .hero__label {
@@ -286,7 +285,6 @@ body {
 .origin__flag { font-size: 22px; }
 .origin__city { font-size: 13px; color: var(--text-secondary); }
 .origin__asn { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
-.origin__distance { font: 600 12px/1.4 var(--font-mono); color: var(--accent); }
 
 /* Facts */
 .facts {
@@ -507,6 +505,18 @@ table.records td:first-child { color: var(--accent); width: 140px; }
   font-size: 10px;
 }
 .map__attribution a { color: inherit; }
+.map__distance {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  padding: 5px 10px;
+  background: #0B0D12E6;
+  border: 1px solid #5B8CFF4D;
+  border-radius: 8px;
+  color: var(--accent);
+  font: 600 12px/1 var(--font-mono);
+  white-space: nowrap;
+  pointer-events: none;
+}
 
 .mobile-map { display: none; }
 
@@ -548,6 +558,10 @@ table.records td:first-child { color: var(--accent); width: 140px; }
     border-radius: 14px;
     background: var(--surface);
   }
-  .footer { flex-direction: column; align-items: flex-start; gap: 8px; }
+  /* One line, or it eats three. The wordmark is the first thing to go: the
+     timing line and the source link carry more. */
+  .footer { gap: 12px; font-size: 11px; }
+  .footer .wordmark { display: none; }
+  .icon-link { width: 28px; height: 28px; }
   table.records td:first-child { width: 90px; }
 }

@@ -42,7 +42,7 @@ function attribution() {
   return box;
 }
 
-function paint(container, canvas) {
+function paint(container, canvas, distanceText) {
   // Everything the server projected lives on a fixed-size stage that is scaled
   // to cover the band. Tiles, pins and the arc scale together, so they stay
   // aligned at any viewport width instead of leaving dead space on wide screens.
@@ -105,12 +105,30 @@ function paint(container, canvas) {
 
   container.appendChild(attribution());
 
+  // The distance rides above the middle of the arc, clear of both pins. It lives
+  // outside the scaled stage so the type stays the same size at any width.
+  let chip = null;
+  const apex = canvas.line ? canvas.line[Math.floor(canvas.line.length / 2)] : null;
+  if (apex && distanceText) {
+    chip = document.createElement("div");
+    chip.className = "map__distance";
+    chip.textContent = distanceText;
+    container.appendChild(chip);
+  }
+
   const cover = () => {
     const scale = Math.max(
       container.clientWidth / canvas.width,
       container.clientHeight / canvas.height,
     );
     stage.style.transform = `translate(-50%, -50%) scale(${scale})`;
+
+    if (chip) {
+      const x = container.clientWidth / 2 + (apex[0] - canvas.width / 2) * scale;
+      const y = container.clientHeight / 2 + (apex[1] - canvas.height / 2) * scale;
+      chip.style.left = `${x}px`;
+      chip.style.top = `${y - 12}px`;
+    }
   };
   cover();
   return cover;
@@ -140,7 +158,10 @@ if (mapData) {
     }
     const container = containers[variant];
     const canvas = mapData[variant];
-    cover = container && canvas ? paint(container, canvas) : null;
+    cover =
+      container && canvas
+        ? paint(container, canvas, mapData.distance_text)
+        : null;
   };
 
   render();

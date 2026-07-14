@@ -1028,21 +1028,27 @@ async def lookup_location(ip: str) -> dict:
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
+    view = build_view(response_data, is_self=is_self)
+
+    # The distance label is drawn on the arc, so map.js needs the wording. It
+    # rides along with the map payload rather than polluting the JSON API.
+    map_data = response_data.get("map")
+    if map_data:
+        map_data = {**map_data, "distance_text": view["distance_text"]}
+
     return templates.TemplateResponse(
         request,
         "browser.html",
         {
-            "view": build_view(response_data, is_self=is_self),
-            "view_map": response_data.get("map") is not None,
+            "view": view,
+            "view_map": map_data is not None,
             "dns_rows": _dns_rows(response_data),
             "headers": response_data.get("headers") or {},
             "whois": {k: str(v) for k, v in whois_data.items()},
             "json_data": json.dumps(response_data, indent=2, default=str).replace(
                 "</", "<\\/"
             ),
-            "map_data": json.dumps(response_data.get("map"), default=str).replace(
-                "</", "<\\/"
-            ),
+            "map_data": json.dumps(map_data, default=str).replace("</", "<\\/"),
             "nonce": getattr(request.state, "csp_nonce", ""),
         },
     )
