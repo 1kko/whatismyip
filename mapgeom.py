@@ -10,6 +10,11 @@ from __future__ import annotations
 import math
 
 TILE_SIZE = 256
+# Tiles are fetched one zoom level out and painted at double size. The visual
+# scale is identical, but a 1440x300 band costs ~4 tile requests instead of
+# ~14 — OSM's tile policy assumes low volume, and the map is a dimmed
+# background, so the softness is invisible under the scrim.
+TILE_ZOOM_OFFSET = 1
 TILE_URL_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 CITY_ZOOM = 10
 MIN_ZOOM = 1
@@ -128,12 +133,16 @@ def build_canvas(
             _world_y(lat) * scale - top,
         )
 
-    tile_count = 2**zoom
+    tile_zoom = max(zoom - TILE_ZOOM_OFFSET, 0)
+    # One tile of tile_zoom covers this many canvas pixels at the current zoom.
+    tile_span = TILE_SIZE * (2 ** (zoom - tile_zoom))
+    tile_count = 2**tile_zoom
+
     tiles = []
-    first_col = math.floor(left / TILE_SIZE)
-    last_col = math.floor((left + width - 1) / TILE_SIZE)
-    first_row = math.floor(top / TILE_SIZE)
-    last_row = math.floor((top + height - 1) / TILE_SIZE)
+    first_col = math.floor(left / tile_span)
+    last_col = math.floor((left + width - 1) / tile_span)
+    first_row = math.floor(top / tile_span)
+    last_row = math.floor((top + height - 1) / tile_span)
 
     for col in range(first_col, last_col + 1):
         for row in range(first_row, last_row + 1):
@@ -141,9 +150,11 @@ def build_canvas(
                 continue
             tiles.append(
                 {
-                    "url": TILE_URL_TEMPLATE.format(z=zoom, x=col % tile_count, y=row),
-                    "x": round(col * TILE_SIZE - left, 2),
-                    "y": round(row * TILE_SIZE - top, 2),
+                    "url": TILE_URL_TEMPLATE.format(
+                        z=tile_zoom, x=col % tile_count, y=row
+                    ),
+                    "x": round(col * tile_span - left, 2),
+                    "y": round(row * tile_span - top, 2),
                 }
             )
 
@@ -152,6 +163,7 @@ def build_canvas(
         "width": width,
         "height": height,
         "zoom": zoom,
+        "tile_size": tile_span,
         "tiles": tiles,
         "target": {"x": round(target_x, 2), "y": round(target_y, 2)},
         "origin": None,

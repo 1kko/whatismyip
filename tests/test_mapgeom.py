@@ -86,22 +86,35 @@ class TestBuildCanvas:
 
     def test_tiles_cover_the_canvas(self):
         canvas = build_canvas(SEOUL, None, *DESKTOP)
+        span = canvas["tile_size"]
         assert canvas["tiles"]
         for tile in canvas["tiles"]:
-            assert tile["url"].startswith("https://tile.openstreetmap.org/10/")
+            assert tile["url"].startswith("https://tile.openstreetmap.org/")
             assert tile["url"].endswith(".png")
         # Every tile is placed so that the canvas is fully covered.
         assert min(t["x"] for t in canvas["tiles"]) <= 0
-        assert max(t["x"] for t in canvas["tiles"]) + TILE_SIZE >= DESKTOP[0]
+        assert max(t["x"] for t in canvas["tiles"]) + span >= DESKTOP[0]
         assert min(t["y"] for t in canvas["tiles"]) <= 0
-        assert max(t["y"] for t in canvas["tiles"]) + TILE_SIZE >= DESKTOP[1]
+        assert max(t["y"] for t in canvas["tiles"]) + span >= DESKTOP[1]
+
+    def test_tiles_are_fetched_one_zoom_out_and_drawn_at_double_size(self):
+        canvas = build_canvas(SEOUL, None, *DESKTOP)
+        tile_zoom = int(canvas["tiles"][0]["url"].split("/")[-3])
+        assert tile_zoom == canvas["zoom"] - 1
+        assert canvas["tile_size"] == TILE_SIZE * 2
+
+    def test_tile_requests_stay_cheap(self):
+        # OSM's tile policy assumes low volume: one page view must not fan out
+        # into a dozen tile requests.
+        assert len(build_canvas(SEOUL, None, *DESKTOP)["tiles"]) <= 8
+        assert len(build_canvas(MOUNTAIN_VIEW, SEOUL, *DESKTOP)["tiles"]) <= 8
+        assert len(build_canvas(SEOUL, None, 350, 170)["tiles"]) <= 4
 
     def test_tile_x_wraps_around_the_dateline(self):
         canvas = build_canvas(MOUNTAIN_VIEW, SEOUL, *DESKTOP)
-        z = canvas["zoom"]
-        limit = 2**z
         for tile in canvas["tiles"]:
-            _, _, tx, ty = tile["url"].rsplit("/", 3)
+            _, tz, tx, ty = tile["url"].rsplit("/", 3)
+            limit = 2 ** int(tz)
             assert 0 <= int(tx) < limit
             assert 0 <= int(ty.removesuffix(".png")) < limit
 

@@ -28,6 +28,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from geoip2fast import GeoIP2Fast
 from pydantic import BaseModel
+
+from geo import MIN_ROUTE_KM, Gazetteer, haversine_km
+from mapgeom import build_canvas
 from tld import exceptions as tld_exceptions
 from tld import get_tld
 
@@ -915,6 +918,50 @@ class GeoBlockManager:
 
 geo_ip_manager = GeoIpManager()
 domain_manager = DomainManager()
+gazetteer = Gazetteer.load()
+
+DESKTOP_CANVAS = (1440, 300)
+MOBILE_CANVAS = (350, 170)
+
+
+def build_map_payload(
+    target_location: dict | None, origin_location: dict | None
+) -> tuple[dict | None, float | None, dict | None]:
+    """Return (map, distance_km, origin) for the response.
+
+    City mode (single pin, no arc) when the target is the visitor themselves,
+    when the visitor's own location is unknown, or when the two points are
+    within MIN_ROUTE_KM of each other.
+    """
+    target = gazetteer.resolve(target_location)
+    if not target:
+        return None, None, None
+
+    origin = gazetteer.resolve(origin_location)
+    distance_km = None
+    route_origin = None
+
+    if origin:
+        distance_km = haversine_km(
+            (origin["lat"], origin["lon"]), (target["lat"], target["lon"])
+        )
+        if distance_km >= MIN_ROUTE_KM:
+            route_origin = origin
+        else:
+            distance_km = None
+
+    origin_city = ((origin_location or {}).get("city") or {}).get("name") or None
+    payload = {
+        "desktop": build_canvas(target, route_origin, *DESKTOP_CANVAS),
+        "mobile": build_canvas(target, route_origin, *MOBILE_CANVAS),
+        "precision": target["precision"],
+        "origin_city": origin_city if route_origin else None,
+        "origin_country": (origin_location or {}).get("country_code")
+        if route_origin
+        else None,
+    }
+    return payload, (round(distance_km, 1) if distance_km else None), origin
+
 
 # Initialize security managers
 ip_ban_manager = IPBanManager()
@@ -1073,7 +1120,7 @@ async def security_headers_middleware(request: Request, call_next):
         "default-src 'self'; "
         f"script-src 'self' 'nonce-{nonce}'; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; "
+        "img-src 'self' data: https://tile.openstreetmap.org; "
         "object-src 'none'; "
         "base-uri 'self'; "
         "frame-ancestors 'none'"
@@ -1115,6 +1162,11 @@ async def get_self_info(request: Request):
         if reverse_dns_hostname
         else {}
     )
+    # A self-lookup is never a route: the visitor IS the target, so the
+    # distance is 0 km, which build_map_payload collapses to city mode.
+    map_payload, _, origin = await asyncio.to_thread(
+        build_map_payload, ip_data, ip_data
+    )
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
@@ -1123,6 +1175,9 @@ async def get_self_info(request: Request):
         "whois": whois_data,
         "ssl": None,
         "headers": request_headers,
+        "map": map_payload,
+        "distance_km": None,
+        "origin": origin,
     }
 
     user_agent = request.headers.get("user-agent", "")
@@ -1224,6 +1279,12 @@ async def get_ip_info(domain_ip: str, request: Request):
     else:
         ip_data = {}
 
+    origin_location = await asyncio.to_thread(geo_ip_manager.fetch_location, client_ip)
+    origin_location.pop("elapsed_time", None)
+    map_payload, distance_km, origin = await asyncio.to_thread(
+        build_map_payload, ip_data, origin_location
+    )
+
     response_data = {
         "address": domain_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
@@ -1232,6 +1293,9 @@ async def get_ip_info(domain_ip: str, request: Request):
         "whois": whois_data,
         "ssl": ssl_data,
         "headers": request_headers,
+        "map": map_payload,
+        "distance_km": distance_km,
+        "origin": origin,
     }
 
     user_agent = request.headers.get("user-agent", "")
