@@ -505,15 +505,13 @@ table.records td:first-child { color: var(--accent); width: 140px; }
   font-size: 10px;
 }
 .map__attribution a { color: inherit; }
+/* Bare text on the arc — a halo does the legibility work a box used to. */
 .map__distance {
   position: absolute;
   transform: translate(-50%, -100%);
-  padding: 5px 10px;
-  background: #0B0D12E6;
-  border: 1px solid #5B8CFF4D;
-  border-radius: 8px;
   color: var(--accent);
   font: 600 12px/1 var(--font-mono);
+  text-shadow: 0 0 12px #0B0D12, 0 1px 3px #0B0D12;
   white-space: nowrap;
   pointer-events: none;
 }
