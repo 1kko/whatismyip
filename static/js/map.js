@@ -4,6 +4,7 @@ const mapDataNode = document.getElementById("map-data");
 const mapData = mapDataNode ? JSON.parse(mapDataNode.textContent) : null;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
+const MOBILE = window.matchMedia("(max-width: 900px)");
 
 function svg(tag, attrs) {
   const node = document.createElementNS(SVG_NS, tag);
@@ -13,11 +14,14 @@ function svg(tag, attrs) {
   return node;
 }
 
-function pin(x, y, isOrigin) {
+function pin(x, y, isOrigin, compact) {
   const group = svg("g", {
     class: isOrigin ? "map__pin map__pin--origin" : "map__pin",
   });
-  const [halo, ring, dot] = isOrigin ? [24, 0, 6] : [48, 24, 7];
+  const sizes = compact
+    ? { origin: [16, 0, 4], target: [30, 15, 5] }
+    : { origin: [24, 0, 6], target: [48, 24, 7] };
+  const [halo, ring, dot] = isOrigin ? sizes.origin : sizes.target;
   group.appendChild(svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: halo }));
   if (ring) {
     group.appendChild(svg("circle", { class: "map__pin-ring", cx: x, cy: y, r: ring }));
@@ -26,7 +30,27 @@ function pin(x, y, isOrigin) {
   return group;
 }
 
+function attribution() {
+  const box = document.createElement("div");
+  box.className = "map__attribution";
+  const link = document.createElement("a");
+  link.href = "https://www.openstreetmap.org/copyright";
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "OpenStreetMap";
+  box.append("© ", link, " contributors");
+  return box;
+}
+
 function paint(container, canvas) {
+  // Everything the server projected lives on a fixed-size stage that is scaled
+  // to cover the band. Tiles, pins and the arc scale together, so they stay
+  // aligned at any viewport width instead of leaving dead space on wide screens.
+  const stage = document.createElement("div");
+  stage.className = "map__stage";
+  stage.style.width = `${canvas.width}px`;
+  stage.style.height = `${canvas.height}px`;
+
   const tiles = document.createElement("div");
   tiles.className = "map__tiles";
   for (const tile of canvas.tiles) {
@@ -40,24 +64,24 @@ function paint(container, canvas) {
     img.style.top = `${tile.y}px`;
     tiles.appendChild(img);
   }
-  container.appendChild(tiles);
+  stage.appendChild(tiles);
 
-  // The scrim dims the TILES only. It has to sit under the overlay, or it
-  // would crush the pins and the arc along with the basemap.
+  // The scrim dims the TILES only. It has to sit under the overlay, or it would
+  // crush the pins and the arc along with the basemap.
   const scrim = document.createElement("div");
   scrim.className = "map__scrim";
-  container.appendChild(scrim);
+  stage.appendChild(scrim);
 
   const fade = document.createElement("div");
   fade.className = "map__fade";
-  container.appendChild(fade);
+  stage.appendChild(fade);
 
   const overlay = svg("svg", {
     class: "map__overlay",
+    width: canvas.width,
+    height: canvas.height,
     viewBox: `0 0 ${canvas.width} ${canvas.height}`,
-    preserveAspectRatio: "xMidYMid slice",
   });
-
   if (canvas.line) {
     overlay.appendChild(
       svg("polyline", {
@@ -66,29 +90,56 @@ function paint(container, canvas) {
       }),
     );
   }
+  // A pin sized for the 1440px band swamps the little mobile card.
+  const compact = canvas.width < 600;
   if (canvas.origin) {
-    overlay.appendChild(pin(canvas.origin.x, canvas.origin.y, true));
+    overlay.appendChild(pin(canvas.origin.x, canvas.origin.y, true, compact));
   }
-  overlay.appendChild(pin(canvas.target.x, canvas.target.y, false));
-  container.appendChild(overlay);
+  overlay.appendChild(pin(canvas.target.x, canvas.target.y, false, compact));
+  stage.appendChild(overlay);
 
-  const attribution = document.createElement("div");
-  attribution.className = "map__attribution";
-  const link = document.createElement("a");
-  link.href = "https://www.openstreetmap.org/copyright";
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.textContent = "OpenStreetMap";
-  attribution.append("© ", link, " contributors");
-  container.appendChild(attribution);
+  container.appendChild(stage);
+  container.appendChild(attribution());
+
+  const cover = () => {
+    const scale = Math.max(
+      container.clientWidth / canvas.width,
+      container.clientHeight / canvas.height,
+    );
+    stage.style.transform = `translate(-50%, -50%) scale(${scale})`;
+  };
+  cover();
+  return cover;
 }
 
 if (mapData) {
-  // Only the visible breakpoint's tiles are ever requested.
-  const isMobile = window.matchMedia("(max-width: 900px)").matches;
-  const container = document.getElementById(isMobile ? "mobile-map" : "page-map");
-  const canvas = isMobile ? mapData.mobile : mapData.desktop;
-  if (container && canvas) {
-    paint(container, canvas);
-  }
+  const containers = {
+    desktop: document.getElementById("page-map"),
+    mobile: document.getElementById("mobile-map"),
+  };
+  let cover = null;
+  let painted = null;
+
+  // Crossing the breakpoint swaps the band map for the mobile card, and each
+  // has its own projected canvas — repaint on the change instead of making the
+  // user reload. Only the active breakpoint's tiles are ever requested.
+  const render = () => {
+    const variant = MOBILE.matches ? "mobile" : "desktop";
+    if (variant === painted) {
+      return;
+    }
+    painted = variant;
+    for (const container of Object.values(containers)) {
+      if (container) {
+        container.replaceChildren();
+      }
+    }
+    const container = containers[variant];
+    const canvas = mapData[variant];
+    cover = container && canvas ? paint(container, canvas) : null;
+  };
+
+  render();
+  MOBILE.addEventListener("change", render);
+  window.addEventListener("resize", () => cover && cover());
 }

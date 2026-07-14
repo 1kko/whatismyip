@@ -40,7 +40,6 @@
   --font-sans: "InterVariable", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
   --radius: 12px;
-  --gutter: 220px;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -65,8 +64,15 @@ body {
 .tone-warning { color: var(--warning); }
 .tone-danger { color: var(--danger); }
 
-.shell { max-width: 1440px; margin: 0 auto; }
-.inset { padding-inline: var(--gutter); }
+/* Backgrounds (the map band, the footer rule) run full-bleed; content sits in a
+   centred column, so a wide viewport widens the map instead of cropping it. */
+.shell { width: 100%; }
+.inset {
+  width: 100%;
+  max-width: 1040px;
+  margin-inline: auto;
+  padding-inline: 20px;
+}
 
 /* Topbar — floats over the map band, no chrome of its own. The wordmark lives
    in the footer, so this is only the search field. */
@@ -371,8 +377,16 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 }
 .icon-link:hover { background: var(--surface); }
 
-/* Map */
+/* Map — the server projects a fixed canvas; map.js scales it to cover whatever
+   the band ends up being, so a 2560px viewport shows more map, not a cropped
+   strip with dead space either side. */
 .map { position: absolute; inset: 0; }
+.map__stage {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform-origin: center;
+}
 .map__tiles { position: absolute; inset: 0; overflow: hidden; }
 /* OSM's standard tiles are a light theme. Grayscale + invert turns them into a
    monochrome dark basemap that matches the palette, so no third-party dark tile
@@ -423,8 +437,6 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 .mobile-map { display: none; }
 
 @media (max-width: 900px) {
-  :root { --gutter: 20px; }
-
   .topbar { padding-block: 14px; }
   .search { width: 100%; height: 44px; }
   .band { height: auto; padding-bottom: 8px; }
