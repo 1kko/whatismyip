@@ -139,6 +139,13 @@ class TestBrowserPage:
         ).text
         assert "curl http://testserver/8.8.8.8" in html
 
+    def test_public_base_url_wins_when_the_proxy_forwards_nothing(self, monkeypatch):
+        import main
+
+        monkeypatch.setattr(main, "PUBLIC_BASE_URL", "https://ip.1kko.com")
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert "curl https://ip.1kko.com/8.8.8.8" in html
+
     def test_place_name_links_out_to_openstreetmap(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert 'class="origin__place" href="https://www.openstreetmap.org/#map=' in html

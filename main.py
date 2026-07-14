@@ -139,6 +139,11 @@ TRUSTED_PROXIES = [
     p.strip() for p in os.getenv("TRUSTED_PROXIES", "").split(",") if p.strip()
 ]
 
+# Canonical public URL, e.g. https://ip.1kko.com. Set this when the reverse proxy
+# does not forward x-forwarded-proto: without it the copyable curl command would
+# say http://, the proxy would answer 302, and curl would just print "Found".
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
+
 
 def is_safe_ip(ip_str: str) -> bool:
     """Check if an IP address is safe to query (not private/reserved)."""
@@ -1034,6 +1039,9 @@ def public_base_url(request: Request) -> str:
     own --forwarded-allow-ips is deliberately NOT widened, because it would
     rewrite scope["client"] and defeat get_client_ip()'s spoofing check.
     """
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL.rstrip("/") + "/"
+
     base = str(request.base_url)
     peer = request.client.host if request.client else None
     if not _peer_is_trusted(peer):
