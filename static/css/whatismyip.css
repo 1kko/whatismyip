@@ -66,6 +66,51 @@ body {
     text-align: right;
 }
 
+.lookup-form {
+    display: flex;
+    gap: 8px;
+    margin: 10px 0;
+}
+
+.lookup-input {
+    flex: 1;
+    min-width: 0;
+    background-color: var(--section-bg);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    padding: 10px 12px;
+    font-family: inherit;
+    font-size: 1em;
+    transition: border-color 0.3s ease;
+}
+
+.lookup-input::placeholder {
+    color: var(--json-empty-color);
+}
+
+.lookup-input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+}
+
+.lookup-button {
+    background-color: transparent;
+    color: var(--accent-color);
+    border: 1px solid var(--accent-color);
+    border-radius: 5px;
+    padding: 10px 16px;
+    font-family: inherit;
+    font-size: 0.9em;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 0.3s ease;
+}
+
+.lookup-button:hover {
+    background-color: var(--hover-color);
+}
+
 .code-examples {
     display: grid;
     grid-template-columns: 1fr 1fr;

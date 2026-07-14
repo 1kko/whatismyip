@@ -15,6 +15,13 @@
 </head>
 <body>
     <div class="container">
+        <form id="lookup-form" class="lookup-form" action="/" method="get" autocomplete="off">
+            <input type="text" id="lookup-input" class="lookup-input" name="q" spellcheck="false"
+                   placeholder="Enter a domain or IP address (e.g. google.com, 8.8.8.8)"
+                   aria-label="Domain or IP address to look up" />
+            <button type="submit" class="lookup-button">🔍 Lookup</button>
+        </form>
+
         <div class="header">
             <div class="header-left">
                 <h1>Lookup for <span id="target-title">Loading...</span></h1>
@@ -176,10 +183,30 @@ curl -X GET "{{ request.base_url }}google.com" \
             document.getElementById('target-title').textContent = title;
         }
 
+        // Accept pasted URLs too: "https://google.com/path?x=1" -> "google.com"
+        function normalizeLookupTarget(raw) {
+            return raw
+                .trim()
+                .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
+                .split(/[/?#]/)[0];
+        }
+
+        function submitLookup(event) {
+            event.preventDefault();
+            const target = normalizeLookupTarget(document.getElementById('lookup-input').value);
+            if (!target) {
+                return;
+            }
+            window.location.assign('/' + encodeURIComponent(target));
+        }
+
         // entry point
         document.addEventListener('DOMContentLoaded', function() {
             // update target title
             updateTargetTitle(jsonData.address);
+
+            // Enter in the input submits the form, which routes to /{value}
+            document.getElementById('lookup-form').addEventListener('submit', submitLookup);
 
             // fillup all sections with json editor
             for (const [key, value] of Object.entries(dataMap)) {
