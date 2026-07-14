@@ -429,10 +429,11 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 .map__pin-dot { fill: var(--accent); }
 .map__pin--origin .map__pin-halo { fill: #8B97AC1F; stroke: #8B97AC66; }
 .map__pin--origin .map__pin-dot { fill: var(--text-secondary); }
+/* Sits above the bottom fade, so it stays legible instead of dissolving. */
 .map__attribution {
   position: absolute;
-  right: 8px;
-  bottom: 8px;
+  right: 24px;
+  bottom: 110px;
   padding: 4px 8px;
   background: #0B0D12B3;
   border-radius: 6px;
@@ -448,9 +449,11 @@ table.records td:first-child { color: var(--accent); width: 140px; }
   .search { width: 100%; height: 44px; }
   .band { height: auto; padding-bottom: 8px; }
   .band .map { display: none; }
-  /* No text sits over the mobile card, so it needs far less dimming. */
+  /* No text sits over the mobile card, so it needs far less dimming, and with
+     no fade the attribution goes back to the corner. */
   .mobile-map__card .map__scrim { background: #0B0D1259; }
   .mobile-map__card .map__fade { display: none; }
+  .mobile-map__card .map__attribution { right: 8px; bottom: 8px; }
   .hero { padding-top: 28px; padding-bottom: 8px; }
   .hero__row { flex-direction: column; align-items: flex-start; gap: 14px; }
   .ip { font-size: 32px; }
