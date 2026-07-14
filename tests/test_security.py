@@ -367,40 +367,59 @@ class TestAdminSecurityEnforcement:
 # ---------------------------------------------------------------------------
 # Fix 6: Blocking I/O in async handlers
 # ---------------------------------------------------------------------------
+def _handler_sources(*handlers) -> str:
+    """Source of the handlers plus the helpers they delegate blocking work to."""
+    import inspect
+
+    import main
+
+    helpers = (main.lookup_whois, main.lookup_location)
+    return "\n".join(inspect.getsource(fn) for fn in (*handlers, *helpers))
+
+
 class TestAsyncIO:
     def test_get_self_info_uses_to_thread(self):
-        """Async: get_self_info should use asyncio.to_thread for blocking calls."""
-        import inspect
+        """Async: no blocking call may run on the event loop."""
+        import re as _re
+
         from main import get_self_info
 
-        source = inspect.getsource(get_self_info)
-        assert "asyncio.to_thread" in source
-        # Verify specific blocking calls are wrapped
-        assert "await asyncio.to_thread(whois.whois" in source
-        assert "await asyncio.to_thread(geo_ip_manager.fetch_location" in source
-        assert (
-            "asyncio.to_thread(" in source
-            and "domain_manager.perform_reverse_lookup" in source
-        )
+        source = _handler_sources(get_self_info)
+        for target in (
+            "whois.whois",
+            "geo_ip_manager.fetch_location",
+            "domain_manager.perform_reverse_lookup",
+        ):
+            pattern = rf"asyncio\.to_thread\(\s*{_re.escape(target)}"
+            assert _re.search(pattern, source), f"missing to_thread wrap for {target}"
 
     def test_get_ip_info_uses_to_thread(self):
-        """Async: get_ip_info should use asyncio.to_thread for blocking calls."""
-        import inspect
+        """Async: no blocking call may run on the event loop."""
         import re as _re
 
         from main import get_ip_info
 
-        source = inspect.getsource(get_ip_info)
-        # Allow line breaks / whitespace inside the to_thread(...) call so the
-        # assertions survive `ruff format` changes.
+        source = _handler_sources(get_ip_info)
         for target in (
             "whois.whois",
             "dns.resolver.resolve",
             "SSLManager.get_ssl_info",
             "geo_ip_manager.fetch_location",
         ):
-            pattern = rf"await asyncio\.to_thread\(\s*{_re.escape(target)}"
+            pattern = rf"asyncio\.to_thread\(\s*{_re.escape(target)}"
             assert _re.search(pattern, source), f"missing to_thread wrap for {target}"
+
+    def test_blocking_calls_are_never_awaited_directly(self):
+        """The wrap has to be to_thread, not a bare await on a blocking call."""
+        import re as _re
+
+        from main import get_ip_info, get_self_info
+
+        source = _handler_sources(get_self_info, get_ip_info)
+        blocking = ("whois.whois", "dns.resolver.resolve", "SSLManager.get_ssl_info")
+        for target in blocking:
+            bare = rf"await\s+{_re.escape(target)}\("
+            assert not _re.search(bare, source), f"{target} awaited without to_thread"
 
     @patch("main.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))

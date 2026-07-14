@@ -151,6 +151,15 @@ class TestBrowserPage:
         assert 'id="lookup-form"' in html
         assert 'id="lookup-input"' in html
 
+    def test_pending_lookup_has_somewhere_to_report_itself(self):
+        # A lookup is a full navigation that takes ~1s; the page must be able to
+        # say so instead of sitting there looking broken.
+        html = client.get("/", headers=BROWSER_UA).text
+        assert 'id="progress"' in html
+        assert 'id="lookup-status"' in html
+        assert 'id="lookup-error"' in html
+        assert 'role="alert"' in html
+
 
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):

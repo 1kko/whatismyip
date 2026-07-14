@@ -1011,6 +1011,20 @@ def _dns_rows(response_data: dict) -> list[dict]:
     return rows
 
 
+async def lookup_whois(target: str) -> dict:
+    try:
+        return await asyncio.to_thread(whois.whois, target, quiet=True)
+    except Exception:
+        logging.exception("WHOIS lookup failed for %s", sanitize_log_input(target))
+        return {"error": "WHOIS lookup failed"}
+
+
+async def lookup_location(ip: str) -> dict:
+    data = await asyncio.to_thread(geo_ip_manager.fetch_location, ip)
+    data.pop("elapsed_time", None)
+    return data
+
+
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
@@ -1212,18 +1226,16 @@ async def get_self_info(request: Request):
     sanitized_ip = sanitize_log_input(client_ip)
     logging.info("client=%s lookup=%s (self)", sanitized_ip, sanitized_ip)
 
-    try:
-        whois_data = await asyncio.to_thread(whois.whois, client_ip, quiet=True)
-    except Exception:
-        logging.exception("WHOIS lookup failed for %s", sanitized_ip)
-        whois_data = {"error": "WHOIS lookup failed"}
-
-    ip_data = await asyncio.to_thread(geo_ip_manager.fetch_location, client_ip)
-    ip_data.pop("elapsed_time", None)
-
-    reverse_dns_hostname = await asyncio.to_thread(
-        domain_manager.perform_reverse_lookup, client_ip
+    # WHOIS is the slow one (seconds); it has nothing to do with GeoIP or the
+    # reverse lookup, so none of these wait on each other.
+    whois_task = asyncio.create_task(lookup_whois(client_ip))
+    location_task = asyncio.create_task(lookup_location(client_ip))
+    reverse_task = asyncio.create_task(
+        asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
     )
+
+    ip_data = await location_task
+    reverse_dns_hostname = await reverse_task
     if reverse_dns_hostname:
         ip_data["reverse_dns"] = reverse_dns_hostname
 
@@ -1234,6 +1246,8 @@ async def get_self_info(request: Request):
         if reverse_dns_hostname
         else {}
     )
+    whois_data = await whois_task
+
     # A self-lookup is never a route: the visitor IS the target, so the
     # distance is 0 km, which build_map_payload collapses to city mode.
     map_payload, _, origin = await asyncio.to_thread(
@@ -1277,15 +1291,16 @@ async def get_ip_info(domain_ip: str, request: Request):
         sanitize_log_input(domain_ip),
     )
 
-    try:
-        whois_data = await asyncio.to_thread(whois.whois, domain_ip, quiet=True)
-    except Exception:
-        logging.exception("WHOIS lookup failed for %s", sanitize_log_input(domain_ip))
-        whois_data = {"error": "WHOIS lookup failed"}
+    # WHOIS takes seconds and depends on nothing else here, so it runs alongside
+    # the DNS/SSL work instead of in front of it. Same for the visitor's own
+    # location, which only feeds the distance line.
+    whois_task = asyncio.create_task(lookup_whois(domain_ip))
+    origin_task = asyncio.create_task(lookup_location(client_ip))
 
     ssl_data = None
     resolved_ip = None
     domain_data = None
+    reverse_dns_hostname = None
 
     if domain_manager.is_valid_domain(domain_ip):
         logging.debug(f"domain={domain_ip}")
@@ -1295,25 +1310,36 @@ async def get_ip_info(domain_ip: str, request: Request):
         except Exception as e:
             logging.warning(f"No A record for {domain_ip}: {str(e)}")
         if resolved_ip and not is_safe_ip(resolved_ip):
+            whois_task.cancel()
+            origin_task.cancel()
             raise HTTPException(
                 status_code=400,
                 detail="Private or reserved IP addresses are not allowed",
             )
-        try:
-            domain_data = await asyncio.to_thread(
+
+        # The record sweep and the TLS handshake are independent of each other.
+        domain_data, ssl_data = await asyncio.gather(
+            asyncio.to_thread(
                 lambda: domain_manager.get_records(domain_ip, ip=resolved_ip)
+            ),
+            asyncio.to_thread(SSLManager.get_ssl_info, domain_ip, resolved_ip),
+            return_exceptions=True,
+        )
+        if isinstance(domain_data, BaseException):
+            logging.exception(
+                "Error getting DNS records for %s", sanitize_log_input(domain_ip)
             )
-        except Exception as e:
-            logging.exception(f"Error getting DNS records for {domain_ip}: {str(e)}")
-        try:
-            ssl_data = await asyncio.to_thread(
-                SSLManager.get_ssl_info, domain_ip, resolved_ip
+            domain_data = None
+        if isinstance(ssl_data, BaseException):
+            logging.exception(
+                "Error getting SSL info for %s", sanitize_log_input(domain_ip)
             )
-        except Exception as e:
-            logging.exception(f"Error getting SSL info for {domain_ip}: {str(e)}")
+            ssl_data = None
     elif domain_manager.is_ipv4(domain_ip):
         logging.debug(f"ip={domain_ip}")
         if not is_safe_ip(domain_ip):
+            whois_task.cancel()
+            origin_task.cancel()
             raise HTTPException(
                 status_code=400,
                 detail="Private or reserved IP addresses are not allowed",
@@ -1331,21 +1357,15 @@ async def get_ip_info(domain_ip: str, request: Request):
         resolved_ip = domain_ip
 
     if resolved_ip:
-        ip_data = await asyncio.to_thread(geo_ip_manager.fetch_location, resolved_ip)
-        ip_data.pop("elapsed_time", None)
-        # Add reverse DNS for IP lookups
-        if domain_manager.is_ipv4(domain_ip):
-            reverse_dns_hostname = await asyncio.to_thread(
-                domain_manager.perform_reverse_lookup,
-                resolved_ip,
-            )
-            if reverse_dns_hostname:
-                ip_data["reverse_dns"] = reverse_dns_hostname
+        ip_data = await lookup_location(resolved_ip)
+        # The PTR record was already resolved above; don't ask twice.
+        if reverse_dns_hostname:
+            ip_data["reverse_dns"] = reverse_dns_hostname
     else:
         ip_data = {}
 
-    origin_location = await asyncio.to_thread(geo_ip_manager.fetch_location, client_ip)
-    origin_location.pop("elapsed_time", None)
+    whois_data = await whois_task
+    origin_location = await origin_task
     map_payload, distance_km, origin = await asyncio.to_thread(
         build_map_payload, ip_data, origin_location
     )

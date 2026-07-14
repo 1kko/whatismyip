@@ -12,6 +12,7 @@
     <link rel="manifest" href="/static/site.webmanifest">
 </head>
 <body>
+<div class="progress" id="progress" aria-hidden="true"></div>
 <div class="shell">
     <section class="band">
         {% if view_map %}
@@ -19,12 +20,18 @@
         {% endif %}
 
         <header class="topbar inset">
-            <form class="search" id="lookup-form" action="/" method="get" autocomplete="off">
-                <input type="text" id="lookup-input" name="q" spellcheck="false"
-                       placeholder="Enter a domain or IP address"
-                       aria-label="Domain or IP address to look up">
-                <kbd>/</kbd>
-            </form>
+            <div class="search-wrap">
+                <form class="search" id="lookup-form" action="/" method="get" autocomplete="off">
+                    <input type="text" id="lookup-input" name="q" spellcheck="false"
+                           placeholder="Enter a domain or IP address"
+                           aria-label="Domain or IP address to look up"
+                           aria-describedby="lookup-error">
+                    <kbd class="search__hint">/</kbd>
+                    <span class="search__spinner" aria-hidden="true"></span>
+                </form>
+                <p class="search-error" id="lookup-error" role="alert" hidden></p>
+                <p class="search-status" id="lookup-status" role="status" hidden></p>
+            </div>
         </header>
 
         <div class="hero inset">
