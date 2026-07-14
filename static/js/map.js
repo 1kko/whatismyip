@@ -72,10 +72,6 @@ function paint(container, canvas) {
   scrim.className = "map__scrim";
   stage.appendChild(scrim);
 
-  const fade = document.createElement("div");
-  fade.className = "map__fade";
-  stage.appendChild(fade);
-
   const overlay = svg("svg", {
     class: "map__overlay",
     width: canvas.width,
@@ -99,6 +95,14 @@ function paint(container, canvas) {
   stage.appendChild(overlay);
 
   container.appendChild(stage);
+
+  // The fade belongs to the BAND, not the stage: inside the stage it would be
+  // scaled with the tiles and pushed off the bottom edge on wide screens, which
+  // is exactly where the hard seam against the content area came from.
+  const fade = document.createElement("div");
+  fade.className = "map__fade";
+  container.appendChild(fade);
+
   container.appendChild(attribution());
 
   const cover = () => {
