@@ -175,3 +175,5 @@ service.log.*
 # security data files
 data/banned_ips.json
 data/geo_rules.json
+# GeoIP database: ~21MB, downloaded and refreshed at runtime. Never commit it.
+data/*.dat.gz

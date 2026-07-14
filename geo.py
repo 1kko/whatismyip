@@ -1,0 +1,77 @@
+"""Coordinate lookup and great-circle distance.
+
+geoip2fast returns city names but its latitude/longitude fields are always
+null, so coordinates come from the local gazetteer built by
+scripts/build_gazetteer.py.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import unicodedata
+from typing import Any
+
+CITIES_FILE = os.getenv("GEO_CITIES_FILE", "static/geo/cities.json")
+COUNTRIES_FILE = os.getenv("GEO_COUNTRIES_FILE", "static/geo/countries.json")
+
+CITY_ZOOM = 10
+COUNTRY_ZOOM = 4
+MIN_ROUTE_KM = 25.0
+EARTH_RADIUS_KM = 6371.0088
+
+
+def normalize_city(name: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", name)
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return " ".join(stripped.lower().split())
+
+
+def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    lat1, lon1 = math.radians(a[0]), math.radians(a[1])
+    lat2, lon2 = math.radians(b[0]), math.radians(b[1])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    h = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
+    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
+
+
+class Gazetteer:
+    def __init__(
+        self, cities: dict[str, list[float]], countries: dict[str, list[float]]
+    ) -> None:
+        self.cities = cities
+        self.countries = countries
+
+    @classmethod
+    def load(
+        cls, cities_file: str = CITIES_FILE, countries_file: str = COUNTRIES_FILE
+    ) -> "Gazetteer":
+        with open(cities_file, encoding="utf-8") as handle:
+            cities = json.load(handle)
+        with open(countries_file, encoding="utf-8") as handle:
+            countries = json.load(handle)
+        return cls(cities, countries)
+
+    def resolve(self, location: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Best-effort coordinates for a geoip2fast location dict."""
+        if not location or location.get("is_private"):
+            return None
+
+        country = (location.get("country_code") or "").strip().upper()
+        if len(country) != 2 or not country.isalpha():
+            return None
+
+        city = (location.get("city") or {}).get("name") or ""
+        if city:
+            point = self.cities.get(f"{country}:{normalize_city(city)}")
+            if point:
+                return {"lat": point[0], "lon": point[1], "precision": "city"}
+
+        point = self.countries.get(country)
+        if point:
+            return {"lat": point[0], "lon": point[1], "precision": "country"}
+        return None

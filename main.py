@@ -11,6 +11,7 @@ import re
 import secrets
 import socket
 import ssl
+import time
 from collections import defaultdict
 from logging.handlers import TimedRotatingFileHandler
 from typing import Any, Dict
@@ -28,6 +29,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from geoip2fast import GeoIP2Fast
 from pydantic import BaseModel
+
+from geo import MIN_ROUTE_KM, Gazetteer, haversine_km
+from mapgeom import build_canvas
+from viewmodel import build_view
 from tld import exceptions as tld_exceptions
 from tld import get_tld
 
@@ -915,6 +920,119 @@ class GeoBlockManager:
 
 geo_ip_manager = GeoIpManager()
 domain_manager = DomainManager()
+gazetteer = Gazetteer.load()
+
+# The desktop hero text sits over the left half of the band, so the map is
+# focused right of centre and fitted into the free width beside it. Both canvases
+# fetch tiles at native zoom (tile_zoom_offset 0) so roads and place names stay
+# legible; that costs ~15 tile requests on desktop and ~6 on mobile.
+DESKTOP_CANVAS = {"width": 1440, "height": 380, "focus_x": 0.58, "fit_ratio": 0.4}
+MOBILE_CANVAS = {"width": 350, "height": 170, "focus_x": 0.5, "fit_ratio": 0.78}
+
+
+def build_map_payload(
+    target_location: dict | None, origin_location: dict | None
+) -> tuple[dict | None, float | None, dict | None]:
+    """Return (map, distance_km, origin) for the response.
+
+    City mode (single pin, no arc) when the target is the visitor themselves,
+    when the visitor's own location is unknown, or when the two points are
+    within MIN_ROUTE_KM of each other.
+    """
+    target = gazetteer.resolve(target_location)
+    if not target:
+        return None, None, None
+
+    origin = gazetteer.resolve(origin_location)
+    distance_km = None
+    route_origin = None
+
+    if origin:
+        distance_km = haversine_km(
+            (origin["lat"], origin["lon"]), (target["lat"], target["lon"])
+        )
+        if distance_km >= MIN_ROUTE_KM:
+            route_origin = origin
+        else:
+            distance_km = None
+
+    origin_city = ((origin_location or {}).get("city") or {}).get("name") or None
+    payload = {
+        "desktop": build_canvas(target, route_origin, **DESKTOP_CANVAS),
+        "mobile": build_canvas(target, route_origin, **MOBILE_CANVAS),
+        "target": target,
+        "precision": target["precision"],
+        "origin_city": origin_city if route_origin else None,
+        "origin_country": (origin_location or {}).get("country_code")
+        if route_origin
+        else None,
+    }
+    return payload, (round(distance_km, 1) if distance_km else None), origin
+
+
+def _dns_rows(response_data: dict) -> list[dict]:
+    """Flatten the DNS record dict into table rows."""
+    domain = response_data.get("domain") or {}
+    address = response_data.get("address", "")
+    rows = []
+    for record in domain.get("a") or []:
+        rows.append(
+            {
+                "type": "A",
+                "name": address,
+                "value": record.get("ip", ""),
+                "ttl": record.get("ttl", ""),
+            }
+        )
+    for record in domain.get("mx") or []:
+        rows.append(
+            {
+                "type": "MX",
+                "name": address,
+                "value": str(record.get("host", record))
+                if isinstance(record, dict)
+                else str(record),
+                "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
+            }
+        )
+    for record in domain.get("ns") or []:
+        rows.append(
+            {
+                "type": "NS",
+                "name": address,
+                "value": str(record.get("hostname", record))
+                if isinstance(record, dict)
+                else str(record),
+                "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
+            }
+        )
+    for record in domain.get("txt") or []:
+        rows.append({"type": "TXT", "name": address, "value": str(record), "ttl": ""})
+    return rows
+
+
+def render_page(request: Request, response_data: dict, is_self: bool):
+    """Render browser.html from the server-side view model."""
+    whois_data = response_data.get("whois") or {}
+    return templates.TemplateResponse(
+        request,
+        "browser.html",
+        {
+            "view": build_view(response_data, is_self=is_self),
+            "view_map": response_data.get("map") is not None,
+            "dns_rows": _dns_rows(response_data),
+            "headers": response_data.get("headers") or {},
+            "whois": {k: str(v) for k, v in whois_data.items()},
+            "json_data": json.dumps(response_data, indent=2, default=str).replace(
+                "</", "<\\/"
+            ),
+            "map_data": json.dumps(response_data.get("map"), default=str).replace(
+                "</", "<\\/"
+            ),
+            "nonce": getattr(request.state, "csp_nonce", ""),
+        },
+    )
+
 
 # Initialize security managers
 ip_ban_manager = IPBanManager()
@@ -1073,7 +1191,7 @@ async def security_headers_middleware(request: Request, call_next):
         "default-src 'self'; "
         f"script-src 'self' 'nonce-{nonce}'; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; "
+        "img-src 'self' data: https://tile.openstreetmap.org; "
         "object-src 'none'; "
         "base-uri 'self'; "
         "frame-ancestors 'none'"
@@ -1085,6 +1203,7 @@ async def security_headers_middleware(request: Request, call_next):
 
 @app.get("/", response_model=None)
 async def get_self_info(request: Request):
+    started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
@@ -1115,6 +1234,11 @@ async def get_self_info(request: Request):
         if reverse_dns_hostname
         else {}
     )
+    # A self-lookup is never a route: the visitor IS the target, so the
+    # distance is 0 km, which build_map_payload collapses to city mode.
+    map_payload, _, origin = await asyncio.to_thread(
+        build_map_payload, ip_data, ip_data
+    )
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
@@ -1123,20 +1247,15 @@ async def get_self_info(request: Request):
         "whois": whois_data,
         "ssl": None,
         "headers": request_headers,
+        "map": map_payload,
+        "distance_km": None,
+        "origin": origin,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
 
     user_agent = request.headers.get("user-agent", "")
     if BrowserDetector.is_browser(user_agent):
-        return templates.TemplateResponse(
-            request,
-            "browser.html",
-            {
-                "json_data": json.dumps(response_data, indent=2, default=str).replace(
-                    "</", "<\\/"
-                ),
-                "nonce": getattr(request.state, "csp_nonce", ""),
-            },
-        )
+        return render_page(request, response_data, is_self=True)
 
     return SafeORJSONResponse(response_data)
 
@@ -1144,6 +1263,7 @@ async def get_self_info(request: Request):
 @app.get("/{domain_ip}", response_model=None)
 async def get_ip_info(domain_ip: str, request: Request):
     # Remove the static path check since it's handled by the static files mount
+    started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
@@ -1224,6 +1344,12 @@ async def get_ip_info(domain_ip: str, request: Request):
     else:
         ip_data = {}
 
+    origin_location = await asyncio.to_thread(geo_ip_manager.fetch_location, client_ip)
+    origin_location.pop("elapsed_time", None)
+    map_payload, distance_km, origin = await asyncio.to_thread(
+        build_map_payload, ip_data, origin_location
+    )
+
     response_data = {
         "address": domain_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
@@ -1232,20 +1358,15 @@ async def get_ip_info(domain_ip: str, request: Request):
         "whois": whois_data,
         "ssl": ssl_data,
         "headers": request_headers,
+        "map": map_payload,
+        "distance_km": distance_km,
+        "origin": origin,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
 
     user_agent = request.headers.get("user-agent", "")
     if BrowserDetector.is_browser(user_agent):
-        return templates.TemplateResponse(
-            request,
-            "browser.html",
-            {
-                "json_data": json.dumps(response_data, indent=2, default=str).replace(
-                    "</", "<\\/"
-                ),
-                "nonce": getattr(request.state, "csp_nonce", ""),
-            },
-        )
+        return render_page(request, response_data, is_self=False)
 
     return SafeORJSONResponse(response_data)
 

@@ -116,21 +116,20 @@ class TestXSSPrevention:
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_json_data_uses_escaped_slash(self, mock_rev, mock_geo, mock_whois):
-        """XSS: json_data passed to template must escape </ sequences."""
+        """XSS: embedded JSON must escape </ so it cannot close the script tag."""
         response = client.get(
             "/",
             headers={"User-Agent": "Mozilla/5.0 Chrome/120"},
         )
         body = response.text
-        # Find the jsonData assignment in the script
-        assert "const jsonData" in body
-        # The json_data should use <\/ not </
-        # Look for the pattern in the script section
-        script_start = body.find("const jsonData")
-        script_end = body.find("</script>", script_start)
-        script_content = body[script_start:script_end]
-        # No raw </ should appear in JSON data (all should be <\/)
-        assert "</" not in script_content
+        # The response payload is embedded as a JSON data block, not as JS.
+        for element_id in ('id="page-data"', 'id="map-data"'):
+            start = body.find(element_id)
+            assert start != -1, element_id
+            block_start = body.find(">", start) + 1
+            block_end = body.find("</script>", block_start)
+            # No raw </ inside the block: every one is escaped to <\/
+            assert "</" not in body[block_start:block_end]
 
 
 # ---------------------------------------------------------------------------

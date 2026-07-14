@@ -77,6 +77,23 @@ poetry install
 make
 ```
 
+### Regenerating vendored assets
+
+Both are committed, so this is only needed when refreshing them:
+
+```bash
+poetry run python scripts/build_gazetteer.py   # static/geo/*.json from GeoNames
+./scripts/fetch_fonts.sh                       # static/fonts/*.woff2
+```
+
+The Content-Security-Policy is `default-src 'self'`, so fonts must be self-hosted.
+Map tiles come from the single allowlisted host `tile.openstreetmap.org`: the browser
+fetches them directly (no API key, no proxy), which means visitor IPs reach OSM — the
+footer says so, and `© OpenStreetMap contributors` attribution is required.
+
+Coordinates for the map do **not** come from the GeoIP database (geoip2fast returns city
+names but never latitude/longitude). They come from the GeoNames gazetteer above.
+
 ## Configuration
 
 The service is configured via environment variables in `.env` file:
