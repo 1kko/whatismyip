@@ -1,8 +1,17 @@
 import json
 from pathlib import Path
 
+import pytest
+
+from geo import CITY_ZOOM, COUNTRY_ZOOM, Gazetteer, haversine_km, normalize_city
+
 CITIES = Path("static/geo/cities.json")
 COUNTRIES = Path("static/geo/countries.json")
+
+
+@pytest.fixture(scope="module")
+def gazetteer():
+    return Gazetteer.load()
 
 
 class TestGazetteerData:
@@ -30,3 +39,62 @@ class TestGazetteerData:
             code, _, name = key.partition(":")
             assert len(code) == 2 and code.isupper()
             assert name == name.lower().strip()
+
+
+class TestResolve:
+    def test_city_hit_wins_over_country(self, gazetteer):
+        location = {
+            "country_code": "KR",
+            "city": {"name": "Seoul"},
+            "is_private": False,
+        }
+        result = gazetteer.resolve(location)
+        assert result["precision"] == "city"
+        assert 37.0 < result["lat"] < 38.0
+
+    def test_falls_back_to_country_centroid_when_city_missing(self, gazetteer):
+        location = {"country_code": "US", "city": {"name": ""}, "is_private": False}
+        result = gazetteer.resolve(location)
+        assert result["precision"] == "country"
+        assert 20.0 < result["lat"] < 55.0
+
+    def test_unknown_city_falls_back_to_country(self, gazetteer):
+        location = {
+            "country_code": "KR",
+            "city": {"name": "Nowhere-in-particular"},
+            "is_private": False,
+        }
+        assert gazetteer.resolve(location)["precision"] == "country"
+
+    def test_private_ip_has_no_coordinates(self, gazetteer):
+        location = {"country_code": "--", "city": {}, "is_private": True}
+        assert gazetteer.resolve(location) is None
+
+    def test_missing_country_has_no_coordinates(self, gazetteer):
+        assert gazetteer.resolve({"city": {}}) is None
+
+    def test_accents_and_case_are_normalized(self, gazetteer):
+        location = {"country_code": "BR", "city": {"name": "SÃO PAULO"}}
+        assert gazetteer.resolve(location)["precision"] == "city"
+
+    def test_zoom_constants(self):
+        assert CITY_ZOOM == 10
+        assert COUNTRY_ZOOM == 4
+
+
+class TestHaversine:
+    def test_seoul_to_mountain_view(self):
+        seoul = (37.5665, 126.978)
+        mountain_view = (37.3861, -122.0839)
+        # Great-circle distance is ~9,000 km; assert a tight band.
+        assert 8900 < haversine_km(seoul, mountain_view) < 9200
+
+    def test_zero_distance(self):
+        assert haversine_km((37.5, 127.0), (37.5, 127.0)) == 0.0
+
+    def test_symmetric(self):
+        a, b = (51.5, -0.12), (-33.87, 151.21)
+        assert haversine_km(a, b) == pytest.approx(haversine_km(b, a))
+
+    def test_normalize_city_strips_accents(self):
+        assert normalize_city("  SÃO  Paulo ") == "sao paulo"
