@@ -921,8 +921,10 @@ geo_ip_manager = GeoIpManager()
 domain_manager = DomainManager()
 gazetteer = Gazetteer.load()
 
-DESKTOP_CANVAS = (1440, 300)
-MOBILE_CANVAS = (350, 170)
+# The desktop hero text sits over the left half of the band, so the map is
+# focused right of centre and fitted into the free width beside it.
+DESKTOP_CANVAS = {"width": 1440, "height": 300, "focus_x": 0.58, "fit_ratio": 0.4}
+MOBILE_CANVAS = {"width": 350, "height": 170, "focus_x": 0.5, "fit_ratio": 0.78}
 
 
 def build_map_payload(
@@ -953,8 +955,8 @@ def build_map_payload(
 
     origin_city = ((origin_location or {}).get("city") or {}).get("name") or None
     payload = {
-        "desktop": build_canvas(target, route_origin, *DESKTOP_CANVAS),
-        "mobile": build_canvas(target, route_origin, *MOBILE_CANVAS),
+        "desktop": build_canvas(target, route_origin, **DESKTOP_CANVAS),
+        "mobile": build_canvas(target, route_origin, **MOBILE_CANVAS),
         "precision": target["precision"],
         "origin_city": origin_city if route_origin else None,
         "origin_country": (origin_location or {}).get("country_code")

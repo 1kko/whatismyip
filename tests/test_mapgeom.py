@@ -144,6 +144,25 @@ class TestBuildCanvas:
             assert 0 <= pin["x"] <= DESKTOP[0]
             assert 0 <= pin["y"] <= DESKTOP[1]
 
+    def test_the_whole_arc_stays_inside_the_canvas(self):
+        # The Pacific great circle bulges far north of both cities. Fitting only
+        # the endpoints let the curve run off the top of the band.
+        canvas = build_canvas(MOUNTAIN_VIEW, SEOUL, *DESKTOP)
+        for x, y in canvas["line"]:
+            assert 0 <= x <= DESKTOP[0]
+            assert 0 <= y <= DESKTOP[1]
+
+    def test_focus_x_pushes_the_map_right_of_the_hero_text(self):
+        canvas = build_canvas(SEOUL, None, *DESKTOP, focus_x=0.66)
+        assert canvas["target"]["x"] == pytest.approx(DESKTOP[0] * 0.66, abs=1.0)
+
+        route = build_canvas(
+            MOUNTAIN_VIEW, SEOUL, *DESKTOP, focus_x=0.66, fit_ratio=0.44
+        )
+        xs = [x for x, _ in route["line"]]
+        # The whole arc clears the left half, where the IP heading lives.
+        assert min(xs) > DESKTOP[0] * 0.4
+
     def test_mobile_canvas_is_smaller_but_valid(self):
         canvas = build_canvas(MOUNTAIN_VIEW, SEOUL, 350, 170)
         assert canvas["width"] == 350

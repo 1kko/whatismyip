@@ -143,6 +143,23 @@ class TestAccordions:
         assert "MarkMonitor" in items["whois"]
         assert items["dns"] == "A 1 · MX 1 · NS 4 · TXT 12"
 
+    def test_list_valued_whois_dates_are_flattened(self):
+        # python-whois hands back lists for some domains; the hint must not
+        # render "[dat → [dat".
+        response = dict(
+            DOMAIN_RESPONSE,
+            whois={
+                "registrar": ["MarkMonitor Inc.", "MarkMonitor"],
+                "creation_date": ["1997-09-15 04:00:00", "1997-09-15 07:00:00"],
+                "expiration_date": ["2028-09-14 04:00:00"],
+            },
+        )
+        hint = {
+            i["id"]: i["hint"]
+            for i in build_view(response, is_self=False)["accordions"]
+        }["whois"]
+        assert hint == "MarkMonitor Inc. · 1997 → 2028"
+
     def test_failed_whois_hint(self):
         items = {
             i["id"]: i["hint"]

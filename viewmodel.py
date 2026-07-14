@@ -41,6 +41,13 @@ def _is_ip(address: str) -> bool:
         return False
 
 
+def _first(value: Any) -> Any:
+    """python-whois returns some fields (dates, especially) as lists."""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
 def _cert_issuer(ssl_data: dict) -> str:
     for rdn in ssl_data.get("issuer", ()):
         for key, value in rdn:
@@ -61,9 +68,15 @@ def _cert_expiry(ssl_data: dict) -> tuple[str, int | None]:
 
 
 def _network_column(location: dict, address: str) -> dict:
+    # geoip2fast has no AS number, only the ASN's announced block and its name,
+    # so this row is labelled for what it actually holds.
     rows = [
         {"label": "CIDR", "value": location.get("cidr") or DASH, "tone": "default"},
-        {"label": "ASN", "value": location.get("asn_cidr") or DASH, "tone": "default"},
+        {
+            "label": "AS block",
+            "value": location.get("asn_cidr") or DASH,
+            "tone": "default",
+        },
         {"label": "Org", "value": location.get("asn_name") or DASH, "tone": "default"},
     ]
     if _is_ip(address):
@@ -214,9 +227,9 @@ def _accordions(response: dict) -> list[dict]:
     if "error" in whois_data or not whois_data:
         whois_hint = "lookup failed"
     else:
-        registrar = whois_data.get("registrar") or "registry data"
-        created = str(whois_data.get("creation_date") or "")[:4]
-        expires = str(whois_data.get("expiration_date") or "")[:4]
+        registrar = _first(whois_data.get("registrar")) or "registry data"
+        created = str(_first(whois_data.get("creation_date")) or "")[:4]
+        expires = str(_first(whois_data.get("expiration_date")) or "")[:4]
         span = f" · {created} → {expires}" if created and expires else ""
         whois_hint = f"{registrar}{span}"
 
@@ -247,10 +260,6 @@ def build_view(response: dict, is_self: bool) -> dict:
     subdivision = (location.get("city") or {}).get("subdivision_name") or ""
     city_line = " · ".join(part for part in (city, subdivision) if part)
 
-    asn_parts = [
-        part for part in (location.get("asn_cidr"), location.get("asn_name")) if part
-    ]
-
     if is_ip:
         facts = [
             _network_column(location, address),
@@ -271,7 +280,7 @@ def build_view(response: dict, is_self: bool) -> dict:
         "flag": country_flag(location.get("country_code")),
         "country_name": location.get("country_name") or "",
         "city_line": city_line,
-        "asn_line": " · ".join(asn_parts),
+        "asn_line": location.get("asn_name") or "",
         "distance_text": format_distance(response.get("distance_km")),
         "facts": facts,
         "accordions": _accordions(response),

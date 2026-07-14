@@ -127,17 +127,6 @@ body {
 
 /* Hero over the map band */
 .band { position: relative; height: 300px; overflow: hidden; }
-.band__scrim {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, #0B0D12FA 0%, #0B0D12E6 50%, #0B0D12A6 100%);
-}
-.band__fade {
-  position: absolute;
-  inset: auto 0 0 0;
-  height: 120px;
-  background: linear-gradient(180deg, #0B0D1200 0%, var(--bg) 100%);
-}
 .hero { position: relative; padding-top: 52px; }
 .hero__label {
   display: flex;
@@ -302,6 +291,27 @@ table.records td {
 table.records tr:last-child td { border-bottom: 0; }
 table.records td:first-child { color: var(--accent); width: 140px; }
 
+/* JSONEditor: its stylesheet is injected lazily, after this one, so the dark
+   theme has to win the cascade with !important. */
+#raw-json { height: 420px; }
+.jsoneditor,
+.jsoneditor-tree,
+.jsoneditor-outer {
+  background: var(--surface-2) !important;
+  border-color: var(--border) !important;
+  color: var(--text-primary) !important;
+  font-size: 12px;
+}
+.jsoneditor-tree .jsoneditor-field,
+.jsoneditor-value.jsoneditor-field { color: var(--text-secondary) !important; }
+.jsoneditor-value.jsoneditor-string { color: #CE9178 !important; }
+.jsoneditor-value.jsoneditor-number { color: #B5CEA8 !important; }
+.jsoneditor-value.jsoneditor-boolean,
+.jsoneditor-value.jsoneditor-null { color: var(--accent) !important; }
+.jsoneditor-value.jsoneditor-empty { color: var(--text-muted) !important; }
+.jsoneditor-value.jsoneditor-url { color: var(--accent) !important; }
+.jsoneditor-separator, .jsoneditor-readonly { color: var(--text-muted) !important; }
+
 /* Footer */
 .footer {
   display: flex;
@@ -319,7 +329,25 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 /* Map */
 .map { position: absolute; inset: 0; }
 .map__tiles { position: absolute; inset: 0; overflow: hidden; }
-.map__tiles img { position: absolute; }
+/* OSM's standard tiles are a light theme. Grayscale + invert turns them into a
+   dark basemap that matches the palette, so no third-party dark tile provider
+   (and no API key) is needed. */
+.map__tiles img {
+  position: absolute;
+  filter: grayscale(1) invert(1) brightness(0.62) contrast(1.15);
+  opacity: 0.75;
+}
+.map__scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, #0B0D12F2 0%, #0B0D12CC 45%, #0B0D1280 100%);
+}
+.map__fade {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 120px;
+  background: linear-gradient(180deg, #0B0D1200 0%, var(--bg) 100%);
+}
 .map__overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
 .map__line {
   fill: none;
@@ -330,7 +358,7 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 .map__pin-halo { fill: #5B8CFF14; stroke: #5B8CFF33; }
 .map__pin-ring { fill: #5B8CFF29; stroke: #5B8CFF66; }
 .map__pin-dot { fill: var(--accent); }
-.map__pin--origin .map__pin-halo { fill: #8B97AC14; stroke: #8B97AC40; }
+.map__pin--origin .map__pin-halo { fill: #8B97AC1F; stroke: #8B97AC66; }
 .map__pin--origin .map__pin-dot { fill: var(--text-secondary); }
 .map__attribution {
   position: absolute;
@@ -352,7 +380,10 @@ table.records td:first-child { color: var(--accent); width: 140px; }
   .topbar { flex-direction: column; align-items: stretch; gap: 12px; }
   .search { width: 100%; height: 44px; }
   .band { height: auto; }
-  .band__scrim, .band__fade, .band .map { display: none; }
+  .band .map { display: none; }
+  /* No text sits over the mobile card, so it needs far less dimming. */
+  .mobile-map__card .map__scrim { background: #0B0D1259; }
+  .mobile-map__card .map__fade { display: none; }
   .hero { padding-top: 28px; padding-bottom: 8px; }
   .hero__row { flex-direction: column; align-items: flex-start; gap: 14px; }
   .ip { font-size: 32px; }

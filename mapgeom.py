@@ -87,18 +87,27 @@ def _unwrapped_x(lon: float, center_lon: float, scale: float) -> float:
 
 
 def fit_zoom(
-    a: tuple[float, float], b: tuple[float, float], width: int, height: int
+    a: tuple[float, float],
+    b: tuple[float, float],
+    width: int,
+    height: int,
+    fit_ratio: float = FIT_MARGIN,
 ) -> int:
-    """Largest integer zoom where both points fit inside the canvas."""
+    """Largest integer zoom where the whole arc fits inside the canvas.
+
+    The ARC, not just the endpoints: a Pacific great circle bulges far north
+    of both cities, and fitting only the endpoints lets the curve run off the
+    top of the band.
+    """
     center_lon = midpoint_lon(a[1], b[1])
+    points = great_circle_points(a, b)
     for zoom in range(MAX_ZOOM, MIN_ZOOM - 1, -1):
         scale = TILE_SIZE * (2**zoom)
-        span_x = abs(
-            _unwrapped_x(a[1], center_lon, scale)
-            - _unwrapped_x(b[1], center_lon, scale)
-        )
-        span_y = abs(_world_y(a[0]) * scale - _world_y(b[0]) * scale)
-        if span_x <= width * FIT_MARGIN and span_y <= height * FIT_MARGIN:
+        xs = [_unwrapped_x(lon, center_lon, scale) for _, lon in points]
+        ys = [_world_y(lat) * scale for lat, _ in points]
+        span_x = max(xs) - min(xs)
+        span_y = max(ys) - min(ys)
+        if span_x <= width * fit_ratio and span_y <= height * fit_ratio:
             return zoom
     return MIN_ZOOM
 
@@ -108,24 +117,33 @@ def build_canvas(
     origin: dict[str, float] | None,
     width: int,
     height: int,
+    focus_x: float = 0.5,
+    fit_ratio: float = FIT_MARGIN,
 ) -> dict:
-    """Tiles, pin positions and the projected arc for one fixed canvas."""
+    """Tiles, pin positions and the projected arc for one fixed canvas.
+
+    focus_x places the horizontal centre of what matters (the pin, or the whole
+    arc) at that fraction of the canvas width. The desktop band pushes it right
+    so the map does not fight the hero text on the left.
+    """
     target_point = (target["lat"], target["lon"])
 
     if origin is None:
         zoom = CITY_ZOOM
-        center_lat, center_lon = target_point
+        center_lon = target["lon"]
+        points = [target_point]
     else:
         origin_point = (origin["lat"], origin["lon"])
-        zoom = fit_zoom(target_point, origin_point, width, height)
+        zoom = fit_zoom(target_point, origin_point, width, height, fit_ratio)
         center_lon = midpoint_lon(origin["lon"], target["lon"])
-        center_lat = (origin["lat"] + target["lat"]) / 2.0
+        points = great_circle_points(origin_point, target_point)
 
     scale = TILE_SIZE * (2**zoom)
-    center_x = _world_x(center_lon) * scale
-    center_y = _world_y(center_lat) * scale
-    left = center_x - width / 2.0
-    top = center_y - height / 2.0
+    xs = [_unwrapped_x(lon, center_lon, scale) for _, lon in points]
+    ys = [_world_y(lat) * scale for lat, _ in points]
+    # Frame the whole arc, not just its endpoints.
+    left = (min(xs) + max(xs)) / 2.0 - width * focus_x
+    top = (min(ys) + max(ys)) / 2.0 - height / 2.0
 
     def project(lat: float, lon: float) -> tuple[float, float]:
         return (
