@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from geo import MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
+from viewmodel import build_view
 from tld import exceptions as tld_exceptions
 from tld import get_tld
 
@@ -963,6 +964,70 @@ def build_map_payload(
     return payload, (round(distance_km, 1) if distance_km else None), origin
 
 
+def _dns_rows(response_data: dict) -> list[dict]:
+    """Flatten the DNS record dict into table rows."""
+    domain = response_data.get("domain") or {}
+    address = response_data.get("address", "")
+    rows = []
+    for record in domain.get("a") or []:
+        rows.append(
+            {
+                "type": "A",
+                "name": address,
+                "value": record.get("ip", ""),
+                "ttl": record.get("ttl", ""),
+            }
+        )
+    for record in domain.get("mx") or []:
+        rows.append(
+            {
+                "type": "MX",
+                "name": address,
+                "value": str(record.get("host", record))
+                if isinstance(record, dict)
+                else str(record),
+                "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
+            }
+        )
+    for record in domain.get("ns") or []:
+        rows.append(
+            {
+                "type": "NS",
+                "name": address,
+                "value": str(record.get("hostname", record))
+                if isinstance(record, dict)
+                else str(record),
+                "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
+            }
+        )
+    for record in domain.get("txt") or []:
+        rows.append({"type": "TXT", "name": address, "value": str(record), "ttl": ""})
+    return rows
+
+
+def render_page(request: Request, response_data: dict, is_self: bool):
+    """Render browser.html from the server-side view model."""
+    whois_data = response_data.get("whois") or {}
+    return templates.TemplateResponse(
+        request,
+        "browser.html",
+        {
+            "view": build_view(response_data, is_self=is_self),
+            "view_map": response_data.get("map") is not None,
+            "dns_rows": _dns_rows(response_data),
+            "headers": response_data.get("headers") or {},
+            "whois": {k: str(v) for k, v in whois_data.items()},
+            "json_data": json.dumps(response_data, indent=2, default=str).replace(
+                "</", "<\\/"
+            ),
+            "map_data": json.dumps(response_data.get("map"), default=str).replace(
+                "</", "<\\/"
+            ),
+            "nonce": getattr(request.state, "csp_nonce", ""),
+        },
+    )
+
+
 # Initialize security managers
 ip_ban_manager = IPBanManager()
 rate_limiter = RateLimiter()
@@ -1182,16 +1247,7 @@ async def get_self_info(request: Request):
 
     user_agent = request.headers.get("user-agent", "")
     if BrowserDetector.is_browser(user_agent):
-        return templates.TemplateResponse(
-            request,
-            "browser.html",
-            {
-                "json_data": json.dumps(response_data, indent=2, default=str).replace(
-                    "</", "<\\/"
-                ),
-                "nonce": getattr(request.state, "csp_nonce", ""),
-            },
-        )
+        return render_page(request, response_data, is_self=True)
 
     return SafeORJSONResponse(response_data)
 
@@ -1300,16 +1356,7 @@ async def get_ip_info(domain_ip: str, request: Request):
 
     user_agent = request.headers.get("user-agent", "")
     if BrowserDetector.is_browser(user_agent):
-        return templates.TemplateResponse(
-            request,
-            "browser.html",
-            {
-                "json_data": json.dumps(response_data, indent=2, default=str).replace(
-                    "</", "<\\/"
-                ),
-                "nonce": getattr(request.state, "csp_nonce", ""),
-            },
-        )
+        return render_page(request, response_data, is_self=False)
 
     return SafeORJSONResponse(response_data)
 

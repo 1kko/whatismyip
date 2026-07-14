@@ -89,6 +89,46 @@ class TestSecurityHeaders:
         assert "script-src 'self' 'nonce-" in csp
 
 
+BROWSER_UA = {
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+    )
+}
+
+
+class TestBrowserPage:
+    def test_server_renders_the_answer_without_javascript(self):
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert "WhatIsMyIP" in html
+        assert "8.8.8.8" in html
+        assert "LOOKUP" in html
+        assert "NETWORK" in html
+        assert "Raw JSON" in html
+
+    def test_no_inline_event_handlers(self):
+        html = client.get("/", headers=BROWSER_UA).text
+        assert "onclick=" not in html
+        assert "onsubmit=" not in html
+
+    def test_osm_attribution_and_privacy_notice_are_present(self):
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert "OpenStreetMap contributors" in html
+        assert "openstreetmap.org" in html
+
+    def test_json_editor_is_not_loaded_eagerly(self):
+        html = client.get("/", headers=BROWSER_UA).text
+        # The tree only boots when Raw JSON is opened.
+        assert 'id="raw-json"' in html
+        assert "new JSONEditor(" not in html
+        assert "jsoneditor.min.js" not in html
+
+    def test_search_form_targets_the_root_path(self):
+        html = client.get("/", headers=BROWSER_UA).text
+        assert 'id="lookup-form"' in html
+        assert 'id="lookup-input"' in html
+
+
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):
         css = CSS.read_text(encoding="utf-8")

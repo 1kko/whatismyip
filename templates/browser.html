@@ -3,228 +3,149 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IP Information Scanner</title>
-    <link rel="stylesheet" href="/static/css/jsoneditor.css" />
-    <link rel="stylesheet" href="/static/css/whatismyip.css" />
-    <link rel="icon" type="image/png" href="/static/favicon-96x96.png" sizes="96x96" />
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <link rel="shortcut icon" href="/static/favicon.ico" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png" />
-    <link rel="manifest" href="/static/site.webmanifest" />
-    <script src="/static/js/jsoneditor.min.js"></script>
+    <title>{{ view.target }} — WhatIsMyIP</title>
+    <link rel="preload" href="/static/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/static/css/whatismyip.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="shortcut icon" href="/static/favicon.ico">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+    <link rel="manifest" href="/static/site.webmanifest">
 </head>
 <body>
-    <div class="container">
-        <form id="lookup-form" class="lookup-form" action="/" method="get" autocomplete="off">
-            <input type="text" id="lookup-input" class="lookup-input" name="q" spellcheck="false"
-                   placeholder="Enter a domain or IP address (e.g. google.com, 8.8.8.8)"
-                   aria-label="Domain or IP address to look up" />
-            <button type="submit" class="lookup-button">🔍 Lookup</button>
+<div class="shell">
+    <header class="topbar inset">
+        <span class="wordmark">WhatIsMyIP</span>
+        <form class="search" id="lookup-form" action="/" method="get" autocomplete="off">
+            <input type="text" id="lookup-input" name="q" spellcheck="false"
+                   placeholder="Enter a domain or IP address"
+                   aria-label="Domain or IP address to look up">
+            <kbd>/</kbd>
         </form>
+    </header>
 
-        <div class="header">
-            <div class="header-left">
-                <h1>Lookup for <span id="target-title">Loading...</span></h1>
+    <section class="band">
+        {% if view_map %}
+        <div class="map" id="page-map"></div>
+        {% endif %}
+        <div class="band__scrim"></div>
+        <div class="band__fade"></div>
+        <div class="hero inset">
+            <div class="hero__label">
+                <span class="eyebrow">{{ view.eyebrow }}</span>
+                <button type="button" class="copy-btn" id="copy-target" data-value="{{ view.target }}">Copy</button>
             </div>
-            <div class="header-right">
-                <a href="https://github.com/1kko/whatismyip" class="github-link" target="_blank" rel="noopener noreferrer">
-                    📦 View on GitHub
-                </a>
-            </div>
-        </div>
-
-        <div id="success-message" class="success-message">
-            JSON copied to clipboard!
-        </div>
-
-
-        <div class="section" id="location-section">
-            <div class="section-header" data-toggle="location-section">
-                <h2>📍 Location</h2>
-                <span class="toggle-icon">🔺</span>
-            </div>
-            <div class="section-content">
-                <div class="code-container">
-                    <button class="copy-button" data-copy="location-data">📋</button>
-                    <div id="location-data"></div>
-                </div>
-            </div>
-        </div>
-
-        <div class="section" id="whois-section">
-            <div class="section-header" data-toggle="whois-section">
-                <h2>ℹ️ WHOIS</h2>
-                <span class="toggle-icon">🔺</span>
-            </div>
-            <div class="section-content">
-                <div class="code-container">
-                    <button class="copy-button" data-copy="whois-data">📋</button>
-                    <div id="whois-data"></div>
-                </div>
-            </div>
-        </div>
-
-        <div class="section" id="dns-section">
-            <div class="section-header" data-toggle="dns-section">
-                <h2>🗄️ DNS</h2>
-                <span class="toggle-icon">🔺</span>
-            </div>
-            <div class="section-content">
-                <div class="code-container">
-                    <button class="copy-button" data-copy="dns-data">📋</button>
-                    <div id="dns-data"></div>
-                </div>
-            </div>
-        </div>
-
-        <div class="section" id="browser-section">
-            <div class="section-header" data-toggle="browser-section">
-                <h2>🌐 Your Browser</h2>
-                <span class="toggle-icon">🔺</span>
-            </div>
-            <div class="section-content">
-                <div class="code-container">
-                    <button class="copy-button" data-copy="browser-data">📋</button>
-                    <div id="browser-data"></div>
-                </div>
-            </div>
-        </div>
-
-        <div class="section" id="notice-section">
-            <div class="section-header" data-toggle="notice-section">
+            <div class="hero__row">
                 <div>
-                    🔌 <strong>Looking for API?</strong>
-                </div>
-                <span class="toggle-icon">🔻</span>
-            </div>
-
-            
-            <div class="section-content collapsed">
-                <span>For programmatic access, just make requests without a browser User-Agent.</span>
-                <div class="code-examples">
-                    <div class="example-block">
-                        <h3>💻 cURL Examples</h3>
-                        <div class="code-container">
-                            <pre id="example-curl"># Get your own IP info
-curl -X GET "{{ request.base_url }}" \
-     -H "Accept: application/json" \
-     -H "User-Agent: curl/7.64.1"
-
-# Get info for IP address
-curl -X GET "{{ request.base_url }}8.8.8.8" \
-     -H "Accept: application/json" \
-     -H "User-Agent: curl/7.64.1"
-
-# Get info for domain
-curl -X GET "{{ request.base_url }}google.com" \
-     -H "Accept: application/json" \
-     -H "User-Agent: curl/7.64.1"
-                            </pre>
-                        </div>
-                    </div>                    
-                    <div class="example-block">
-                        <h3>📄 Current Response (full JSON data)</h3>
-                        <div class="code-container">
-                            <button class="copy-button" data-copy="full-json">📋</button>
-                            <div id="full-json"></div>
-                        </div>
+                    <h1 class="ip mono">{{ view.target }}</h1>
+                    <div class="tags">
+                        {% for tag in view.tags %}
+                        <span class="tag tone-{{ tag.tone }}">{{ tag.text }}</span>
+                        {% endfor %}
                     </div>
                 </div>
+                <div class="origin">
+                    <div class="origin__country">
+                        <span class="origin__flag">{{ view.flag }}</span>
+                        <span>{{ view.country_name }}</span>
+                    </div>
+                    {% if view.city_line %}<span class="origin__city">{{ view.city_line }}</span>{% endif %}
+                    {% if view.asn_line %}<span class="origin__asn">{{ view.asn_line }}</span>{% endif %}
+                    {% if view.distance_text %}<span class="origin__distance">{{ view.distance_text }}</span>{% endif %}
+                </div>
             </div>
         </div>
+    </section>
 
-    </div>
+    <main class="inset">
+        {% if view_map %}
+        <section class="mobile-map">
+            <div class="mobile-map__header">
+                <h2 class="facts__title">LOCATION</h2>
+                <span class="hint">{{ view.distance_text or view.city_line or view.country_name }}</span>
+            </div>
+            <div class="mobile-map__card map" id="mobile-map"></div>
+        </section>
+        {% endif %}
 
-    <script nonce="{{ nonce }}">
-        // Parse the JSON data. Do not change this line, it's parsed by server using Jinja2 template.
-        const jsonData = {{ json_data | safe }};
-        dataMap = {
-            'full-json': jsonData,
-            'location-data': jsonData.location,
-            'whois-data': jsonData.whois,
-            'dns-data': jsonData.domain,
-            'browser-data': jsonData.headers,
-        }
-        
-        function initializeJsonEditor(elementId, data) {
-            const container = document.getElementById(elementId);
-            const options = { mode: 'view', search: false, navigationBar: false, mainMenuBar: false, indentation: 2 };
-            const editor = new JSONEditor(container, options);
-            editor.set(data);
-            editor.expandAll();
-        }
+        <section class="facts">
+            {% for column in view.facts %}
+            <div class="facts__col">
+                <h2 class="facts__title">{{ column.title }}</h2>
+                {% for row in column.rows %}
+                <div class="kv">
+                    <span class="kv-label">{{ row.label }}</span>
+                    <span class="kv-value tone-{{ row.tone }}">{{ row.value }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endfor %}
+        </section>
 
-        function copySection(elementId) {
-            console.log(elementId);
-            const text = JSON.stringify(dataMap[elementId], null, 2);
-            navigator.clipboard.writeText(text).then(() => {
-                showSuccessMessage();
-            });
-        }
+        <section class="accordions">
+            {% for item in view.accordions %}
+            <details class="accordion" id="acc-{{ item.id }}">
+                <summary class="accordion__header">
+                    <span class="accordion__title">{{ item.title }}</span>
+                    <span class="hint">{{ item.hint }}</span>
+                </summary>
+                <div class="accordion__body">
+                    {% if item.id == 'raw' %}
+                    <div id="raw-json"></div>
+                    {% elif item.id == 'dns' %}
+                    <table class="records">
+                        <thead><tr><th>TYPE</th><th>NAME</th><th>VALUE</th><th>TTL</th></tr></thead>
+                        <tbody>
+                        {% for record in dns_rows %}
+                        <tr>
+                            <td>{{ record.type }}</td>
+                            <td>{{ record.name }}</td>
+                            <td>{{ record.value }}</td>
+                            <td>{{ record.ttl }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="4" class="tone-muted">No records</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    {% elif item.id == 'headers' %}
+                    <table class="records">
+                        <tbody>
+                        {% for key, value in headers.items() %}
+                        <tr><td>{{ key }}</td><td colspan="3">{{ value }}</td></tr>
+                        {% else %}
+                        <tr><td colspan="4" class="tone-muted">No headers</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    {% else %}
+                    <table class="records">
+                        <tbody>
+                        {% for key, value in whois.items() %}
+                        <tr><td>{{ key }}</td><td colspan="3">{{ value }}</td></tr>
+                        {% else %}
+                        <tr><td colspan="4" class="tone-muted">No WHOIS data</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    {% endif %}
+                </div>
+            </details>
+            {% endfor %}
+        </section>
+    </main>
 
-        function showSuccessMessage() {
-            const message = document.getElementById('success-message');
-            message.style.display = 'block';
-            
-            setTimeout(() => {
-                message.style.display = 'none';
-            }, 2000);
-        }
+    <footer class="footer inset">
+        <span class="mono">curl -H "Accept: application/json" {{ request.base_url }}{{ view.target }}</span>
+        <span>Map tiles load directly from
+            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">openstreetmap.org</a>
+            · © OpenStreetMap contributors</span>
+        <a href="https://github.com/1kko/whatismyip" target="_blank" rel="noopener noreferrer">1kko/whatismyip</a>
+    </footer>
+</div>
 
-        function toggleSection(sectionId) {
-            const section = document.getElementById(sectionId);
-            const header = section.querySelector('.section-header');
-            const content = section.querySelector('.section-content');
-            header.classList.toggle('collapsed');
-            content.classList.toggle('collapsed');
-        }
-
-        function updateTargetTitle(title) {
-            document.getElementById('target-title').textContent = title;
-        }
-
-        // Accept pasted URLs too: "https://google.com/path?x=1" -> "google.com"
-        function normalizeLookupTarget(raw) {
-            return raw
-                .trim()
-                .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
-                .split(/[/?#]/)[0];
-        }
-
-        function submitLookup(event) {
-            event.preventDefault();
-            const target = normalizeLookupTarget(document.getElementById('lookup-input').value);
-            if (!target) {
-                return;
-            }
-            window.location.assign('/' + encodeURIComponent(target));
-        }
-
-        // entry point
-        document.addEventListener('DOMContentLoaded', function() {
-            // update target title
-            updateTargetTitle(jsonData.address);
-
-            // Enter in the input submits the form, which routes to /{value}
-            document.getElementById('lookup-form').addEventListener('submit', submitLookup);
-
-            // fillup all sections with json editor
-            for (const [key, value] of Object.entries(dataMap)) {
-                initializeJsonEditor(key, value);
-            }
-
-            // Wire click handlers via data-* attributes (CSP nonce doesn't
-            // cover inline event handlers, so onclick="..." is forbidden).
-            document.querySelectorAll('[data-toggle]').forEach(el => {
-                el.addEventListener('click', () => toggleSection(el.dataset.toggle));
-            });
-            document.querySelectorAll('[data-copy]').forEach(el => {
-                el.addEventListener('click', (e) => {
-                    e.stopPropagation();  // don't also toggle the section
-                    copySection(el.dataset.copy);
-                });
-            });
-        });
-    </script>
+<script type="application/json" id="page-data" nonce="{{ nonce }}">{{ json_data | safe }}</script>
+<script type="application/json" id="map-data" nonce="{{ nonce }}">{{ map_data | safe }}</script>
+<script src="/static/js/app.js" nonce="{{ nonce }}" defer></script>
+<script src="/static/js/map.js" nonce="{{ nonce }}" defer></script>
 </body>
-</html> 
+</html>
