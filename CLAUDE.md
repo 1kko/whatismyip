@@ -51,7 +51,10 @@ python main.py
 
 ### Testing
 ```bash
-# Run all tests (requires service running on localhost:8000)
+# Unit + TestClient tests — no running service needed
+pytest tests/test_geo.py tests/test_mapgeom.py tests/test_viewmodel.py tests/test_page.py
+
+# Run all tests (test_basic.py and test_security.py require localhost:8000)
 pytest
 
 # Run specific test
@@ -120,17 +123,54 @@ poetry run ruff format .
 ### Project Structure
 ```
 whatismyip/
-├── main.py              # Single-file FastAPI application with all logic
+├── main.py              # FastAPI app: routes, managers, security headers, page rendering
+├── geo.py               # Gazetteer lookup + haversine distance
+├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
+├── viewmodel.py         # response_data -> template view (pure, no I/O)
+├── scripts/
+│   ├── build_gazetteer.py  # regenerates static/geo/*.json from GeoNames
+│   └── fetch_fonts.sh      # vendors Inter + JetBrains Mono into static/fonts/
+├── templates/
+│   └── browser.html     # server-rendered page (no client-side templating)
+├── static/
+│   ├── css/whatismyip.css  # design tokens + layout (dark only)
+│   ├── js/app.js           # search, copy, accordions, lazy JSONEditor
+│   ├── js/map.js           # paints the server's map payload
+│   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs)
+│   └── geo/                # cities.json, countries.json (generated, committed)
 ├── tests/
-│   └── test_basic.py    # Integration tests (requires running service)
-├── templates/           # Jinja2 HTML templates for browser responses
-│   └── browser.html
-├── static/              # Static assets (CSS, JS, images)
+│   ├── test_geo.py      # gazetteer + distance (unit)
+│   ├── test_mapgeom.py  # projection, tiles, arcs (unit)
+│   ├── test_viewmodel.py# view model (unit)
+│   ├── test_page.py     # API + HTML via TestClient (no live server needed)
+│   ├── test_basic.py    # integration (requires running service)
+│   └── test_security.py # integration (requires running service)
 ├── data/                # Volume mount for persistent data (Docker)
 ├── Dockerfile           # Multi-stage build with poetry + uv
 ├── Makefile             # Docker workflow automation
 └── pyproject.toml       # Poetry dependencies and project metadata
 ```
+
+### Map subsystem
+
+**Coordinates**: geoip2fast returns city names but `latitude`/`longitude` are ALWAYS
+`null`. Coordinates come from `static/geo/cities.json` (GeoNames cities15000), with a
+population-weighted country centroid as fallback. Private IPs get no map.
+
+**Projection**: all map math is server-side and unit-tested (`tests/test_mapgeom.py`).
+The server emits tile URLs with pixel offsets plus a projected great-circle polyline for
+two fixed canvases (desktop band 1440×300, mobile card 350×170); `static/js/map.js` only
+paints them.
+
+**Antimeridian**: Seoul → California crosses the Pacific. The map centers on the
+shortest-path midpoint longitude and wraps tile x by 2^zoom; a naive Mercator straight
+line would run the wrong way across Europe. `fit_zoom()` frames the whole sampled arc,
+not just the endpoints, because the great circle bulges far north of both cities.
+
+**Tiles**: fetched by the browser straight from `tile.openstreetmap.org` (no API key).
+CSP allows exactly that one host in `img-src`. Tiles are requested one zoom level out and
+painted at 2× so a page view costs ~4 requests, and inverted in CSS to turn OSM's light
+basemap dark. **Attribution is mandatory** and appears on the map and in the footer.
 
 ### Dependencies
 
