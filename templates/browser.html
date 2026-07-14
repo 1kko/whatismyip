@@ -42,11 +42,22 @@
                     </div>
                 </div>
                 <div class="origin">
+                    {% if view.map_link %}
+                    <a class="origin__place" href="{{ view.map_link }}" target="_blank" rel="noopener noreferrer"
+                       title="Open this location on OpenStreetMap">
+                        <span class="origin__country">
+                            <span class="origin__flag">{{ view.flag }}</span>
+                            <span>{{ view.country_name }}</span>
+                        </span>
+                        {% if view.city_line %}<span class="origin__city">{{ view.city_line }}</span>{% endif %}
+                    </a>
+                    {% else %}
                     <div class="origin__country">
                         <span class="origin__flag">{{ view.flag }}</span>
                         <span>{{ view.country_name }}</span>
                     </div>
                     {% if view.city_line %}<span class="origin__city">{{ view.city_line }}</span>{% endif %}
+                    {% endif %}
                     {% if view.asn_line %}<span class="origin__asn">{{ view.asn_line }}</span>{% endif %}
                     {% if view.distance_text %}<span class="origin__distance">{{ view.distance_text }}</span>{% endif %}
                 </div>

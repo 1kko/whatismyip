@@ -125,6 +125,11 @@ class TestBrowserPage:
         assert 'id="curl-example"' in raw_block
         assert "curl http://testserver/8.8.8.8" in raw_block
 
+    def test_place_name_links_out_to_openstreetmap(self):
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert 'class="origin__place" href="https://www.openstreetmap.org/#map=' in html
+        assert 'target="_blank" rel="noopener noreferrer"' in html
+
     def test_osm_attribution_is_rendered_on_the_map(self):
         # OSM only requires attribution on or beside the map; map.js paints the
         # chip, so the footer no longer repeats it.

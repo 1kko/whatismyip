@@ -210,12 +210,23 @@ body {
   gap: 8px;
   text-align: right;
 }
+.origin__place {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  color: inherit;
+  text-decoration: none;
+}
+.origin__place:hover .origin__country { color: var(--accent); }
+.origin__place:hover .origin__city { text-decoration: underline; }
 .origin__country {
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: 16px;
   font-weight: 500;
+  transition: color 0.2s ease;
 }
 .origin__flag { font-size: 22px; }
 .origin__city { font-size: 13px; color: var(--text-secondary); }
@@ -429,11 +440,11 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 .map__pin-dot { fill: var(--accent); }
 .map__pin--origin .map__pin-halo { fill: #8B97AC1F; stroke: #8B97AC66; }
 .map__pin--origin .map__pin-dot { fill: var(--text-secondary); }
-/* Sits above the bottom fade, so it stays legible instead of dissolving. */
+/* Sits mid-way up the 140px bottom fade. */
 .map__attribution {
   position: absolute;
   right: 24px;
-  bottom: 110px;
+  bottom: 70px;
   padding: 4px 8px;
   background: #0B0D12B3;
   border-radius: 6px;

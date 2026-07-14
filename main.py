@@ -960,6 +960,7 @@ def build_map_payload(
     payload = {
         "desktop": build_canvas(target, route_origin, **DESKTOP_CANVAS),
         "mobile": build_canvas(target, route_origin, **MOBILE_CANVAS),
+        "target": target,
         "precision": target["precision"],
         "origin_city": origin_city if route_origin else None,
         "origin_country": (origin_location or {}).get("country_code")

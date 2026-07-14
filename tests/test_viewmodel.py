@@ -173,6 +173,30 @@ class TestAccordions:
         assert items["headers"] == "1 header"
 
 
+class TestOsmLink:
+    def test_city_precision_links_deep(self):
+        response = dict(
+            IP_RESPONSE,
+            map={"target": {"lat": 37.5665, "lon": 126.978, "precision": "city"}},
+        )
+        assert (
+            build_view(response, is_self=True)["map_link"]
+            == "https://www.openstreetmap.org/#map=11/37.5665/126.978"
+        )
+
+    def test_country_precision_zooms_out(self):
+        response = dict(
+            IP_RESPONSE,
+            map={"target": {"lat": 39.5, "lon": -98.35, "precision": "country"}},
+        )
+        assert build_view(response, is_self=True)["map_link"].startswith(
+            "https://www.openstreetmap.org/#map=5/"
+        )
+
+    def test_no_map_no_link(self):
+        assert build_view(dict(IP_RESPONSE, map=None), is_self=True)["map_link"] is None
+
+
 class TestMetaLine:
     def test_reports_elapsed_time_and_server_clock(self):
         response = dict(

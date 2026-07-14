@@ -26,6 +26,15 @@ def format_distance(distance_km: float | None) -> str | None:
     return f"≈ {round(distance_km):,} km from you"
 
 
+def osm_link(map_payload: dict | None) -> str | None:
+    """Deep link to the same spot on openstreetmap.org."""
+    target = (map_payload or {}).get("target")
+    if not target:
+        return None
+    zoom = 11 if target.get("precision") == "city" else 5
+    return f"https://www.openstreetmap.org/#map={zoom}/{target['lat']}/{target['lon']}"
+
+
 def format_meta(elapsed_ms: int | None, when: Any) -> str:
     """Footer line: how long the lookup took, and the server's clock."""
     parts = []
@@ -292,6 +301,7 @@ def build_view(response: dict, is_self: bool) -> dict:
         "city_line": city_line,
         "asn_line": location.get("asn_name") or "",
         "distance_text": format_distance(response.get("distance_km")),
+        "map_link": osm_link(response.get("map")),
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
         "accordions": _accordions(response),
