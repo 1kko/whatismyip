@@ -125,6 +125,20 @@ class TestBrowserPage:
         assert 'id="curl-example"' in raw_block
         assert "curl http://testserver/8.8.8.8" in raw_block
 
+    def test_curl_example_uses_the_scheme_the_visitor_actually_used(self):
+        # Behind a TLS-terminating proxy the ASGI scope still says http://, so a
+        # copied command would point at the wrong scheme.
+        html = local_client.get(
+            "/8.8.8.8", headers={**BROWSER_UA, "x-forwarded-proto": "https"}
+        ).text
+        assert "curl https://testserver/8.8.8.8" in html
+
+    def test_forwarded_proto_from_an_untrusted_peer_is_ignored(self):
+        html = client.get(
+            "/8.8.8.8", headers={**BROWSER_UA, "x-forwarded-proto": "https"}
+        ).text
+        assert "curl http://testserver/8.8.8.8" in html
+
     def test_place_name_links_out_to_openstreetmap(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert 'class="origin__place" href="https://www.openstreetmap.org/#map=' in html

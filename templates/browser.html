@@ -105,11 +105,11 @@
                 </summary>
                 <div class="accordion__body">
                     {% if item.id == 'raw' %}
-                    <p class="api-note">Send a non-browser User-Agent and this same lookup returns JSON:</p>
+                    <p class="api-note">Any non-browser client gets JSON — curl, wget and friends already qualify:</p>
                     <div class="code">
-                        <pre id="curl-example">curl {{ request.base_url }}{{ view.target }}</pre>
+                        <pre id="curl-example">curl {{ api_base }}{{ view.target }}</pre>
                         <button type="button" class="copy-btn" id="copy-curl"
-                                data-value="curl {{ request.base_url }}{{ view.target }}">Copy</button>
+                                data-value="curl {{ api_base }}{{ view.target }}">Copy</button>
                     </div>
                     <div id="raw-json"></div>
                     {% elif item.id == 'dns' %}

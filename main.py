@@ -1025,6 +1025,28 @@ async def lookup_location(ip: str) -> dict:
     return data
 
 
+def public_base_url(request: Request) -> str:
+    """The URL a visitor would actually type, not the one uvicorn sees.
+
+    Behind a TLS-terminating proxy the ASGI scope still says http://, so the
+    copyable curl command would hand out the wrong scheme. Trust
+    x-forwarded-proto only from a peer we already trust for x-real-ip; uvicorn's
+    own --forwarded-allow-ips is deliberately NOT widened, because it would
+    rewrite scope["client"] and defeat get_client_ip()'s spoofing check.
+    """
+    base = str(request.base_url)
+    peer = request.client.host if request.client else None
+    if not _peer_is_trusted(peer):
+        return base
+
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    if proto in ("http", "https"):
+        _, separator, rest = base.partition("://")
+        if separator:
+            return f"{proto}://{rest}"
+    return base
+
+
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
@@ -1042,6 +1064,7 @@ def render_page(request: Request, response_data: dict, is_self: bool):
         {
             "view": view,
             "view_map": map_data is not None,
+            "api_base": public_base_url(request),
             "dns_rows": _dns_rows(response_data),
             "headers": response_data.get("headers") or {},
             "whois": {k: str(v) for k, v in whois_data.items()},
