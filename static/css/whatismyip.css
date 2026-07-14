@@ -68,23 +68,23 @@ body {
 .shell { max-width: 1440px; margin: 0 auto; }
 .inset { padding-inline: var(--gutter); }
 
-/* Topbar — floats over the map band, no chrome of its own */
+/* Topbar — floats over the map band, no chrome of its own. The wordmark lives
+   in the footer, so this is only the search field. */
 .topbar {
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
+  justify-content: flex-end;
   padding-block: 20px;
 }
 .wordmark {
   display: flex;
   align-items: center;
   gap: 9px;
+  color: var(--text-primary);
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
   white-space: nowrap;
-  text-shadow: 0 0 14px #0B0D12, 0 1px 3px #0B0D12;
 }
 .wordmark::before {
   content: "";
@@ -425,7 +425,7 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 @media (max-width: 900px) {
   :root { --gutter: 20px; }
 
-  .topbar { flex-direction: column; align-items: stretch; gap: 12px; padding-block: 14px; }
+  .topbar { padding-block: 14px; }
   .search { width: 100%; height: 44px; }
   .band { height: auto; padding-bottom: 8px; }
   .band .map { display: none; }

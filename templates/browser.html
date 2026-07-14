@@ -19,7 +19,6 @@
         {% endif %}
 
         <header class="topbar inset">
-            <span class="wordmark">WhatIsMyIP</span>
             <form class="search" id="lookup-form" action="/" method="get" autocomplete="off">
                 <input type="text" id="lookup-input" name="q" spellcheck="false"
                        placeholder="Enter a domain or IP address"
@@ -140,6 +139,7 @@
     </main>
 
     <footer class="footer inset">
+        <span class="wordmark">WhatIsMyIP</span>
         <span class="mono">{{ view.meta_line }}</span>
         <a class="icon-link" href="https://github.com/1kko/whatismyip" target="_blank"
            rel="noopener noreferrer" aria-label="Source on GitHub" title="1kko/whatismyip">
