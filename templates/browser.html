@@ -13,20 +13,21 @@
 </head>
 <body>
 <div class="shell">
-    <header class="topbar inset">
-        <span class="wordmark">WhatIsMyIP</span>
-        <form class="search" id="lookup-form" action="/" method="get" autocomplete="off">
-            <input type="text" id="lookup-input" name="q" spellcheck="false"
-                   placeholder="Enter a domain or IP address"
-                   aria-label="Domain or IP address to look up">
-            <kbd>/</kbd>
-        </form>
-    </header>
-
     <section class="band">
         {% if view_map %}
         <div class="map" id="page-map"></div>
         {% endif %}
+
+        <header class="topbar inset">
+            <span class="wordmark">WhatIsMyIP</span>
+            <form class="search" id="lookup-form" action="/" method="get" autocomplete="off">
+                <input type="text" id="lookup-input" name="q" spellcheck="false"
+                       placeholder="Enter a domain or IP address"
+                       aria-label="Domain or IP address to look up">
+                <kbd>/</kbd>
+            </form>
+        </header>
+
         <div class="hero inset">
             <div class="hero__label">
                 <span class="eyebrow">{{ view.eyebrow }}</span>

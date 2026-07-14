@@ -68,14 +68,14 @@ body {
 .shell { max-width: 1440px; margin: 0 auto; }
 .inset { padding-inline: var(--gutter); }
 
-/* Topbar */
+/* Topbar — floats over the map band, no chrome of its own */
 .topbar {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding-block: 16px;
-  border-bottom: 1px solid var(--border);
+  padding-block: 20px;
 }
 .wordmark {
   display: flex;
@@ -84,6 +84,7 @@ body {
   font-weight: 600;
   font-size: 14px;
   white-space: nowrap;
+  text-shadow: 0 0 14px #0B0D12, 0 1px 3px #0B0D12;
 }
 .wordmark::before {
   content: "";
@@ -126,8 +127,8 @@ body {
 }
 
 /* Hero over the map band */
-.band { position: relative; height: 300px; overflow: hidden; }
-.hero { position: relative; padding-top: 52px; }
+.band { position: relative; height: 380px; overflow: hidden; }
+.hero { position: relative; padding-top: 28px; }
 /* The band is a flat-dimmed map, not a gradient, so OSM's own place labels can
    sit right behind the small hero text. A soft halo keeps ours on top. */
 .hero .eyebrow,
@@ -424,9 +425,9 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 @media (max-width: 900px) {
   :root { --gutter: 20px; }
 
-  .topbar { flex-direction: column; align-items: stretch; gap: 12px; }
+  .topbar { flex-direction: column; align-items: stretch; gap: 12px; padding-block: 14px; }
   .search { width: 100%; height: 44px; }
-  .band { height: auto; }
+  .band { height: auto; padding-bottom: 8px; }
   .band .map { display: none; }
   /* No text sits over the mobile card, so it needs far less dimming. */
   .mobile-map__card .map__scrim { background: #0B0D1259; }

@@ -926,7 +926,7 @@ gazetteer = Gazetteer.load()
 # focused right of centre and fitted into the free width beside it. Both canvases
 # fetch tiles at native zoom (tile_zoom_offset 0) so roads and place names stay
 # legible; that costs ~15 tile requests on desktop and ~6 on mobile.
-DESKTOP_CANVAS = {"width": 1440, "height": 300, "focus_x": 0.58, "fit_ratio": 0.4}
+DESKTOP_CANVAS = {"width": 1440, "height": 380, "focus_x": 0.58, "fit_ratio": 0.4}
 MOBILE_CANVAS = {"width": 350, "height": 170, "focus_x": 0.5, "fit_ratio": 0.78}
 
 
