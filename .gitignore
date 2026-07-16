@@ -177,3 +177,9 @@ data/banned_ips.json
 data/geo_rules.json
 # GeoIP database: ~21MB, downloaded and refreshed at runtime. Never commit it.
 data/*.dat.gz
+
+# Claude Code local state: plugins, worktrees, per-machine settings
+.claude/
+
+# Superpowers planning/spec scratch (generated per task)
+docs/superpowers/
