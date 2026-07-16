@@ -165,6 +165,13 @@ class TestBrowserPage:
         assert "onclick=" not in html
         assert "onsubmit=" not in html
 
+    def test_ssl_certificate_section_renders_and_reports_absence_for_an_ip(self):
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert "SSL certificate" in html  # the accordion is always present
+        # An IP lookup never has a certificate, so the section says so.
+        section = html.split('id="acc-ssl"')[1].split("</details>")[0]
+        assert "No certificate" in section
+
     def test_footer_reports_timing_and_links_github_as_an_icon(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert "resolved in" in html

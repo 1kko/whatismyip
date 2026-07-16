@@ -549,6 +549,20 @@ class SSLManager:
             sock.connect((verified_ip, 443))
             with ctx.wrap_socket(sock, server_hostname=hostname) as s:
                 cert = s.getpeercert()
+                if not cert:
+                    return None
+                # Enrich with connection-level details ("SSL type"): the
+                # negotiated TLS protocol and cipher. Must be read inside the
+                # with-block, before the socket closes.
+                cert = dict(cert)
+                cert["protocol"] = s.version()
+                negotiated = s.cipher()
+                if negotiated:
+                    cert["cipher"] = {
+                        "name": negotiated[0],
+                        "protocol": negotiated[1],
+                        "bits": negotiated[2],
+                    }
             return cert
         except Exception:
             logging.exception(

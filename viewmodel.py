@@ -86,6 +86,79 @@ def _cert_expiry(ssl_data: dict) -> tuple[str, int | None]:
     return parsed.date().isoformat(), days_left
 
 
+def _cert_subject_cn(ssl_data: dict) -> str:
+    for rdn in ssl_data.get("subject", ()):
+        for key, value in rdn:
+            if key == "commonName":
+                return value
+    return DASH
+
+
+def _cert_san(ssl_data: dict) -> list[str]:
+    return [
+        value for kind, value in ssl_data.get("subjectAltName", ()) if kind == "DNS"
+    ]
+
+
+def _format_cert_date(raw: str | None) -> str:
+    if not raw:
+        return DASH
+    try:
+        parsed = datetime.datetime.strptime(raw, "%b %d %H:%M:%S %Y %Z")
+        return parsed.date().isoformat()
+    except ValueError:
+        return raw
+
+
+def _ssl_status(ssl_data: dict) -> tuple[str, str]:
+    _, days_left = _cert_expiry(ssl_data)
+    if days_left is None:
+        return DASH, "muted"
+    if days_left < 0:
+        return "expired", "danger"
+    if days_left < 14:
+        return f"valid · {days_left}d left", "warning"
+    return f"valid · {days_left}d left", "success"
+
+
+def ssl_rows(ssl_data: dict | None) -> list[dict]:
+    """Detailed certificate rows for the SSL accordion. Empty when there is no
+    certificate (IP lookups, private/reserved targets, or an unreachable host)."""
+    if not ssl_data:
+        return []
+    status, tone = _ssl_status(ssl_data)
+    cipher = ssl_data.get("cipher") or {}
+    cipher_text = f"{cipher.get('name')} ({cipher.get('bits')}-bit)" if cipher else DASH
+    san = _cert_san(ssl_data)
+    return [
+        {"label": "Status", "value": status, "tone": tone},
+        {"label": "Issuer (CA)", "value": _cert_issuer(ssl_data), "tone": "default"},
+        {"label": "Subject", "value": _cert_subject_cn(ssl_data), "tone": "default"},
+        {
+            "label": "Protocol",
+            "value": ssl_data.get("protocol") or DASH,
+            "tone": "default",
+        },
+        {"label": "Cipher", "value": cipher_text, "tone": "default"},
+        {
+            "label": "Valid from",
+            "value": _format_cert_date(ssl_data.get("notBefore")),
+            "tone": "default",
+        },
+        {
+            "label": "Valid until",
+            "value": _format_cert_date(ssl_data.get("notAfter")),
+            "tone": "default",
+        },
+        {"label": "SAN", "value": ", ".join(san) if san else DASH, "tone": "default"},
+        {
+            "label": "Serial",
+            "value": ssl_data.get("serialNumber") or DASH,
+            "tone": "default",
+        },
+    ]
+
+
 def _network_column(location: dict, address: str) -> dict:
     # geoip2fast has no AS number, only the ASN's announced block and its name,
     # so this row is labelled for what it actually holds.
@@ -256,10 +329,20 @@ def _accordions(response: dict) -> list[dict]:
         f"{label} {len(domain.get(key) or [])}"
         for label, key in (("A", "a"), ("MX", "mx"), ("NS", "ns"), ("TXT", "txt"))
     )
+
+    ssl_data = response.get("ssl")
+    if not ssl_data:
+        ssl_hint = "no certificate"
+    else:
+        issuer = _cert_issuer(ssl_data)
+        _, days_left = _cert_expiry(ssl_data)
+        ssl_hint = issuer if days_left is None else f"{issuer} · {days_left}d left"
+
     header_count = len(headers)
     return [
         {"id": "whois", "title": "WHOIS", "hint": whois_hint},
         {"id": "dns", "title": "DNS records", "hint": dns_hint},
+        {"id": "ssl", "title": "SSL certificate", "hint": ssl_hint},
         {
             "id": "headers",
             "title": "Your headers",
@@ -305,4 +388,5 @@ def build_view(response: dict, is_self: bool) -> dict:
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
         "accordions": _accordions(response),
+        "ssl_rows": ssl_rows(response.get("ssl")),
     }

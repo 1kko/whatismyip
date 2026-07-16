@@ -138,6 +138,16 @@
                         {% endfor %}
                         </tbody>
                     </table>
+                    {% elif item.id == 'ssl' %}
+                    <table class="records">
+                        <tbody>
+                        {% for row in view.ssl_rows %}
+                        <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{{ row.value }}</td></tr>
+                        {% else %}
+                        <tr><td colspan="4" class="tone-muted">No certificate</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
                     {% else %}
                     <table class="records">
                         <tbody>
