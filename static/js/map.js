@@ -65,18 +65,6 @@ function attribution() {
   return box;
 }
 
-// A triangle defined pointing along +x; the server's bearing rotates it to sit
-// tangent to the arc, pointing at the destination.
-function arrowHead(arrow, compact) {
-  const s = compact ? 6 : 9;
-  const d = `M ${s} 0 L ${-s * 0.72} ${s * 0.66} L ${-s * 0.72} ${-s * 0.66} Z`;
-  return svg("path", {
-    class: "map__arrow",
-    d,
-    transform: `translate(${arrow.x} ${arrow.y}) rotate(${arrow.angle})`,
-  });
-}
-
 function paint(container, canvas, distanceText) {
   // Everything the server projected lives on a fixed-size stage that is scaled
   // to cover the band. Tiles, pins and the arc scale together, so they stay
@@ -117,12 +105,24 @@ function paint(container, canvas, distanceText) {
   const compact = canvas.width < 600;
   if (canvas.line) {
     const points = canvas.line.map(([x, y]) => `${x},${y}`).join(" ");
-    // Solid base arc, then a dotted overlay that flows toward the destination.
     overlay.appendChild(svg("polyline", { class: "map__line", points }));
-    overlay.appendChild(svg("polyline", { class: "map__line--flow", points }));
-  }
-  if (canvas.arrow) {
-    overlay.appendChild(arrowHead(canvas.arrow, compact));
+    // Small arrows flowing along the arc toward the destination — replaces the
+    // old dotted overlay and the single static arrowhead. offset-path animates
+    // each arrow along the exact projected polyline; a staggered negative delay
+    // spaces them out and offset-rotate keeps them tangent (pointing forward).
+    const d = "M " + canvas.line.map(([x, y]) => `${x} ${y}`).join(" L ");
+    const count = compact ? 1 : 2;
+    const size = compact ? 4 : 6;
+    const dur = compact ? 4.5 : 6;
+    const head = `M ${size} 0 L ${-size * 0.7} ${size * 0.62} L ${-size * 0.7} ${-size * 0.62} Z`;
+    for (let i = 0; i < count; i++) {
+      const arrow = svg("path", { class: "map__flow-arrow", d: head });
+      arrow.style.offsetPath = `path("${d}")`;
+      arrow.style.offsetDistance = `${(i / count) * 100}%`;
+      arrow.style.animationDuration = `${dur}s`;
+      arrow.style.animationDelay = `${(-i / count) * dur}s`;
+      overlay.appendChild(arrow);
+    }
   }
   if (canvas.origin) {
     overlay.appendChild(pin(canvas.origin.x, canvas.origin.y, true, compact));
