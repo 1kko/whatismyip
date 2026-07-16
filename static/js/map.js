@@ -75,12 +75,18 @@ function pin(x, y, isOrigin, compact, label) {
 function attribution() {
   const box = document.createElement("div");
   box.className = "map__attribution";
-  const link = document.createElement("a");
-  link.href = "https://www.openstreetmap.org/copyright";
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.textContent = "OpenStreetMap";
-  box.append("© ", link, " contributors");
+  const osm = document.createElement("a");
+  osm.href = "https://www.openstreetmap.org/copyright";
+  osm.target = "_blank";
+  osm.rel = "noopener noreferrer";
+  osm.textContent = "OpenStreetMap";
+  // GeoLite2 data is created by MaxMind; attribution is required by its licence.
+  const mm = document.createElement("a");
+  mm.href = "https://www.maxmind.com";
+  mm.target = "_blank";
+  mm.rel = "noopener noreferrer";
+  mm.textContent = "MaxMind";
+  box.append("© ", osm, " contributors · GeoLite2 by ", mm);
   return box;
 }
 

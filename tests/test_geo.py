@@ -52,6 +52,37 @@ class TestResolve:
         assert result["precision"] == "city"
         assert 37.0 < result["lat"] < 38.0
 
+    def test_overlaid_coordinates_win_and_carry_accuracy(self, gazetteer):
+        # GeoLite2-City overlays real lat/lon + accuracy onto the location; the
+        # gazetteer must use them directly — even for a city name it has never
+        # heard of — and pass the accuracy radius through.
+        location = {
+            "country_code": "US",
+            "city": {
+                "name": "Nowheresville",
+                "latitude": 37.751,
+                "longitude": -97.822,
+                "accuracy_radius": 20,
+            },
+            "is_private": False,
+        }
+        result = gazetteer.resolve(location)
+        assert result["precision"] == "city"
+        assert (result["lat"], result["lon"]) == (37.751, -97.822)
+        assert result["accuracy_km"] == 20
+
+    def test_a_coarse_fix_keeps_country_zoom(self, gazetteer):
+        # An anycast/country-centroid fix comes back with a huge accuracy radius;
+        # keep the coordinates but do not pretend it is street-level.
+        location = {
+            "country_code": "US",
+            "city": {"latitude": 37.751, "longitude": -97.822, "accuracy_radius": 1000},
+            "is_private": False,
+        }
+        result = gazetteer.resolve(location)
+        assert result["precision"] == "country"
+        assert result["accuracy_km"] == 1000
+
     def test_falls_back_to_country_centroid_when_city_missing(self, gazetteer):
         location = {"country_code": "US", "city": {"name": ""}, "is_private": False}
         result = gazetteer.resolve(location)

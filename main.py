@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import gzip
 import hmac
 import ipaddress
 import json
@@ -12,6 +13,7 @@ import secrets
 import socket
 import ssl
 import time
+import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import TimedRotatingFileHandler
@@ -20,6 +22,7 @@ from urllib.parse import urlparse
 
 import dns.resolver
 import dns.reversename
+import maxminddb
 import orjson
 import uvicorn
 import whois
@@ -173,6 +176,20 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 GEOIP_DATA_FILE = os.getenv(
     "GEOIP_DATA_FILE",
     os.path.join(_APP_DIR, "data", "geoip2fast.dat.gz"),
+)
+
+# City-level geolocation from a GeoLite2-City mmdb. geoip2fast supplies country
+# and ASN but leaves latitude/longitude null; this overlays real coordinates,
+# the precise city, and an accuracy radius. The source URL is configurable, so
+# the free mirror can be swapped for a personal MaxMind licence, DB-IP, or a
+# local file without any code change.
+GEOIP_CITY_DB_URL = os.getenv(
+    "GEOIP_CITY_DB_URL",
+    "https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz",
+)
+GEOIP_CITY_DB_FILE = os.getenv(
+    "GEOIP_CITY_DB_FILE",
+    os.path.join(_APP_DIR, "data", "GeoLite2-City.mmdb"),
 )
 
 # Background Job Intervals
@@ -334,6 +351,16 @@ class GeoIpManager:
             self.instance = GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE)
         else:
             self.instance = GeoIP2Fast()
+        self.city_reader = self._open_city_reader()
+
+    @staticmethod
+    def _open_city_reader():
+        if os.path.exists(GEOIP_CITY_DB_FILE):
+            try:
+                return maxminddb.open_database(GEOIP_CITY_DB_FILE)
+            except Exception:
+                logging.exception("Could not open GeoLite2-City database")
+        return None
 
     def update_database(self):
         try:
@@ -349,6 +376,30 @@ class GeoIpManager:
         except Exception as e:
             logging.exception(f"Error updating GeoIP2Fast database: {str(e)}")
 
+    def update_city_database(self):
+        """Download and unpack the GeoLite2-City mmdb, then hot-swap the reader.
+        The mirror tracks MaxMind's twice-weekly release; the URL is env-tunable
+        so it can point at a licensed MaxMind download or a local file instead."""
+        try:
+            os.makedirs(os.path.dirname(GEOIP_CITY_DB_FILE), exist_ok=True)
+            # GEOIP_CITY_DB_URL is operator-set config (an https mirror or a
+            # local file:// path), not user input, so any scheme is intentional.
+            with urllib.request.urlopen(  # noqa: S310
+                GEOIP_CITY_DB_URL, timeout=120
+            ) as resp:
+                data = gzip.decompress(resp.read())
+            tmp = GEOIP_CITY_DB_FILE + ".tmp"
+            with open(tmp, "wb") as handle:
+                handle.write(data)
+            os.replace(tmp, GEOIP_CITY_DB_FILE)
+            old = self.city_reader
+            self.city_reader = maxminddb.open_database(GEOIP_CITY_DB_FILE)
+            if old:
+                old.close()
+            logging.info("GeoLite2-City database updated (%d bytes)", len(data))
+        except Exception:
+            logging.exception("Error updating GeoLite2-City database")
+
     def fetch_location(self, ip: str) -> Dict[str, Any]:
         location = self.instance.lookup(ip).to_dict()
         # geoip2fast returns "city" as an empty string when using the
@@ -356,7 +407,37 @@ class GeoIpManager:
         # safely use .get() without type checks.
         if not isinstance(location.get("city"), dict):
             location["city"] = {}
+        self._overlay_city(ip, location)
         return location
+
+    def _overlay_city(self, ip: str, location: Dict[str, Any]) -> None:
+        """Fill in the precise city, coordinates, and accuracy radius from
+        GeoLite2-City. geoip2fast keeps country/ASN duty; MaxMind supplies the
+        latitude/longitude geoip2fast always leaves null."""
+        if not self.city_reader or location.get("is_private"):
+            return
+        try:
+            record = self.city_reader.get(ip)
+        except Exception:
+            record = None
+        if not record:
+            return
+        city = location["city"]
+        loc = record.get("location") or {}
+        if loc.get("latitude") is not None and loc.get("longitude") is not None:
+            city["latitude"] = loc.get("latitude")
+            city["longitude"] = loc.get("longitude")
+            city["accuracy_radius"] = loc.get("accuracy_radius")
+        mm_city = ((record.get("city") or {}).get("names") or {}).get("en")
+        if mm_city:
+            city["name"] = mm_city
+        subdivisions = record.get("subdivisions") or []
+        if subdivisions:
+            names = subdivisions[0].get("names") or {}
+            if names.get("en"):
+                city["subdivision_name"] = names["en"]
+            if subdivisions[0].get("iso_code"):
+                city["subdivision_code"] = subdivisions[0]["iso_code"]
 
 
 class DomainManager:
@@ -1193,6 +1274,7 @@ geo_block_manager = GeoBlockManager(geo_ip_manager)
 # Initialize scheduler and add jobs
 scheduler = BackgroundScheduler()
 scheduler.add_job(geo_ip_manager.update_database, "interval", days=3)
+scheduler.add_job(geo_ip_manager.update_city_database, "interval", days=3)
 scheduler.add_job(
     ip_ban_manager.cleanup_expired_bans, "interval", seconds=CLEANUP_INTERVAL_SECONDS
 )
@@ -1201,6 +1283,10 @@ scheduler.add_job(
 )
 scheduler.start()
 geo_ip_manager.update_database()
+# The city DB is ~60MB, so only fetch it on first boot; the scheduler refreshes
+# it afterwards. Lookups degrade gracefully to geoip2fast until it lands.
+if not os.path.exists(GEOIP_CITY_DB_FILE):
+    geo_ip_manager.update_city_database()
 
 
 class BrowserDetector:

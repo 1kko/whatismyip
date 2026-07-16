@@ -175,8 +175,9 @@ service.log.*
 # security data files
 data/banned_ips.json
 data/geo_rules.json
-# GeoIP database: ~21MB, downloaded and refreshed at runtime. Never commit it.
+# GeoIP databases: downloaded and refreshed at runtime. Never commit them.
 data/*.dat.gz
+data/*.mmdb
 
 # Claude Code local state: plugins, worktrees, per-machine settings
 .claude/
