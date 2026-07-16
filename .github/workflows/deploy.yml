@@ -24,7 +24,13 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          version: latest
+          # Pinned on purpose. `latest` makes the action resolve the version via
+          # pkgs.tailscale.com/stable/?mode=json, which serves text/html and
+          # intermittently returns an HTML error page instead of JSON — that
+          # crashes the action ("Unexpected token '<' ... is not valid JSON")
+          # and kills the deploy before it ever joins the tailnet. A pinned
+          # version downloads the tarball directly and skips that lookup.
+          version: "1.98.9"
 
       - name: Trigger Coolify deploy
         env:
