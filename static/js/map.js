@@ -34,7 +34,20 @@ function housePath(x, y, s) {
   ].join(" ");
 }
 
-function pin(x, y, isOrigin, compact) {
+// A short label (an IP) centred under a pin, with a dark outline so it stays
+// legible over the basemap.
+function pinLabel(x, y, text) {
+  const node = svg("text", {
+    class: "map__pin-label",
+    x,
+    y,
+    "text-anchor": "middle",
+  });
+  node.textContent = text;
+  return node;
+}
+
+function pin(x, y, isOrigin, compact, label) {
   const group = svg("g", {
     class: isOrigin ? "map__pin map__pin--origin" : "map__pin",
   });
@@ -43,6 +56,9 @@ function pin(x, y, isOrigin, compact) {
     const [halo, house] = compact ? [16, 7] : [24, 10];
     group.appendChild(svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: halo }));
     group.appendChild(svg("path", { class: "map__pin-home", d: housePath(x, y, house) }));
+    if (label) {
+      group.appendChild(pinLabel(x, y + house + (compact ? 12 : 15), label));
+    }
     return group;
   }
   // [halo radius, ring radius, dot radius]
@@ -50,6 +66,9 @@ function pin(x, y, isOrigin, compact) {
   group.appendChild(svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: halo }));
   group.appendChild(svg("circle", { class: "map__pin-ring", cx: x, cy: y, r: ring }));
   group.appendChild(svg("circle", { class: "map__pin-dot", cx: x, cy: y, r: dot }));
+  if (label) {
+    group.appendChild(pinLabel(x, y + ring + (compact ? 12 : 15), label));
+  }
   return group;
 }
 
@@ -65,7 +84,7 @@ function attribution() {
   return box;
 }
 
-function paint(container, canvas, distanceText) {
+function paint(container, canvas, distanceText, originIp, targetIp) {
   // Everything the server projected lives on a fixed-size stage that is scaled
   // to cover the band. Tiles, pins and the arc scale together, so they stay
   // aligned at any viewport width instead of leaving dead space on wide screens.
@@ -125,9 +144,13 @@ function paint(container, canvas, distanceText) {
     }
   }
   if (canvas.origin) {
-    overlay.appendChild(pin(canvas.origin.x, canvas.origin.y, true, compact));
+    overlay.appendChild(
+      pin(canvas.origin.x, canvas.origin.y, true, compact, originIp),
+    );
   }
-  overlay.appendChild(pin(canvas.target.x, canvas.target.y, false, compact));
+  overlay.appendChild(
+    pin(canvas.target.x, canvas.target.y, false, compact, targetIp),
+  );
   stage.appendChild(overlay);
 
   container.appendChild(stage);
@@ -196,7 +219,13 @@ if (mapData) {
     const canvas = mapData[variant];
     cover =
       container && canvas
-        ? paint(container, canvas, mapData.distance_text)
+        ? paint(
+            container,
+            canvas,
+            mapData.distance_text,
+            mapData.origin_ip,
+            mapData.target_ip,
+          )
         : null;
   };
 

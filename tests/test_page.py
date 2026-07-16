@@ -81,6 +81,16 @@ class TestMapPayload:
         ):
             assert key in body
 
+    def test_pins_carry_ip_labels_on_a_route(self):
+        body = client.get("/8.8.8.8", headers=JSON_UA).json()
+        assert body["map"]["target_ip"] == "8.8.8.8"
+        assert body["map"]["origin_ip"] == SEOUL_IP
+
+    def test_self_lookup_labels_only_the_target_ip(self):
+        body = client.get("/", headers=JSON_UA).json()
+        assert body["map"]["target_ip"] == SEOUL_IP
+        assert body["map"]["origin_ip"] is None
+
 
 class TestDnsRows:
     DOMAIN = {
