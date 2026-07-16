@@ -172,6 +172,23 @@ class TestBrowserPage:
         section = html.split('id="acc-ssl"')[1].split("</details>")[0]
         assert "No certificate" in section
 
+    def test_footer_wordmark_shows_the_current_domain(self):
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert '<span class="wordmark">testserver</span>' in html
+
+    def test_footer_wordmark_falls_back_when_host_is_a_bare_ip(self):
+        html = client.get(
+            "/8.8.8.8", headers={**BROWSER_UA, "host": "203.0.113.9"}
+        ).text
+        assert '<span class="wordmark">ip.1kko.com</span>' in html
+
+    def test_footer_wordmark_uses_the_public_base_url_domain(self, monkeypatch):
+        import main
+
+        monkeypatch.setattr(main, "PUBLIC_BASE_URL", "https://ip.1kko.com")
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert '<span class="wordmark">ip.1kko.com</span>' in html
+
     def test_footer_reports_timing_and_links_github_as_an_icon(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert "resolved in" in html

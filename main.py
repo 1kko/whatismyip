@@ -16,6 +16,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import TimedRotatingFileHandler
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 import dns.resolver
 import dns.reversename
@@ -1133,6 +1134,22 @@ def public_base_url(request: Request) -> str:
     return base
 
 
+SITE_DOMAIN_FALLBACK = os.getenv("SITE_DOMAIN_FALLBACK", "ip.1kko.com")
+
+
+def site_domain(request: Request) -> str:
+    """The domain shown as the footer wordmark: the host the visitor actually
+    reached us on, falling back to a fixed domain when that host is missing or
+    is a bare IP address (i.e. there is no real domain to show)."""
+    host = urlparse(public_base_url(request)).hostname or ""
+    try:
+        ipaddress.ip_address(host)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+    return host if host and not is_ip else SITE_DOMAIN_FALLBACK
+
+
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
@@ -1151,6 +1168,7 @@ def render_page(request: Request, response_data: dict, is_self: bool):
             "view": view,
             "view_map": map_data is not None,
             "api_base": public_base_url(request),
+            "site_domain": site_domain(request),
             "dns_rows": _dns_rows(response_data),
             "headers": response_data.get("headers") or {},
             "whois": {k: str(v) for k, v in whois_data.items()},
