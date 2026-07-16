@@ -176,3 +176,28 @@ class TestBuildCanvas:
         assert canvas["height"] == 170
         assert 0 <= canvas["target"]["x"] <= 350
         assert not math.isnan(canvas["target"]["y"])
+
+    def test_route_mode_has_direction_arrow_on_the_arc(self):
+        canvas = build_canvas(MOUNTAIN_VIEW, SEOUL, *DESKTOP)
+        arrow = canvas["arrow"]
+        assert arrow is not None
+        line = canvas["line"]
+        # The arrow anchors on the projected polyline, ~70% toward the target.
+        anchor = line[round(0.70 * (len(line) - 1))]
+        assert arrow["x"] == pytest.approx(anchor[0], abs=0.5)
+        assert arrow["y"] == pytest.approx(anchor[1], abs=0.5)
+
+    def test_arrow_heading_points_toward_the_target(self):
+        canvas = build_canvas(MOUNTAIN_VIEW, SEOUL, *DESKTOP)
+        arrow = canvas["arrow"]
+        target = canvas["target"]
+        heading = (
+            math.cos(math.radians(arrow["angle"])),
+            math.sin(math.radians(arrow["angle"])),
+        )
+        to_target = (target["x"] - arrow["x"], target["y"] - arrow["y"])
+        # The heading has a positive component pointing at the destination.
+        assert heading[0] * to_target[0] + heading[1] * to_target[1] > 0
+
+    def test_city_mode_has_no_arrow(self):
+        assert build_canvas(SEOUL, None, *DESKTOP)["arrow"] is None
