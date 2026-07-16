@@ -13,6 +13,7 @@ import socket
 import ssl
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import TimedRotatingFileHandler
 from typing import Any, Dict
 
@@ -70,6 +71,66 @@ logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
 TIMEOUT_SECONDS = 5
+
+# DNS record sweep: query the fast, cached public resolvers concurrently with a
+# bounded per-query budget. The old code switched to the domain's authoritative
+# nameservers and issued every record type in series, so one slow or distant
+# nameserver (and the PTR/MX-host queries those servers never answer) turned into
+# 20-30s stalls. get_records was the single biggest source of tail latency.
+PUBLIC_RESOLVERS = ["8.8.8.8", "1.1.1.1"]
+DNS_QUERY_TIMEOUT = float(os.getenv("DNS_QUERY_TIMEOUT", "2"))  # per nameserver
+DNS_QUERY_LIFETIME = float(os.getenv("DNS_QUERY_LIFETIME", "3"))  # per query, total
+
+# WHOIS is slow (~1.2s median, up to a ~10s timeout ceiling on some registries)
+# and its data is effectively static, so cache it and cap how long a single
+# lookup may block the response.
+WHOIS_TIMEOUT_SECONDS = float(os.getenv("WHOIS_TIMEOUT_SECONDS", "4"))
+WHOIS_CACHE_TTL = int(os.getenv("WHOIS_CACHE_TTL", "21600"))  # 6h for a hit
+WHOIS_CACHE_ERROR_TTL = int(os.getenv("WHOIS_CACHE_ERROR_TTL", "300"))  # 5m for a miss
+
+
+def _recursive_resolver() -> dns.resolver.Resolver:
+    """A resolver pointed at the public recursive DNS servers.
+
+    Public resolvers are heavily cached and close to the datacentre, so they
+    answer far faster than a domain's own authoritative nameservers, and they
+    actually answer PTR / MX-host A queries (which authoritative NS refuse).
+    """
+    resolver = dns.resolver.Resolver(configure=False)
+    resolver.nameservers = list(PUBLIC_RESOLVERS)
+    resolver.timeout = DNS_QUERY_TIMEOUT
+    resolver.lifetime = DNS_QUERY_LIFETIME
+    return resolver
+
+
+class TTLCache:
+    """Tiny time-bounded cache. Read/written only from the event-loop thread, so
+    it needs no lock; eviction is FIFO once it reaches maxsize."""
+
+    def __init__(self, maxsize: int = 1024):
+        self._data: dict[str, tuple[float, Any]] = {}
+        self._maxsize = maxsize
+
+    def get(self, key: str) -> Any:
+        item = self._data.get(key)
+        if not item:
+            return None
+        expires_at, value = item
+        if expires_at < time.time():
+            self._data.pop(key, None)
+            return None
+        return value
+
+    def set(self, key: str, value: Any, ttl: float) -> None:
+        if key not in self._data and len(self._data) >= self._maxsize:
+            self._data.pop(next(iter(self._data)), None)
+        self._data[key] = (time.time() + ttl, value)
+
+    def clear(self) -> None:
+        self._data.clear()
+
+
+_whois_cache = TTLCache()
 
 
 class SafeORJSONResponse(ORJSONResponse):
@@ -318,6 +379,8 @@ class DomainManager:
     def get_records(
         self, domain: str, ns_servers: list | None = None, ip: str | None = None
     ) -> dict:
+        # ns_servers is kept for signature compatibility but unused: every query
+        # now goes to the cached public resolvers (see _recursive_resolver).
         records = {
             "mx": [],
             "ns": [],
@@ -327,154 +390,130 @@ class DomainManager:
             "ptr": [],
             "a": [],
         }
-
-        # Get NS records
-        resolver = dns.resolver.Resolver(configure=False)
-        # Use public DNS servers to avoid Docker DNS issues
-        resolver.nameservers = ["8.8.8.8", "1.1.1.1"]
-
-        if ns_servers and len(ns_servers) > 1:
-            for ns in ns_servers:
-                server = (
-                    ns if self.is_ipv4(ns) else str(dns.resolver.resolve(ns, "A")[0])
-                )
-                resolver.nameservers.append(server)
-        else:
-            try:
-                ns_records = resolver.resolve(self.remove_subdomains(domain), "NS")
-                if ns_records:
-                    resolver.nameservers = [
-                        str(dns.resolver.resolve(str(r.target), "A")[0])
-                        for r in ns_records
-                    ]
-            except (
-                dns.resolver.NoAnswer,
-                dns.resolver.NXDOMAIN,
-                dns.resolver.NoNameservers,
-            ) as e:
-                logging.warning(f"Failed to get NS records for {domain}: {str(e)}")
-                ns_records = None
-
-        # Only process NS records if we successfully retrieved them
-        if ns_servers or (not ns_servers and ns_records):
-            try:
-                for r in ns_records:
-                    ns_ip = str(dns.resolver.resolve(str(r.target), "A")[0])
-                    records["ns"].append(
-                        {
-                            "hostname": r.target.to_text(),
-                            "ttl": ns_records.rrset.ttl,
-                            "ip": ns_ip,
-                        }
-                    )
-            except Exception as e:
-                logging.warning(f"Failed to process NS records: {str(e)}")
-
-        # Get A records
-        try:
-            a_records = resolver.resolve(domain, "A")
-            for r in a_records:
-                records["a"].append({"ip": str(r), "ttl": a_records.rrset.ttl})
-        except (
-            dns.resolver.NoAnswer,
-            dns.resolver.NXDOMAIN,
-            dns.resolver.NoNameservers,
-        ):
-            pass
-
-        try:
-            mx_records = resolver.resolve(self.remove_subdomains(domain), "MX")
-            for r in mx_records:
-                try:
-                    mx_ip = str(resolver.resolve(str(r.exchange), "A")[0])
-                except Exception:
-                    mx_ip = None
-                records["mx"].append(
-                    {
-                        "preference": r.preference,
-                        "hostname": r.exchange.to_text(),
-                        "ttl": mx_records.rrset.ttl,
-                        "ip": mx_ip,
-                    }
-                )
-        except (
-            dns.resolver.NoAnswer,
-            dns.resolver.NXDOMAIN,
-            dns.resolver.NoNameservers,
-        ):
-            pass
-
-        try:
-            cname_record = resolver.resolve(domain, "CNAME")
-            records["cname"] = {
-                "cname": cname_record.rrset[0].target.to_text(),
-                "ttl": cname_record.rrset.ttl,
-            }
-        except (
-            dns.resolver.NoAnswer,
-            dns.resolver.NXDOMAIN,
-            dns.resolver.NoNameservers,
-        ):
-            records["cname"] = None
-
-        try:
-            txt_records = resolver.resolve(domain, "TXT")
-            for r in txt_records:
-                text_parts = [s.decode("utf-8", errors="replace") for s in r.strings]
-                records["txt"].append(
-                    {"text": text_parts, "ttl": txt_records.rrset.ttl}
-                )
-                joined = " ".join(text_parts)
-                if joined.startswith("v=spf1"):
-                    records["spf"].append(
-                        {"text": joined, "ttl": txt_records.rrset.ttl}
-                    )
-        except (
-            dns.resolver.NoAnswer,
-            dns.resolver.NXDOMAIN,
-            dns.resolver.NoNameservers,
-        ):
-            pass
-
-        # Also check base domain TXT/SPF if querying a subdomain
         base_domain = self.remove_subdomains(domain)
-        if base_domain != domain:
-            try:
-                base_txt_records = resolver.resolve(base_domain, "TXT")
-                for r in base_txt_records:
-                    text_parts = [
-                        s.decode("utf-8", errors="replace") for s in r.strings
-                    ]
-                    joined = " ".join(text_parts)
-                    if joined.startswith("v=spf1"):
-                        # Avoid duplicates
-                        if not any(s["text"] == joined for s in records["spf"]):
-                            records["spf"].append(
-                                {"text": joined, "ttl": base_txt_records.rrset.ttl}
-                            )
-            except (
-                dns.resolver.NoAnswer,
-                dns.resolver.NXDOMAIN,
-                dns.resolver.NoNameservers,
-            ):
-                pass
 
-        # Get PTR records (reverse DNS)
-        lookup_ip = ip
-        if not lookup_ip and records["a"]:
-            lookup_ip = records["a"][0]["ip"]
-        if lookup_ip:
+        def a_ip(name: str) -> str | None:
             try:
-                reverse_name = dns.reversename.from_address(lookup_ip)
-                ptr_records = resolver.resolve(
-                    reverse_name, "PTR", lifetime=TIMEOUT_SECONDS
+                return str(_recursive_resolver().resolve(name, "A")[0])
+            except Exception:
+                return None
+
+        def fetch_ns() -> list:
+            try:
+                answer = _recursive_resolver().resolve(base_domain, "NS")
+            except Exception:
+                return []
+            targets = [r.target for r in answer]
+            with ThreadPoolExecutor(max_workers=max(len(targets), 1)) as pool:
+                ips = list(pool.map(lambda t: a_ip(str(t)), targets))
+            return [
+                {"hostname": t.to_text(), "ttl": answer.rrset.ttl, "ip": ip_}
+                for t, ip_ in zip(targets, ips)
+            ]
+
+        def fetch_a() -> list:
+            try:
+                answer = _recursive_resolver().resolve(domain, "A")
+            except Exception:
+                return []
+            return [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer]
+
+        def fetch_mx() -> list:
+            try:
+                answer = _recursive_resolver().resolve(base_domain, "MX")
+            except Exception:
+                return []
+            rows = list(answer)
+            with ThreadPoolExecutor(max_workers=max(len(rows), 1)) as pool:
+                ips = list(pool.map(lambda r: a_ip(str(r.exchange)), rows))
+            return [
+                {
+                    "preference": r.preference,
+                    "hostname": r.exchange.to_text(),
+                    "ttl": answer.rrset.ttl,
+                    "ip": ip_,
+                }
+                for r, ip_ in zip(rows, ips)
+            ]
+
+        def fetch_cname():
+            try:
+                answer = _recursive_resolver().resolve(domain, "CNAME")
+            except Exception:
+                return None
+            return {
+                "cname": answer.rrset[0].target.to_text(),
+                "ttl": answer.rrset.ttl,
+            }
+
+        def spf_from(answer) -> list:
+            spf = []
+            for r in answer:
+                joined = " ".join(
+                    s.decode("utf-8", errors="replace") for s in r.strings
                 )
-                for r in ptr_records:
-                    records["ptr"].append(
-                        {"hostname": str(r), "ttl": ptr_records.rrset.ttl}
-                    )
+                if joined.startswith("v=spf1"):
+                    spf.append({"text": joined, "ttl": answer.rrset.ttl})
+            return spf
+
+        def fetch_txt():
+            try:
+                answer = _recursive_resolver().resolve(domain, "TXT")
+            except Exception:
+                return [], []
+            txt = [
+                {
+                    "text": [s.decode("utf-8", errors="replace") for s in r.strings],
+                    "ttl": answer.rrset.ttl,
+                }
+                for r in answer
+            ]
+            return txt, spf_from(answer)
+
+        def fetch_base_spf() -> list:
+            if base_domain == domain:
+                return []
+            try:
+                answer = _recursive_resolver().resolve(base_domain, "TXT")
+            except Exception:
+                return []
+            return spf_from(answer)
+
+        def fetch_ptr(lookup_ip: str) -> list:
+            try:
+                answer = _recursive_resolver().resolve(
+                    dns.reversename.from_address(lookup_ip), "PTR"
+                )
             except Exception:
                 logging.debug("PTR record lookup failed for %s", lookup_ip)
+                return []
+            return [{"hostname": str(r), "ttl": answer.rrset.ttl} for r in answer]
+
+        # Every record type is independent, so sweep them at once against the
+        # cached public resolvers instead of walking them in series.
+        with ThreadPoolExecutor(max_workers=7) as pool:
+            f_ns = pool.submit(fetch_ns)
+            f_a = pool.submit(fetch_a)
+            f_mx = pool.submit(fetch_mx)
+            f_cname = pool.submit(fetch_cname)
+            f_txt = pool.submit(fetch_txt)
+            f_base_spf = pool.submit(fetch_base_spf)
+            f_ptr = pool.submit(fetch_ptr, ip) if ip else None
+
+            records["ns"] = f_ns.result()
+            records["a"] = f_a.result()
+            records["mx"] = f_mx.result()
+            records["cname"] = f_cname.result()
+            records["txt"], records["spf"] = f_txt.result()
+            for entry in f_base_spf.result():
+                if not any(s["text"] == entry["text"] for s in records["spf"]):
+                    records["spf"].append(entry)
+            if f_ptr is not None:
+                records["ptr"] = f_ptr.result()
+
+        # Fallback only when a caller omits ip (all current callers pass it).
+        if not ip and records["a"]:
+            records["ptr"] = fetch_ptr(records["a"][0]["ip"])
 
         return records
 
@@ -1025,11 +1064,28 @@ def _dns_rows(response_data: dict) -> list[dict]:
 
 
 async def lookup_whois(target: str) -> dict:
+    key = (target or "").strip().lower()
+    cached = _whois_cache.get(key)
+    if cached is not None:
+        return cached
     try:
-        return await asyncio.to_thread(whois.whois, target, quiet=True)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(whois.whois, target, quiet=True),
+            timeout=WHOIS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        # wait_for cannot cancel the worker thread, so the underlying whois call
+        # keeps running and is discarded; the response no longer waits on it.
+        logging.warning("WHOIS lookup timed out for %s", sanitize_log_input(target))
+        result = {"error": "WHOIS lookup timed out"}
     except Exception:
         logging.exception("WHOIS lookup failed for %s", sanitize_log_input(target))
-        return {"error": "WHOIS lookup failed"}
+        result = {"error": "WHOIS lookup failed"}
+    if not result:
+        result = {"error": "WHOIS lookup failed"}
+    failed = isinstance(result, dict) and result.get("error")
+    _whois_cache.set(key, result, WHOIS_CACHE_ERROR_TTL if failed else WHOIS_CACHE_TTL)
+    return result
 
 
 async def lookup_location(ip: str) -> dict:
