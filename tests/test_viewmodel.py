@@ -133,11 +133,11 @@ class TestFacts:
 
 
 class TestAccordions:
-    def test_four_accordions_in_order(self):
+    def test_accordions_in_order(self):
         ids = [
             item["id"] for item in build_view(IP_RESPONSE, is_self=True)["accordions"]
         ]
-        assert ids == ["whois", "dns", "headers", "raw"]
+        assert ids == ["whois", "dns", "ssl", "headers", "raw"]
 
     def test_hints_summarise_content(self):
         items = {
@@ -171,6 +171,63 @@ class TestAccordions:
         }
         assert items["whois"] == "lookup failed"
         assert items["headers"] == "1 header"
+
+    def test_ssl_hint_present_for_domain_and_absent_for_ip(self):
+        dom = {
+            i["id"]: i["hint"]
+            for i in build_view(DOMAIN_RESPONSE, is_self=False)["accordions"]
+        }
+        assert "Google Trust Services" in dom["ssl"]
+        ip = {
+            i["id"]: i["hint"]
+            for i in build_view(IP_RESPONSE, is_self=True)["accordions"]
+        }
+        assert ip["ssl"] == "no certificate"
+
+
+FULL_SSL = {
+    "subject": ((("commonName", "example.com"),),),
+    "issuer": ((("organizationName", "Let's Encrypt"),), (("commonName", "R3"),)),
+    "notBefore": "Jun 01 00:00:00 2026 GMT",
+    "notAfter": "Sep 14 08:00:00 2026 GMT",
+    "serialNumber": "0ABCDEF",
+    "subjectAltName": (("DNS", "example.com"), ("DNS", "www.example.com")),
+    "protocol": "TLSv1.3",
+    "cipher": {"name": "TLS_AES_256_GCM_SHA384", "protocol": "TLSv1.3", "bits": 256},
+}
+
+
+class TestSslSection:
+    def test_no_certificate_yields_empty_rows(self):
+        assert build_view(IP_RESPONSE, is_self=True)["ssl_rows"] == []
+
+    def test_certificate_rows_expose_ca_protocol_and_dates(self):
+        rows = {
+            r["label"]: r["value"]
+            for r in build_view(dict(DOMAIN_RESPONSE, ssl=FULL_SSL), is_self=False)[
+                "ssl_rows"
+            ]
+        }
+        assert rows["Issuer (CA)"] == "Let's Encrypt"
+        assert rows["Subject"] == "example.com"
+        assert rows["Protocol"] == "TLSv1.3"
+        assert "TLS_AES_256_GCM_SHA384" in rows["Cipher"]
+        assert "256-bit" in rows["Cipher"]
+        assert rows["Valid from"] == "2026-06-01"
+        assert rows["Valid until"] == "2026-09-14"
+        assert rows["SAN"] == "example.com, www.example.com"
+        assert rows["Serial"] == "0ABCDEF"
+
+    def test_missing_optional_fields_render_as_dash(self):
+        # DOMAIN_RESPONSE's cert has no subject/protocol/cipher/serial.
+        rows = {
+            r["label"]: r["value"]
+            for r in build_view(DOMAIN_RESPONSE, is_self=False)["ssl_rows"]
+        }
+        assert rows["Issuer (CA)"] == "Google Trust Services"
+        assert rows["Protocol"] == "—"
+        assert rows["Cipher"] == "—"
+        assert rows["Subject"] == "—"
 
 
 class TestOsmLink:
