@@ -156,7 +156,7 @@ class TestBrowserPage:
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert "WhatIsMyIP" in html
         assert "8.8.8.8" in html
-        assert "LOOKUP" in html
+        assert "IPv4" in html  # a hero tag, rendered above the address
         assert "NETWORK" in html
         assert "Raw JSON" in html
 

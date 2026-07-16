@@ -189,7 +189,14 @@ body {
 
 /* Hero over the map band */
 .band { position: relative; height: 380px; overflow: hidden; }
-.hero { position: relative; padding-top: 28px; }
+.hero {
+  position: relative;
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
 /* The band is a flat-dimmed map, not a gradient, so OSM's own place labels can
    sit right behind the small hero text. A soft halo keeps ours on top. */
 .hero .eyebrow,
@@ -198,11 +205,6 @@ body {
 .hero .origin__city,
 .hero .origin__asn {
   text-shadow: 0 0 14px #0B0D12, 0 1px 3px #0B0D12;
-}
-.hero__label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 .eyebrow {
   font-size: 11px;
@@ -223,13 +225,6 @@ body {
   cursor: pointer;
 }
 .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
-.hero__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  margin-top: 20px;
-}
 .ip {
   margin: 0;
   font-size: 56px;
@@ -237,7 +232,7 @@ body {
   letter-spacing: -1px;
   overflow-wrap: anywhere;
 }
-.tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.tags { display: flex; flex-wrap: wrap; gap: 8px; }
 .tag {
   padding: 4px 9px;
   border: 1px solid var(--border);
@@ -260,14 +255,14 @@ body {
 .origin {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 8px;
-  text-align: right;
+  text-align: left;
 }
 .origin__place {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 8px;
   color: inherit;
   text-decoration: none;
@@ -575,9 +570,7 @@ table.records--dns td:nth-child(4) {
   .mobile-map__card .map__fade { display: none; }
   .mobile-map__card .map__attribution { right: 8px; bottom: 8px; }
   .hero { padding-top: 28px; padding-bottom: 8px; }
-  .hero__row { flex-direction: column; align-items: flex-start; gap: 14px; }
   .ip { font-size: 32px; }
-  .origin { align-items: flex-start; text-align: left; }
   .facts { grid-template-columns: 1fr; gap: 24px; padding-block: 24px; }
   .facts__col { padding-inline: 0; }
   .facts__col + .facts__col {
