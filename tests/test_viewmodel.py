@@ -215,7 +215,7 @@ class TestSslSection:
         assert "256-bit" in rows["Cipher"]
         assert rows["Valid from"] == "2026-06-01"
         assert rows["Valid until"] == "2026-09-14"
-        assert "example.com" in rows["SAN"] and "www.example.com" in rows["SAN"]
+        assert rows["SAN"] == "example.com, www.example.com"
         assert rows["Serial"] == "0ABCDEF"
 
     def test_missing_optional_fields_render_as_dash(self):
