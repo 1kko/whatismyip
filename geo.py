@@ -20,6 +20,9 @@ CITY_ZOOM = 10
 COUNTRY_ZOOM = 4
 MIN_ROUTE_KM = 25.0
 EARTH_RADIUS_KM = 6371.0088
+# Above this GeoLite2 accuracy radius the fix is really country/region level
+# (anycast, country centroid), so it should not zoom to street level.
+MAX_CITY_ACCURACY_KM = 200
 
 
 def normalize_city(name: str) -> str:
@@ -57,17 +60,34 @@ class Gazetteer:
         return cls(cities, countries)
 
     def resolve(self, location: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Best-effort coordinates for a geoip2fast location dict."""
+        """Best-effort coordinates for a location dict.
+
+        Prefers the precise latitude/longitude a GeoLite2-City lookup overlays
+        onto the location; falls back to matching the city name against the
+        local gazetteer, then to a country centroid.
+        """
         if not location or location.get("is_private"):
             return None
+
+        city = location.get("city") or {}
+        lat, lon = city.get("latitude"), city.get("longitude")
+        if lat is not None and lon is not None:
+            accuracy_km = city.get("accuracy_radius")
+            precise = accuracy_km is not None and accuracy_km <= MAX_CITY_ACCURACY_KM
+            return {
+                "lat": lat,
+                "lon": lon,
+                "precision": "city" if precise else "country",
+                "accuracy_km": accuracy_km,
+            }
 
         country = (location.get("country_code") or "").strip().upper()
         if len(country) != 2 or not country.isalpha():
             return None
 
-        city = (location.get("city") or {}).get("name") or ""
-        if city:
-            point = self.cities.get(f"{country}:{normalize_city(city)}")
+        name = city.get("name") or ""
+        if name:
+            point = self.cities.get(f"{country}:{normalize_city(name)}")
             if point:
                 return {"lat": point[0], "lon": point[1], "precision": "city"}
 
