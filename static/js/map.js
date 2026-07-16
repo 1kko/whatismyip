@@ -65,6 +65,18 @@ function attribution() {
   return box;
 }
 
+// A triangle defined pointing along +x; the server's bearing rotates it to sit
+// tangent to the arc, pointing at the destination.
+function arrowHead(arrow, compact) {
+  const s = compact ? 6 : 9;
+  const d = `M ${s} 0 L ${-s * 0.72} ${s * 0.66} L ${-s * 0.72} ${-s * 0.66} Z`;
+  return svg("path", {
+    class: "map__arrow",
+    d,
+    transform: `translate(${arrow.x} ${arrow.y}) rotate(${arrow.angle})`,
+  });
+}
+
 function paint(container, canvas, distanceText) {
   // Everything the server projected lives on a fixed-size stage that is scaled
   // to cover the band. Tiles, pins and the arc scale together, so they stay
@@ -101,16 +113,17 @@ function paint(container, canvas, distanceText) {
     height: canvas.height,
     viewBox: `0 0 ${canvas.width} ${canvas.height}`,
   });
-  if (canvas.line) {
-    overlay.appendChild(
-      svg("polyline", {
-        class: "map__line",
-        points: canvas.line.map(([x, y]) => `${x},${y}`).join(" "),
-      }),
-    );
-  }
   // A pin sized for the 1440px band swamps the little mobile card.
   const compact = canvas.width < 600;
+  if (canvas.line) {
+    const points = canvas.line.map(([x, y]) => `${x},${y}`).join(" ");
+    // Solid base arc, then a dotted overlay that flows toward the destination.
+    overlay.appendChild(svg("polyline", { class: "map__line", points }));
+    overlay.appendChild(svg("polyline", { class: "map__line--flow", points }));
+  }
+  if (canvas.arrow) {
+    overlay.appendChild(arrowHead(canvas.arrow, compact));
+  }
   if (canvas.origin) {
     overlay.appendChild(pin(canvas.origin.x, canvas.origin.y, true, compact));
   }
