@@ -206,3 +206,8 @@ Tests are integration tests that make actual HTTP requests to a running service 
 make serve  # or uvicorn main:app
 pytest
 ```
+
+## Commit Conventions
+- Never include Claude session URLs or metadata in commit messages.
+- Do not add "Co-Authored-By" lines.
+
