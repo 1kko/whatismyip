@@ -534,6 +534,17 @@ table.records--dns td:nth-child(4) {
 .map__pin--origin .map__pin-halo { fill: #8B97AC1F; stroke: #8B97AC66; }
 .map__pin--origin .map__pin-dot { fill: var(--text-secondary); }
 .map__pin-home { fill: var(--text-secondary); }
+.map__pin-label {
+  fill: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  /* Dark outline behind the glyphs keeps the IP legible over the basemap. */
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
 /* Sits mid-way up the 140px bottom fade. */
 .map__attribution {
   position: absolute;
@@ -589,7 +600,7 @@ table.records--dns td:nth-child(4) {
   .mobile-map__header .facts__title { margin: 0; }
   .mobile-map__card {
     position: relative;
-    height: 170px;
+    height: 255px;
     overflow: hidden;
     border: 1px solid var(--border);
     border-radius: 14px;

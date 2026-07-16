@@ -986,7 +986,7 @@ gazetteer = Gazetteer.load()
 # fetch tiles at native zoom (tile_zoom_offset 0) so roads and place names stay
 # legible; that costs ~15 tile requests on desktop and ~6 on mobile.
 DESKTOP_CANVAS = {"width": 1440, "height": 380, "focus_x": 0.58, "fit_ratio": 0.4}
-MOBILE_CANVAS = {"width": 350, "height": 170, "focus_x": 0.5, "fit_ratio": 0.78}
+MOBILE_CANVAS = {"width": 350, "height": 255, "focus_x": 0.5, "fit_ratio": 0.78}
 
 
 def build_map_payload(
@@ -1021,6 +1021,8 @@ def build_map_payload(
         "mobile": build_canvas(target, route_origin, **MOBILE_CANVAS),
         "target": target,
         "precision": target["precision"],
+        "target_ip": (target_location or {}).get("ip"),
+        "origin_ip": (origin_location or {}).get("ip") if route_origin else None,
         "origin_city": origin_city if route_origin else None,
         "origin_country": (origin_location or {}).get("country_code")
         if route_origin
