@@ -517,6 +517,7 @@ table.records--dns td:nth-child(4) {
 .map__pin-dot { fill: var(--accent); }
 .map__pin--origin .map__pin-halo { fill: #8B97AC1F; stroke: #8B97AC66; }
 .map__pin--origin .map__pin-dot { fill: var(--text-secondary); }
+.map__pin-home { fill: var(--text-secondary); }
 /* Sits mid-way up the 140px bottom fade. */
 .map__attribution {
   position: absolute;

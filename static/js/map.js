@@ -14,18 +14,41 @@ function svg(tag, attrs) {
   return node;
 }
 
+// A small house silhouette centred on (x, y): a roof that overhangs the walls
+// so it still reads as a home at pin size. `s` is roughly the half-height.
+function housePath(x, y, s) {
+  const eave = s; // roof half-width, wider than the walls
+  const wall = s * 0.62; // body half-width
+  const shoulderY = y - s * 0.18; // where the roof eaves meet the walls
+  const top = y - s; // roof apex
+  const base = y + s * 0.92; // bottom of the walls
+  return [
+    `M ${x} ${top}`,
+    `L ${x + eave} ${shoulderY}`,
+    `L ${x + wall} ${shoulderY}`,
+    `L ${x + wall} ${base}`,
+    `L ${x - wall} ${base}`,
+    `L ${x - wall} ${shoulderY}`,
+    `L ${x - eave} ${shoulderY}`,
+    "Z",
+  ].join(" ");
+}
+
 function pin(x, y, isOrigin, compact) {
   const group = svg("g", {
     class: isOrigin ? "map__pin map__pin--origin" : "map__pin",
   });
-  const sizes = compact
-    ? { origin: [16, 0, 4], target: [30, 15, 5] }
-    : { origin: [24, 0, 6], target: [48, 24, 7] };
-  const [halo, ring, dot] = isOrigin ? sizes.origin : sizes.target;
-  group.appendChild(svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: halo }));
-  if (ring) {
-    group.appendChild(svg("circle", { class: "map__pin-ring", cx: x, cy: y, r: ring }));
+  if (isOrigin) {
+    // [halo radius, house half-height]
+    const [halo, house] = compact ? [16, 7] : [24, 10];
+    group.appendChild(svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: halo }));
+    group.appendChild(svg("path", { class: "map__pin-home", d: housePath(x, y, house) }));
+    return group;
   }
+  // [halo radius, ring radius, dot radius]
+  const [halo, ring, dot] = compact ? [30, 15, 5] : [48, 24, 7];
+  group.appendChild(svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: halo }));
+  group.appendChild(svg("circle", { class: "map__pin-ring", cx: x, cy: y, r: ring }));
   group.appendChild(svg("circle", { class: "map__pin-dot", cx: x, cy: y, r: dot }));
   return group;
 }
