@@ -27,7 +27,7 @@ orjson = "^3.11.9"
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.15.21"
 pytest = "^9.0.0"
-pip-audit = "^2.7.0"
+pip-audit = "^2.10.1"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
