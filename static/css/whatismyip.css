@@ -512,11 +512,32 @@ table.records--dns td:nth-child(4) {
   stroke-width: 1.5;
   stroke-linecap: round;
 }
+.map__arrow { fill: var(--accent); }
+/* A dotted overlay on the arc. Round caps turn the 0.1-long dashes into dots;
+   the animation marches them from origin toward the destination. */
+.map__line--flow {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-dasharray: 0.1 9;
+  display: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .map__line--flow {
+    display: block;
+    animation: map-flow 0.9s linear infinite;
+  }
+}
+@keyframes map-flow {
+  to { stroke-dashoffset: -9.1; }
+}
 .map__pin-halo { fill: #5B8CFF14; stroke: #5B8CFF33; }
 .map__pin-ring { fill: #5B8CFF29; stroke: #5B8CFF66; }
 .map__pin-dot { fill: var(--accent); }
 .map__pin--origin .map__pin-halo { fill: #8B97AC1F; stroke: #8B97AC66; }
 .map__pin--origin .map__pin-dot { fill: var(--text-secondary); }
+.map__pin-home { fill: var(--text-secondary); }
 /* Sits mid-way up the 140px bottom fade. */
 .map__attribution {
   position: absolute;

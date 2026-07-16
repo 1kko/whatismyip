@@ -17,6 +17,9 @@ MAX_ZOOM = 12
 LINE_SAMPLES = 48
 # Keep both pins away from the canvas edges.
 FIT_MARGIN = 0.8
+# The direction arrowhead sits this far along the projected arc, past the apex
+# (where the distance label lives) so it reads as flowing into the destination.
+ARROW_POSITION = 0.70
 
 
 def _wrap180(degrees: float) -> float:
@@ -107,6 +110,23 @@ def fit_zoom(
     return MIN_ZOOM
 
 
+def _arrow_marker(line: list[list[float]]) -> dict | None:
+    """Anchor point and screen bearing for the direction arrowhead.
+
+    Sits ARROW_POSITION of the way along the projected polyline (which runs
+    origin -> target) and points along the local tangent toward the target end.
+    """
+    if not line or len(line) < 2:
+        return None
+    last = len(line) - 1
+    index = min(max(round(ARROW_POSITION * last), 1), last)
+    prev = line[index - 1]
+    nxt = line[min(index + 1, last)]
+    angle = math.degrees(math.atan2(nxt[1] - prev[1], nxt[0] - prev[0]))
+    ax, ay = line[index]
+    return {"x": round(ax, 2), "y": round(ay, 2), "angle": round(angle, 2)}
+
+
 def build_canvas(
     target: dict[str, float],
     origin: dict[str, float] | None,
@@ -186,6 +206,7 @@ def build_canvas(
         "target": {"x": round(target_x, 2), "y": round(target_y, 2)},
         "origin": None,
         "line": None,
+        "arrow": None,
     }
 
     if origin is not None:
@@ -200,4 +221,5 @@ def build_canvas(
                 )
             )
         ]
+        canvas["arrow"] = _arrow_marker(canvas["line"])
     return canvas
