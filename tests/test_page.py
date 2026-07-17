@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from main import app
+from main import app, normalize_lookup_target
 
 CSS = Path("static/css/whatismyip.css")
 
@@ -29,6 +29,38 @@ SEOUL_IP = "118.235.14.201"
 # visitor's address is set as the TestClient's own peer address instead.
 client = TestClient(app, client=(SEOUL_IP, 41234))
 local_client = TestClient(app, client=("127.0.0.1", 41234))
+
+
+class TestNormalizeLookupTarget:
+    """Server-side host normalisation, mirroring static/js/app.js so a pasted URL
+    behaves the same whether it comes through the search box or straight to the
+    API. (A full URL with slashes still 404s at the router; this covers what
+    actually reaches the handler: schemes, trailing paths, queries, whitespace.)"""
+
+    def test_strips_scheme_path_query_and_fragment(self):
+        assert (
+            normalize_lookup_target("https://google.com/?q=asdasdasd") == "google.com"
+        )
+        assert normalize_lookup_target("http://a.b.co.kr/deep/path#frag") == "a.b.co.kr"
+
+    def test_plain_host_and_ip_pass_through(self):
+        assert normalize_lookup_target("google.com") == "google.com"
+        assert normalize_lookup_target("8.8.8.8") == "8.8.8.8"
+
+    def test_path_or_query_without_a_scheme(self):
+        assert normalize_lookup_target("google.com/foo") == "google.com"
+        assert normalize_lookup_target("google.com?q=1") == "google.com"
+
+    def test_trims_surrounding_whitespace(self):
+        assert normalize_lookup_target("  google.com  ") == "google.com"
+
+    def test_ipv6_is_left_intact(self):
+        # No scheme and no '/?#', so the IPv6 literal must survive untouched.
+        assert normalize_lookup_target("2001:db8::1") == "2001:db8::1"
+
+    def test_empty_and_scheme_only_collapse_to_empty(self):
+        assert normalize_lookup_target("") == ""
+        assert normalize_lookup_target("https://") == ""
 
 
 class TestMapPayload:
