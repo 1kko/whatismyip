@@ -26,13 +26,14 @@ def format_distance(distance_km: float | None) -> str | None:
     return f"≈ {round(distance_km):,} km from you"
 
 
-def osm_link(map_payload: dict | None) -> str | None:
-    """Deep link to the same spot on openstreetmap.org."""
-    target = (map_payload or {}).get("target")
-    if not target:
+def osm_link(location: dict | None) -> str | None:
+    """Deep link to the target's spot on openstreetmap.org."""
+    location = location or {}
+    lat, lon = location.get("lat"), location.get("lon")
+    if lat is None or lon is None:
         return None
-    zoom = 11 if target.get("precision") == "city" else 5
-    return f"https://www.openstreetmap.org/#map={zoom}/{target['lat']}/{target['lon']}"
+    zoom = 11 if location.get("precision") == "city" else 5
+    return f"https://www.openstreetmap.org/#map={zoom}/{lat}/{lon}"
 
 
 def format_meta(elapsed_ms: int | None, when: Any) -> str:
@@ -344,33 +345,36 @@ def geoip_rows(location: dict | None) -> list[dict]:
     coordinates, accuracy radius, time zone and network, from geoip2fast plus
     the GeoLite2-City overlay."""
     location = location or {}
-    city = location.get("city") or {}
     code = (location.get("country_code") or "").strip()
     name = location.get("country_name") or ""
     country = f"{country_flag(code)} {name} ({code})".strip() if name else DASH
 
-    subdivision = city.get("subdivision_name") or ""
-    sub_code = city.get("subdivision_code") or ""
+    subdivision = location.get("subdivision_name") or ""
+    sub_code = location.get("subdivision_code") or ""
     region = (
         f"{subdivision} ({sub_code})"
         if subdivision and sub_code
         else (subdivision or DASH)
     )
 
-    lat, lon = city.get("latitude"), city.get("longitude")
+    lat, lon = location.get("lat"), location.get("lon")
     coords = f"{lat}, {lon}" if lat is not None and lon is not None else DASH
-    accuracy = city.get("accuracy_radius")
+    accuracy = location.get("accuracy_km")
     accuracy_text = f"± {accuracy} km" if accuracy is not None else DASH
 
     return [
         {"label": "Country", "value": country, "tone": "default"},
         {"label": "Region", "value": region, "tone": "default"},
-        {"label": "City", "value": city.get("name") or DASH, "tone": "default"},
+        {
+            "label": "City",
+            "value": location.get("city_name") or DASH,
+            "tone": "default",
+        },
         {"label": "Coordinates", "value": coords, "tone": "default"},
         {"label": "Accuracy", "value": accuracy_text, "tone": "default"},
         {
             "label": "Time zone",
-            "value": city.get("time_zone") or DASH,
+            "value": location.get("time_zone") or DASH,
             "tone": "default",
         },
         {
@@ -414,7 +418,7 @@ def _accordions(response: dict) -> list[dict]:
         ssl_hint = issuer if days_left is None else f"{issuer} · {days_left}d left"
 
     location = response.get("location") or {}
-    geo_city = (location.get("city") or {}).get("name")
+    geo_city = location.get("city_name")
     geo_country = location.get("country_code")
     geoip_hint = " · ".join(p for p in (geo_city, geo_country) if p) or "no data"
 
@@ -439,8 +443,8 @@ def build_view(response: dict, is_self: bool) -> dict:
     address = response.get("address") or ""
     is_ip = _is_ip(address)
 
-    city = (location.get("city") or {}).get("name") or ""
-    subdivision = (location.get("city") or {}).get("subdivision_name") or ""
+    city = location.get("city_name") or ""
+    subdivision = location.get("subdivision_name") or ""
     city_line = " · ".join(part for part in (city, subdivision) if part)
 
     if is_ip:
@@ -465,7 +469,7 @@ def build_view(response: dict, is_self: bool) -> dict:
         "city_line": city_line,
         "asn_line": location.get("asn_name") or "",
         "distance_text": format_distance(response.get("distance_km")),
-        "map_link": osm_link(response.get("map")),
+        "map_link": osm_link(location),
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
         "accordions": _accordions(response),

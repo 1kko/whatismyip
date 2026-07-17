@@ -404,20 +404,37 @@ class GeoIpManager:
             logging.exception("Error updating GeoLite2-City database")
 
     def fetch_location(self, ip: str) -> Dict[str, Any]:
-        location = self.instance.lookup(ip).to_dict()
-        # geoip2fast returns "city" as an empty string when using the
-        # country-only DB. Normalise to a dict so downstream callers can
-        # safely use .get() without type checks.
-        if not isinstance(location.get("city"), dict):
-            location["city"] = {}
-        self._overlay_city(ip, location)
-        return location
+        """A single flat location record for the IP: country + ASN from
+        geoip2fast, precise city/lat/lon/accuracy/time zone overlaid from
+        GeoLite2-City. Callers add reverse_dns; the response assembly adds the
+        resolved coordinates, the origin_* fields, and distance_km."""
+        raw = self.instance.lookup(ip).to_dict()
+        city = raw.get("city") if isinstance(raw.get("city"), dict) else {}
+        self._overlay_city(ip, raw.get("is_private"), city)
+        return {
+            "ip": raw.get("ip"),
+            "country_code": raw.get("country_code"),
+            "country_name": raw.get("country_name"),
+            "city_name": city.get("name") or "",
+            "subdivision_name": city.get("subdivision_name") or "",
+            "subdivision_code": city.get("subdivision_code") or "",
+            "lat": city.get("latitude"),
+            "lon": city.get("longitude"),
+            "accuracy_km": city.get("accuracy_radius"),
+            "time_zone": city.get("time_zone"),
+            "cidr": raw.get("cidr"),
+            "asn_name": raw.get("asn_name"),
+            "asn_cidr": raw.get("asn_cidr"),
+            "is_private": raw.get("is_private"),
+            "hostname": raw.get("hostname"),
+        }
 
-    def _overlay_city(self, ip: str, location: Dict[str, Any]) -> None:
-        """Fill in the precise city, coordinates, and accuracy radius from
-        GeoLite2-City. geoip2fast keeps country/ASN duty; MaxMind supplies the
+    def _overlay_city(self, ip: str, is_private: Any, city: Dict[str, Any]) -> None:
+        """Overlay the precise city, coordinates, accuracy and time zone from
+        GeoLite2-City onto the (still nested) geoip2fast city dict before it is
+        flattened. geoip2fast keeps country/ASN duty; MaxMind supplies the
         latitude/longitude geoip2fast always leaves null."""
-        if not self.city_reader or location.get("is_private"):
+        if not self.city_reader or is_private:
             return
         try:
             record = self.city_reader.get(ip)
@@ -425,7 +442,6 @@ class GeoIpManager:
             record = None
         if not record:
             return
-        city = location["city"]
         loc = record.get("location") or {}
         if loc.get("latitude") is not None and loc.get("longitude") is not None:
             city["latitude"] = loc.get("latitude")
@@ -965,7 +981,7 @@ class GeoBlockManager:
         try:
             location = self.geo_ip.fetch_location(ip)
             country = location.get("country_code", "UNKNOWN")
-            subdivision = location.get("city", {}).get("subdivision_code", "")
+            subdivision = location.get("subdivision_code") or ""
             region_full = f"{country}-{subdivision}" if subdivision else None
         except Exception as e:
             logging.error(f"GeoIP lookup failed for {ip}: {e}")
@@ -1076,16 +1092,18 @@ MOBILE_CANVAS = {"width": 350, "height": 255, "focus_x": 0.5, "fit_ratio": 0.78}
 
 def build_map_payload(
     target_location: dict | None, origin_location: dict | None
-) -> tuple[dict | None, float | None, dict | None]:
-    """Return (map, distance_km, origin) for the response.
+) -> tuple[dict | None, float | None, dict | None, dict | None]:
+    """Return (map, distance_km, origin, target) for the response.
 
-    City mode (single pin, no arc) when the target is the visitor themselves,
-    when the visitor's own location is unknown, or when the two points are
-    within MIN_ROUTE_KM of each other.
+    `map` is render-only (desktop/mobile canvases). `origin` is a flat location
+    object for the visitor (None unless it's a route), and `target` is the
+    resolved target coordinates the caller writes back onto `location`. City
+    mode (single pin, no arc) when the visitor is the target, their location is
+    unknown, or the two points are within MIN_ROUTE_KM of each other.
     """
     target = gazetteer.resolve(target_location)
     if not target:
-        return None, None, None
+        return None, None, None, None
 
     origin = gazetteer.resolve(origin_location)
     distance_km = None
@@ -1100,20 +1118,36 @@ def build_map_payload(
         else:
             distance_km = None
 
-    origin_city = ((origin_location or {}).get("city") or {}).get("name") or None
+    origin_obj = None
+    if route_origin:
+        ol = origin_location or {}
+        origin_obj = {
+            "ip": ol.get("ip"),
+            "country_code": ol.get("country_code"),
+            "country_name": ol.get("country_name"),
+            "city_name": ol.get("city_name") or None,
+            "lat": route_origin["lat"],
+            "lon": route_origin["lon"],
+            "accuracy_km": route_origin.get("accuracy_km"),
+        }
+
     payload = {
         "desktop": build_canvas(target, route_origin, **DESKTOP_CANVAS),
         "mobile": build_canvas(target, route_origin, **MOBILE_CANVAS),
-        "target": target,
-        "precision": target["precision"],
-        "target_ip": (target_location or {}).get("ip"),
-        "origin_ip": (origin_location or {}).get("ip") if route_origin else None,
-        "origin_city": origin_city if route_origin else None,
-        "origin_country": (origin_location or {}).get("country_code")
-        if route_origin
-        else None,
     }
-    return payload, (round(distance_km, 1) if distance_km else None), origin
+    distance = round(distance_km, 1) if distance_km else None
+    return payload, distance, origin_obj, target
+
+
+def _apply_resolved_target(location: dict, target: dict | None) -> None:
+    """Write the resolved (displayed) coordinates + precision back onto the flat
+    location, so location.lat/lon match the map pin even when they came from the
+    gazetteer fallback rather than GeoLite2."""
+    if not target:
+        return
+    location["lat"] = target["lat"]
+    location["lon"] = target["lon"]
+    location["precision"] = target.get("precision")
 
 
 def _record_value(kind: str, record) -> str:
@@ -1242,11 +1276,18 @@ def render_page(request: Request, response_data: dict, is_self: bool):
     whois_data = response_data.get("whois") or {}
     view = build_view(response_data, is_self=is_self)
 
-    # The distance label is drawn on the arc, so map.js needs the wording. It
-    # rides along with the map payload rather than polluting the JSON API.
+    # map.js labels the pins with the two IPs and draws the distance on the arc.
+    # These ride along with the browser's map payload rather than polluting the
+    # render-only `map` in the JSON API (they live under location / origin there).
     map_data = response_data.get("map")
     if map_data:
-        map_data = {**map_data, "distance_text": view["distance_text"]}
+        origin = response_data.get("origin") or {}
+        map_data = {
+            **map_data,
+            "distance_text": view["distance_text"],
+            "target_ip": (response_data.get("location") or {}).get("ip"),
+            "origin_ip": origin.get("ip"),
+        }
 
     return templates.TemplateResponse(
         request,
@@ -1475,9 +1516,10 @@ async def get_self_info(request: Request):
 
     # A self-lookup is never a route: the visitor IS the target, so the
     # distance is 0 km, which build_map_payload collapses to city mode.
-    map_payload, _, origin = await asyncio.to_thread(
+    map_payload, _, origin, target = await asyncio.to_thread(
         build_map_payload, ip_data, ip_data
     )
+    _apply_resolved_target(ip_data, target)
     response_data = {
         "address": client_ip,
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
@@ -1591,9 +1633,10 @@ async def get_ip_info(domain_ip: str, request: Request):
 
     whois_data = await whois_task
     origin_location = await origin_task
-    map_payload, distance_km, origin = await asyncio.to_thread(
+    map_payload, distance_km, origin, target = await asyncio.to_thread(
         build_map_payload, ip_data, origin_location
     )
+    _apply_resolved_target(ip_data, target)
 
     response_data = {
         "address": domain_ip,
@@ -1737,13 +1780,12 @@ async def lookup_ip_location(ip: str, authenticated: bool = Depends(verify_admin
         "country_code": location.get("country_code"),
         "country_name": location.get("country_name"),
         "region": (
-            f"{location.get('country_code')}"
-            f"-{location.get('city', {}).get('subdivision_code')}"
-            if location.get("city", {}).get("subdivision_code")
+            f"{location.get('country_code')}-{location.get('subdivision_code')}"
+            if location.get("subdivision_code")
             else None
         ),
-        "subdivision_name": location.get("city", {}).get("subdivision_name"),
-        "city": location.get("city", {}).get("name"),
+        "subdivision_name": location.get("subdivision_name"),
+        "city": location.get("city_name"),
     }
 
 

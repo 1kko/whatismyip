@@ -10,7 +10,8 @@ IP_RESPONSE = {
         "ip": "8.8.8.8",
         "country_code": "US",
         "country_name": "United States",
-        "city": {"name": "", "subdivision_name": ""},
+        "city_name": "",
+        "subdivision_name": "",
         "cidr": "8.8.8.0/23",
         "asn_name": "Google LLC",
         "asn_cidr": "8.8.8.0/24",
@@ -29,7 +30,8 @@ DOMAIN_RESPONSE = {
     "location": {
         "country_code": "US",
         "country_name": "United States",
-        "city": {"name": "Mountain View", "subdivision_name": "California"},
+        "city_name": "Mountain View",
+        "subdivision_name": "California",
         "cidr": "142.250.192.0/19",
         "asn_name": "Google LLC",
         "is_private": False,
@@ -234,7 +236,9 @@ class TestOsmLink:
     def test_city_precision_links_deep(self):
         response = dict(
             IP_RESPONSE,
-            map={"target": {"lat": 37.5665, "lon": 126.978, "precision": "city"}},
+            location=dict(
+                IP_RESPONSE["location"], lat=37.5665, lon=126.978, precision="city"
+            ),
         )
         assert (
             build_view(response, is_self=True)["map_link"]
@@ -244,14 +248,17 @@ class TestOsmLink:
     def test_country_precision_zooms_out(self):
         response = dict(
             IP_RESPONSE,
-            map={"target": {"lat": 39.5, "lon": -98.35, "precision": "country"}},
+            location=dict(
+                IP_RESPONSE["location"], lat=39.5, lon=-98.35, precision="country"
+            ),
         )
         assert build_view(response, is_self=True)["map_link"].startswith(
             "https://www.openstreetmap.org/#map=5/"
         )
 
-    def test_no_map_no_link(self):
-        assert build_view(dict(IP_RESPONSE, map=None), is_self=True)["map_link"] is None
+    def test_no_coords_no_link(self):
+        # IP_RESPONSE's location has no lat/lon, so there is nothing to link to.
+        assert build_view(IP_RESPONSE, is_self=True)["map_link"] is None
 
 
 class TestMetaLine:
@@ -319,15 +326,13 @@ class TestGeoIpSection:
             location={
                 "country_code": "KR",
                 "country_name": "South Korea",
-                "city": {
-                    "name": "Seoul",
-                    "subdivision_name": "Seoul",
-                    "subdivision_code": "11",
-                    "latitude": 37.5656,
-                    "longitude": 126.978,
-                    "accuracy_radius": 20,
-                    "time_zone": "Asia/Seoul",
-                },
+                "city_name": "Seoul",
+                "subdivision_name": "Seoul",
+                "subdivision_code": "11",
+                "lat": 37.5656,
+                "lon": 126.978,
+                "accuracy_km": 20,
+                "time_zone": "Asia/Seoul",
                 "asn_name": "SK Broadband",
                 "cidr": "1.2.3.0/24",
             },

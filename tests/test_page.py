@@ -37,7 +37,8 @@ class TestMapPayload:
         assert response.status_code == 200
         body = response.json()
 
-        assert body["origin"]["precision"] in ("city", "country")
+        assert body["origin"]["ip"] == SEOUL_IP
+        assert body["origin"]["lat"] is not None
         assert body["distance_km"] > 1000
         desktop = body["map"]["desktop"]
         assert desktop["origin"] is not None
@@ -81,15 +82,15 @@ class TestMapPayload:
         ):
             assert key in body
 
-    def test_pins_carry_ip_labels_on_a_route(self):
+    def test_target_and_origin_ips_live_in_location_and_origin(self):
         body = client.get("/8.8.8.8", headers=JSON_UA).json()
-        assert body["map"]["target_ip"] == "8.8.8.8"
-        assert body["map"]["origin_ip"] == SEOUL_IP
+        assert body["location"]["ip"] == "8.8.8.8"
+        assert body["origin"]["ip"] == SEOUL_IP
 
-    def test_self_lookup_labels_only_the_target_ip(self):
+    def test_self_lookup_has_target_location_and_no_origin(self):
         body = client.get("/", headers=JSON_UA).json()
-        assert body["map"]["target_ip"] == SEOUL_IP
-        assert body["map"]["origin_ip"] is None
+        assert body["location"]["ip"] == SEOUL_IP
+        assert body["origin"] is None
 
 
 class TestDnsRows:
