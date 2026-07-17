@@ -48,11 +48,25 @@ def _recursive_resolver() -> dns.resolver.Resolver:
 
 class GeoIpManager:
     def __init__(self):
-        if os.path.exists(GEOIP_DATA_FILE):
-            self.instance = GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE)
-        else:
-            self.instance = GeoIP2Fast()
+        self.instance = self._load_instance()
         self.city_reader = self._open_city_reader()
+
+    @staticmethod
+    def _load_instance() -> GeoIP2Fast:
+        """Load the volume database, falling back to the bundled one when the
+        volume file is missing or corrupt. An interrupted download can leave a
+        truncated .dat.gz that GeoIP2Fast raises on; that must degrade the app to
+        the built-in country DB, not crash it at startup. update_database()
+        refreshes a good copy on the next run."""
+        if os.path.exists(GEOIP_DATA_FILE):
+            try:
+                return GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE)
+            except Exception:
+                logging.exception(
+                    "GeoIP DB at %s is unreadable; using the bundled database",
+                    GEOIP_DATA_FILE,
+                )
+        return GeoIP2Fast()
 
     @staticmethod
     def _open_city_reader():
@@ -64,18 +78,30 @@ class GeoIpManager:
         return None
 
     def update_database(self):
+        tmp = GEOIP_DATA_FILE + ".tmp"
         try:
             data_dir = os.path.dirname(GEOIP_DATA_FILE)
             if data_dir:
                 os.makedirs(data_dir, exist_ok=True)
+            # Download to a temp file and only swap it in once it loads cleanly.
+            # Writing straight to GEOIP_DATA_FILE meant an interrupted download
+            # left a truncated file that crashed the next startup; os.replace is
+            # atomic, so the live file is only ever a complete, loadable DB.
+            if os.path.exists(tmp):
+                os.remove(tmp)
             update_result = self.instance.update_file(
-                "geoip2fast-city-asn-ipv6.dat.gz", GEOIP_DATA_FILE, verbose=False
+                "geoip2fast-city-asn-ipv6.dat.gz", tmp, verbose=False
             )
-            # Re-instantiate so the running process picks up the new file.
-            self.instance = GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE)
+            new_instance = GeoIP2Fast(geoip2fast_data_file=tmp)  # validates it loads
+            os.replace(tmp, GEOIP_DATA_FILE)
+            self.instance = new_instance
             logging.info(f"{update_result=}")
         except Exception as e:
             logging.exception(f"Error updating GeoIP2Fast database: {str(e)}")
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     def update_city_database(self):
         """Download and unpack the GeoLite2-City mmdb, then hot-swap the reader.
