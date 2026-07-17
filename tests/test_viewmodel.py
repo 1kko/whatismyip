@@ -1,7 +1,13 @@
 import datetime
 
 from rdap import normalize_whois
-from viewmodel import build_view, country_flag, format_distance, whois_display
+from viewmodel import (
+    build_view,
+    country_flag,
+    format_distance,
+    ssl_rows,
+    whois_display,
+)
 
 UTC = datetime.timezone.utc
 
@@ -240,6 +246,73 @@ class TestSslSection:
         assert rows["Protocol"] == "—"
         assert rows["Cipher"] == "—"
         assert rows["Subject"] == "—"
+
+
+DV_CERT = {  # Let's Encrypt naver.com apex: CN only, no org, no www.naver.com
+    "subject": ((("commonName", "naver.co.kr"),),),
+    "issuer": ((("organizationName", "Let's Encrypt"),),),
+    "notAfter": "Sep 14 08:00:00 2026 GMT",
+    "subjectAltName": (("DNS", "naver.com"), ("DNS", "www.naver.co.kr")),
+}
+OV_CERT = {  # DigiCert *.naver.com wildcard with an organizationName
+    "subject": (
+        (("commonName", "*.naver.com"),),
+        (("organizationName", "NAVER Corporation"),),
+    ),
+    "issuer": ((("organizationName", "DigiCert Inc"),),),
+    "notAfter": "Sep 14 08:00:00 2026 GMT",
+    "subjectAltName": (("DNS", "*.naver.com"), ("DNS", "*.blog.naver.com")),
+}
+EV_CERT = {  # businessCategory marks an EV cert
+    "subject": (
+        (("businessCategory", "Private Organization"),),
+        (("organizationName", "Example Bank"),),
+        (("commonName", "example-bank.com"),),
+    ),
+    "issuer": ((("organizationName", "DigiCert Inc"),),),
+    "notAfter": "Sep 14 08:00:00 2026 GMT",
+    "subjectAltName": (("DNS", "example-bank.com"),),
+}
+
+
+class TestSslHostMatchAndValidation:
+    @staticmethod
+    def _rows(ssl_data, address):
+        return {r["label"]: r for r in ssl_rows(ssl_data, address)}
+
+    def test_exact_san_entry_covers_the_host(self):
+        row = self._rows(DV_CERT, "naver.com")["Host match"]
+        assert row["value"] == "valid for naver.com"
+        assert row["tone"] == "success"
+
+    def test_host_absent_from_san_is_flagged(self):
+        # The Let's Encrypt apex cert does not list www.naver.com.
+        row = self._rows(DV_CERT, "www.naver.com")["Host match"]
+        assert row["value"] == "not valid for www.naver.com"
+        assert row["tone"] == "danger"
+
+    def test_wildcard_covers_exactly_one_label(self):
+        assert self._rows(OV_CERT, "www.naver.com")["Host match"]["tone"] == "success"
+        # *.naver.com matches neither the bare apex nor a two-label host.
+        assert self._rows(OV_CERT, "naver.com")["Host match"]["tone"] == "danger"
+        assert self._rows(OV_CERT, "a.b.naver.com")["Host match"]["tone"] == "danger"
+
+    def test_no_host_match_row_without_a_hostname(self):
+        assert "Host match" not in self._rows(OV_CERT, "8.8.8.8")
+        assert "Host match" not in self._rows(OV_CERT, None)
+
+    def test_validation_level_is_read_from_the_subject(self):
+        assert self._rows(DV_CERT, "naver.com")["Validation"]["value"] == (
+            "DV (domain validated)"
+        )
+        assert (
+            self._rows(OV_CERT, "www.naver.com")["Validation"]["value"]
+            == "OV · NAVER Corporation"
+        )
+        assert (
+            self._rows(EV_CERT, "example-bank.com")["Validation"]["value"]
+            == "EV · Example Bank"
+        )
 
 
 class TestOsmLink:
