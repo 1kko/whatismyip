@@ -69,10 +69,9 @@ class Gazetteer:
         if not location or location.get("is_private"):
             return None
 
-        city = location.get("city") or {}
-        lat, lon = city.get("latitude"), city.get("longitude")
+        lat, lon = location.get("lat"), location.get("lon")
         if lat is not None and lon is not None:
-            accuracy_km = city.get("accuracy_radius")
+            accuracy_km = location.get("accuracy_km")
             precise = accuracy_km is not None and accuracy_km <= MAX_CITY_ACCURACY_KM
             return {
                 "lat": lat,
@@ -85,7 +84,7 @@ class Gazetteer:
         if len(country) != 2 or not country.isalpha():
             return None
 
-        name = city.get("name") or ""
+        name = location.get("city_name") or ""
         if name:
             point = self.cities.get(f"{country}:{normalize_city(name)}")
             if point:

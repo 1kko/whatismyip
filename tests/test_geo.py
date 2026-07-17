@@ -43,11 +43,7 @@ class TestGazetteerData:
 
 class TestResolve:
     def test_city_hit_wins_over_country(self, gazetteer):
-        location = {
-            "country_code": "KR",
-            "city": {"name": "Seoul"},
-            "is_private": False,
-        }
+        location = {"country_code": "KR", "city_name": "Seoul", "is_private": False}
         result = gazetteer.resolve(location)
         assert result["precision"] == "city"
         assert 37.0 < result["lat"] < 38.0
@@ -58,12 +54,10 @@ class TestResolve:
         # heard of — and pass the accuracy radius through.
         location = {
             "country_code": "US",
-            "city": {
-                "name": "Nowheresville",
-                "latitude": 37.751,
-                "longitude": -97.822,
-                "accuracy_radius": 20,
-            },
+            "city_name": "Nowheresville",
+            "lat": 37.751,
+            "lon": -97.822,
+            "accuracy_km": 20,
             "is_private": False,
         }
         result = gazetteer.resolve(location)
@@ -76,7 +70,9 @@ class TestResolve:
         # keep the coordinates but do not pretend it is street-level.
         location = {
             "country_code": "US",
-            "city": {"latitude": 37.751, "longitude": -97.822, "accuracy_radius": 1000},
+            "lat": 37.751,
+            "lon": -97.822,
+            "accuracy_km": 1000,
             "is_private": False,
         }
         result = gazetteer.resolve(location)
@@ -84,7 +80,7 @@ class TestResolve:
         assert result["accuracy_km"] == 1000
 
     def test_falls_back_to_country_centroid_when_city_missing(self, gazetteer):
-        location = {"country_code": "US", "city": {"name": ""}, "is_private": False}
+        location = {"country_code": "US", "city_name": "", "is_private": False}
         result = gazetteer.resolve(location)
         assert result["precision"] == "country"
         assert 20.0 < result["lat"] < 55.0
@@ -92,7 +88,7 @@ class TestResolve:
     def test_unknown_city_falls_back_to_country(self, gazetteer):
         location = {
             "country_code": "KR",
-            "city": {"name": "Nowhere-in-particular"},
+            "city_name": "Nowhere-in-particular",
             "is_private": False,
         }
         assert gazetteer.resolve(location)["precision"] == "country"
@@ -105,7 +101,7 @@ class TestResolve:
         assert gazetteer.resolve({"city": {}}) is None
 
     def test_accents_and_case_are_normalized(self, gazetteer):
-        location = {"country_code": "BR", "city": {"name": "SÃO PAULO"}}
+        location = {"country_code": "BR", "city_name": "SÃO PAULO"}
         assert gazetteer.resolve(location)["precision"] == "city"
 
     def test_zoom_constants(self):
