@@ -184,3 +184,7 @@ data/*.mmdb
 
 # Superpowers planning/spec scratch (generated per task)
 docs/superpowers/
+
+# Editor and local tooling state (per-machine, not part of the project)
+.vscode/
+.openchrome/

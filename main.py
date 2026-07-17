@@ -16,13 +16,12 @@ from urllib.parse import urlparse
 
 import dns.resolver
 import dns.reversename
-import orjson
 import uvicorn
 import whois
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, ORJSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -118,13 +117,6 @@ class TTLCache:
 
 
 _whois_cache = TTLCache()
-
-
-class SafeORJSONResponse(ORJSONResponse):
-    # python-whois returns sets and other non-JSON-native types; fall back to str
-    # so the API path matches the browser path's json.dumps(default=str) behavior.
-    def render(self, content: Any) -> bytes:
-        return orjson.dumps(content, default=str)
 
 
 def sanitize_log_input(value: str) -> str:
@@ -673,7 +665,9 @@ async def get_self_info(request: Request):
     if BrowserDetector.is_browser(user_agent):
         return render_page(request, response_data, is_self=True)
 
-    return SafeORJSONResponse(response_data)
+    # FastAPI serialises the dict via jsonable_encoder (datetimes -> ISO-8601)
+    # and its default JSONResponse (UTF-8, no ASCII escaping).
+    return response_data
 
 
 @app.get("/{domain_ip}", response_model=None)
@@ -791,7 +785,9 @@ async def get_ip_info(domain_ip: str, request: Request):
     if BrowserDetector.is_browser(user_agent):
         return render_page(request, response_data, is_self=False)
 
-    return SafeORJSONResponse(response_data)
+    # FastAPI serialises the dict via jsonable_encoder (datetimes -> ISO-8601)
+    # and its default JSONResponse (UTF-8, no ASCII escaping).
+    return response_data
 
 
 # Admin endpoints for security management
