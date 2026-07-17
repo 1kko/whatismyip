@@ -139,6 +139,14 @@
                         {% endfor %}
                         </tbody>
                     </table>
+                    {% elif item.id == 'geoip' %}
+                    <table class="records">
+                        <tbody>
+                        {% for row in view.geoip_rows %}
+                        <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{{ row.value }}</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
                     {% else %}
                     <table class="records">
                         <tbody>

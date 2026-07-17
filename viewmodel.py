@@ -311,6 +311,81 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
     return tags
 
 
+def whois_display(whois_data: dict | None) -> dict:
+    """Flatten a python-whois record into readable strings for the template.
+
+    python-whois hands back lists (name servers, emails, sometimes dates) and
+    datetime objects; a bare str() on those prints raw Python reprs like
+    "[datetime.datetime(2022, 12, 27, ...)]" or "['NS1', 'NS2']".
+    """
+
+    def scalar(value: Any) -> str:
+        if isinstance(value, datetime.datetime):
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+        return DASH if value is None else str(value)
+
+    out: dict[str, str] = {}
+    for key, value in (whois_data or {}).items():
+        if isinstance(value, (list, tuple)):
+            seen, parts = set(), []
+            for item in value:
+                text = scalar(item)
+                if text and text != DASH and text not in seen:
+                    seen.add(text)
+                    parts.append(text)
+            out[key] = ", ".join(parts) if parts else DASH
+        else:
+            out[key] = scalar(value)
+    return out
+
+
+def geoip_rows(location: dict | None) -> list[dict]:
+    """Detailed geolocation for the GeoIP accordion: country, region, city,
+    coordinates, accuracy radius, time zone and network, from geoip2fast plus
+    the GeoLite2-City overlay."""
+    location = location or {}
+    city = location.get("city") or {}
+    code = (location.get("country_code") or "").strip()
+    name = location.get("country_name") or ""
+    country = f"{country_flag(code)} {name} ({code})".strip() if name else DASH
+
+    subdivision = city.get("subdivision_name") or ""
+    sub_code = city.get("subdivision_code") or ""
+    region = (
+        f"{subdivision} ({sub_code})"
+        if subdivision and sub_code
+        else (subdivision or DASH)
+    )
+
+    lat, lon = city.get("latitude"), city.get("longitude")
+    coords = f"{lat}, {lon}" if lat is not None and lon is not None else DASH
+    accuracy = city.get("accuracy_radius")
+    accuracy_text = f"± {accuracy} km" if accuracy is not None else DASH
+
+    return [
+        {"label": "Country", "value": country, "tone": "default"},
+        {"label": "Region", "value": region, "tone": "default"},
+        {"label": "City", "value": city.get("name") or DASH, "tone": "default"},
+        {"label": "Coordinates", "value": coords, "tone": "default"},
+        {"label": "Accuracy", "value": accuracy_text, "tone": "default"},
+        {
+            "label": "Time zone",
+            "value": city.get("time_zone") or DASH,
+            "tone": "default",
+        },
+        {
+            "label": "ASN org",
+            "value": location.get("asn_name") or DASH,
+            "tone": "default",
+        },
+        {
+            "label": "Network",
+            "value": location.get("cidr") or location.get("asn_cidr") or DASH,
+            "tone": "default",
+        },
+    ]
+
+
 def _accordions(response: dict) -> list[dict]:
     whois_data = response.get("whois") or {}
     domain = response.get("domain") or {}
@@ -338,11 +413,17 @@ def _accordions(response: dict) -> list[dict]:
         _, days_left = _cert_expiry(ssl_data)
         ssl_hint = issuer if days_left is None else f"{issuer} · {days_left}d left"
 
+    location = response.get("location") or {}
+    geo_city = (location.get("city") or {}).get("name")
+    geo_country = location.get("country_code")
+    geoip_hint = " · ".join(p for p in (geo_city, geo_country) if p) or "no data"
+
     header_count = len(headers)
     return [
         {"id": "whois", "title": "WHOIS", "hint": whois_hint},
         {"id": "dns", "title": "DNS records", "hint": dns_hint},
         {"id": "ssl", "title": "SSL certificate", "hint": ssl_hint},
+        {"id": "geoip", "title": "GeoIP", "hint": geoip_hint},
         {
             "id": "headers",
             "title": "Your headers",
@@ -389,4 +470,5 @@ def build_view(response: dict, is_self: bool) -> dict:
         "facts": facts,
         "accordions": _accordions(response),
         "ssl_rows": ssl_rows(response.get("ssl")),
+        "geoip_rows": geoip_rows(location),
     }

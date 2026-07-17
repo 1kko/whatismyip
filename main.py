@@ -37,7 +37,7 @@ from pydantic import BaseModel
 
 from geo import MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
-from viewmodel import build_view
+from viewmodel import build_view, whois_display
 from tld import exceptions as tld_exceptions
 from tld import get_tld
 
@@ -88,7 +88,10 @@ DNS_QUERY_LIFETIME = float(os.getenv("DNS_QUERY_LIFETIME", "3"))  # per query, t
 # WHOIS is slow (~1.2s median, up to a ~10s timeout ceiling on some registries)
 # and its data is effectively static, so cache it and cap how long a single
 # lookup may block the response.
-WHOIS_TIMEOUT_SECONDS = float(os.getenv("WHOIS_TIMEOUT_SECONDS", "4"))
+# Some registries (naver.com, ibm.com, .pt ...) answer WHOIS in ~11s. A tight
+# cap turned those into "lookup timed out" failures, so give the slow tail room;
+# the result is cached for 6h and the lookup runs in parallel with everything.
+WHOIS_TIMEOUT_SECONDS = float(os.getenv("WHOIS_TIMEOUT_SECONDS", "15"))
 WHOIS_CACHE_TTL = int(os.getenv("WHOIS_CACHE_TTL", "21600"))  # 6h for a hit
 WHOIS_CACHE_ERROR_TTL = int(os.getenv("WHOIS_CACHE_ERROR_TTL", "300"))  # 5m for a miss
 
@@ -428,6 +431,7 @@ class GeoIpManager:
             city["latitude"] = loc.get("latitude")
             city["longitude"] = loc.get("longitude")
             city["accuracy_radius"] = loc.get("accuracy_radius")
+            city["time_zone"] = loc.get("time_zone")
         mm_city = ((record.get("city") or {}).get("names") or {}).get("en")
         if mm_city:
             city["name"] = mm_city
@@ -1254,7 +1258,7 @@ def render_page(request: Request, response_data: dict, is_self: bool):
             "site_domain": site_domain(request),
             "dns_rows": _dns_rows(response_data),
             "headers": response_data.get("headers") or {},
-            "whois": {k: str(v) for k, v in whois_data.items()},
+            "whois": whois_display(whois_data),
             "json_data": json.dumps(response_data, indent=2, default=str).replace(
                 "</", "<\\/"
             ),

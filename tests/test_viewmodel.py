@@ -1,6 +1,6 @@
 import datetime
 
-from viewmodel import build_view, country_flag, format_distance
+from viewmodel import build_view, country_flag, format_distance, whois_display
 
 UTC = datetime.timezone.utc
 
@@ -137,7 +137,7 @@ class TestAccordions:
         ids = [
             item["id"] for item in build_view(IP_RESPONSE, is_self=True)["accordions"]
         ]
-        assert ids == ["whois", "dns", "ssl", "headers", "raw"]
+        assert ids == ["whois", "dns", "ssl", "geoip", "headers", "raw"]
 
     def test_hints_summarise_content(self):
         items = {
@@ -283,3 +283,70 @@ class TestFormatDistance:
 
     def test_none_stays_none(self):
         assert format_distance(None) is None
+
+
+class TestWhoisDisplay:
+    def test_lists_and_datetimes_render_readably(self):
+        # bahama.com shape: lists (name servers, emails, a list-valued date) and
+        # datetime objects must not leak Python reprs into the table.
+        tz = UTC
+        raw = {
+            "domain_name": "BAHAMA.COM",
+            "updated_date": [
+                datetime.datetime(2022, 12, 27, 17, 1, 31, tzinfo=tz),
+                datetime.datetime(2022, 12, 27, 17, 1, 31, tzinfo=tz),
+            ],
+            "creation_date": datetime.datetime(1995, 3, 23, 5, 0, tzinfo=tz),
+            "name_servers": ["DNS1.NAMESECURE.COM", "DNS2.NAMESECURE.COM"],
+            "emails": ["a@x.com", "b@y.com"],
+            "referral_url": None,
+        }
+        out = whois_display(raw)
+        assert out["domain_name"] == "BAHAMA.COM"
+        assert out["updated_date"] == "2022-12-27 17:01:31"  # deduped, formatted
+        assert out["creation_date"] == "1995-03-23 05:00:00"
+        assert out["name_servers"] == "DNS1.NAMESECURE.COM, DNS2.NAMESECURE.COM"
+        assert out["emails"] == "a@x.com, b@y.com"
+        assert out["referral_url"] == "—"
+        for value in out.values():
+            assert "datetime.datetime" not in value and "[" not in value
+
+
+class TestGeoIpSection:
+    def test_rows_expose_coordinates_accuracy_and_timezone(self):
+        response = dict(
+            DOMAIN_RESPONSE,
+            location={
+                "country_code": "KR",
+                "country_name": "South Korea",
+                "city": {
+                    "name": "Seoul",
+                    "subdivision_name": "Seoul",
+                    "subdivision_code": "11",
+                    "latitude": 37.5656,
+                    "longitude": 126.978,
+                    "accuracy_radius": 20,
+                    "time_zone": "Asia/Seoul",
+                },
+                "asn_name": "SK Broadband",
+                "cidr": "1.2.3.0/24",
+            },
+        )
+        rows = {
+            r["label"]: r["value"]
+            for r in build_view(response, is_self=False)["geoip_rows"]
+        }
+        assert "South Korea" in rows["Country"] and "KR" in rows["Country"]
+        assert rows["City"] == "Seoul"
+        assert rows["Coordinates"] == "37.5656, 126.978"
+        assert rows["Accuracy"] == "± 20 km"
+        assert rows["Time zone"] == "Asia/Seoul"
+        assert rows["ASN org"] == "SK Broadband"
+
+    def test_missing_geo_is_dashes_not_errors(self):
+        rows = {
+            r["label"]: r["value"]
+            for r in build_view(IP_RESPONSE, is_self=True)["geoip_rows"]
+        }
+        assert rows["Coordinates"] == "—"
+        assert rows["Accuracy"] == "—"
