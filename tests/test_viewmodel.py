@@ -1,5 +1,6 @@
 import datetime
 
+from rdap import normalize_whois
 from viewmodel import build_view, country_flag, format_distance, whois_display
 
 UTC = datetime.timezone.utc
@@ -43,9 +44,16 @@ DOMAIN_RESPONSE = {
         "txt": ["v=spf1"] * 12,
     },
     "whois": {
+        "source": "rdap",
+        "name": "google.com",
         "registrar": "MarkMonitor Inc.",
-        "creation_date": "1997-09-15 04:00:00",
-        "expiration_date": "2028-09-14 04:00:00",
+        "registrant": "Google LLC",
+        "status": ["client transfer prohibited"],
+        "name_servers": ["ns1.google.com", "ns2.google.com"],
+        "created": datetime.datetime(1997, 9, 15, 4, 0, tzinfo=datetime.timezone.utc),
+        "updated": datetime.datetime(2024, 8, 2, 2, 17, tzinfo=datetime.timezone.utc),
+        "expires": datetime.datetime(2028, 9, 14, 4, 0, tzinfo=datetime.timezone.utc),
+        "dnssec": False,
     },
     "ssl": {
         "issuer": (
@@ -150,16 +158,18 @@ class TestAccordions:
         assert items["dns"] == "A 1 · MX 1 · NS 4 · TXT 12"
 
     def test_list_valued_whois_dates_are_flattened(self):
-        # python-whois hands back lists for some domains; the hint must not
-        # render "[dat → [dat".
-        response = dict(
-            DOMAIN_RESPONSE,
-            whois={
-                "registrar": ["MarkMonitor Inc.", "MarkMonitor"],
-                "creation_date": ["1997-09-15 04:00:00", "1997-09-15 07:00:00"],
-                "expiration_date": ["2028-09-14 04:00:00"],
-            },
-        )
+        # python-whois hands back lists for some domains; normalize_whois folds
+        # them so the hint never renders "[dat → [dat".
+        raw = {
+            "domain_name": "google.com",
+            "registrar": ["MarkMonitor Inc.", "MarkMonitor"],
+            "creation_date": [
+                datetime.datetime(1997, 9, 15, 4, 0, tzinfo=UTC),
+                datetime.datetime(1997, 9, 15, 7, 0, tzinfo=UTC),
+            ],
+            "expiration_date": [datetime.datetime(2028, 9, 14, 4, 0, tzinfo=UTC)],
+        }
+        response = dict(DOMAIN_RESPONSE, whois=normalize_whois(raw, "google.com"))
         hint = {
             i["id"]: i["hint"]
             for i in build_view(response, is_self=False)["accordions"]
@@ -293,12 +303,14 @@ class TestFormatDistance:
 
 
 class TestWhoisDisplay:
-    def test_lists_and_datetimes_render_readably(self):
-        # bahama.com shape: lists (name servers, emails, a list-valued date) and
-        # datetime objects must not leak Python reprs into the table.
+    def test_whois_fallback_lists_and_datetimes_render_readably(self):
+        # bahama.com shape from the port-43 fallback: lists (name servers, a
+        # list-valued date) and datetime objects must survive normalize_whois +
+        # whois_display without leaking Python reprs into the table.
         tz = UTC
         raw = {
             "domain_name": "BAHAMA.COM",
+            "registrar": "NameSecure",
             "updated_date": [
                 datetime.datetime(2022, 12, 27, 17, 1, 31, tzinfo=tz),
                 datetime.datetime(2022, 12, 27, 17, 1, 31, tzinfo=tz),
@@ -306,17 +318,38 @@ class TestWhoisDisplay:
             "creation_date": datetime.datetime(1995, 3, 23, 5, 0, tzinfo=tz),
             "name_servers": ["DNS1.NAMESECURE.COM", "DNS2.NAMESECURE.COM"],
             "emails": ["a@x.com", "b@y.com"],
-            "referral_url": None,
         }
-        out = whois_display(raw)
-        assert out["domain_name"] == "BAHAMA.COM"
-        assert out["updated_date"] == "2022-12-27 17:01:31"  # deduped, formatted
-        assert out["creation_date"] == "1995-03-23 05:00:00"
-        assert out["name_servers"] == "DNS1.NAMESECURE.COM, DNS2.NAMESECURE.COM"
-        assert out["emails"] == "a@x.com, b@y.com"
-        assert out["referral_url"] == "—"
+        out = whois_display(normalize_whois(raw, "bahama.com"))
+        assert out["Source"] == "WHOIS"
+        assert out["Name"] == "BAHAMA.COM"
+        assert out["Registrar"] == "NameSecure"
+        assert out["Updated"] == "2022-12-27 17:01 UTC"  # deduped, formatted
+        assert out["Created"] == "1995-03-23 05:00 UTC"
+        assert out["Name servers"] == "dns1.namesecure.com, dns2.namesecure.com"
+        assert out["Abuse contact"] == "a@x.com"
         for value in out.values():
             assert "datetime.datetime" not in value and "[" not in value
+
+    def test_rdap_record_renders_ordered_labelled_rows(self):
+        record = {
+            "source": "rdap",
+            "name": "google.com",
+            "registrar": "MarkMonitor Inc.",
+            "status": ["client transfer prohibited"],
+            "name_servers": ["ns1.google.com", "ns2.google.com"],
+            "expires": datetime.datetime(2028, 9, 14, 4, 0, tzinfo=UTC),
+            "dnssec": False,
+        }
+        out = whois_display(record)
+        assert out["Source"] == "RDAP"
+        assert out["Registrar"] == "MarkMonitor Inc."
+        assert out["Name servers"] == "ns1.google.com, ns2.google.com"
+        assert out["Expires"] == "2028-09-14 04:00 UTC"
+        assert out["DNSSEC"] == "unsigned"
+
+    def test_error_record_shows_a_single_error_row(self):
+        assert whois_display({"error": "not registered"}) == {"Error": "not registered"}
+        assert whois_display(None) == {}
 
 
 class TestGeoIpSection:
