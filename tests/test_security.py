@@ -375,7 +375,7 @@ def _handler_sources(*handlers) -> str:
 
     import main
 
-    helpers = (main.lookup_whois, main.lookup_location)
+    helpers = (main.lookup_whois, main._whois_fallback, main.lookup_location)
     return "\n".join(inspect.getsource(fn) for fn in (*handlers, *helpers))
 
 
@@ -388,6 +388,7 @@ class TestAsyncIO:
 
         source = _handler_sources(get_self_info)
         for target in (
+            "lookup_rdap",
             "whois.whois",
             "geo_ip_manager.fetch_location",
             "domain_manager.perform_reverse_lookup",
@@ -403,6 +404,7 @@ class TestAsyncIO:
 
         source = _handler_sources(get_ip_info)
         for target in (
+            "lookup_rdap",
             "whois.whois",
             "dns.resolver.resolve",
             "SSLManager.get_ssl_info",

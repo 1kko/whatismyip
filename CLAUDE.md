@@ -51,20 +51,19 @@ python main.py
 
 ### Testing
 ```bash
-# Unit + TestClient tests — no running service needed
-pytest tests/test_geo.py tests/test_mapgeom.py tests/test_viewmodel.py tests/test_page.py
-
-# Run all tests (test_basic.py and test_security.py require localhost:8000)
+# The whole suite runs on FastAPI's TestClient with external lookups mocked —
+# no running service, no network.
 pytest
 
-# Run specific test
+# Run a single file or test
+pytest tests/test_rdap.py
 pytest tests/test_basic.py::TestBasic::test_get_domain_info
 
 # Run with verbose output
 pytest -v
 ```
 
-**Note:** Tests expect the service to be running at `http://127.0.0.1:8000` before execution.
+**Note:** No live server is required — every test file uses `TestClient`.
 
 ### Code Quality
 ```bash
@@ -79,12 +78,17 @@ poetry run ruff format .
 
 ### Core Components
 
-**Manager Classes** (main.py:116-268):
-- `GeoIpManager`: Handles GeoIP database updates (every 3 days via APScheduler) and location lookups using geoip2fast
-- `DomainManager`: DNS operations including A, MX, NS, CNAME, TXT record resolution, reverse DNS lookups, and domain validation
-- `SSLManager`: SSL certificate retrieval for HTTPS endpoints
-- `HeaderManager`: Request header filtering to remove proxy/forwarding headers
-- `BrowserDetector`: User-agent analysis to determine if HTML or JSON response should be returned
+**Modules:**
+- `config.py`: every environment-driven constant (timeouts, cache TTLs, file paths, rate-limit/ban settings, geo-block defaults, trusted proxies, map canvases). Pure values — imported by everything, imports nothing app-local, which keeps the tree cycle-free.
+- `managers.py` — data-gathering managers, one thin wrapper per source:
+  - `GeoIpManager`: GeoIP database updates (every 3 days via APScheduler) + geoip2fast lookups with a GeoLite2-City coordinate overlay
+  - `DomainManager`: DNS (A, MX, NS, CNAME, TXT), reverse DNS, domain validation
+  - `SSLManager`: SSL certificate retrieval for HTTPS endpoints
+  - `HeaderManager`: strips proxy/forwarding headers
+- `security.py` — request-security subsystem: `IPBanManager`, `RateLimiter`, `SuspiciousPatternDetector`, `WhitelistManager`, `GeoBlockManager`
+- `rdap.py`: RDAP lookups (whoisit) with a port-43 WHOIS fallback, both normalised to one canonical dict
+- `models.py`: Pydantic models (`WhoisResponse`, `GeoRulesUpdate`)
+- `main.py`: FastAPI app + middleware + routes + page rendering; wires the managers/security singletons and the scheduler. `BrowserDetector` (HTML-vs-JSON by user-agent) lives here.
 
 **API Endpoints**:
 - `GET /` - Returns client's own IP information (detects client IP from x-real-ip header or request.client.host)
@@ -123,7 +127,12 @@ poetry run ruff format .
 ### Project Structure
 ```
 whatismyip/
-├── main.py              # FastAPI app: routes, managers, security headers, page rendering
+├── main.py              # FastAPI app: routes, middleware, page rendering, wiring
+├── config.py            # all env-driven constants (no I/O, no cycles)
+├── managers.py          # GeoIp / Domain / SSL / Header managers
+├── security.py          # IP bans, rate limit, suspicious paths, geo-blocking
+├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
+├── models.py            # Pydantic models (WhoisResponse, GeoRulesUpdate)
 ├── geo.py               # Gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
@@ -141,10 +150,11 @@ whatismyip/
 ├── tests/
 │   ├── test_geo.py      # gazetteer + distance (unit)
 │   ├── test_mapgeom.py  # projection, tiles, arcs (unit)
-│   ├── test_viewmodel.py# view model (unit)
-│   ├── test_page.py     # API + HTML via TestClient (no live server needed)
-│   ├── test_basic.py    # integration (requires running service)
-│   └── test_security.py # integration (requires running service)
+│   ├── test_viewmodel.py# view model + WHOIS/SSL rendering (unit)
+│   ├── test_rdap.py     # RDAP/WHOIS normalisation + fallback routing (unit)
+│   ├── test_page.py     # API + HTML via TestClient
+│   ├── test_basic.py    # endpoint smoke tests via TestClient (mocked I/O)
+│   └── test_security.py # security subsystem via TestClient (mocked I/O)
 ├── data/                # Volume mount for persistent data (Docker)
 ├── Dockerfile           # Multi-stage build with poetry + uv
 ├── Makefile             # Docker workflow automation
@@ -195,15 +205,14 @@ The Dockerfile uses a two-stage approach:
 
 ### Testing Strategy
 
-Tests are integration tests that make actual HTTP requests to a running service instance. They verify:
-- Client IP information retrieval
-- Domain resolution (google.com)
-- Direct IP lookup (8.8.8.8)
-- 404 handling for non-existent paths
+Every test runs against FastAPI's `TestClient` with the external lookups
+(RDAP/WHOIS, GeoIP, DNS, reverse DNS) mocked, so `pytest` needs no running
+service and no network. Coverage spans:
+- Pure units: gazetteer/distance, map projection, the view model, RDAP/WHOIS normalisation
+- Endpoint behaviour and HTML rendering via `TestClient`
+- The security subsystem: proxy-header trust, SSRF guards, bans, rate limiting, geo-blocking
 
-**Before running tests, start the service:**
 ```bash
-make serve  # or uvicorn main:app
 pytest
 ```
 
