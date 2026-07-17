@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from geo import MIN_ROUTE_KM, Gazetteer, haversine_km
+from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
 from rdap import lookup_rdap, normalize_whois, refresh_rdap_bootstrap
 from viewmodel import build_view, whois_display
@@ -203,6 +203,23 @@ domain_manager = DomainManager()
 gazetteer = Gazetteer.load()
 
 
+def _is_route(
+    distance_km: float, origin_location: dict | None, target_location: dict | None
+) -> bool:
+    """Whether to draw home -> destination (two pins + arc) rather than a single
+    city pin. A genuine trip (>= MIN_ROUTE_KM) always is; and now that GeoIP is
+    city-level, two *different* cities closer than that get the route view too,
+    as long as they are not essentially the same spot (same-city GeoIP jitter)."""
+    if distance_km >= MIN_ROUTE_KM:
+        return True
+    origin_city = ((origin_location or {}).get("city_name") or "").strip()
+    target_city = ((target_location or {}).get("city_name") or "").strip()
+    different_cities = (
+        origin_city and target_city and origin_city.casefold() != target_city.casefold()
+    )
+    return bool(different_cities) and distance_km >= LOCAL_ROUTE_KM
+
+
 def build_map_payload(
     target_location: dict | None, origin_location: dict | None
 ) -> tuple[dict | None, float | None, dict | None, dict | None]:
@@ -212,7 +229,8 @@ def build_map_payload(
     object for the visitor (None unless it's a route), and `target` is the
     resolved target coordinates the caller writes back onto `location`. City
     mode (single pin, no arc) when the visitor is the target, their location is
-    unknown, or the two points are within MIN_ROUTE_KM of each other.
+    unknown, or the two points are the same place; see _is_route for when a
+    nearby-but-different city still draws home -> destination.
     """
     target = gazetteer.resolve(target_location)
     if not target:
@@ -226,7 +244,7 @@ def build_map_payload(
         distance_km = haversine_km(
             (origin["lat"], origin["lon"]), (target["lat"], target["lon"])
         )
-        if distance_km >= MIN_ROUTE_KM:
+        if _is_route(distance_km, origin_location, target_location):
             route_origin = origin
         else:
             distance_km = None

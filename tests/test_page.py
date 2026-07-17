@@ -3,7 +3,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from main import app, normalize_lookup_target
+from main import app, build_map_payload, normalize_lookup_target
+from main import _is_route
 
 CSS = Path("static/css/whatismyip.css")
 
@@ -61,6 +62,52 @@ class TestNormalizeLookupTarget:
     def test_empty_and_scheme_only_collapse_to_empty(self):
         assert normalize_lookup_target("") == ""
         assert normalize_lookup_target("https://") == ""
+
+
+class TestRouteVsCityMode:
+    """Now GeoIP is city-level, two different cities draw home -> destination even
+    when they are closer than the 25 km trip threshold."""
+
+    def _loc(self, name, lat, lon):
+        return {
+            "country_code": "KR",
+            "city_name": name,
+            "lat": lat,
+            "lon": lon,
+            "accuracy_km": 20,
+            "is_private": False,
+        }
+
+    def test_far_apart_is_always_a_route(self):
+        assert _is_route(9000, {"city_name": "Seoul"}, {"city_name": "Mountain View"})
+
+    def test_different_nearby_cities_now_route(self):
+        # ~15 km apart, different city names -> route (was city mode before).
+        assert _is_route(15, {"city_name": "Seoul"}, {"city_name": "Seongnam-si"})
+
+    def test_same_city_stays_city_mode(self):
+        assert not _is_route(15, {"city_name": "Seoul"}, {"city_name": "Seoul"})
+
+    def test_case_insensitive_same_city(self):
+        assert not _is_route(15, {"city_name": "SEOUL"}, {"city_name": "seoul"})
+
+    def test_essentially_the_same_spot_is_not_a_route(self):
+        # Different names but within the floor: same-place GeoIP jitter.
+        assert not _is_route(3, {"city_name": "Seoul"}, {"city_name": "Incheon"})
+
+    def test_unknown_target_city_falls_back_to_distance(self):
+        assert not _is_route(15, {"city_name": "Seoul"}, {"city_name": ""})
+        assert _is_route(40, {"city_name": "Seoul"}, {"city_name": ""})
+
+    def test_payload_draws_both_pins_for_nearby_different_cities(self):
+        # Seoul -> a point ~15 km east, different city: origin + arc must appear.
+        origin = self._loc("Seoul", 37.5665, 126.978)
+        target = self._loc("Seongnam-si", 37.5665, 127.15)
+        payload, distance_km, origin_obj, _ = build_map_payload(target, origin)
+        assert 5 < distance_km < 25  # closer than the old threshold...
+        assert origin_obj is not None  # ...yet still a route
+        assert payload["desktop"]["origin"] is not None
+        assert payload["desktop"]["line"] is not None
 
 
 class TestMapPayload:

@@ -18,7 +18,12 @@ COUNTRIES_FILE = os.getenv("GEO_COUNTRIES_FILE", "static/geo/countries.json")
 
 CITY_ZOOM = 10
 COUNTRY_ZOOM = 4
+# A trip far enough to always draw as home -> destination.
 MIN_ROUTE_KM = 25.0
+# Now that GeoIP resolves to city level, two *different* cities that are closer
+# than MIN_ROUTE_KM still deserve the home/destination view — but not two points
+# essentially on top of each other (same-city GeoIP jitter), so keep a floor.
+LOCAL_ROUTE_KM = 5.0
 EARTH_RADIUS_KM = 6371.0088
 # Above this GeoLite2 accuracy radius the fix is really country/region level
 # (anycast, country centroid), so it should not zoom to street level.
