@@ -15,39 +15,25 @@ permissions: {}
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # Runs on the self-hosted runner container that lives on the Coolify host, so
+    # it reaches Coolify at localhost with no Tailscale hop and nothing exposed
+    # publicly. This runner is used ONLY by this push/dispatch-triggered job;
+    # CI, CodeQL and the security audit stay on GitHub-hosted runners so a fork
+    # pull request can never execute code on the server.
+    runs-on: [self-hosted, coolify]
     timeout-minutes: 5
     steps:
-      - name: Join tailnet
-        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-          # Pinned on purpose. `latest` makes the action resolve the version via
-          # pkgs.tailscale.com/stable/?mode=json, which serves text/html and
-          # intermittently returns an HTML error page instead of JSON — that
-          # crashes the action ("Unexpected token '<' ... is not valid JSON")
-          # and kills the deploy before it ever joins the tailnet. A pinned
-          # version downloads the tarball directly and skips that lookup.
-          version: "1.98.9"
-
       - name: Trigger Coolify deploy
         env:
-          HOST: ${{ secrets.SVC_1KKO_COM }}
           UUID: ${{ secrets.COOLIFY_UUID }}
           FORCE: ${{ inputs.force || false }}
           TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
         run: |
           set -euo pipefail
           echo "Deploying (force=${FORCE})"
-          # Retry the webhook. The ephemeral CI node reaching Coolify over the
-          # tailnet occasionally hits a transient connection timeout (curl 28)
-          # right after joining, so one blip shouldn't fail the whole deploy.
           curl --fail-with-body --show-error --silent \
-               --connect-timeout 10 --max-time 60 \
-               --retry 4 --retry-delay 5 --retry-all-errors \
-               -X GET "https://${HOST}/api/v1/deploy?uuid=${UUID}&force=${FORCE}" \
+               --retry 3 --retry-delay 2 --retry-all-errors --max-time 30 \
+               -X GET "http://localhost:8000/api/v1/deploy?uuid=${UUID}&force=${FORCE}" \
                -H "Authorization: Bearer ${TOKEN}" \
                -H "Accept: application/json"
           echo
