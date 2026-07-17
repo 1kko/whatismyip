@@ -101,6 +101,54 @@ def _cert_san(ssl_data: dict) -> list[str]:
     ]
 
 
+def _subject_field(ssl_data: dict, name: str) -> str | None:
+    for rdn in ssl_data.get("subject", ()):
+        for key, value in rdn:
+            if key == name:
+                return value
+    return None
+
+
+def _cert_validation(ssl_data: dict) -> str:
+    """The validation level the CA vetted. getpeercert() does not expose the
+    certificate-policy OID, so EV is inferred from the businessCategory field EV
+    certs carry, OV from an organizationName, and DV when the subject is only a
+    common name (the Let's Encrypt / ACME shape)."""
+    org = _subject_field(ssl_data, "organizationName")
+    if _subject_field(ssl_data, "businessCategory") and org:
+        return f"EV · {org}"
+    if org:
+        return f"OV · {org}"
+    return "DV (domain validated)"
+
+
+def _dns_name_matches(pattern: str, host: str) -> bool:
+    """RFC 6125 name match. A wildcard covers exactly one left-most label, so
+    *.naver.com matches www.naver.com but neither naver.com nor a.b.naver.com."""
+    if pattern == host:
+        return True
+    if pattern.startswith("*."):
+        suffix = pattern[1:]  # ".naver.com"
+        if not host.endswith(suffix):
+            return False
+        leftmost = host[: -len(suffix)]
+        return bool(leftmost) and "." not in leftmost
+    return False
+
+
+def _host_covered(ssl_data: dict, host: str | None) -> bool | None:
+    """Whether the served certificate is actually valid for the looked-up host.
+    None when there is nothing to check (IP lookups have no hostname)."""
+    host = (host or "").strip().lower().rstrip(".")
+    if not host or _is_ip(host):
+        return None
+    names = [name.lower().rstrip(".") for name in _cert_san(ssl_data)]
+    if not names:  # pre-2017 certs with no SAN fall back to the common name
+        cn = _cert_subject_cn(ssl_data)
+        names = [cn.lower().rstrip(".")] if cn and cn != DASH else []
+    return any(_dns_name_matches(pattern, host) for pattern in names)
+
+
 def _format_cert_date(raw: str | None) -> str:
     if not raw:
         return DASH
@@ -122,7 +170,7 @@ def _ssl_status(ssl_data: dict) -> tuple[str, str]:
     return f"valid · {days_left}d left", "success"
 
 
-def ssl_rows(ssl_data: dict | None) -> list[dict]:
+def ssl_rows(ssl_data: dict | None, address: str | None = None) -> list[dict]:
     """Detailed certificate rows for the SSL accordion. Empty when there is no
     certificate (IP lookups, private/reserved targets, or an unreachable host)."""
     if not ssl_data:
@@ -131,10 +179,31 @@ def ssl_rows(ssl_data: dict | None) -> list[dict]:
     cipher = ssl_data.get("cipher") or {}
     cipher_text = f"{cipher.get('name')} ({cipher.get('bits')}-bit)" if cipher else DASH
     san = _cert_san(ssl_data)
-    return [
+    rows = [
         {"label": "Status", "value": status, "tone": tone},
+    ]
+    # Does the served cert actually cover the name the visitor looked up? The
+    # cert is fetched with SNI = that name, so a mismatch means a misconfigured
+    # host (or a shared cert that forgot to list it) — worth flagging loudly.
+    covered = _host_covered(ssl_data, address)
+    if covered is not None:
+        rows.append(
+            {
+                "label": "Host match",
+                "value": f"valid for {address}"
+                if covered
+                else f"not valid for {address}",
+                "tone": "success" if covered else "danger",
+            }
+        )
+    rows += [
         {"label": "Issuer (CA)", "value": _cert_issuer(ssl_data), "tone": "default"},
         {"label": "Subject", "value": _cert_subject_cn(ssl_data), "tone": "default"},
+        {
+            "label": "Validation",
+            "value": _cert_validation(ssl_data),
+            "tone": "default",
+        },
         {
             "label": "Protocol",
             "value": ssl_data.get("protocol") or DASH,
@@ -158,6 +227,7 @@ def ssl_rows(ssl_data: dict | None) -> list[dict]:
             "tone": "default",
         },
     ]
+    return rows
 
 
 def _network_column(location: dict, address: str) -> dict:
@@ -522,6 +592,6 @@ def build_view(response: dict, is_self: bool) -> dict:
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
         "accordions": _accordions(response),
-        "ssl_rows": ssl_rows(response.get("ssl")),
+        "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         "geoip_rows": geoip_rows(location),
     }
