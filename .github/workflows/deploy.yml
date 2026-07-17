@@ -31,8 +31,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Deploying (force=${FORCE})"
-          curl --fail-with-body --show-error --silent \
-               --retry 3 --retry-delay 2 --retry-all-errors --max-time 30 \
+          # Flags kept compatible with the runner image's curl 7.68 (no
+          # --fail-with-body / --retry-all-errors, which need 7.76 / 7.71).
+          curl --fail --show-error --silent \
+               --retry 3 --retry-delay 2 --max-time 30 \
                -X GET "http://localhost:8000/api/v1/deploy?uuid=${UUID}&force=${FORCE}" \
                -H "Authorization: Bearer ${TOKEN}" \
                -H "Accept: application/json"
