@@ -124,6 +124,20 @@ def sanitize_log_input(value: str) -> str:
     return value.replace("\n", "").replace("\r", "").replace("\x00", "")
 
 
+def normalize_lookup_target(raw: str) -> str:
+    """Reduce a pasted URL to the bare host or IP the pipeline can resolve.
+
+    Mirrors static/js/app.js normalizeLookupTarget so a URL typed into the search
+    box and one sent straight to the API behave the same: drop the scheme and
+    everything from the first '/', '?' or '#' onwards. Without this, is_valid_domain
+    (which parses URLs via get_tld) would accept "https://host/path" but the raw
+    string would then be handed to DNS/WHOIS/SSL, which cannot resolve it.
+    """
+    target = (raw or "").strip()
+    target = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", target)
+    return re.split(r"[/?#]", target, maxsplit=1)[0]
+
+
 # Security Configuration from Environment Variables
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 if not ADMIN_API_KEY or ADMIN_API_KEY == "CHANGE_ME_TO_SECURE_RANDOM_STRING":
@@ -674,6 +688,9 @@ async def get_self_info(request: Request):
 async def get_ip_info(domain_ip: str, request: Request):
     # Remove the static path check since it's handled by the static files mount
     started = time.perf_counter()
+    # Strip any scheme/path a caller pasted (e.g. "https://host/x") down to the
+    # bare host before it reaches WHOIS/DNS/SSL. Everything below reads this.
+    domain_ip = normalize_lookup_target(domain_ip)
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
