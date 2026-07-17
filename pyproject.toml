@@ -23,6 +23,7 @@ opentelemetry-instrumentation-requests = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-logging = ">=0.50b0,<1.0"
 orjson = "^3.11.9"
 maxminddb = "^3.1.1"
+whoisit = "^4.0.4"
 
 
 [tool.poetry.group.dev.dependencies]

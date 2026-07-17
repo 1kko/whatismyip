@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from geo import MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
+from rdap import lookup_rdap, normalize_whois, refresh_rdap_bootstrap
 from viewmodel import build_view, whois_display
 from tld import exceptions as tld_exceptions
 from tld import get_tld
@@ -91,6 +92,9 @@ DNS_QUERY_LIFETIME = float(os.getenv("DNS_QUERY_LIFETIME", "3"))  # per query, t
 # Some registries (naver.com, ibm.com, .pt ...) answer WHOIS in ~11s. A tight
 # cap turned those into "lookup timed out" failures, so give the slow tail room;
 # the result is cached for 6h and the lookup runs in parallel with everything.
+# RDAP is a single HTTPS GET, so it answers in well under a second when the TLD
+# supports it; give it a tight budget and fall back to port-43 WHOIS otherwise.
+RDAP_TIMEOUT_SECONDS = float(os.getenv("RDAP_TIMEOUT_SECONDS", "8"))
 WHOIS_TIMEOUT_SECONDS = float(os.getenv("WHOIS_TIMEOUT_SECONDS", "15"))
 WHOIS_CACHE_TTL = int(os.getenv("WHOIS_CACHE_TTL", "21600"))  # 6h for a hit
 WHOIS_CACHE_ERROR_TTL = int(os.getenv("WHOIS_CACHE_ERROR_TTL", "300"))  # 5m for a miss
@@ -1199,13 +1203,11 @@ def _dns_rows(response_data: dict) -> list[dict]:
     return rows
 
 
-async def lookup_whois(target: str) -> dict:
-    key = (target or "").strip().lower()
-    cached = _whois_cache.get(key)
-    if cached is not None:
-        return cached
+async def _whois_fallback(target: str) -> dict:
+    """Port-43 WHOIS, normalised into the same shape RDAP produces. Used only for
+    the TLDs RDAP does not cover, or when the RDAP server is unreachable."""
     try:
-        result = await asyncio.wait_for(
+        raw = await asyncio.wait_for(
             asyncio.to_thread(whois.whois, target, quiet=True),
             timeout=WHOIS_TIMEOUT_SECONDS,
         )
@@ -1213,12 +1215,41 @@ async def lookup_whois(target: str) -> dict:
         # wait_for cannot cancel the worker thread, so the underlying whois call
         # keeps running and is discarded; the response no longer waits on it.
         logging.warning("WHOIS lookup timed out for %s", sanitize_log_input(target))
-        result = {"error": "WHOIS lookup timed out"}
+        return {"error": "WHOIS lookup timed out"}
     except Exception:
         logging.exception("WHOIS lookup failed for %s", sanitize_log_input(target))
-        result = {"error": "WHOIS lookup failed"}
+        return {"error": "WHOIS lookup failed"}
+    return normalize_whois(raw, target)
+
+
+async def lookup_whois(target: str) -> dict:
+    """Registration data for a domain or IP. RDAP first (fast, structured JSON),
+    falling back to port-43 WHOIS for TLDs RDAP does not serve. Both sources are
+    normalised to one shape (see rdap.py) and cached under the same key."""
+    key = (target or "").strip().lower()
+    cached = _whois_cache.get(key)
+    if cached is not None:
+        return cached
+
+    result = None
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(lookup_rdap, target),
+            timeout=RDAP_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logging.info("RDAP timed out for %s; trying WHOIS", sanitize_log_input(target))
+    except Exception:
+        safe = sanitize_log_input(target)
+        logging.exception("RDAP errored for %s; trying WHOIS", safe)
+
+    # lookup_rdap returns None when RDAP cannot answer (unsupported TLD, query
+    # error) — only then do we pay for the slow port-43 round-trip.
+    if result is None:
+        result = await _whois_fallback(target)
     if not result:
         result = {"error": "WHOIS lookup failed"}
+
     failed = isinstance(result, dict) and result.get("error")
     _whois_cache.set(key, result, WHOIS_CACHE_ERROR_TTL if failed else WHOIS_CACHE_TTL)
     return result
@@ -1326,6 +1357,10 @@ scheduler.add_job(
 scheduler.add_job(
     rate_limiter.cleanup_old_records, "interval", seconds=RATE_LIMIT_CLEANUP_INTERVAL
 )
+# The IANA RDAP bootstrap registry (TLD/IP-block -> RDAP server) rarely changes;
+# check daily and only re-fetch when it is older than a week. The first lookup
+# bootstraps lazily, so nothing here blocks startup.
+scheduler.add_job(refresh_rdap_bootstrap, "interval", days=1)
 scheduler.start()
 geo_ip_manager.update_database()
 # The city DB is ~60MB, so only fetch it on first boot; the scheduler refreshes

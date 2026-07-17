@@ -312,31 +312,76 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
     return tags
 
 
+# The canonical registration record (see rdap.py) rendered as an ordered set of
+# labelled rows. Empty fields are dropped, so an IP result simply omits the
+# domain-only rows (registrar, name servers, expiry) and vice versa.
+_WHOIS_ROWS = (
+    ("source", "Source"),
+    ("name", "Name"),
+    ("handle", "Handle"),
+    ("registrar", "Registrar"),
+    ("registrant", "Registrant"),
+    ("abuse_email", "Abuse contact"),
+    ("status", "Status"),
+    ("name_servers", "Name servers"),
+    ("created", "Created"),
+    ("updated", "Updated"),
+    ("expires", "Expires"),
+    ("dnssec", "DNSSEC"),
+    ("country", "Country"),
+    ("network", "Network"),
+    ("rir", "RIR"),
+    ("whois_server", "WHOIS server"),
+    ("url", "RDAP URL"),
+)
+
+
+def _year(value: Any) -> str:
+    """Four-digit year from a canonical date field (datetime, or a string for
+    the odd WHOIS record that hands one back)."""
+    if isinstance(value, datetime.datetime):
+        return str(value.year)
+    return str(value or "")[:4]
+
+
+def _whois_value(key: str, value: Any) -> str:
+    """Render one canonical field. RDAP and WHOIS both feed this, so it copes
+    with datetimes, lists, and the odd bool without leaking Python reprs."""
+    if value is None or value == "":
+        return DASH
+    if key == "source":
+        return str(value).upper()
+    if key == "dnssec":
+        if isinstance(value, bool):
+            return "signed" if value else "unsigned"
+        return str(value)
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(datetime.timezone.utc)
+        return value.strftime("%Y-%m-%d %H:%M UTC")
+    if isinstance(value, (list, tuple, set)):
+        seen, parts = set(), []
+        for item in value:
+            text = _whois_value(key, item)
+            if text and text != DASH and text not in seen:
+                seen.add(text)
+                parts.append(text)
+        return ", ".join(parts) if parts else DASH
+    return str(value)
+
+
 def whois_display(whois_data: dict | None) -> dict:
-    """Flatten a python-whois record into readable strings for the template.
-
-    python-whois hands back lists (name servers, emails, sometimes dates) and
-    datetime objects; a bare str() on those prints raw Python reprs like
-    "[datetime.datetime(2022, 12, 27, ...)]" or "['NS1', 'NS2']".
-    """
-
-    def scalar(value: Any) -> str:
-        if isinstance(value, datetime.datetime):
-            return value.strftime("%Y-%m-%d %H:%M:%S")
-        return DASH if value is None else str(value)
-
+    """Turn a canonical registration record into ordered, labelled strings for
+    the WHOIS accordion. Returns an error row on failure and {} when absent."""
+    if not whois_data:
+        return {}
+    if whois_data.get("error"):
+        return {"Error": str(whois_data["error"])}
     out: dict[str, str] = {}
-    for key, value in (whois_data or {}).items():
-        if isinstance(value, (list, tuple)):
-            seen, parts = set(), []
-            for item in value:
-                text = scalar(item)
-                if text and text != DASH and text not in seen:
-                    seen.add(text)
-                    parts.append(text)
-            out[key] = ", ".join(parts) if parts else DASH
-        else:
-            out[key] = scalar(value)
+    for key, label in _WHOIS_ROWS:
+        text = _whois_value(key, whois_data.get(key))
+        if text and text != DASH:
+            out[label] = text
     return out
 
 
@@ -398,11 +443,15 @@ def _accordions(response: dict) -> list[dict]:
     if "error" in whois_data or not whois_data:
         whois_hint = "lookup failed"
     else:
-        registrar = _first(whois_data.get("registrar")) or "registry data"
-        created = str(_first(whois_data.get("creation_date")) or "")[:4]
-        expires = str(_first(whois_data.get("expiration_date")) or "")[:4]
+        who = (
+            whois_data.get("registrar")
+            or whois_data.get("registrant")
+            or "registry data"
+        )
+        created = _year(whois_data.get("created"))
+        expires = _year(whois_data.get("expires"))
         span = f" · {created} → {expires}" if created and expires else ""
-        whois_hint = f"{registrar}{span}"
+        whois_hint = f"{who}{span}"
 
     dns_hint = " · ".join(
         f"{label} {len(domain.get(key) or [])}"

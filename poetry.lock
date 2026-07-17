@@ -3008,6 +3008,25 @@ files = [
 ]
 
 [[package]]
+name = "whoisit"
+version = "4.0.4"
+description = "A Python client to RDAP WHOIS-like services for internet resources."
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "whoisit-4.0.4-py3-none-any.whl", hash = "sha256:9ecf5c12f3e259267b11a09b30881ba94f1b4640a27f71fe27bb6e4303505966"},
+    {file = "whoisit-4.0.4.tar.gz", hash = "sha256:84f043e102c9984c1b10e29efcbe30f800d6e5c9c2a14c5dad379126fd281b0a"},
+]
+
+[package.dependencies]
+httpx = ">=0.28.1"
+python-dateutil = ">=2.9.0.post0"
+requests = ">=2.32.5"
+typing-extensions = ">=4.15.0"
+urllib3 = ">=2.6.3"
+
+[[package]]
 name = "wrapt"
 version = "2.1.2"
 description = "Module for decorators, wrappers and monkey patching."
@@ -3133,4 +3152,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "c3e9d032c9b1c71e6ca2d971897ca5d38de0f6987a5416af71551555145a3aa2"
+content-hash = "cb31a3d03bd4f0cf82590d53fc389fad32f7887135561333067c0b84e09f0a84"
