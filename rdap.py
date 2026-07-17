@@ -30,9 +30,9 @@ never have to care which one answered:
         "url": str | None,
     }
 
-datetimes are left as datetime objects on purpose: orjson serialises them to
-ISO-8601 natively for the JSON API, and viewmodel.whois_display() formats them
-for the browser table. On total failure the dict is just {"error": "..."}.
+datetimes are left as datetime objects on purpose: FastAPI's jsonable_encoder
+serialises them to ISO-8601 for the JSON API, and viewmodel.whois_display()
+formats them for the browser table. On total failure the dict is {"error": ...}.
 """
 
 from __future__ import annotations
