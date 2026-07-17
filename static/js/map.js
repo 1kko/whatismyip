@@ -6,6 +6,12 @@ const mapData = mapDataNode ? JSON.parse(mapDataNode.textContent) : null;
 const SVG_NS = "http://www.w3.org/2000/svg";
 const MOBILE = window.matchMedia("(max-width: 900px)");
 
+// mapData is built server-side (mapgeom.py), but it reaches this script as DOM
+// text, so every tile URL is checked against the one host the CSP img-src allows
+// before it is ever assigned to img.src. Defence in depth, and it satisfies
+// CodeQL's js/xss-through-dom by proving the value safe at the sink.
+const OSM_TILE_URL = /^https:\/\/tile\.openstreetmap\.org\/\d+\/\d+\/\d+\.png$/;
+
 function svg(tag, attrs) {
   const node = document.createElementNS(SVG_NS, tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -102,6 +108,7 @@ function paint(container, canvas, distanceText, originIp, targetIp) {
   const tiles = document.createElement("div");
   tiles.className = "map__tiles";
   for (const tile of canvas.tiles) {
+    if (!OSM_TILE_URL.test(tile.url)) continue;
     const img = document.createElement("img");
     img.src = tile.url;
     img.alt = "";
