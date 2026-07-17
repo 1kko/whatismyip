@@ -351,8 +351,10 @@ def geoip_rows(location: dict | None) -> list[dict]:
 
     subdivision = city.get("subdivision_name") or ""
     sub_code = city.get("subdivision_code") or ""
-    region = f"{subdivision} ({sub_code})" if subdivision and sub_code else (
-        subdivision or DASH
+    region = (
+        f"{subdivision} ({sub_code})"
+        if subdivision and sub_code
+        else (subdivision or DASH)
     )
 
     lat, lon = city.get("latitude"), city.get("longitude")
