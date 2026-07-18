@@ -369,6 +369,12 @@ class TestFingerprintPanel:
         assert "img-src 'self' data: https://tile.openstreetmap.org" in csp
         assert "connect-src" not in csp  # no external calls were opened up
 
+    def test_device_panel_is_styled(self):
+        css = CSS.read_text(encoding="utf-8")
+        assert ".device__hash" in css
+        assert ".device__grid" in css
+        assert ".device__bits" in css
+
 
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):
