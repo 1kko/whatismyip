@@ -225,6 +225,7 @@ body {
   cursor: pointer;
 }
 .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+.copy-btn:disabled { opacity: 0.5; cursor: default; }
 .ip {
   margin: 0;
   font-size: 56px;

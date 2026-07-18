@@ -117,7 +117,10 @@
 
       setText("fp-hash", id ? id.slice(0, 32) : DASH);
       const copyBtn = document.getElementById("fp-copy");
-      if (copyBtn && id) copyBtn.dataset.value = id;
+      if (copyBtn && id) {
+        copyBtn.dataset.value = id;
+        copyBtn.disabled = false;
+      }
       setText("fp-bits", "≈ " + bits + " bits");
       setText("fp-unique", "≈ 1 in " + formatCount(Math.pow(2, bits)) + " browsers");
       setText("fp-acc-hint", signals.length + " signals · ≈ " + bits + " bits");

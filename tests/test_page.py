@@ -406,6 +406,16 @@ class TestFingerprintPanel:
         assert "stable = true" in js
         assert "signals.filter((s) => s.stable)" in js
 
+    def test_copy_button_is_disabled_until_the_id_is_ready(self):
+        html = client.get("/", headers=BROWSER_UA).text
+        assert 'id="fp-copy"' in html
+        # The button ships disabled so an early click can't copy an empty value.
+        button = html.split('id="fp-copy"')[1].split(">")[0]
+        assert "disabled" in button
+        # JS re-enables it only after the fingerprint ID is set.
+        js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        assert "copyBtn.disabled = false" in js
+
 
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):
