@@ -87,6 +87,43 @@
             {% endfor %}
         </section>
 
+        {% if view.is_self %}
+        <section class="device" id="device-panel" aria-label="What your browser reveals">
+            <div class="device__head">
+                <h2 class="facts__title">WHAT YOUR BROWSER REVEALS</h2>
+                <span class="hint">computed in your browser · sent to no one</span>
+            </div>
+            <noscript>
+                <p class="device__note">JavaScript is required to read your browser's signals.</p>
+            </noscript>
+            <div class="device__body" id="device-body" hidden>
+                <div class="device__headline">
+                    <div class="device__id">
+                        <span class="kv-label">FINGERPRINT</span>
+                        <code class="device__hash mono" id="fp-hash">…</code>
+                        <button type="button" class="copy-btn" id="fp-copy" data-value="">Copy</button>
+                    </div>
+                    <div class="device__entropy">
+                        <span class="device__bits mono" id="fp-bits">…</span>
+                        <span class="device__unique" id="fp-unique"></span>
+                    </div>
+                </div>
+                <p class="device__note">
+                    Estimate from typical distributions, not measured on real traffic.
+                    Reload — the ID stays the same.
+                </p>
+                <div class="device__grid">
+                    <div class="kv"><span class="kv-label">GPU</span><span class="kv-value" id="fp-gpu">—</span></div>
+                    <div class="kv"><span class="kv-label">Cores</span><span class="kv-value" id="fp-cores">—</span></div>
+                    <div class="kv"><span class="kv-label">Memory</span><span class="kv-value" id="fp-memory">—</span></div>
+                    <div class="kv"><span class="kv-label">Screen</span><span class="kv-value" id="fp-resolution">—</span></div>
+                    <div class="kv"><span class="kv-label">TZ</span><span class="kv-value" id="fp-timezone">—</span></div>
+                    <div class="kv"><span class="kv-label">Lang</span><span class="kv-value" id="fp-language">—</span></div>
+                </div>
+            </div>
+        </section>
+        {% endif %}
+
         <section class="accordions">
             {% for item in view.accordions %}
             <details class="accordion" id="acc-{{ item.id }}">
@@ -161,6 +198,21 @@
                 </div>
             </details>
             {% endfor %}
+            {% if view.is_self %}
+            <details class="accordion" id="acc-fingerprint">
+                <summary class="accordion__header">
+                    <span class="accordion__title">Fingerprint</span>
+                    <span class="hint" id="fp-acc-hint">browser signals</span>
+                </summary>
+                <div class="accordion__body">
+                    <table class="records">
+                        <tbody id="fp-signals">
+                            <tr><td colspan="4" class="tone-muted">Reading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </details>
+            {% endif %}
         </section>
     </main>
 
@@ -180,5 +232,6 @@
 <script type="application/json" id="map-data" nonce="{{ nonce }}">{{ map_data | safe }}</script>
 <script src="/static/js/app.js" nonce="{{ nonce }}" defer></script>
 <script src="/static/js/map.js" nonce="{{ nonce }}" defer></script>
+{% if view.is_self %}<script src="/static/js/fingerprint.js" nonce="{{ nonce }}" defer></script>{% endif %}
 </body>
 </html>

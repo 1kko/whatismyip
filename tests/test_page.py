@@ -350,6 +350,26 @@ class TestBrowserPage:
         assert 'role="alert"' in html
 
 
+class TestFingerprintPanel:
+    def test_self_page_shows_the_browser_fingerprint_panel(self):
+        html = client.get("/", headers=BROWSER_UA).text
+        assert 'id="device-panel"' in html
+        assert 'id="acc-fingerprint"' in html
+        assert "/static/js/fingerprint.js" in html
+        assert "noscript" in html  # JS-required fallback lives in the panel
+
+    def test_lookup_page_has_no_fingerprint_panel(self):
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert 'id="device-panel"' not in html
+        assert "/static/js/fingerprint.js" not in html
+
+    def test_fingerprint_panel_does_not_change_the_csp(self):
+        # Same-origin computation only; the tile-host CSP must be untouched.
+        csp = client.get("/", headers=BROWSER_UA).headers["content-security-policy"]
+        assert "img-src 'self' data: https://tile.openstreetmap.org" in csp
+        assert "connect-src" not in csp  # no external calls were opened up
+
+
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):
         css = CSS.read_text(encoding="utf-8")
