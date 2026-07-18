@@ -66,6 +66,14 @@ GEOIP_CITY_DB_FILE = os.getenv(
     os.path.join(_APP_DIR, "data", "GeoLite2-City.mmdb"),
 )
 
+# Official MaxMind GeoLite2-City download. When both are set, the city overlay is
+# fetched from MaxMind's licensed endpoint (a .tar.gz over HTTP Basic auth)
+# instead of the free mirror above, falling back to that mirror on failure. Get
+# them free at https://www.maxmind.com/en/geolite2/signup.
+MAXMIND_ACCOUNT_ID = os.getenv("MAXMIND_ACCOUNT_ID")
+MAXMIND_LICENSE_KEY = os.getenv("MAXMIND_LICENSE_KEY")
+MAXMIND_CITY_EDITION = os.getenv("MAXMIND_CITY_EDITION", "GeoLite2-City")
+
 # Background Job Intervals (seconds)
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "300"))
 RATE_LIMIT_CLEANUP_INTERVAL = int(os.getenv("RATE_LIMIT_CLEANUP_INTERVAL", "60"))
