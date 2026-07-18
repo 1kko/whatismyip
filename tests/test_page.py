@@ -399,6 +399,13 @@ class TestFingerprintPanel:
         assert 'getElementById("device-panel")' in js
         assert "if (!panel) return" in js
 
+    def test_fingerprint_id_hashes_only_stable_signals(self):
+        js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        # The ID must be reproducible across reloads, so the hash material is
+        # built from stable signals only (volatile ones are tagged stable=false).
+        assert "stable = true" in js
+        assert "signals.filter((s) => s.stable)" in js
+
 
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):

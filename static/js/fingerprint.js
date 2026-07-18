@@ -13,9 +13,9 @@
   // {label, value, bits}. bits count only when the signal was actually read,
   // so a browser that blocks canvas/WebGL honestly scores lower.
   const signals = [];
-  const add = (label, value, bits) => {
+  const add = (label, value, bits, stable = true) => {
     const has = value !== null && value !== undefined && value !== "";
-    signals.push({ label, value: has ? String(value) : DASH, bits: has ? bits : 0 });
+    signals.push({ label, value: has ? String(value) : DASH, bits: has ? bits : 0, stable });
   };
   const safe = (fn) => {
     try {
@@ -38,14 +38,14 @@
   const tz = safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
   add("Time zone", tz, 3);
   const offset = safe(() => -new Date().getTimezoneOffset());
-  add("UTC offset", offset != null ? (offset >= 0 ? "+" : "") + offset + " min" : null, 0);
+  add("UTC offset", offset != null ? (offset >= 0 ? "+" : "") + offset + " min" : null, 0, false);
 
   const resolution = safe(() => screen.width + "×" + screen.height);
   add("Resolution", resolution, 4);
-  add("Available", safe(() => screen.availWidth + "×" + screen.availHeight), 0);
+  add("Available", safe(() => screen.availWidth + "×" + screen.availHeight), 0, false);
   add("Color depth", safe(() => screen.colorDepth), 1);
-  add("Pixel ratio", safe(() => window.devicePixelRatio), 1);
-  add("Orientation", safe(() => screen.orientation && screen.orientation.type), 0);
+  add("Pixel ratio", safe(() => window.devicePixelRatio), 1, false);
+  add("Orientation", safe(() => screen.orientation && screen.orientation.type), 0, false);
   add("Touch points", safe(() => nav.maxTouchPoints), 1);
 
   const platform = safe(() => (nav.userAgentData && nav.userAgentData.platform) || nav.platform);
@@ -56,8 +56,8 @@
   add("Device memory", memory, 2);
   add("Pointer", safe(() =>
     matchMedia("(pointer: fine)").matches ? "fine"
-      : matchMedia("(pointer: coarse)").matches ? "coarse" : "none"), 0);
-  add("Hover", safe(() => (matchMedia("(hover: hover)").matches ? "yes" : "no")), 0);
+      : matchMedia("(pointer: coarse)").matches ? "coarse" : "none"), 0, false);
+  add("Hover", safe(() => (matchMedia("(hover: hover)").matches ? "yes" : "no")), 0, false);
 
   // GPU via WebGL. This context is reused in phase 2 for the parameter hash.
   const gl = safe(() => {
@@ -110,7 +110,8 @@
       renderSignals();
 
       const material =
-        signals.map((s) => s.label + "=" + s.value).join("|") + "|fonts=" + fonts.join(",");
+        signals.filter((s) => s.stable).map((s) => s.label + "=" + s.value).join("|") +
+        "|fonts=" + fonts.join(",");
       const id = await hashString(material);
       const bits = signals.reduce((total, s) => total + s.bits, 0);
 
