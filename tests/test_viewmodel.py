@@ -461,3 +461,13 @@ class TestGeoIpSection:
         }
         assert rows["Coordinates"] == "—"
         assert rows["Accuracy"] == "—"
+
+
+class TestSelfFlag:
+    def test_self_lookup_is_flagged(self):
+        view = build_view({"address": "1.2.3.4", "location": {}}, is_self=True)
+        assert view["is_self"] is True
+
+    def test_non_self_lookup_is_flagged(self):
+        view = build_view({"address": "1.2.3.4", "location": {}}, is_self=False)
+        assert view["is_self"] is False

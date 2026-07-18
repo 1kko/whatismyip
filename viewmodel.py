@@ -580,6 +580,7 @@ def build_view(response: dict, is_self: bool) -> dict:
         ]
 
     return {
+        "is_self": is_self,
         "eyebrow": "YOUR IP ADDRESS" if is_self else "LOOKUP",
         "target": address,
         "tags": _tags(response, is_ip),
