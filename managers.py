@@ -4,12 +4,15 @@ Each is a thin wrapper over one external source. They depend only on config, so
 main.py can import them without an import cycle.
 """
 
+import base64
 import gzip
+import io
 import ipaddress
 import logging
 import os
 import socket
 import ssl
+import tarfile
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
@@ -27,8 +30,18 @@ from config import (
     GEOIP_CITY_DB_FILE,
     GEOIP_CITY_DB_URL,
     GEOIP_DATA_FILE,
+    MAXMIND_ACCOUNT_ID,
+    MAXMIND_CITY_EDITION,
+    MAXMIND_LICENSE_KEY,
     PUBLIC_RESOLVERS,
     TIMEOUT_SECONDS,
+)
+
+# MaxMind's licensed direct-download endpoint. It returns a .tar.gz (Basic auth
+# with account id + license key); the free mirror in GEOIP_CITY_DB_URL is a plain
+# gzip of the bare .mmdb instead.
+MAXMIND_CITY_DOWNLOAD_URL = (
+    "https://download.maxmind.com/geoip/databases/{edition}/download?suffix=tar.gz"
 )
 
 
@@ -44,6 +57,74 @@ def _recursive_resolver() -> dns.resolver.Resolver:
     resolver.timeout = DNS_QUERY_TIMEOUT
     resolver.lifetime = DNS_QUERY_LIFETIME
     return resolver
+
+
+class _AuthDroppingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Strip the Authorization header when following a redirect. MaxMind's
+    download endpoint 302-redirects to a presigned URL on another host that
+    rejects the Basic auth header (HTTP 400); the credentials belong only on the
+    first request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new.remove_header("Authorization")
+        return new
+
+
+def _download_bytes(target, timeout: int = 120) -> bytes:
+    """Read an HTTP(S) URL or a prepared urllib Request fully into memory. The
+    target is operator-set config (a mirror URL or an authenticated MaxMind
+    request), not user input, so any scheme is intentional."""
+    opener = urllib.request.build_opener(_AuthDroppingRedirectHandler())
+    with opener.open(target, timeout=timeout) as resp:  # noqa: S310
+        return resp.read()
+
+
+def _maxmind_city_request():
+    """An authenticated request for MaxMind's GeoLite2-City .tar.gz, or None when
+    the two credentials are not both configured (then the free mirror is used)."""
+    if not (MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY):
+        return None
+    url = MAXMIND_CITY_DOWNLOAD_URL.format(edition=MAXMIND_CITY_EDITION)
+    token = base64.b64encode(
+        f"{MAXMIND_ACCOUNT_ID}:{MAXMIND_LICENSE_KEY}".encode()
+    ).decode()
+    # url is the hardcoded https MaxMind endpoint above, not user input.
+    request = urllib.request.Request(url)  # noqa: S310
+    request.add_header("Authorization", f"Basic {token}")
+    return request
+
+
+def _extract_mmdb(tar_gz_bytes: bytes) -> bytes:
+    """Pull the single .mmdb file out of a MaxMind .tar.gz release, which also
+    bundles COPYRIGHT/LICENSE text files alongside the database."""
+    with tarfile.open(fileobj=io.BytesIO(tar_gz_bytes), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if member.name.endswith(".mmdb"):
+                extracted = tar.extractfile(member)
+                if extracted is not None:
+                    return extracted.read()
+    raise ValueError("no .mmdb member found in the MaxMind tarball")
+
+
+def _fetch_city_mmdb() -> bytes:
+    """Raw GeoLite2-City mmdb bytes from the best available source.
+
+    MaxMind's licensed endpoint (a .tar.gz, extracted) when credentials are set;
+    on any MaxMind error, falls back to the free jsdelivr mirror (a plain gzip)
+    so the city overlay still refreshes. Without credentials the mirror is the
+    only source, which is the original behaviour."""
+    request = _maxmind_city_request()
+    if request is not None:
+        try:
+            return _extract_mmdb(_download_bytes(request))
+        except Exception:
+            logging.exception(
+                "MaxMind GeoLite2-City download failed (check MAXMIND_ACCOUNT_ID "
+                "/ MAXMIND_LICENSE_KEY); falling back to the free mirror"
+            )
+    return gzip.decompress(_download_bytes(GEOIP_CITY_DB_URL))
 
 
 class GeoIpManager:
@@ -105,16 +186,13 @@ class GeoIpManager:
 
     def update_city_database(self):
         """Download and unpack the GeoLite2-City mmdb, then hot-swap the reader.
-        The mirror tracks MaxMind's twice-weekly release; the URL is env-tunable
-        so it can point at a licensed MaxMind download or a local file instead."""
+        The source is MaxMind's licensed endpoint when MAXMIND_ACCOUNT_ID and
+        MAXMIND_LICENSE_KEY are set, otherwise the free mirror; see
+        _fetch_city_mmdb. The write is atomic, so the live file is only ever a
+        complete database."""
         try:
             os.makedirs(os.path.dirname(GEOIP_CITY_DB_FILE), exist_ok=True)
-            # GEOIP_CITY_DB_URL is operator-set config (an https mirror or a
-            # local file:// path), not user input, so any scheme is intentional.
-            with urllib.request.urlopen(  # noqa: S310
-                GEOIP_CITY_DB_URL, timeout=120
-            ) as resp:
-                data = gzip.decompress(resp.read())
+            data = _fetch_city_mmdb()
             tmp = GEOIP_CITY_DB_FILE + ".tmp"
             with open(tmp, "wb") as handle:
                 handle.write(data)
