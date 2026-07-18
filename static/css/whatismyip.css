@@ -226,6 +226,22 @@ body {
 }
 .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
 .copy-btn:disabled { opacity: 0.5; cursor: default; }
+/* Inline copy icon (the fingerprint UNIQUE ID row) */
+.copy-icon {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.copy-icon:hover { color: var(--accent); }
+.copy-icon:disabled { opacity: 0.4; cursor: default; }
+.copy-icon.is-copied { color: var(--success); }
+.fp-id { align-items: center; }
+.fp-id .kv-label { width: auto; white-space: nowrap; }
+.fp-id .kv-value { flex: 1; overflow-wrap: anywhere; }
 .ip {
   margin: 0;
   font-size: 56px;

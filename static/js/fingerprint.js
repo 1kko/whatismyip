@@ -3,11 +3,10 @@
 // No dependencies, no storage. Mirrors the map.js pattern: server renders empty
 // placeholders, this paints them. Two phases so the first frame is never blocked.
 (function () {
-  const panel = document.getElementById("device-panel");
+  const panel = document.getElementById("acc-fingerprint");
   if (!panel) return; // lookup page, or not the self view — do nothing.
 
   const DASH = "—";
-  const body = document.getElementById("device-body");
   const tbody = document.getElementById("fp-signals");
 
   // {label, value, bits}. bits count only when the signal was actually read,
@@ -33,7 +32,6 @@
   // ---- Phase 1: passive signals (synchronous) ----------------------------
   const nav = navigator;
 
-  const language = safe(() => nav.language);
   add("Languages", safe(() => (nav.languages || [nav.language]).join(", ")), 3);
   const tz = safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
   add("Time zone", tz, 3);
@@ -85,15 +83,8 @@
   add("PDF viewer",
     safe(() => (nav.pdfViewerEnabled != null ? (nav.pdfViewerEnabled ? "yes" : "no") : null)), 0);
 
-  // Fill the headline mini-grid and reveal the body.
-  setText("fp-gpu", gpu);
-  setText("fp-cores", cores);
-  setText("fp-memory", memory);
-  setText("fp-resolution", resolution);
-  setText("fp-timezone", tz);
-  setText("fp-language", language);
+  // The full signal list lives in the Fingerprint accordion table.
   renderSignals();
-  if (body) body.hidden = false;
 
   // ---- Phase 2: active entropy (deferred, never blocks first paint) ------
   const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1));
@@ -120,6 +111,13 @@
       if (copyBtn && id) {
         copyBtn.dataset.value = id;
         copyBtn.disabled = false;
+        copyBtn.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(id);
+            copyBtn.classList.add("is-copied");
+            setTimeout(() => copyBtn.classList.remove("is-copied"), 1200);
+          } catch (_e) {}
+        });
       }
       setText("fp-bits", "≈ " + bits + " bits");
       setText("fp-unique", "≈ 1 in " + formatCount(Math.pow(2, bits)) + " browsers");

@@ -353,10 +353,11 @@ class TestBrowserPage:
 class TestFingerprintPanel:
     def test_self_page_shows_the_browser_fingerprint_panel(self):
         html = client.get("/", headers=BROWSER_UA).text
-        assert 'id="device-panel"' in html
         assert 'id="acc-fingerprint"' in html
+        assert "UNIQUE ID" in html
+        assert 'id="fp-hash"' in html
         assert "/static/js/fingerprint.js" in html
-        assert "noscript" in html  # JS-required fallback lives in the panel
+        assert "noscript" in html  # JS-required fallback lives in the accordion
 
     def test_fingerprint_accordion_sits_above_whois(self):
         # The Fingerprint accordion renders first in the accordion list, ahead
@@ -366,7 +367,7 @@ class TestFingerprintPanel:
 
     def test_lookup_page_has_no_fingerprint_panel(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        assert 'id="device-panel"' not in html
+        assert 'id="acc-fingerprint"' not in html
         assert "/static/js/fingerprint.js" not in html
 
     def test_fingerprint_panel_does_not_change_the_csp(self):
@@ -401,8 +402,8 @@ class TestFingerprintPanel:
 
     def test_module_no_ops_off_the_self_page(self):
         js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
-        # Must bail immediately if the placeholder isn't on the page.
-        assert 'getElementById("device-panel")' in js
+        # Must bail immediately if the fingerprint accordion isn't on the page.
+        assert 'getElementById("acc-fingerprint")' in js
         assert "if (!panel) return" in js
 
     def test_fingerprint_id_hashes_only_stable_signals(self):

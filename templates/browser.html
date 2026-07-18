@@ -87,43 +87,6 @@
             {% endfor %}
         </section>
 
-        {% if view.is_self %}
-        <section class="device" id="device-panel" aria-label="What your browser reveals">
-            <div class="device__head">
-                <h2 class="facts__title">WHAT YOUR BROWSER REVEALS</h2>
-                <span class="hint">computed in your browser · sent to no one</span>
-            </div>
-            <noscript>
-                <p class="device__note">JavaScript is required to read your browser's signals.</p>
-            </noscript>
-            <div class="device__body" id="device-body" hidden>
-                <div class="device__headline">
-                    <div class="device__id">
-                        <span class="kv-label">FINGERPRINT</span>
-                        <code class="device__hash mono" id="fp-hash">…</code>
-                        <button type="button" class="copy-btn" id="fp-copy" data-value="" disabled>Copy</button>
-                    </div>
-                    <div class="device__entropy">
-                        <span class="device__bits mono" id="fp-bits">…</span>
-                        <span class="device__unique" id="fp-unique"></span>
-                    </div>
-                </div>
-                <p class="device__note">
-                    Estimate from typical distributions, not measured on real traffic.
-                    Reload — the ID stays the same.
-                </p>
-                <div class="device__grid">
-                    <div class="kv"><span class="kv-label">GPU</span><span class="kv-value" id="fp-gpu">—</span></div>
-                    <div class="kv"><span class="kv-label">Cores</span><span class="kv-value" id="fp-cores">—</span></div>
-                    <div class="kv"><span class="kv-label">Memory</span><span class="kv-value" id="fp-memory">—</span></div>
-                    <div class="kv"><span class="kv-label">Screen</span><span class="kv-value" id="fp-resolution">—</span></div>
-                    <div class="kv"><span class="kv-label">TZ</span><span class="kv-value" id="fp-timezone">—</span></div>
-                    <div class="kv"><span class="kv-label">Lang</span><span class="kv-value" id="fp-language">—</span></div>
-                </div>
-            </div>
-        </section>
-        {% endif %}
-
         <section class="accordions">
             {% if view.is_self %}
             <details class="accordion" id="acc-fingerprint">
@@ -132,6 +95,23 @@
                     <span class="hint" id="fp-acc-hint">browser signals</span>
                 </summary>
                 <div class="accordion__body">
+                    <noscript>
+                        <p class="device__note">JavaScript is required to read your browser's signals.</p>
+                    </noscript>
+                    <div class="kv fp-id">
+                        <span class="kv-label">UNIQUE ID</span>
+                        <span class="kv-value mono" id="fp-hash">…</span>
+                        <button type="button" class="copy-icon" id="fp-copy" data-value=""
+                                aria-label="Copy fingerprint" title="Copy" disabled>
+                            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+                                <path fill="currentColor" d="M10 1H4a1 1 0 0 0-1 1v1H2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1a1 1 0 0 0 1-1V4l-3-3Zm0 12H2V4h1v7a1 1 0 0 0 1 1h6v1Zm2-2H4V2h5v2a1 1 0 0 0 1 1h2v6Z"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <p class="device__note">
+                        <span id="fp-bits">…</span> · <span id="fp-unique"></span> — estimate, not
+                        measured on real traffic. Reload — the ID stays the same.
+                    </p>
                     <table class="records">
                         <tbody id="fp-signals">
                             <tr><td colspan="4" class="tone-muted">Reading…</td></tr>
