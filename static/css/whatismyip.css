@@ -225,7 +225,6 @@ body {
   cursor: pointer;
 }
 .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
-.copy-btn:disabled { opacity: 0.5; cursor: default; }
 /* Inline copy icon (the fingerprint UNIQUE ID row) */
 .copy-icon {
   display: inline-flex;
@@ -587,49 +586,11 @@ table.records--dns td:nth-child(4) {
 
 .mobile-map { display: none; }
 
-/* Device panel — client-side browser fingerprint (self page only) */
-.device {
-  padding-block: 32px;
-  border-top: 1px solid var(--border);
-}
-.device__head {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 18px;
-}
-.device__head .facts__title { margin: 0; }
-.device__body[hidden] { display: none; }
-.device__headline {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px 24px;
-}
-.device__id { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.device__hash {
-  padding: 6px 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--text-primary);
-  overflow-wrap: anywhere;
-}
-.device__entropy { display: flex; flex-direction: column; align-items: flex-end; }
-.device__bits { font-size: 22px; font-weight: 600; color: var(--accent); }
-.device__unique { font-size: 12px; color: var(--text-secondary); }
+/* Fingerprint accordion — caption under the UNIQUE ID row / entropy note */
 .device__note {
   margin: 12px 0 0;
   font-size: 12px;
   color: var(--text-muted);
-}
-.device__grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px 34px;
-  margin-top: 24px;
 }
 
 @media (max-width: 900px) {
@@ -652,8 +613,6 @@ table.records--dns td:nth-child(4) {
     border-top: 1px solid var(--border);
     padding-top: 24px;
   }
-  .device__grid { grid-template-columns: 1fr; gap: 12px; }
-  .device__entropy { align-items: flex-start; }
   .mobile-map { display: block; padding-bottom: 24px; }
   .mobile-map__header {
     display: flex;

@@ -376,11 +376,11 @@ class TestFingerprintPanel:
         assert "img-src 'self' data: https://tile.openstreetmap.org" in csp
         assert "connect-src" not in csp  # no external calls were opened up
 
-    def test_device_panel_is_styled(self):
+    def test_fingerprint_identifier_is_styled(self):
         css = CSS.read_text(encoding="utf-8")
-        assert ".device__hash" in css
-        assert ".device__grid" in css
-        assert ".device__bits" in css
+        assert ".copy-icon" in css  # inline copy icon on the UNIQUE ID row
+        assert ".fp-id" in css  # the UNIQUE ID row layout
+        assert ".device__note" in css  # the entropy / estimate caption
 
     def test_module_is_display_only(self):
         js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")

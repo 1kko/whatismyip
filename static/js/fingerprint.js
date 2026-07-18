@@ -33,25 +33,20 @@
   const nav = navigator;
 
   add("Languages", safe(() => (nav.languages || [nav.language]).join(", ")), 3);
-  const tz = safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
-  add("Time zone", tz, 3);
+  add("Time zone", safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone), 3);
   const offset = safe(() => -new Date().getTimezoneOffset());
   add("UTC offset", offset != null ? (offset >= 0 ? "+" : "") + offset + " min" : null, 0, false);
 
-  const resolution = safe(() => screen.width + "×" + screen.height);
-  add("Resolution", resolution, 4);
+  add("Resolution", safe(() => screen.width + "×" + screen.height), 4);
   add("Available", safe(() => screen.availWidth + "×" + screen.availHeight), 0, false);
   add("Color depth", safe(() => screen.colorDepth), 1);
   add("Pixel ratio", safe(() => window.devicePixelRatio), 1, false);
   add("Orientation", safe(() => screen.orientation && screen.orientation.type), 0, false);
   add("Touch points", safe(() => nav.maxTouchPoints), 1);
 
-  const platform = safe(() => (nav.userAgentData && nav.userAgentData.platform) || nav.platform);
-  add("Platform", platform, 2);
-  const cores = safe(() => nav.hardwareConcurrency);
-  add("CPU cores", cores, 2);
-  const memory = safe(() => (nav.deviceMemory != null ? nav.deviceMemory + " GB" : null));
-  add("Device memory", memory, 2);
+  add("Platform", safe(() => (nav.userAgentData && nav.userAgentData.platform) || nav.platform), 2);
+  add("CPU cores", safe(() => nav.hardwareConcurrency), 2);
+  add("Device memory", safe(() => (nav.deviceMemory != null ? nav.deviceMemory + " GB" : null)), 2);
   add("Pointer", safe(() =>
     matchMedia("(pointer: fine)").matches ? "fine"
       : matchMedia("(pointer: coarse)").matches ? "coarse" : "none"), 0, false);
