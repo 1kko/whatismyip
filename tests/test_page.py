@@ -375,6 +375,30 @@ class TestFingerprintPanel:
         assert ".device__grid" in css
         assert ".device__bits" in css
 
+    def test_module_is_display_only(self):
+        js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        assert "fetch(" not in js
+        assert "XMLHttpRequest" not in js
+        assert "sendBeacon" not in js
+        assert "localStorage" not in js
+        assert "sessionStorage" not in js
+
+    def test_module_collects_the_expected_signals(self):
+        js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        assert "WEBGL_debug_renderer_info" in js  # GPU
+        assert "toDataURL" in js  # canvas entropy
+        assert "OfflineAudioContext" in js  # audio entropy
+        assert "hardwareConcurrency" in js  # CPU cores
+        assert "getSupportedExtensions" in js  # WebGL params
+        assert "offsetWidth" in js  # font probe
+        assert "subtle" in js and "cyrb53" in js  # SHA-256 + fallback
+
+    def test_module_no_ops_off_the_self_page(self):
+        js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        # Must bail immediately if the placeholder isn't on the page.
+        assert 'getElementById("device-panel")' in js
+        assert "if (!panel) return" in js
+
 
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):
