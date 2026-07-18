@@ -125,6 +125,21 @@
         {% endif %}
 
         <section class="accordions">
+            {% if view.is_self %}
+            <details class="accordion" id="acc-fingerprint">
+                <summary class="accordion__header">
+                    <span class="accordion__title">Fingerprint</span>
+                    <span class="hint" id="fp-acc-hint">browser signals</span>
+                </summary>
+                <div class="accordion__body">
+                    <table class="records">
+                        <tbody id="fp-signals">
+                            <tr><td colspan="4" class="tone-muted">Reading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </details>
+            {% endif %}
             {% for item in view.accordions %}
             <details class="accordion" id="acc-{{ item.id }}">
                 <summary class="accordion__header">
@@ -198,21 +213,6 @@
                 </div>
             </details>
             {% endfor %}
-            {% if view.is_self %}
-            <details class="accordion" id="acc-fingerprint">
-                <summary class="accordion__header">
-                    <span class="accordion__title">Fingerprint</span>
-                    <span class="hint" id="fp-acc-hint">browser signals</span>
-                </summary>
-                <div class="accordion__body">
-                    <table class="records">
-                        <tbody id="fp-signals">
-                            <tr><td colspan="4" class="tone-muted">Reading…</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </details>
-            {% endif %}
         </section>
     </main>
 

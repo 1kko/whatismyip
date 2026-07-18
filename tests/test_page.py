@@ -358,6 +358,12 @@ class TestFingerprintPanel:
         assert "/static/js/fingerprint.js" in html
         assert "noscript" in html  # JS-required fallback lives in the panel
 
+    def test_fingerprint_accordion_sits_above_whois(self):
+        # The Fingerprint accordion renders first in the accordion list, ahead
+        # of WHOIS (the first server-side accordion).
+        html = client.get("/", headers=BROWSER_UA).text
+        assert html.index('id="acc-fingerprint"') < html.index('id="acc-whois"')
+
     def test_lookup_page_has_no_fingerprint_panel(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert 'id="device-panel"' not in html
