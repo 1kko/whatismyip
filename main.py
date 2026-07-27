@@ -34,7 +34,9 @@ from config import (
     BAN_DURATION_SUSPICIOUS,
     CLEANUP_INTERVAL_SECONDS,
     DESKTOP_CANVAS,
+    GEOIP_ASN_DB_FILE,
     GEOIP_CITY_DB_FILE,
+    GEOIP_UPDATE_RETRY_SECONDS,
     MOBILE_CANVAS,
     PUBLIC_BASE_URL,
     RATE_LIMIT_CLEANUP_INTERVAL,
@@ -473,8 +475,40 @@ geo_block_manager = GeoBlockManager(geo_ip_manager)
 
 # Initialize scheduler and add jobs
 scheduler = BackgroundScheduler()
-scheduler.add_job(geo_ip_manager.update_database, "interval", days=3)
-scheduler.add_job(geo_ip_manager.update_city_database, "interval", days=3)
+
+
+def _refresh_with_retry(refresh, name: str):
+    """Run one GeoIP database refresh; when it fails, retry on a short one-shot
+    timer instead of waiting out the 3-day interval — a failed boot-time refresh
+    otherwise leaves the bundled country-only DB (no carrier data) serving for
+    days. The fixed job id caps the pending retries at one per database."""
+
+    def run():
+        if refresh():
+            return
+        logging.warning(
+            "%s refresh failed; retrying in %ss", name, GEOIP_UPDATE_RETRY_SECONDS
+        )
+        scheduler.add_job(
+            run,
+            "date",
+            run_date=datetime.datetime.now()
+            + datetime.timedelta(seconds=GEOIP_UPDATE_RETRY_SECONDS),
+            id=f"retry-{name}",
+            replace_existing=True,
+        )
+
+    return run
+
+
+refresh_geoip_db = _refresh_with_retry(geo_ip_manager.update_database, "geoip2fast")
+refresh_city_db = _refresh_with_retry(
+    geo_ip_manager.update_city_database, "GeoLite2-City"
+)
+refresh_asn_db = _refresh_with_retry(geo_ip_manager.update_asn_database, "GeoLite2-ASN")
+scheduler.add_job(refresh_geoip_db, "interval", days=3)
+scheduler.add_job(refresh_city_db, "interval", days=3)
+scheduler.add_job(refresh_asn_db, "interval", days=3)
 scheduler.add_job(
     ip_ban_manager.cleanup_expired_bans, "interval", seconds=CLEANUP_INTERVAL_SECONDS
 )
@@ -486,11 +520,14 @@ scheduler.add_job(
 # bootstraps lazily, so nothing here blocks startup.
 scheduler.add_job(refresh_rdap_bootstrap, "interval", days=1)
 scheduler.start()
-geo_ip_manager.update_database()
-# The city DB is ~60MB, so only fetch it on first boot; the scheduler refreshes
-# it afterwards. Lookups degrade gracefully to geoip2fast until it lands.
+refresh_geoip_db()
+# The mmdb overlays are tens of MB, so only fetch them on first boot; the
+# scheduler refreshes them afterwards. Lookups degrade gracefully to geoip2fast
+# until they land.
 if not os.path.exists(GEOIP_CITY_DB_FILE):
-    geo_ip_manager.update_city_database()
+    refresh_city_db()
+if not os.path.exists(GEOIP_ASN_DB_FILE):
+    refresh_asn_db()
 
 
 class BrowserDetector:
@@ -638,6 +675,14 @@ async def security_headers_middleware(request: Request, call_next):
     # Obscure server fingerprinting.
     response.headers["server"] = "hidden"
     return response
+
+
+@app.get("/healthz")
+async def healthz():
+    """Liveness plus which GeoIP databases are actually serving lookups, so a
+    silent fallback to the bundled country-only DB is visible from outside.
+    Declared before /{domain_ip}, which would otherwise swallow the path."""
+    return {"status": "ok", "databases": geo_ip_manager.database_status()}
 
 
 @app.get("/", response_model=None)

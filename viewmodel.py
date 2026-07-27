@@ -230,9 +230,18 @@ def ssl_rows(ssl_data: dict | None, address: str | None = None) -> list[dict]:
     return rows
 
 
+def _asn_org(location: dict) -> str:
+    """'AS4766 Korea Telecom' when the GeoLite2-ASN overlay supplied the AS
+    number; just the org name when only geoip2fast answered (it has no AS
+    numbers, only the announced block and name)."""
+    name = location.get("asn_name")
+    number = location.get("asn_number")
+    if name and number:
+        return f"AS{number} {name}"
+    return name or DASH
+
+
 def _network_column(location: dict, address: str) -> dict:
-    # geoip2fast has no AS number, only the ASN's announced block and its name,
-    # so this row is labelled for what it actually holds.
     rows = [
         {"label": "CIDR", "value": location.get("cidr") or DASH, "tone": "default"},
         {
@@ -240,7 +249,7 @@ def _network_column(location: dict, address: str) -> dict:
             "value": location.get("asn_cidr") or DASH,
             "tone": "default",
         },
-        {"label": "Org", "value": location.get("asn_name") or DASH, "tone": "default"},
+        {"label": "Org", "value": _asn_org(location), "tone": "default"},
     ]
     if _is_ip(address):
         rows.append(
@@ -494,7 +503,7 @@ def geoip_rows(location: dict | None) -> list[dict]:
         },
         {
             "label": "ASN org",
-            "value": location.get("asn_name") or DASH,
+            "value": _asn_org(location),
             "tone": "default",
         },
         {

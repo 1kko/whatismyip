@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+import main
 from main import app
 
 # A public peer address so the self-lookup is treated as a routable client.
@@ -63,3 +64,35 @@ class TestBasic:
     def test_not_found(self):
         response = client.get("/admin/nonexistent", headers={"user-agent": "curl/8"})
         assert response.status_code == 404
+
+    def test_healthz_reports_database_status(self):
+        # /healthz must win over the /{domain_ip} catch-all and expose which
+        # GeoIP databases are actually loaded (bundled fallback is a real
+        # production failure mode, not a hypothetical).
+        response = client.get("/healthz", headers={"user-agent": "curl/8"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        databases = data["databases"]
+        assert databases["geoip2fast"]["source"] in ("volume", "bundled")
+        assert set(databases["city_overlay"]) == {"loaded", "build"}
+        assert set(databases["asn_overlay"]) == {"loaded", "build"}
+
+
+class TestRefreshRetry:
+    """A failed refresh schedules exactly one short-interval retry instead of
+    waiting out the 3-day interval; a successful one schedules nothing."""
+
+    def test_failure_schedules_a_single_deduped_retry(self, monkeypatch):
+        added = []
+        monkeypatch.setattr(main.scheduler, "add_job", lambda *a, **k: added.append(k))
+        main._refresh_with_retry(lambda: False, "test-db")()
+        assert len(added) == 1
+        assert added[0]["id"] == "retry-test-db"
+        assert added[0]["replace_existing"] is True
+
+    def test_success_schedules_nothing(self, monkeypatch):
+        added = []
+        monkeypatch.setattr(main.scheduler, "add_job", lambda *a, **k: added.append(k))
+        main._refresh_with_retry(lambda: True, "test-db")()
+        assert added == []

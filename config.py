@@ -66,17 +66,34 @@ GEOIP_CITY_DB_FILE = os.getenv(
     os.path.join(_APP_DIR, "data", "GeoLite2-City.mmdb"),
 )
 
-# Official MaxMind GeoLite2-City download. When both are set, the city overlay is
-# fetched from MaxMind's licensed endpoint (a .tar.gz over HTTP Basic auth)
-# instead of the free mirror above, falling back to that mirror on failure. Get
-# them free at https://www.maxmind.com/en/geolite2/signup.
+# ASN (carrier/org) from a GeoLite2-ASN mmdb, refreshed twice weekly upstream.
+# geoip2fast's own ASN snapshot stays as the fallback, but its release cadence
+# stalls for weeks at a time, so the overlay is what keeps carriers current.
+GEOIP_ASN_DB_URL = os.getenv(
+    "GEOIP_ASN_DB_URL",
+    "https://cdn.jsdelivr.net/npm/geolite2-asn/GeoLite2-ASN.mmdb.gz",
+)
+GEOIP_ASN_DB_FILE = os.getenv(
+    "GEOIP_ASN_DB_FILE",
+    os.path.join(_APP_DIR, "data", "GeoLite2-ASN.mmdb"),
+)
+
+# Official MaxMind GeoLite2 downloads. When both are set, the city and ASN
+# overlays are fetched from MaxMind's licensed endpoint (a .tar.gz over HTTP
+# Basic auth) instead of the free mirrors above, falling back to those mirrors
+# on failure. Get them free at https://www.maxmind.com/en/geolite2/signup.
 MAXMIND_ACCOUNT_ID = os.getenv("MAXMIND_ACCOUNT_ID")
 MAXMIND_LICENSE_KEY = os.getenv("MAXMIND_LICENSE_KEY")
 MAXMIND_CITY_EDITION = os.getenv("MAXMIND_CITY_EDITION", "GeoLite2-City")
+MAXMIND_ASN_EDITION = os.getenv("MAXMIND_ASN_EDITION", "GeoLite2-ASN")
 
 # Background Job Intervals (seconds)
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "300"))
 RATE_LIMIT_CLEANUP_INTERVAL = int(os.getenv("RATE_LIMIT_CLEANUP_INTERVAL", "60"))
+# How soon to retry a failed GeoIP database refresh. The regular refresh runs
+# every 3 days; without this, one failed run leaves stale (or bundled-fallback)
+# data in place for the whole interval.
+GEOIP_UPDATE_RETRY_SECONDS = int(os.getenv("GEOIP_UPDATE_RETRY_SECONDS", "3600"))
 
 # Geographic Blocking Configuration (optional initial values from .env)
 GEO_MODE_INITIAL = os.getenv("GEO_MODE", "disabled")

@@ -15,6 +15,7 @@ import ssl
 import tarfile
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 import dns.resolver
@@ -27,10 +28,13 @@ from tld import get_tld
 from config import (
     DNS_QUERY_LIFETIME,
     DNS_QUERY_TIMEOUT,
+    GEOIP_ASN_DB_FILE,
+    GEOIP_ASN_DB_URL,
     GEOIP_CITY_DB_FILE,
     GEOIP_CITY_DB_URL,
     GEOIP_DATA_FILE,
     MAXMIND_ACCOUNT_ID,
+    MAXMIND_ASN_EDITION,
     MAXMIND_CITY_EDITION,
     MAXMIND_LICENSE_KEY,
     PUBLIC_RESOLVERS,
@@ -38,9 +42,9 @@ from config import (
 )
 
 # MaxMind's licensed direct-download endpoint. It returns a .tar.gz (Basic auth
-# with account id + license key); the free mirror in GEOIP_CITY_DB_URL is a plain
-# gzip of the bare .mmdb instead.
-MAXMIND_CITY_DOWNLOAD_URL = (
+# with account id + license key); the free mirrors in GEOIP_*_DB_URL are plain
+# gzips of the bare .mmdb instead.
+MAXMIND_DOWNLOAD_URL = (
     "https://download.maxmind.com/geoip/databases/{edition}/download?suffix=tar.gz"
 )
 
@@ -81,12 +85,12 @@ def _download_bytes(target, timeout: int = 120) -> bytes:
         return resp.read()
 
 
-def _maxmind_city_request():
-    """An authenticated request for MaxMind's GeoLite2-City .tar.gz, or None when
+def _maxmind_mmdb_request(edition: str):
+    """An authenticated request for one MaxMind .tar.gz edition, or None when
     the two credentials are not both configured (then the free mirror is used)."""
     if not (MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY):
         return None
-    url = MAXMIND_CITY_DOWNLOAD_URL.format(edition=MAXMIND_CITY_EDITION)
+    url = MAXMIND_DOWNLOAD_URL.format(edition=edition)
     token = base64.b64encode(
         f"{MAXMIND_ACCOUNT_ID}:{MAXMIND_LICENSE_KEY}".encode()
     ).decode()
@@ -108,58 +112,121 @@ def _extract_mmdb(tar_gz_bytes: bytes) -> bytes:
     raise ValueError("no .mmdb member found in the MaxMind tarball")
 
 
-def _fetch_city_mmdb() -> bytes:
-    """Raw GeoLite2-City mmdb bytes from the best available source.
+def _fetch_mmdb(edition: str, mirror_url: str) -> bytes:
+    """Raw mmdb bytes for one MaxMind edition from the best available source.
 
     MaxMind's licensed endpoint (a .tar.gz, extracted) when credentials are set;
-    on any MaxMind error, falls back to the free jsdelivr mirror (a plain gzip)
-    so the city overlay still refreshes. Without credentials the mirror is the
-    only source, which is the original behaviour."""
-    request = _maxmind_city_request()
+    on any MaxMind error, falls back to the edition's free jsdelivr mirror (a
+    plain gzip) so the overlay still refreshes. Without credentials the mirror
+    is the only source."""
+    request = _maxmind_mmdb_request(edition)
     if request is not None:
         try:
             return _extract_mmdb(_download_bytes(request))
         except Exception:
             logging.exception(
-                "MaxMind GeoLite2-City download failed (check MAXMIND_ACCOUNT_ID "
-                "/ MAXMIND_LICENSE_KEY); falling back to the free mirror"
+                "MaxMind %s download failed (check MAXMIND_ACCOUNT_ID / "
+                "MAXMIND_LICENSE_KEY); falling back to the free mirror",
+                edition,
             )
-    return gzip.decompress(_download_bytes(GEOIP_CITY_DB_URL))
+    return gzip.decompress(_download_bytes(mirror_url))
 
 
 class GeoIpManager:
     def __init__(self):
-        self.instance = self._load_instance()
-        self.city_reader = self._open_city_reader()
+        self.instance, source = self._load_instance()
+        self.db_info = self._describe_db(self.instance, source)
+        self.city_reader = self._open_mmdb_reader(GEOIP_CITY_DB_FILE)
+        self.asn_reader = self._open_mmdb_reader(GEOIP_ASN_DB_FILE)
+        self._log_db_status()
 
     @staticmethod
-    def _load_instance() -> GeoIP2Fast:
+    def _load_instance():
         """Load the volume database, falling back to the bundled one when the
         volume file is missing or corrupt. An interrupted download can leave a
         truncated .dat.gz that GeoIP2Fast raises on; that must degrade the app to
         the built-in country DB, not crash it at startup. update_database()
-        refreshes a good copy on the next run."""
+        refreshes a good copy on the next run. Returns (instance, source) so the
+        fallback shows up in logs and the health endpoint."""
         if os.path.exists(GEOIP_DATA_FILE):
             try:
-                return GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE)
+                return GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE), "volume"
             except Exception:
                 logging.exception(
                     "GeoIP DB at %s is unreadable; using the bundled database",
                     GEOIP_DATA_FILE,
                 )
-        return GeoIP2Fast()
+        return GeoIP2Fast(), "bundled"
 
     @staticmethod
-    def _open_city_reader():
-        if os.path.exists(GEOIP_CITY_DB_FILE):
+    def _describe_db(instance: GeoIP2Fast, source: str) -> Dict[str, Any]:
+        """A snapshot of what the loaded geoip2fast DB contains, captured at
+        load time — get_database_info() re-reads the file path the instance was
+        loaded from, which is gone once a refreshed temp file has been
+        os.replace()d over the live one."""
+        try:
+            info = instance.get_database_info()
+            return {
+                "source": source,
+                "content": info.get("database_content"),
+                "build": info.get("source_info"),
+            }
+        except Exception:
+            return {"source": source, "content": None, "build": None}
+
+    @staticmethod
+    def _open_mmdb_reader(path: str):
+        if os.path.exists(path):
             try:
-                return maxminddb.open_database(GEOIP_CITY_DB_FILE)
+                return maxminddb.open_database(path)
             except Exception:
-                logging.exception("Could not open GeoLite2-City database")
+                logging.exception("Could not open mmdb database at %s", path)
         return None
 
-    def update_database(self):
-        tmp = GEOIP_DATA_FILE + ".tmp"
+    def _log_db_status(self):
+        info = self.db_info
+        logging.info(
+            "GeoIP DB loaded: source=%s content=%r build=%r "
+            "city_overlay=%s asn_overlay=%s",
+            info["source"],
+            info["content"],
+            info["build"],
+            self.city_reader is not None,
+            self.asn_reader is not None,
+        )
+        if "ASN" not in (info["content"] or "") and self.asn_reader is None:
+            logging.warning(
+                "No ASN data available (geoip2fast DB is %r, no GeoLite2-ASN "
+                "overlay); carrier lookups stay empty until a refresh succeeds",
+                info["content"],
+            )
+
+    @staticmethod
+    def _mmdb_status(reader) -> Dict[str, Any]:
+        if reader is None:
+            return {"loaded": False, "build": None}
+        try:
+            epoch = reader.metadata().build_epoch
+            build = datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d")
+        except Exception:
+            build = None
+        return {"loaded": True, "build": build}
+
+    def database_status(self) -> Dict[str, Any]:
+        """What each database serving lookups actually is — for the health
+        endpoint, so a silent fallback to the bundled country-only DB is
+        visible from outside."""
+        return {
+            "geoip2fast": dict(self.db_info),
+            "city_overlay": self._mmdb_status(self.city_reader),
+            "asn_overlay": self._mmdb_status(self.asn_reader),
+        }
+
+    def update_database(self) -> bool:
+        # The temp name must keep the .dat.gz suffix: update_file() refuses any
+        # other extension with an {'error': ...} result instead of raising, and
+        # downloads nothing.
+        tmp = GEOIP_DATA_FILE + ".tmp.dat.gz"
         try:
             data_dir = os.path.dirname(GEOIP_DATA_FILE)
             if data_dir:
@@ -173,46 +240,69 @@ class GeoIpManager:
             update_result = self.instance.update_file(
                 "geoip2fast-city-asn-ipv6.dat.gz", tmp, verbose=False
             )
+            # update_file reports failures as a result dict, not an exception.
+            if isinstance(update_result, dict) and update_result.get("error"):
+                raise RuntimeError(update_result["error"])
             new_instance = GeoIP2Fast(geoip2fast_data_file=tmp)  # validates it loads
+            new_info = self._describe_db(new_instance, "volume")  # before the swap
             os.replace(tmp, GEOIP_DATA_FILE)
             self.instance = new_instance
+            self.db_info = new_info
             logging.info(f"{update_result=}")
+            return True
         except Exception as e:
             logging.exception(f"Error updating GeoIP2Fast database: {str(e)}")
             try:
                 os.remove(tmp)
             except OSError:
                 pass
+            return False
 
-    def update_city_database(self):
-        """Download and unpack the GeoLite2-City mmdb, then hot-swap the reader.
-        The source is MaxMind's licensed endpoint when MAXMIND_ACCOUNT_ID and
-        MAXMIND_LICENSE_KEY are set, otherwise the free mirror; see
-        _fetch_city_mmdb. The write is atomic, so the live file is only ever a
-        complete database."""
+    def _update_mmdb(
+        self, edition: str, mirror_url: str, path: str, reader_attr: str
+    ) -> bool:
+        """Download one MaxMind mmdb edition, then hot-swap its reader. The
+        source is MaxMind's licensed endpoint when MAXMIND_ACCOUNT_ID and
+        MAXMIND_LICENSE_KEY are set, otherwise the free mirror; see _fetch_mmdb.
+        The write is atomic, so the live file is only ever a complete database."""
         try:
-            os.makedirs(os.path.dirname(GEOIP_CITY_DB_FILE), exist_ok=True)
-            data = _fetch_city_mmdb()
-            tmp = GEOIP_CITY_DB_FILE + ".tmp"
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            data = _fetch_mmdb(edition, mirror_url)
+            tmp = path + ".tmp"
             with open(tmp, "wb") as handle:
                 handle.write(data)
-            os.replace(tmp, GEOIP_CITY_DB_FILE)
-            old = self.city_reader
-            self.city_reader = maxminddb.open_database(GEOIP_CITY_DB_FILE)
+            os.replace(tmp, path)
+            old = getattr(self, reader_attr)
+            setattr(self, reader_attr, maxminddb.open_database(path))
             if old:
                 old.close()
-            logging.info("GeoLite2-City database updated (%d bytes)", len(data))
+            logging.info("%s database updated (%d bytes)", edition, len(data))
+            return True
         except Exception:
-            logging.exception("Error updating GeoLite2-City database")
+            logging.exception("Error updating %s database", edition)
+            return False
+
+    def update_city_database(self) -> bool:
+        return self._update_mmdb(
+            MAXMIND_CITY_EDITION, GEOIP_CITY_DB_URL, GEOIP_CITY_DB_FILE, "city_reader"
+        )
+
+    def update_asn_database(self) -> bool:
+        return self._update_mmdb(
+            MAXMIND_ASN_EDITION, GEOIP_ASN_DB_URL, GEOIP_ASN_DB_FILE, "asn_reader"
+        )
 
     def fetch_location(self, ip: str) -> Dict[str, Any]:
-        """A single flat location record for the IP: country + ASN from
-        geoip2fast, precise city/lat/lon/accuracy/time zone overlaid from
-        GeoLite2-City. Callers add reverse_dns; the response assembly adds the
-        resolved coordinates, the origin_* fields, and distance_km."""
+        """A single flat location record for the IP: country (plus coarse ASN
+        fallback) from geoip2fast, precise city/lat/lon/accuracy/time zone
+        overlaid from GeoLite2-City, and the AS org/number/announced block
+        overlaid from GeoLite2-ASN when loaded. Callers add reverse_dns; the
+        response assembly adds the resolved coordinates, the origin_* fields,
+        and distance_km."""
         raw = self.instance.lookup(ip).to_dict()
         city = raw.get("city") if isinstance(raw.get("city"), dict) else {}
         self._overlay_city(ip, raw.get("is_private"), city)
+        asn = self._asn_overlay(ip, raw.get("is_private"))
         return {
             "ip": raw.get("ip"),
             "country_code": raw.get("country_code"),
@@ -225,10 +315,34 @@ class GeoIpManager:
             "accuracy_km": city.get("accuracy_radius"),
             "time_zone": city.get("time_zone"),
             "cidr": raw.get("cidr"),
-            "asn_name": raw.get("asn_name"),
-            "asn_cidr": raw.get("asn_cidr"),
+            "asn_name": asn.get("name") or raw.get("asn_name"),
+            "asn_cidr": asn.get("cidr") or raw.get("asn_cidr"),
+            "asn_number": asn.get("number"),
             "is_private": raw.get("is_private"),
             "hostname": raw.get("hostname"),
+        }
+
+    def _asn_overlay(self, ip: str, is_private: Any) -> Dict[str, Any]:
+        """AS org/number/announced block from GeoLite2-ASN, which refreshes
+        twice weekly upstream — fresher than geoip2fast's release snapshot.
+        Empty when the reader is absent, the IP is private, or the DB has no
+        record; callers then fall back to geoip2fast's ASN fields."""
+        if not self.asn_reader or is_private:
+            return {}
+        try:
+            record, prefix_len = self.asn_reader.get_with_prefix_len(ip)
+        except Exception:
+            return {}
+        if not record:
+            return {}
+        try:
+            network = str(ipaddress.ip_network(f"{ip}/{prefix_len}", strict=False))
+        except ValueError:
+            network = None
+        return {
+            "name": record.get("autonomous_system_organization"),
+            "number": record.get("autonomous_system_number"),
+            "cidr": network,
         }
 
     def _overlay_city(self, ip: str, is_private: Any, city: Dict[str, Any]) -> None:
