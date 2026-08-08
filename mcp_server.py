@@ -125,12 +125,15 @@ async def lookup(target: str) -> dict[str, Any]:
     }
 
 
-_RECORD_TYPES = ("a", "aaaa", "mx", "ns", "cname", "txt", "spf", "ptr")
+# No AAAA: DomainManager.get_records() never queries it, so advertising it here
+# would return {} for a domain that does have IPv6 — indistinguishable, to a
+# model relaying the answer, from "this domain has no AAAA records".
+_RECORD_TYPES = ("a", "mx", "ns", "cname", "txt", "spf", "ptr")
 
 
 @mcp.tool()
 async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, Any]:
-    """Every DNS record for a domain: A, AAAA, MX, NS, CNAME, TXT, SPF, PTR.
+    """Every DNS record for a domain: A, MX, NS, CNAME, TXT, SPF, PTR.
     Pass `types` (lowercase, e.g. ["mx", "txt"]) to fetch a subset; omit it for
     everything. Use this for mail-routing and SPF/DMARC questions, where the
     summary from `lookup` is not enough.
@@ -144,7 +147,10 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
         return {"error": "DNS lookup failed"}
 
     records = data["domain"] or {}
-    wanted = [t.lower() for t in types] if types else list(_RECORD_TYPES)
+    # `is not None`, not truthiness: types=[] means "narrow to nothing", which is
+    # a different request from omitting the argument, and must not silently
+    # widen back to the full sweep.
+    wanted = [t.lower() for t in types] if types is not None else list(_RECORD_TYPES)
     return {
         "domain": data["address"],
         "resolved_ip": data["resolved_ip"],

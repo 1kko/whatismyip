@@ -303,6 +303,47 @@ def test_dns_records_narrows_to_requested_types():
         assert set(payload["records"]) == {"ns"}
 
 
+def test_dns_records_with_an_explicit_empty_type_list_returns_nothing():
+    """types=[] is a different request from omitting the argument: "narrow to
+    nothing", not "everything". Truthiness would conflate the two."""
+
+    async def fake_gather(target):
+        return {
+            **FAKE_LOOKUP,
+            "domain": {"a": ["1.2.3.4"], "mx": [], "ns": ["ns1.example.com"]},
+        }
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {
+                    "name": "dns_records",
+                    "arguments": {"domain": "example.com", "types": []},
+                },
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["records"] == {}
+
+
+def test_dns_records_reports_private_targets_as_an_error():
+    async def boom(target):
+        raise lookup.PrivateAddressError(target)
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", boom):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "dns_records", "arguments": {"domain": "10.0.0.1"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert "error" in payload
+
+
 def test_ssl_certificate_reports_the_expiry_clock():
     cert = {
         "issuer": ((("organizationName", "Let's Encrypt"),),),
@@ -342,6 +383,22 @@ def test_ssl_certificate_without_a_certificate_is_an_error():
                 {"name": "ssl_certificate", "arguments": {"domain": "example.com"}},
             )
         assert "error" in response.json()["result"]["structuredContent"]
+
+
+def test_ssl_certificate_reports_private_targets_as_an_error():
+    async def boom(target):
+        raise lookup.PrivateAddressError(target)
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", boom):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "ssl_certificate", "arguments": {"domain": "10.0.0.1"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert "error" in payload
 
 
 def test_whoami_caller_reports_the_connecting_peer_not_the_user():
