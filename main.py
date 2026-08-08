@@ -471,6 +471,10 @@ async def security_middleware(request: Request, call_next):
     # suspicious-path detector has nothing to look at either.
     if request_path == "/mcp" or request_path.startswith("/mcp/"):
         if ip_ban_manager.is_banned(client_ip):
+            logging.warning(
+                "SECURITY: Blocked banned IP %s on MCP endpoint",
+                sanitize_log_input(client_ip),
+            )
             return JSONResponse(
                 status_code=403, content={"error": "IP address is banned"}
             )
@@ -564,7 +568,13 @@ async def security_headers_middleware(request: Request, call_next):
     # CSP governs how a browser executes a document. The MCP response is JSON
     # for a non-browser client, so the header is noise there; the rest of the
     # hardening headers still apply.
-    if not request.url.path.startswith("/mcp"):
+    #
+    # Match the MCP surface exactly, the same way the security middleware does.
+    # A bare startswith("/mcp") would also catch "/mcpfoo.com" — a syntactically
+    # valid domain, and a reachable HTML page via the /{domain_ip} catch-all —
+    # silently stripping CSP from a real browser response.
+    _path = request.url.path
+    if not (_path == "/mcp" or _path.startswith("/mcp/")):
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             f"script-src 'self' 'nonce-{nonce}'; "

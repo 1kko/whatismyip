@@ -194,6 +194,65 @@ def test_mcp_response_carries_no_csp():
         assert response.headers["X-Content-Type-Options"] == "nosniff"
 
 
+def test_domain_starting_with_mcp_keeps_its_csp_header():
+    """A bare startswith("/mcp") in the CSP skip would also match
+    "/mcpfoo.com" — a syntactically valid domain, and a real, reachable page
+    via the /{domain_ip} catch-all, not the MCP transport. That page must keep
+    its CSP header."""
+
+    async def fake_gather(target):
+        return {
+            "address": "mcpfoo.com",
+            "domain": {
+                "a": [{"ip": "93.184.216.34", "ttl": 300}],
+                "mx": [],
+                "ns": [],
+                "txt": [],
+                "cname": None,
+            },
+            "location": {
+                "country_code": "US",
+                "country_name": "United States",
+                "city_name": None,
+                "lat": None,
+                "lon": None,
+                "is_private": False,
+            },
+            "whois": {"source": "rdap", "name": "mcpfoo.com"},
+            "ssl": None,
+            "resolved_ip": "93.184.216.34",
+            "reverse_dns": None,
+        }
+
+    async def fake_lookup_location(ip):
+        return {
+            "country_code": "US",
+            "country_name": "United States",
+            "city_name": None,
+            "lat": None,
+            "lon": None,
+            "is_private": False,
+        }
+
+    with TestClient(app) as client:
+        with (
+            patch("main.gather", fake_gather),
+            patch("main.lookup_location", fake_lookup_location),
+        ):
+            response = client.get("/mcpfoo.com", headers={"user-agent": "curl/8.0"})
+        assert response.status_code == 200
+        assert "Content-Security-Policy" in response.headers
+
+
+def test_manual_ban_still_blocks_mcp():
+    """The one MCP security behaviour this branch relies on but never tested
+    directly: a pre-existing manual ban must still 403 /mcp requests."""
+    main.ip_ban_manager.ban_ip("testclient", reason="manual", duration=3600)
+    with TestClient(app) as client:
+        response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+    assert response.status_code == 403
+
+
 def test_dns_records_returns_the_full_sweep():
     async def fake_gather(target):
         return {
