@@ -12,7 +12,7 @@ python = "^3.12"
 fastapi = {extras = ["all"], version = "^0.139.0"}
 python-whois = "^0.9.4"
 geoip2fast = "^1.2.2"
-apscheduler = "^3.10.4"
+apscheduler = "^3.11.3"
 tld = "^0.13"
 requests = "^2.34.2"
 python-dotenv = "^1.2.2"
