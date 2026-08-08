@@ -188,3 +188,5 @@ docs/superpowers/
 # Editor and local tooling state (per-machine, not part of the project)
 .vscode/
 .openchrome/
+# macOS Finder metadata
+.DS_Store
