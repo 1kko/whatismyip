@@ -13,14 +13,7 @@ import time
 from logging.handlers import TimedRotatingFileHandler
 from urllib.parse import urlparse
 
-# dns.resolver and whois are not called directly in this module anymore (that
-# moved into lookup.py) but stay imported: tests patch main.dns.resolver.resolve
-# / main.whois.whois, and since both are real external modules (singletons in
-# sys.modules), patching an attribute on them here patches the same object
-# lookup.py calls through — but only if `main.dns` / `main.whois` resolve at all.
-import dns.resolver  # noqa: F401
 import uvicorn
-import whois  # noqa: F401
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -45,21 +38,16 @@ from config import (
     RATE_LIMIT_CLEANUP_INTERVAL,
     SITE_DOMAIN_FALLBACK,
 )
-
-# SSLManager isn't called directly here either (also moved into lookup.gather),
-# but tests import it straight from main to exercise it, so it stays re-exported.
-from managers import HeaderManager, SSLManager  # noqa: F401
+from managers import HeaderManager
 from models import GeoRulesUpdate
 from lookup import (
     PrivateAddressError,
-    _whois_cache,  # noqa: F401 -- tests clear main._whois_cache between cases
     domain_manager,
     gather,
     geo_ip_manager,
-    is_safe_ip,  # noqa: F401 -- re-exported; tests call main.is_safe_ip directly
     lookup_location,
     lookup_whois,
-    normalize_lookup_target,  # noqa: F401 -- re-exported for the same reason
+    normalize_lookup_target,
     sanitize_log_input,
 )
 from security import (
@@ -68,7 +56,6 @@ from security import (
     RateLimiter,
     SuspiciousPatternDetector,
     WhitelistManager,
-    _extract_forwarded_ip,  # noqa: F401 -- re-exported; tests call it directly
     _peer_is_trusted,
     get_client_ip,
 )
@@ -608,6 +595,11 @@ async def get_self_info(request: Request):
 @app.get("/{domain_ip}", response_model=None)
 async def get_ip_info(domain_ip: str, request: Request):
     started = time.perf_counter()
+    # Normalize before the log line below so it records what the pipeline
+    # actually resolves, not a raw pasted URL/path. gather() normalizes again
+    # (it must, for its MCP callers); normalize_lookup_target is idempotent,
+    # see test_normalize_lookup_target_is_idempotent in tests/test_lookup.py.
+    domain_ip = normalize_lookup_target(domain_ip)
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]

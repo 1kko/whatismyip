@@ -10,6 +10,24 @@ def test_normalize_lookup_target_strips_scheme_and_path():
     assert lookup.normalize_lookup_target("  example.com  ") == "example.com"
 
 
+def test_normalize_lookup_target_is_idempotent():
+    # get_ip_info normalizes once (so the request log records the resolved
+    # target) and gather() normalizes again (so it stays self-contained for
+    # its MCP callers). That double call only stays correct if a second pass
+    # is a no-op, so pin it here rather than leaving it as an assumption a
+    # future reader might "clean up".
+    for raw in (
+        "https://example.com/a?b#c",
+        "  example.com  ",
+        "8.8.8.8",
+        "google.com/foo",
+        "",
+    ):
+        once = lookup.normalize_lookup_target(raw)
+        twice = lookup.normalize_lookup_target(once)
+        assert once == twice
+
+
 def test_is_safe_ip_rejects_private_and_garbage():
     assert lookup.is_safe_ip("8.8.8.8") is True
     assert lookup.is_safe_ip("10.0.0.1") is False
