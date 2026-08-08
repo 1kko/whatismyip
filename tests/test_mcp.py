@@ -32,6 +32,7 @@ def setup_function():
     tests/test_security.py's _reset_security_state().
     """
     rate_limiter.request_history.clear()
+    main.mcp_rate_limiter.request_history.clear()
     ip_ban_manager.banned_ips.clear()
 
 
@@ -248,9 +249,74 @@ def test_manual_ban_still_blocks_mcp():
     """The one MCP security behaviour this branch relies on but never tested
     directly: a pre-existing manual ban must still 403 /mcp requests."""
     main.ip_ban_manager.ban_ip("testclient", reason="manual", duration=3600)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        assert response.status_code == 403
+    finally:
+        # Otherwise this persists to BANNED_IPS_FILE and 403s every other
+        # test's requests in later, separate pytest invocations.
+        main.ip_ban_manager.unban_ip("testclient")
+
+
+def test_get_mcp_is_rejected_without_opening_a_stream():
+    """A GET here would otherwise reach the SDK's `_handle_get_request` and
+    open a standalone SSE stream that `stateless_http=True` never tears down
+    — see McpDispatch's and McpBarePathRoute's method guards."""
+    with TestClient(app) as client:
+        for path in ("/mcp", "/mcp/"):
+            response = client.get(path, headers=MCP_HEADERS)
+            assert response.status_code == 405
+            assert response.headers["allow"] == "POST"
+
+
+def test_delete_mcp_is_also_rejected():
+    with TestClient(app) as client:
+        response = client.delete("/mcp", headers=MCP_HEADERS)
+        assert response.status_code == 405
+
+
+def test_oversized_mcp_body_is_rejected_with_413():
+    huge_target = "a" * (main.MCP_MAX_BODY_BYTES + 1)
+    body = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "lookup", "arguments": {"target": huge_target}},
+    }
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        response = client.post("/mcp", json=body, headers=MCP_HEADERS)
+    assert response.status_code == 413
+
+
+def test_mcp_body_within_the_limit_still_passes():
     with TestClient(app) as client:
         response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
-    assert response.status_code == 403
+    assert response.status_code == 200
+
+
+def test_mcp_body_with_no_content_length_is_rejected_with_413():
+    """Chunked transfer-encoding has no advertised length to check against the
+    cap, so it is rejected outright rather than read and measured after the
+    fact."""
+
+    def stream():
+        yield b'{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": '
+        yield b'{"protocolVersion": "2026-07-28", "capabilities": {}, '
+        yield b'"clientInfo": {"name": "pytest", "version": "0"}}}'
+
+    with TestClient(app) as client:
+        response = client.post("/mcp", headers=MCP_HEADERS, content=stream())
+    assert response.status_code == 413
+
+
+def test_mcp_rate_limiter_cleanup_is_scheduled():
+    """Without this job, allow_request() prunes each IP's own timestamps but
+    never deletes the (now empty) key, so /mcp leaks one dict entry per
+    distinct caller IP for the life of the process."""
+    funcs = [job.func for job in main.scheduler.get_jobs()]
+    assert main.mcp_rate_limiter.cleanup_old_records in funcs
 
 
 def test_dns_records_returns_the_full_sweep():
@@ -342,6 +408,41 @@ def test_dns_records_reports_private_targets_as_an_error():
             )
         payload = response.json()["result"]["structuredContent"]
         assert "error" in payload
+
+
+def test_dns_records_rejects_a_type_it_never_queries():
+    """types=["aaaa"] must not come back as {} — indistinguishable from a
+    genuinely empty answer, and a confident false negative if relayed to a
+    user asking "does this domain support IPv6?"."""
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        response = _rpc(
+            client,
+            "tools/call",
+            {
+                "name": "dns_records",
+                "arguments": {"domain": "example.com", "types": ["aaaa"]},
+            },
+        )
+        payload = response.json()["result"]["structuredContent"]
+        assert "error" in payload
+        assert "aaaa" in payload["error"]
+
+
+def test_lookup_tool_reports_a_timeout():
+    async def hang(target):
+        raise TimeoutError()
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", hang):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "lookup", "arguments": {"target": "example.com"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["error"] == "Lookup timed out"
 
 
 def test_ssl_certificate_reports_the_expiry_clock():

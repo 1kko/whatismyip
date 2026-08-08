@@ -9,6 +9,7 @@ URLs, projected polylines, and a full certificate dump because a browser paints
 them; none of that helps a model, and all of it costs context.
 """
 
+import asyncio
 import datetime
 import logging
 from contextvars import ContextVar
@@ -17,7 +18,12 @@ from typing import Any
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
-from config import MCP_ALLOWED_HOSTS
+from config import (
+    MCP_ALLOWED_HOSTS,
+    MCP_ALLOWED_ORIGINS,
+    RDAP_TIMEOUT_SECONDS,
+    WHOIS_TIMEOUT_SECONDS,
+)
 from lookup import PrivateAddressError, gather, lookup_location, sanitize_log_input
 from security import client_ip_from_scope
 
@@ -97,6 +103,26 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
     }
 
 
+# Every MCP tool call runs gather()'s full pipeline on the same executor the
+# HTML site uses, and /mcp has no auto-ban escalation (see main.py's
+# security_middleware) to shed a sustained attacker the way the browser path
+# does. Two amplifiers make an unbounded call here worse than the equivalent
+# GET /{domain}: `_whois_fallback` (lookup.py) documents that `wait_for`
+# cannot actually cancel its worker thread on timeout, so a blackholing WHOIS
+# server holds a thread for the OS TCP timeout (~2 min) rather than the 15s
+# budget; and `DomainManager.get_records()` (managers.py) sizes its own
+# nested thread pools by attacker-controlled DNS record counts. A semaphore
+# caps how many gather() calls run at once; wait_for gives the whole call a
+# hard wall-clock ceiling so a stuck one can't hold its slot forever.
+_GATHER_CONCURRENCY = asyncio.Semaphore(8)
+_GATHER_TIMEOUT_SECONDS = RDAP_TIMEOUT_SECONDS + WHOIS_TIMEOUT_SECONDS + 5
+
+
+async def _bounded_gather(target: str) -> dict:
+    async with _GATHER_CONCURRENCY:
+        return await asyncio.wait_for(gather(target), timeout=_GATHER_TIMEOUT_SECONDS)
+
+
 @mcp.tool()
 async def lookup(target: str) -> dict[str, Any]:
     """Look up everything known about a domain name or IP address: its
@@ -106,9 +132,11 @@ async def lookup(target: str) -> dict[str, Any]:
     Private and reserved addresses are refused.
     """
     try:
-        data = await gather(target)
+        data = await _bounded_gather(target)
     except PrivateAddressError:
         return {"error": "Private or reserved addresses are not allowed"}
+    except TimeoutError:
+        return {"error": "Lookup timed out"}
     except Exception:
         logging.exception("MCP lookup failed for %s", sanitize_log_input(target))
         return {"error": "Lookup failed"}
@@ -133,24 +161,42 @@ _RECORD_TYPES = ("a", "mx", "ns", "cname", "txt", "spf", "ptr")
 
 @mcp.tool()
 async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, Any]:
-    """Every DNS record for a domain: A, MX, NS, CNAME, TXT, SPF, PTR.
-    Pass `types` (lowercase, e.g. ["mx", "txt"]) to fetch a subset; omit it for
-    everything. Use this for mail-routing and SPF/DMARC questions, where the
-    summary from `lookup` is not enough.
+    """DNS records for a domain: A, MX, NS, CNAME, TXT, SPF, PTR — the exact
+    set this server queries. Pass `types` (lowercase, a subset of those) to
+    narrow the sweep; omit it for everything. Use this for mail-routing and
+    SPF/DMARC questions, where the summary from `lookup` is not enough.
     """
+    # `is not None`, not truthiness: types=[] means "narrow to nothing", which is
+    # a different request from omitting the argument, and must not silently
+    # widen back to the full sweep.
+    if types is not None:
+        wanted = [t.lower() for t in types]
+        # A type this server never queries (a stale "aaaa", a typo, "caa") must
+        # not come back indistinguishable from {} on a genuinely empty answer —
+        # that reads as a confident "no records of this type" when the truth is
+        # "this tool never asked". Reject it and name what is actually queried.
+        unsupported = sorted(set(wanted) - set(_RECORD_TYPES))
+        if unsupported:
+            return {
+                "error": (
+                    f"unsupported record types: {', '.join(unsupported)} — "
+                    f"this server queries only {', '.join(_RECORD_TYPES)}"
+                )
+            }
+    else:
+        wanted = list(_RECORD_TYPES)
+
     try:
-        data = await gather(domain)
+        data = await _bounded_gather(domain)
     except PrivateAddressError:
         return {"error": "Private or reserved addresses are not allowed"}
+    except TimeoutError:
+        return {"error": "Lookup timed out"}
     except Exception:
         logging.exception("MCP dns_records failed for %s", sanitize_log_input(domain))
         return {"error": "DNS lookup failed"}
 
     records = data["domain"] or {}
-    # `is not None`, not truthiness: types=[] means "narrow to nothing", which is
-    # a different request from omitting the argument, and must not silently
-    # widen back to the full sweep.
-    wanted = [t.lower() for t in types] if types is not None else list(_RECORD_TYPES)
     return {
         "domain": data["address"],
         "resolved_ip": data["resolved_ip"],
@@ -166,9 +212,11 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
     certificate cover this hostname?".
     """
     try:
-        data = await gather(domain)
+        data = await _bounded_gather(domain)
     except PrivateAddressError:
         return {"error": "Private or reserved addresses are not allowed"}
+    except TimeoutError:
+        return {"error": "Lookup timed out"}
     except Exception:
         logging.exception(
             "MCP ssl_certificate failed for %s", sanitize_log_input(domain)
@@ -197,9 +245,15 @@ _caller_ip: ContextVar[str] = ContextVar("mcp_caller_ip", default="unknown")
 class CallerIPMiddleware:
     """Record the verified peer address for whoami_caller.
 
-    A tool cannot read the peer itself: the SDK hands it request headers, and
-    headers are client-supplied input, never an identity. So the address is
-    resolved here, once, from the ASGI scope.
+    A tool cannot read the peer itself: the SDK hands it request headers,
+    which a caller can set to whatever it likes. The address here comes from
+    `client_ip_from_scope()` instead — the same trusted-proxy logic
+    `security.get_client_ip` applies on the HTML path: the raw TCP peer,
+    unless that peer is itself on the trusted-proxy allowlist (or, absent an
+    allowlist, a private-range address — the normal shape of a Docker/K8s
+    sidecar), in which case `x-real-ip`/`x-forwarded-for` is taken instead. A
+    client that isn't behind a trusted proxy cannot spoof this by setting
+    those headers on its own request.
 
     The ContextVar survives the hops between here and the tool body because
     contextvars are copied at task *creation*: a value set before any spawn
@@ -265,8 +319,12 @@ def build_mcp():
         # The mount prefix supplies the whole public path, so the transport's
         # own path is the root of the sub-app.
         streamable_http_path="/",
-        # Plain JSON instead of SSE: nothing here streams, and it keeps the
-        # reverse proxy out of the picture.
+        # Governs the POST response shape only — it does not touch GET, which
+        # the SDK would otherwise turn into a standalone SSE stream that
+        # stateless mode never tears down. This server has no server-initiated
+        # messages to stream, so GET (and every other non-POST method) is
+        # rejected outright by _reject_non_post below, before it ever reaches
+        # this app.
         json_response=True,
         # Only affects clients on spec 2025-11-25 and earlier; 2026-07-28 is
         # sessionless by construction. Without it a legacy client's session
@@ -275,6 +333,7 @@ def build_mcp():
         stateless_http=True,
         transport_security=TransportSecuritySettings(
             allowed_hosts=MCP_ALLOWED_HOSTS,
+            allowed_origins=MCP_ALLOWED_ORIGINS,
         ),
     )
     return CallerIPMiddleware(asgi_app), mcp
@@ -285,6 +344,35 @@ def build_mcp():
 # These two classes are MCP transport mechanics (how a request reaches the
 # app `build_mcp()` returns), not app wiring, so they live here rather than
 # in main.py; main.py only imports and wires them.
+
+
+async def _reject_non_post(send) -> None:
+    """Answer with a prompt 405 instead of forwarding into the SDK.
+
+    A GET here would reach `_handle_get_request`
+    (mcp/server/streamable_http.py), which checks nothing but whether `Accept`
+    contains `text/event-stream` and then opens a standalone SSE stream that
+    `stateless_http=True` never tears down — each one pins a file descriptor,
+    a transport object, and anyio tasks that never return, and `/mcp` cannot
+    auto-ban (see main.py's security_middleware) to shed a caller doing this
+    on purpose. This server never sends a server-initiated message, so the
+    stream has zero utility; the MCP spec explicitly permits 405 for a server
+    that doesn't offer it, so no compliant client breaks. Same reasoning
+    covers PUT/DELETE/etc: nothing here needs any method but POST.
+    """
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 405,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"allow", b"POST"),
+            ],
+        }
+    )
+    await send(
+        {"type": "http.response.body", "body": b'{"error": "Method Not Allowed"}'}
+    )
 
 
 class McpDispatch:
@@ -310,6 +398,9 @@ class McpDispatch:
         self.asgi_app = None
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] != "POST":
+            await _reject_non_post(send)
+            return
         await self.asgi_app(scope, receive, send)
 
 
@@ -329,7 +420,8 @@ class McpBarePathRoute:
     "/mcp". An MCP client configured with the literal "https://ip.1kko.com/mcp"
     URL (the normal way to hand out an MCP server) sends exactly that bare
     path; main.py registers this ahead of its `/{domain_ip}` catch-all so it
-    wins outright instead of falling through to a 405.
+    wins outright instead of falling through to that catch-all's own 405
+    (right path, wrong method).
 
     Only `path` is rewritten to "/" — `root_path` is left exactly as it
     arrived. `Starlette._utils.get_route_path` derives the path routes are
@@ -346,5 +438,30 @@ class McpBarePathRoute:
         self._asgi_app = asgi_app
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] != "POST":
+            await _reject_non_post(send)
+            return
         inner_scope = {**scope, "path": "/"}
         await self._asgi_app(inner_scope, receive, send)
+
+
+class McpDisabled:
+    """Answer every `/mcp` request with 404 when `MCP_ENABLED=false`.
+
+    Without this, main.py mounts nothing at `/mcp` and the request falls
+    through to the `/{domain_ip}` catch-all, which serves it as a lookup of
+    the literal string "mcp" — a confusing 200 where a 404 ("this endpoint
+    doesn't exist right now") is what `MCP_ENABLED=false` actually means.
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 404,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b'{"error": "Not Found"}'})

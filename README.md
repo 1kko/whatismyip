@@ -252,7 +252,10 @@ claude mcp add --transport http whatismyip https://ip.1kko.com/mcp
 ```
 
 Any MCP client that speaks Streamable HTTP works the same way — point it at
-`https://ip.1kko.com/mcp`.
+`https://ip.1kko.com/mcp`. (A client running in a browser and sending an
+`Origin` header needs that origin in `MCP_ALLOWED_ORIGINS`, below; a request
+with no `Origin` header at all — the normal case for a backend MCP client —
+is unaffected.)
 
 ### Tools
 
@@ -276,8 +279,10 @@ is my agent running in?" and nothing else. **For your own IP address, open
 |---|---|---|
 | `MCP_ENABLED` | `true` | Set to `false` to drop the endpoint entirely. |
 | `MCP_ALLOWED_HOSTS` | `ip.1kko.com,ip.1kko.com:*` | Host allowlist. **A hostname missing here gets `421 Misdirected Request` on every request.** |
+| `MCP_ALLOWED_ORIGINS` | *(empty)* | Origin allowlist for browser-based clients. A request with no `Origin` header is always allowed; one that has an `Origin` not listed here gets `403`. |
 | `MCP_RATE_LIMIT_PER_MINUTE` | `120` | MCP's own rate bucket. Over-limit returns `429`; it never bans. |
-| `MCP_RATE_LIMIT_PER_SECOND` | `20` | Burst ceiling for the same bucket. |
+| `MCP_RATE_LIMIT_PER_SECOND` | `5` | Burst ceiling for the same bucket. |
+| `MCP_MAX_BODY_BYTES` | `262144` (256 KiB) | Max size of a `POST /mcp` body. Rejected with `413` before it's read into memory. |
 
 
 ## Security

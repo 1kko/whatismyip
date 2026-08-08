@@ -144,8 +144,25 @@ MCP_ALLOWED_HOSTS = [
     if h.strip()
 ]
 
+# The SDK's transport_security treats a request with no Origin header as
+# same-origin (always allowed — most MCP clients are backend processes and
+# never send one), but 403s any request that *does* carry one unless it's
+# listed here. Empty by default, matching MCP_ALLOWED_HOSTS's "nothing
+# wildcarded unless configured" posture; set this if a specific browser-based
+# MCP client needs to be let through.
+MCP_ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+
 # MCP traffic gets its own bucket. Every user of a hosted AI client arrives from
 # a handful of provider egress IPs, so this is far looser than the browser limit
 # and, unlike it, never escalates to a ban (see the /mcp branch in main.py).
 MCP_RATE_LIMIT_PER_MINUTE = int(os.getenv("MCP_RATE_LIMIT_PER_MINUTE", "120"))
-MCP_RATE_LIMIT_PER_SECOND = int(os.getenv("MCP_RATE_LIMIT_PER_SECOND", "20"))
+# 5, not the browser path's 10: no legitimate agent bursts anywhere near that,
+# and each request can spin up a nested thread pool (see mcp_server._bounded_gather).
+MCP_RATE_LIMIT_PER_SECOND = int(os.getenv("MCP_RATE_LIMIT_PER_SECOND", "5"))
+
+# 256 KiB is generous for a JSON-RPC call — the SDK itself enforces no cap
+# (see security_middleware's /mcp branch, which rejects an oversized or
+# unbounded-length body with 413 before it's ever read into memory).
+MCP_MAX_BODY_BYTES = int(os.getenv("MCP_MAX_BODY_BYTES", str(256 * 1024)))

@@ -35,6 +35,7 @@ from config import (
     GEOIP_CITY_DB_FILE,
     GEOIP_UPDATE_RETRY_SECONDS,
     MCP_ENABLED,
+    MCP_MAX_BODY_BYTES,
     MCP_RATE_LIMIT_PER_MINUTE,
     MCP_RATE_LIMIT_PER_SECOND,
     MOBILE_CANVAS,
@@ -43,7 +44,7 @@ from config import (
     SITE_DOMAIN_FALLBACK,
 )
 from managers import HeaderManager
-from mcp_server import McpBarePathRoute, build_mcp, mcp_dispatch
+from mcp_server import McpBarePathRoute, McpDisabled, build_mcp, mcp_dispatch
 from models import GeoRulesUpdate
 from lookup import (
     PrivateAddressError,
@@ -94,6 +95,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 if MCP_ENABLED:
     app.add_route("/mcp", McpBarePathRoute(mcp_dispatch), include_in_schema=False)
     app.mount("/mcp", mcp_dispatch)
+else:
+    _mcp_disabled = McpDisabled()
+    app.add_route("/mcp", _mcp_disabled, include_in_schema=False)
+    app.mount("/mcp", _mcp_disabled)
 templates = Jinja2Templates(directory="templates")
 
 # Configure logging
@@ -394,6 +399,14 @@ scheduler.add_job(
 scheduler.add_job(
     rate_limiter.cleanup_old_records, "interval", seconds=RATE_LIMIT_CLEANUP_INTERVAL
 )
+# Without this, allow_request() prunes each IP's own timestamp list but never
+# deletes the (now-empty) key, so every distinct IP that ever touches /mcp
+# leaves a permanent dict entry for the life of the process.
+scheduler.add_job(
+    mcp_rate_limiter.cleanup_old_records,
+    "interval",
+    seconds=RATE_LIMIT_CLEANUP_INTERVAL,
+)
 # The IANA RDAP bootstrap registry (TLD/IP-block -> RDAP server) rarely changes;
 # check daily and only re-fetch when it is older than a week. The first lookup
 # bootstraps lazily, so nothing here blocks startup.
@@ -478,6 +491,38 @@ async def security_middleware(request: Request, call_next):
             return JSONResponse(
                 status_code=403, content={"error": "IP address is banned"}
             )
+        # `request.body()` inside the SDK buffers the whole thing into memory
+        # with no cap of its own — checked directly against the installed
+        # package, there is no content-length check and no 413 anywhere in it.
+        # /mcp is this service's first unauthenticated POST endpoint (every
+        # other POST route sits behind ADMIN_API_KEY), so a caller with a
+        # valid Host header and a multi-GB body can OOM the container before
+        # the request ever reaches the SDK. Reject on Content-Length alone,
+        # before the body is read; a missing/non-numeric length means chunked
+        # transfer-encoding, which has no advertised size to check either.
+        if request.method == "POST":
+            content_length = request.headers.get("content-length")
+            if content_length is None or not content_length.isdigit():
+                logging.warning(
+                    "SECURITY: MCP request from %s has no valid Content-Length "
+                    "(missing or chunked)",
+                    sanitize_log_input(client_ip),
+                )
+                return JSONResponse(
+                    status_code=413,
+                    content={"error": "Content-Length header required"},
+                )
+            if int(content_length) > MCP_MAX_BODY_BYTES:
+                logging.warning(
+                    "SECURITY: MCP request from %s exceeds max body size (%s > %s)",
+                    sanitize_log_input(client_ip),
+                    content_length,
+                    MCP_MAX_BODY_BYTES,
+                )
+                return JSONResponse(
+                    status_code=413,
+                    content={"error": "Request body too large"},
+                )
         if not mcp_rate_limiter.allow_request(client_ip):
             logging.warning(
                 "SECURITY: MCP rate limit hit for %s (no ban)",
