@@ -255,6 +255,27 @@ class TestBrowserPage:
         assert "onclick=" not in html
         assert "onsubmit=" not in html
 
+    def test_json_accordion_advertises_the_mcp_endpoint(self):
+        # A visitor's only in-page route to the MCP server. It sits with the curl
+        # example because both answer the same question: how do I use this from
+        # something that isn't a browser?
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        body = html.split('id="acc-raw"')[1].split("</details>")[0]
+        assert 'id="mcp-endpoint"' in body
+        assert "/mcp</pre>" in body
+        assert "claude mcp add --transport http whatismyip" in body
+        # Both blocks must be copyable; the handler binds to .copy-btn[data-value].
+        assert body.count('class="copy-btn"') >= 3  # curl + endpoint + install
+
+    def test_mcp_note_says_whose_ip_it_reports(self):
+        # The honesty contract, on the page where someone decides to install it.
+        # This service is called "what is my IP", so a visitor will assume the MCP
+        # server tells their agent their address. It reports the AI provider's.
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        body = html.split('id="acc-raw"')[1].split("</details>")[0]
+        assert "whoami_caller" in body
+        assert "not your machine" in body
+
     def test_ssl_certificate_section_renders_and_reports_absence_for_an_ip(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert "SSL certificate" in html  # the accordion is always present
