@@ -63,17 +63,17 @@ def test_initialize_handshake():
         assert "tools" in result["capabilities"]
 
 
-def test_tools_list_exposes_the_lookup_tool():
-    """Widened to the full four-tool set in Task 5, once they all exist.
-
-    Asserting the final set here would leave a knowingly-red test sitting in
-    three commits, which every task review would (correctly) flag.
-    """
+def test_tools_list_exposes_the_four_tools():
     with TestClient(app) as client:
         client.post("/mcp", json=INIT, headers=MCP_HEADERS)
         response = _rpc(client, "tools/list")
         names = {tool["name"] for tool in response.json()["result"]["tools"]}
-        assert "lookup" in names
+        assert names == {
+            "lookup",
+            "dns_records",
+            "ssl_certificate",
+            "whoami_caller",
+        }
 
 
 def test_bad_host_header_is_rejected():
@@ -283,3 +283,29 @@ def test_ssl_certificate_without_a_certificate_is_an_error():
                 {"name": "ssl_certificate", "arguments": {"domain": "example.com"}},
             )
         assert "error" in response.json()["result"]["structuredContent"]
+
+
+def test_whoami_caller_reports_the_connecting_peer_not_the_user():
+    async def fake_location(ip):
+        return {
+            "ip": ip,
+            "country_code": "US",
+            "country_name": "United States",
+            "city_name": "Ashburn",
+            "lat": 39.0,
+            "lon": -77.5,
+        }
+
+    with TestClient(app, client=("203.0.113.9", 41234)) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.lookup_location", fake_location):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "whoami_caller", "arguments": {}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["ip"] == "203.0.113.9"
+        assert payload["geo"]["country_code"] == "US"
+        # The honesty contract: the answer must say whose IP this is.
+        assert "ip.1kko.com" in payload["note"]

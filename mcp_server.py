@@ -11,13 +11,15 @@ them; none of that helps a model, and all of it costs context.
 
 import datetime
 import logging
+from contextvars import ContextVar
 from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from config import MCP_ALLOWED_HOSTS
-from lookup import PrivateAddressError, gather, sanitize_log_input
+from lookup import PrivateAddressError, gather, lookup_location, sanitize_log_input
+from security import client_ip_from_scope
 
 # Certificate parsing already exists in viewmodel.py, which is pure and
 # stdlib-only, so there is no cycle and no reason to restate it here.
@@ -183,6 +185,59 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
     }
 
 
+_caller_ip: ContextVar[str] = ContextVar("mcp_caller_ip", default="unknown")
+
+
+class CallerIPMiddleware:
+    """Record the verified peer address for whoami_caller.
+
+    Deliberately a pure-ASGI wrapper rather than BaseHTTPMiddleware: that class
+    runs the downstream app in a child task, and the ContextVar has to be set in
+    the same task the tool body later runs in. A tool cannot read the peer
+    itself — the SDK gives it request headers, and headers are client-supplied
+    input, never an identity.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            _caller_ip.set(client_ip_from_scope(scope))
+        await self.app(scope, receive, send)
+
+
+@mcp.tool()
+async def whoami_caller() -> dict[str, Any]:
+    """The IP address and location of whatever is making this MCP connection.
+
+    IMPORTANT: this is almost never the user's own computer. A hosted MCP
+    client connects from the AI provider's servers, so this reports that
+    datacenter — useful for "which region is my agent running in?" and nothing
+    else. For the user's real IP address they must open https://ip.1kko.com in
+    their own browser; no remote MCP server can see it.
+    """
+    ip = _caller_ip.get()
+    if ip == "unknown":
+        return {"error": "Caller address unavailable"}
+    try:
+        loc = await lookup_location(ip)
+    except Exception:
+        logging.exception("MCP whoami_caller failed")
+        return {"error": "Location lookup failed"}
+    return {
+        "ip": ip,
+        "geo": compact_location(loc),
+        "network": compact_network(loc),
+        "note": (
+            "This is the address of the client connecting to this MCP server, "
+            "which is normally the AI provider's infrastructure rather than the "
+            "user's own machine. For the user's real IP address, have them open "
+            "https://ip.1kko.com in a browser."
+        ),
+    }
+
+
 def build_mcp():
     """Return (asgi_app, mcp) for main.py to mount and drive.
 
@@ -206,7 +261,7 @@ def build_mcp():
             allowed_hosts=MCP_ALLOWED_HOSTS,
         ),
     )
-    return asgi_app, mcp
+    return CallerIPMiddleware(asgi_app), mcp
 
 
 # --- Transport plumbing for main.py's mount -------------------------------
