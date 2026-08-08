@@ -4,6 +4,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ view.target }} — WhatIsMyIP</title>
+    <meta name="description" content="WHOIS, GeoIP, DNS and TLS certificate details for any IP address or domain. Also an MCP server, so AI agents can run the same lookups.">
+
+    <!-- Agent discovery. The service answers JSON to any non-browser client and
+         speaks MCP at the endpoint below, so an agent that lands on this page
+         can find the machine interface without scraping the HTML.
+         `service-doc` is the IANA-registered relation for human-readable
+         service documentation (RFC 8631); the mcp-* names are this site's own
+         convention, since no registry covers them yet. -->
+    <link rel="service-doc" href="https://github.com/1kko/whatismyip#mcp-model-context-protocol">
+    <meta name="mcp-endpoint" content="{{ api_base }}mcp">
+    <meta name="mcp-transport" content="streamable-http">
+    <meta name="mcp-auth" content="none">
+    <meta name="mcp-tools" content="lookup, dns_records, ssl_certificate, whoami_caller">
+    <meta name="mcp-install" content="claude mcp add --transport http whatismyip {{ api_base }}mcp">
+    <meta name="mcp-note" content="whoami_caller returns whoever opened the connection: your own machine from a local client such as Claude Code, a provider datacenter from a hosted one such as claude.ai. The server cannot tell which, so do not report it as the user's IP without checking.">
+    <meta name="api-endpoint" content="{{ api_base }}{target}">
+    <meta name="api-note" content="Any non-browser user-agent gets JSON from the same URL; no key required.">
+
     <link rel="preload" href="/static/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/static/css/whatismyip.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
@@ -211,8 +229,6 @@
     <footer class="footer inset">
         <span class="wordmark">{{ site_domain }}</span>
         <span class="mono">{{ view.meta_line }}</span>
-        <a class="mono" href="https://github.com/1kko/whatismyip#mcp-model-context-protocol"
-           target="_blank" rel="noopener noreferrer" title="Use this service from an AI agent">MCP server</a>
         <a class="icon-link" href="https://github.com/1kko/whatismyip" target="_blank"
            rel="noopener noreferrer" aria-label="Source on GitHub" title="1kko/whatismyip">
             <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" focusable="false">

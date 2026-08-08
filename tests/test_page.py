@@ -255,9 +255,41 @@ class TestBrowserPage:
         assert "onclick=" not in html
         assert "onsubmit=" not in html
 
+    def test_head_carries_agent_discovery_metadata(self):
+        # An agent that lands on the HTML should find the machine interface
+        # without scraping the page. The footer link was removed, so this block
+        # is now the only in-markup pointer to the MCP endpoint.
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        head = html.split("</head>")[0]
+        assert '<meta name="description"' in head
+        assert 'name="mcp-endpoint"' in head and "/mcp" in head
+        assert 'name="mcp-transport" content="streamable-http"' in head
+        assert 'name="mcp-tools"' in head
+        assert 'name="mcp-install"' in head
+        # RFC 8631 registered relation, not an invented one.
+        assert 'rel="service-doc"' in head
+
+    def test_head_mcp_note_does_not_overstate_whose_ip_it_is(self):
+        # Same honesty contract as the tool and the page copy. An agent reads
+        # this to decide how to relay the answer, so it is the highest-leverage
+        # place for the claim to be wrong.
+        head = client.get("/", headers=BROWSER_UA).text.split("</head>")[0]
+        note = head.split('name="mcp-note" content="')[1].split('"')[0]
+        assert "own machine" in note  # local client
+        assert "datacenter" in note  # hosted client
+        assert "cannot tell" in note
+
+    def test_footer_no_longer_carries_the_mcp_link(self):
+        # A bare "MCP server" link told a visitor nothing and left the site to
+        # explain itself. The JSON accordion and the head metadata carry it now.
+        html = client.get("/", headers=BROWSER_UA).text
+        footer = html.split("<footer")[1].split("</footer>")[0]
+        assert "MCP" not in footer
+        assert "github.com/1kko/whatismyip" in footer  # the source link stays
+
     def test_json_accordion_advertises_the_mcp_endpoint(self):
-        # A visitor's only in-page route to the MCP server. It sits with the curl
-        # example because both answer the same question: how do I use this from
+        # A visitor's route to the MCP server. It sits with the curl example
+        # because both answer the same question: how do I use this from
         # something that isn't a browser?
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         body = html.split('id="acc-raw"')[1].split("</details>")[0]
