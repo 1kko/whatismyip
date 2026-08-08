@@ -31,7 +31,7 @@ MOCK_WHOIS = {"source": "rdap", "name": "google.com", "registrar": "Markmonitor 
 
 
 class TestBasic:
-    @patch("main.lookup_rdap", return_value=dict(MOCK_WHOIS, name="8.8.8.0/24"))
+    @patch("lookup.lookup_rdap", return_value=dict(MOCK_WHOIS, name="8.8.8.0/24"))
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_get_self_info(self, mock_rev, mock_geo, mock_rdap):
@@ -42,7 +42,7 @@ class TestBasic:
         assert "location" in data
         assert "whois" in data
 
-    @patch("main.lookup_rdap", return_value=dict(MOCK_WHOIS))
+    @patch("lookup.lookup_rdap", return_value=dict(MOCK_WHOIS))
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_get_domain_info(self, mock_rev, mock_geo, mock_rdap):
@@ -53,7 +53,7 @@ class TestBasic:
         assert data["whois"]["source"] == "rdap"
         assert data["whois"]["name"] == "google.com"
 
-    @patch("main.lookup_rdap", return_value=dict(MOCK_WHOIS, name="8.8.8.0/24"))
+    @patch("lookup.lookup_rdap", return_value=dict(MOCK_WHOIS, name="8.8.8.0/24"))
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_get_ip_info(self, mock_rev, mock_geo, mock_rdap):

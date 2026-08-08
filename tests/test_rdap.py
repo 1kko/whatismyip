@@ -9,6 +9,7 @@ import datetime
 
 import pytest
 
+import lookup
 import main
 import rdap
 
@@ -122,7 +123,7 @@ class TestLookupWhoisRouting:
 
     def test_rdap_hit_skips_whois(self, monkeypatch):
         canonical = {"source": "rdap", "name": "google.com"}
-        monkeypatch.setattr(main, "lookup_rdap", lambda target: canonical)
+        monkeypatch.setattr(lookup, "lookup_rdap", lambda target: canonical)
 
         def boom(*a, **k):
             raise AssertionError("WHOIS must not run when RDAP answers")
@@ -132,7 +133,7 @@ class TestLookupWhoisRouting:
         assert out == canonical
 
     def test_rdap_miss_falls_back_to_whois(self, monkeypatch):
-        monkeypatch.setattr(main, "lookup_rdap", lambda target: None)
+        monkeypatch.setattr(lookup, "lookup_rdap", lambda target: None)
         monkeypatch.setattr(
             main.whois,
             "whois",
@@ -149,7 +150,7 @@ class TestLookupWhoisRouting:
             calls["n"] += 1
             return {"source": "rdap", "name": target}
 
-        monkeypatch.setattr(main, "lookup_rdap", once)
+        monkeypatch.setattr(lookup, "lookup_rdap", once)
         asyncio.run(main.lookup_whois("example.com"))
         asyncio.run(main.lookup_whois("example.com"))
         assert calls["n"] == 1  # second call served from cache

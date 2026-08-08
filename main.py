@@ -11,13 +11,16 @@ import re
 import secrets
 import time
 from logging.handlers import TimedRotatingFileHandler
-from typing import Any
 from urllib.parse import urlparse
 
-import dns.resolver
-import dns.reversename
+# dns.resolver and whois are not called directly in this module anymore (that
+# moved into lookup.py) but stay imported: tests patch main.dns.resolver.resolve
+# / main.whois.whois, and since both are real external modules (singletons in
+# sys.modules), patching an attribute on them here patches the same object
+# lookup.py calls through — but only if `main.dns` / `main.whois` resolve at all.
+import dns.resolver  # noqa: F401
 import uvicorn
-import whois
+import whois  # noqa: F401
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -27,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 
 from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
-from rdap import lookup_rdap, normalize_whois, refresh_rdap_bootstrap
+from rdap import refresh_rdap_bootstrap
 from viewmodel import build_view, whois_display
 from config import (
     BAN_DURATION_RATE_LIMIT,
@@ -40,21 +43,34 @@ from config import (
     MOBILE_CANVAS,
     PUBLIC_BASE_URL,
     RATE_LIMIT_CLEANUP_INTERVAL,
-    RDAP_TIMEOUT_SECONDS,
     SITE_DOMAIN_FALLBACK,
-    TRUSTED_PROXIES,
-    WHOIS_CACHE_ERROR_TTL,
-    WHOIS_CACHE_TTL,
-    WHOIS_TIMEOUT_SECONDS,
 )
-from managers import DomainManager, GeoIpManager, HeaderManager, SSLManager
+
+# SSLManager isn't called directly here either (also moved into lookup.gather),
+# but tests import it straight from main to exercise it, so it stays re-exported.
+from managers import HeaderManager, SSLManager  # noqa: F401
 from models import GeoRulesUpdate
+from lookup import (
+    PrivateAddressError,
+    _whois_cache,  # noqa: F401 -- tests clear main._whois_cache between cases
+    domain_manager,
+    gather,
+    geo_ip_manager,
+    is_safe_ip,  # noqa: F401 -- re-exported; tests call main.is_safe_ip directly
+    lookup_location,
+    lookup_whois,
+    normalize_lookup_target,  # noqa: F401 -- re-exported for the same reason
+    sanitize_log_input,
+)
 from security import (
     GeoBlockManager,
     IPBanManager,
     RateLimiter,
     SuspiciousPatternDetector,
     WhitelistManager,
+    _extract_forwarded_ip,  # noqa: F401 -- re-exported; tests call it directly
+    _peer_is_trusted,
+    get_client_ip,
 )
 
 # Load environment variables from .env file
@@ -91,55 +107,6 @@ logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
 
-class TTLCache:
-    """Tiny time-bounded cache. Read/written only from the event-loop thread, so
-    it needs no lock; eviction is FIFO once it reaches maxsize."""
-
-    def __init__(self, maxsize: int = 1024):
-        self._data: dict[str, tuple[float, Any]] = {}
-        self._maxsize = maxsize
-
-    def get(self, key: str) -> Any:
-        item = self._data.get(key)
-        if not item:
-            return None
-        expires_at, value = item
-        if expires_at < time.time():
-            self._data.pop(key, None)
-            return None
-        return value
-
-    def set(self, key: str, value: Any, ttl: float) -> None:
-        if key not in self._data and len(self._data) >= self._maxsize:
-            self._data.pop(next(iter(self._data)), None)
-        self._data[key] = (time.time() + ttl, value)
-
-    def clear(self) -> None:
-        self._data.clear()
-
-
-_whois_cache = TTLCache()
-
-
-def sanitize_log_input(value: str) -> str:
-    """Remove control characters from log inputs to prevent log injection."""
-    return value.replace("\n", "").replace("\r", "").replace("\x00", "")
-
-
-def normalize_lookup_target(raw: str) -> str:
-    """Reduce a pasted URL to the bare host or IP the pipeline can resolve.
-
-    Mirrors static/js/app.js normalizeLookupTarget so a URL typed into the search
-    box and one sent straight to the API behave the same: drop the scheme and
-    everything from the first '/', '?' or '#' onwards. Without this, is_valid_domain
-    (which parses URLs via get_tld) would accept "https://host/path" but the raw
-    string would then be handed to DNS/WHOIS/SSL, which cannot resolve it.
-    """
-    target = (raw or "").strip()
-    target = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", target)
-    return re.split(r"[/?#]", target, maxsplit=1)[0]
-
-
 # Security Configuration from Environment Variables
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 if not ADMIN_API_KEY or ADMIN_API_KEY == "CHANGE_ME_TO_SECURE_RANDOM_STRING":
@@ -151,57 +118,6 @@ if not ADMIN_API_KEY or ADMIN_API_KEY == "CHANGE_ME_TO_SECURE_RANDOM_STRING":
     ADMIN_API_KEY = None
 
 
-def is_safe_ip(ip_str: str) -> bool:
-    """Check if an IP address is safe to query (not private/reserved)."""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-        return not (
-            ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-        )
-    except ValueError:
-        return False
-
-
-def _extract_forwarded_ip(request: Request) -> str | None:
-    """Extract client IP from proxy headers (x-real-ip or x-forwarded-for)."""
-    real_ip = request.headers.get("x-real-ip")
-    if real_ip:
-        return real_ip.strip()
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        # X-Forwarded-For format: "client, proxy1, proxy2" - first is the client
-        return forwarded_for.split(",")[0].strip()
-    return None
-
-
-def _peer_is_trusted(peer: str | None) -> bool:
-    # Explicit allowlist wins.
-    if TRUSTED_PROXIES:
-        return bool(peer) and peer in TRUSTED_PROXIES
-    # No allowlist: only trust proxy headers when the direct peer is a
-    # private-range address. Docker/K8s/Traefik sidecars always talk from
-    # RFC1918 / CGNAT / link-local space, so this correctly covers the
-    # intended reverse-proxy case without requiring per-deploy config.
-    # If the app is accidentally exposed directly, peer is the attacker's
-    # public IP and headers are ignored (fail-closed).
-    if not peer:
-        return False
-    try:
-        ip = ipaddress.ip_address(peer)
-    except ValueError:
-        return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local
-
-
-def get_client_ip(request: Request) -> str:
-    peer = request.client.host if request.client else None
-    if _peer_is_trusted(peer):
-        return _extract_forwarded_ip(request) or peer or "unknown"
-    return peer or "unknown"
-
-
-geo_ip_manager = GeoIpManager()
-domain_manager = DomainManager()
 gazetteer = Gazetteer.load()
 
 
@@ -330,64 +246,6 @@ def _dns_rows(response_data: dict) -> list[dict]:
     if cname:
         rows.append({"type": "CNAME", "name": address, "value": str(cname), "ttl": ""})
     return rows
-
-
-async def _whois_fallback(target: str) -> dict:
-    """Port-43 WHOIS, normalised into the same shape RDAP produces. Used only for
-    the TLDs RDAP does not cover, or when the RDAP server is unreachable."""
-    try:
-        raw = await asyncio.wait_for(
-            asyncio.to_thread(whois.whois, target, quiet=True),
-            timeout=WHOIS_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        # wait_for cannot cancel the worker thread, so the underlying whois call
-        # keeps running and is discarded; the response no longer waits on it.
-        logging.warning("WHOIS lookup timed out for %s", sanitize_log_input(target))
-        return {"error": "WHOIS lookup timed out"}
-    except Exception:
-        logging.exception("WHOIS lookup failed for %s", sanitize_log_input(target))
-        return {"error": "WHOIS lookup failed"}
-    return normalize_whois(raw, target)
-
-
-async def lookup_whois(target: str) -> dict:
-    """Registration data for a domain or IP. RDAP first (fast, structured JSON),
-    falling back to port-43 WHOIS for TLDs RDAP does not serve. Both sources are
-    normalised to one shape (see rdap.py) and cached under the same key."""
-    key = (target or "").strip().lower()
-    cached = _whois_cache.get(key)
-    if cached is not None:
-        return cached
-
-    result = None
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(lookup_rdap, target),
-            timeout=RDAP_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        logging.info("RDAP timed out for %s; trying WHOIS", sanitize_log_input(target))
-    except Exception:
-        safe = sanitize_log_input(target)
-        logging.exception("RDAP errored for %s; trying WHOIS", safe)
-
-    # lookup_rdap returns None when RDAP cannot answer (unsupported TLD, query
-    # error) — only then do we pay for the slow port-43 round-trip.
-    if result is None:
-        result = await _whois_fallback(target)
-    if not result:
-        result = {"error": "WHOIS lookup failed"}
-
-    failed = isinstance(result, dict) and result.get("error")
-    _whois_cache.set(key, result, WHOIS_CACHE_ERROR_TTL if failed else WHOIS_CACHE_TTL)
-    return result
-
-
-async def lookup_location(ip: str) -> dict:
-    data = await asyncio.to_thread(geo_ip_manager.fetch_location, ip)
-    data.pop("elapsed_time", None)
-    return data
 
 
 def public_base_url(request: Request) -> str:
@@ -749,11 +607,7 @@ async def get_self_info(request: Request):
 
 @app.get("/{domain_ip}", response_model=None)
 async def get_ip_info(domain_ip: str, request: Request):
-    # Remove the static path check since it's handled by the static files mount
     started = time.perf_counter()
-    # Strip any scheme/path a caller pasted (e.g. "https://host/x") down to the
-    # bare host before it reaches WHOIS/DNS/SSL. Everything below reads this.
-    domain_ip = normalize_lookup_target(domain_ip)
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
@@ -767,93 +621,32 @@ async def get_ip_info(domain_ip: str, request: Request):
         sanitize_log_input(domain_ip),
     )
 
-    # WHOIS takes seconds and depends on nothing else here, so it runs alongside
-    # the DNS/SSL work instead of in front of it. Same for the visitor's own
-    # location, which only feeds the distance line.
-    whois_task = asyncio.create_task(lookup_whois(domain_ip))
+    # The visitor's own location only feeds the distance line, so it runs
+    # alongside the target lookup rather than after it.
     origin_task = asyncio.create_task(lookup_location(client_ip))
+    try:
+        data = await gather(domain_ip)
+    except PrivateAddressError:
+        origin_task.cancel()
+        raise HTTPException(
+            status_code=400,
+            detail="Private or reserved IP addresses are not allowed",
+        ) from None
 
-    ssl_data = None
-    resolved_ip = None
-    domain_data = None
-    reverse_dns_hostname = None
-
-    if domain_manager.is_valid_domain(domain_ip):
-        logging.debug(f"domain={domain_ip}")
-        try:
-            a_records = await asyncio.to_thread(dns.resolver.resolve, domain_ip, "A")
-            resolved_ip = str(a_records[0])  # Get the first A record
-        except Exception as e:
-            logging.warning(f"No A record for {domain_ip}: {str(e)}")
-        if resolved_ip and not is_safe_ip(resolved_ip):
-            whois_task.cancel()
-            origin_task.cancel()
-            raise HTTPException(
-                status_code=400,
-                detail="Private or reserved IP addresses are not allowed",
-            )
-
-        # The record sweep and the TLS handshake are independent of each other.
-        domain_data, ssl_data = await asyncio.gather(
-            asyncio.to_thread(
-                lambda: domain_manager.get_records(domain_ip, ip=resolved_ip)
-            ),
-            asyncio.to_thread(SSLManager.get_ssl_info, domain_ip, resolved_ip),
-            return_exceptions=True,
-        )
-        if isinstance(domain_data, BaseException):
-            logging.exception(
-                "Error getting DNS records for %s", sanitize_log_input(domain_ip)
-            )
-            domain_data = None
-        if isinstance(ssl_data, BaseException):
-            logging.exception(
-                "Error getting SSL info for %s", sanitize_log_input(domain_ip)
-            )
-            ssl_data = None
-    elif domain_manager.is_ipv4(domain_ip):
-        logging.debug(f"ip={domain_ip}")
-        if not is_safe_ip(domain_ip):
-            whois_task.cancel()
-            origin_task.cancel()
-            raise HTTPException(
-                status_code=400,
-                detail="Private or reserved IP addresses are not allowed",
-            )
-        reverse_dns_hostname = await asyncio.to_thread(
-            domain_manager.perform_reverse_lookup, domain_ip
-        )
-        domain_data = (
-            await asyncio.to_thread(
-                lambda: domain_manager.get_records(reverse_dns_hostname, ip=domain_ip)
-            )
-            if reverse_dns_hostname
-            else {}
-        )
-        resolved_ip = domain_ip
-
-    if resolved_ip:
-        ip_data = await lookup_location(resolved_ip)
-        # The PTR record was already resolved above; don't ask twice.
-        if reverse_dns_hostname:
-            ip_data["reverse_dns"] = reverse_dns_hostname
-    else:
-        ip_data = {}
-
-    whois_data = await whois_task
     origin_location = await origin_task
+    ip_data = data["location"]
     map_payload, distance_km, origin, target = await asyncio.to_thread(
         build_map_payload, ip_data, origin_location
     )
     _apply_resolved_target(ip_data, target)
 
     response_data = {
-        "address": domain_ip,
+        "address": data["address"],
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
-        "domain": domain_data,
+        "domain": data["domain"],
         "location": ip_data,
-        "whois": whois_data,
-        "ssl": ssl_data,
+        "whois": data["whois"],
+        "ssl": data["ssl"],
         "headers": request_headers,
         "map": map_payload,
         "distance_km": distance_km,

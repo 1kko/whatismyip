@@ -180,7 +180,7 @@ class TestIPSpoofingPrevention:
         result = get_client_ip(mock_request)
         assert result == "127.0.0.1"
 
-    @patch("main.TRUSTED_PROXIES", [])
+    @patch("security.TRUSTED_PROXIES", [])
     def test_no_trusted_proxies_trusts_x_real_ip(self):
         """IP Spoofing: when TRUSTED_PROXIES is empty, trust x-real-ip."""
         mock_request = MagicMock()
@@ -191,7 +191,7 @@ class TestIPSpoofingPrevention:
         result = get_client_ip(mock_request)
         assert result == "203.0.113.50"
 
-    @patch("main.TRUSTED_PROXIES", [])
+    @patch("security.TRUSTED_PROXIES", [])
     def test_no_trusted_proxies_trusts_x_forwarded_for(self):
         """IP Spoofing: when TRUSTED_PROXIES is empty, trust x-forwarded-for
         for reverse proxies like Traefik/Coolify that don't set x-real-ip."""
@@ -373,9 +373,14 @@ def _handler_sources(*handlers) -> str:
     """Source of the handlers plus the helpers they delegate blocking work to."""
     import inspect
 
-    import main
+    import lookup
 
-    helpers = (main.lookup_whois, main._whois_fallback, main.lookup_location)
+    helpers = (
+        lookup.lookup_whois,
+        lookup._whois_fallback,
+        lookup.lookup_location,
+        lookup.gather,
+    )
     return "\n".join(inspect.getsource(fn) for fn in (*handlers, *helpers))
 
 
