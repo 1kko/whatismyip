@@ -35,6 +35,8 @@ from config import (
     GEOIP_CITY_DB_FILE,
     GEOIP_UPDATE_RETRY_SECONDS,
     MCP_ENABLED,
+    MCP_RATE_LIMIT_PER_MINUTE,
+    MCP_RATE_LIMIT_PER_SECOND,
     MOBILE_CANVAS,
     PUBLIC_BASE_URL,
     RATE_LIMIT_CLEANUP_INTERVAL,
@@ -340,6 +342,12 @@ def render_page(request: Request, response_data: dict, is_self: bool):
 # Initialize security managers
 ip_ban_manager = IPBanManager()
 rate_limiter = RateLimiter()
+# MCP traffic gets its own bucket: it arrives from a few shared AI-provider
+# egress IPs, so it must not consume — or be throttled by — the browser budget.
+mcp_rate_limiter = RateLimiter(
+    requests_per_minute=MCP_RATE_LIMIT_PER_MINUTE,
+    requests_per_second=MCP_RATE_LIMIT_PER_SECOND,
+)
 suspicious_detector = SuspiciousPatternDetector()
 whitelist_manager = WhitelistManager()
 geo_block_manager = GeoBlockManager(geo_ip_manager)
@@ -455,6 +463,25 @@ async def security_middleware(request: Request, call_next):
             return JSONResponse(status_code=429, content={"error": "Too many requests"})
         return await call_next(request)
 
+    # MCP endpoint: a manual ban still applies, but nothing here escalates.
+    # Every user of a hosted AI client shares a handful of provider egress
+    # IPs, so an automatic ban would take all of them offline at once, and the
+    # provider's datacenter country says nothing about the user — geo-blocking
+    # is meaningless. The payload is a JSON-RPC body, not a path, so the
+    # suspicious-path detector has nothing to look at either.
+    if request_path == "/mcp" or request_path.startswith("/mcp/"):
+        if ip_ban_manager.is_banned(client_ip):
+            return JSONResponse(
+                status_code=403, content={"error": "IP address is banned"}
+            )
+        if not mcp_rate_limiter.allow_request(client_ip):
+            logging.warning(
+                "SECURITY: MCP rate limit hit for %s (no ban)",
+                sanitize_log_input(client_ip),
+            )
+            return JSONResponse(status_code=429, content={"error": "Too many requests"})
+        return await call_next(request)
+
     # 1. Check if IP is banned (highest priority)
     if ip_ban_manager.is_banned(client_ip):
         logging.warning(f"SECURITY: Blocked banned IP {client_ip}")
@@ -534,15 +561,19 @@ async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
     for key, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(key, value)
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        f"script-src 'self' 'nonce-{nonce}'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https://tile.openstreetmap.org; "
-        "object-src 'none'; "
-        "base-uri 'self'; "
-        "frame-ancestors 'none'"
-    )
+    # CSP governs how a browser executes a document. The MCP response is JSON
+    # for a non-browser client, so the header is noise there; the rest of the
+    # hardening headers still apply.
+    if not request.url.path.startswith("/mcp"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            f"script-src 'self' 'nonce-{nonce}'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https://tile.openstreetmap.org; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'none'"
+        )
     # Obscure server fingerprinting.
     response.headers["server"] = "hidden"
     return response

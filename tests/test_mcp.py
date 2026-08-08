@@ -11,6 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import lookup
+import main
 from main import app, ip_ban_manager, rate_limiter
 
 MCP_HEADERS = {
@@ -162,3 +163,32 @@ def test_lookup_tool_reports_private_targets_as_an_error():
             )
         payload = response.json()["result"]["structuredContent"]
         assert "error" in payload
+
+
+def test_mcp_uses_its_own_rate_bucket_and_never_bans():
+    """A shared provider egress IP must never be banned.
+
+    Every user of a hosted AI client arrives from the same handful of
+    addresses, so escalating an MCP rate-limit breach to a ban would take all
+    of them offline at once. Over-limit is 429 and nothing more.
+    """
+    main.mcp_rate_limiter.request_history.clear()
+    main.ip_ban_manager.banned_ips.clear()
+    limit = main.mcp_rate_limiter.requests_per_minute
+
+    with TestClient(app, client=("203.0.113.7", 41234)) as client:
+        statuses = [
+            client.post("/mcp", json=INIT, headers=MCP_HEADERS).status_code
+            for _ in range(limit + 5)
+        ]
+
+    assert 429 in statuses, "the MCP bucket never engaged"
+    assert "203.0.113.7" not in main.ip_ban_manager.banned_ips
+
+
+def test_mcp_response_carries_no_csp():
+    """CSP is for the HTML page; the MCP response is JSON."""
+    with TestClient(app) as client:
+        response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        assert "Content-Security-Policy" not in response.headers
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
