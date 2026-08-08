@@ -11,13 +11,28 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import lookup
-from main import app
+from main import app, ip_ban_manager, rate_limiter
 
 MCP_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
     "Host": "ip.1kko.com",
 }
+
+
+def setup_function():
+    """Undo whatever a previous run left behind before each test.
+
+    Every test here uses the default TestClient(app), whose client IP is
+    "testclient" — the same IP tests/test_security.py deliberately bans in its
+    own tests. BANNED_IPS_FILE (see tests/conftest.py) persists across pytest
+    runs, so a ban or rate-limit history left over from a previous run would
+    403 every request below before it ever reaches /mcp. Mirrors
+    tests/test_security.py's _reset_security_state().
+    """
+    rate_limiter.request_history.clear()
+    ip_ban_manager.banned_ips.clear()
+
 
 INIT = {
     "jsonrpc": "2.0",

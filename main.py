@@ -41,7 +41,7 @@ from config import (
     SITE_DOMAIN_FALLBACK,
 )
 from managers import HeaderManager
-from mcp_server import build_mcp
+from mcp_server import McpBarePathRoute, build_mcp, mcp_dispatch
 from models import GeoRulesUpdate
 from lookup import (
     PrivateAddressError,
@@ -66,78 +66,21 @@ from security import (
 # Load environment variables from .env file
 load_dotenv()
 
-
-class _McpDispatch:
-    """ASGI indirection to whichever MCP sub-app is currently live.
-
-    A `StreamableHTTPSessionManager.run()` may only be entered once per
-    instance — the SDK's own hard rule (see
-    mcp/server/streamable_http_manager.py): "cannot be reused after its run()
-    context has completed. If you need to restart the manager, create a new
-    instance." The FastAPI app's lifespan starts and stops that manager once
-    per process in production, but each `with TestClient(app) as client:` in
-    the test suite is its own start/stop cycle against the same imported
-    `app`. A fixed reference captured once at mount time would work for
-    exactly the first cycle and raise on every one after it. Routes are wired
-    to this mutable indirection once, at module scope (so mount ordering
-    still holds), while `lifespan` below calls `build_mcp()` fresh on every
-    start — cheap, since it only re-runs `streamable_http_app()` on the
-    already-registered `mcp` singleton, not the `@mcp.tool()` registration.
-    """
-
-    def __init__(self):
-        self.asgi_app = None
-
-    async def __call__(self, scope, receive, send):
-        await self.asgi_app(scope, receive, send)
-
-
-_mcp_dispatch = _McpDispatch()
-
-
-class _McpBarePathRoute:
-    """Answer the bare "/mcp" path (any method) by forwarding straight into the
-    mounted MCP sub-app, presenting it a scope as though the request had
-    arrived at its own root ("/").
-
-    Starlette's `Mount` can only match paths that start with the mount prefix
-    *plus* a trailing slash — there is no way for it to match the prefix
-    itself, so `app.mount("/mcp", ...)` alone answers "/mcp/" but not "/mcp".
-    An MCP client configured with the literal "https://ip.1kko.com/mcp" URL
-    (the normal way to hand out an MCP server) sends exactly that bare path.
-    Without this route it falls through to `/{domain_ip}` below, which claims
-    a "partial" match (right shape, wrong method) and returns 405 before
-    Starlette's own trailing-slash redirect ever gets a chance to run. This is
-    registered ahead of `/{domain_ip}` so it wins outright.
-    """
-
-    def __init__(self, asgi_app):
-        self._asgi_app = asgi_app
-
-    async def __call__(self, scope, receive, send):
-        # Mirrors what Mount does for "/mcp/" (root_path grows by the consumed
-        # prefix), except path is rewritten rather than truncated, since "/mcp"
-        # has nothing left to truncate to "/" the way "/mcp/" does.
-        inner_scope = {
-            **scope,
-            "path": "/",
-            "root_path": scope.get("root_path", "") + scope["path"],
-        }
-        await self._asgi_app(inner_scope, receive, send)
-
-
 if MCP_ENABLED:
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
         # A mounted sub-application's lifespan never runs, so the session
         # manager has to be started here. Without this the first /mcp request
-        # fails with "RuntimeError: Task group is not initialized".
+        # fails with "RuntimeError: Task group is not initialized". build_mcp()
+        # is called fresh on every start (see mcp_dispatch's docstring in
+        # mcp_server.py) rather than once at import time, so the session
+        # manager it hands back is always one that hasn't been run() yet.
         asgi_app, mcp_instance = build_mcp()
-        _mcp_dispatch.asgi_app = asgi_app
+        mcp_dispatch.asgi_app = asgi_app
         async with mcp_instance.session_manager.run():
             yield
-        _mcp_dispatch.asgi_app = None
+        mcp_dispatch.asgi_app = None
 
 else:
     lifespan = None
@@ -147,8 +90,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Before the /{domain_ip} catch-all, for the same reason /healthz is declared
 # early: routes match in registration order and the catch-all swallows /mcp.
 if MCP_ENABLED:
-    app.add_route("/mcp", _McpBarePathRoute(_mcp_dispatch), include_in_schema=False)
-    app.mount("/mcp", _mcp_dispatch)
+    app.add_route("/mcp", McpBarePathRoute(mcp_dispatch), include_in_schema=False)
+    app.mount("/mcp", mcp_dispatch)
 templates = Jinja2Templates(directory="templates")
 
 # Configure logging

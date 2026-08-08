@@ -141,3 +141,73 @@ def build_mcp():
         ),
     )
     return asgi_app, mcp
+
+
+# --- Transport plumbing for main.py's mount -------------------------------
+#
+# These two classes are MCP transport mechanics (how a request reaches the
+# app `build_mcp()` returns), not app wiring, so they live here rather than
+# in main.py; main.py only imports and wires them.
+
+
+class McpDispatch:
+    """ASGI indirection to whichever MCP sub-app is currently live.
+
+    A `StreamableHTTPSessionManager.run()` may only be entered once per
+    instance — the SDK's own hard rule (see
+    mcp/server/streamable_http_manager.py): "cannot be reused after its run()
+    context has completed. If you need to restart the manager, create a new
+    instance." The FastAPI app's lifespan starts and stops that manager once
+    per process in production, but each `with TestClient(app) as client:` in
+    the test suite is its own start/stop cycle against the same imported
+    `app`. A fixed reference captured once at mount time would work for
+    exactly the first cycle and raise on every one after it. main.py wires
+    its Route/Mount to this one mutable indirection at module scope (so mount
+    ordering still holds), and updates `.asgi_app` inside its lifespan by
+    calling `build_mcp()` fresh on every start — cheap, since that only
+    re-runs `streamable_http_app()` on the already-registered `mcp`
+    singleton above, not the `@mcp.tool()` registration.
+    """
+
+    def __init__(self):
+        self.asgi_app = None
+
+    async def __call__(self, scope, receive, send):
+        await self.asgi_app(scope, receive, send)
+
+
+mcp_dispatch = McpDispatch()
+
+
+class McpBarePathRoute:
+    """Answer the bare "/mcp" path (any method) by forwarding straight into
+    the mounted MCP sub-app, presenting it a scope as though the request had
+    arrived at its own root ("/").
+
+    Starlette's `Mount` can only match paths that start with the mount prefix
+    *plus* a trailing slash — `Mount.__init__` compiles its regex from
+    `self.path + "/{path:path}"`, so `Mount("/mcp", ...)` is
+    `^/mcp/(?P<path>.*)$` and structurally cannot match the bare prefix
+    itself. `app.mount("/mcp", ...)` alone therefore answers "/mcp/" but not
+    "/mcp". An MCP client configured with the literal "https://ip.1kko.com/mcp"
+    URL (the normal way to hand out an MCP server) sends exactly that bare
+    path; main.py registers this ahead of its `/{domain_ip}` catch-all so it
+    wins outright instead of falling through to a 405.
+
+    Only `path` is rewritten to "/" — `root_path` is left exactly as it
+    arrived. `Starlette._utils.get_route_path` derives the path routes are
+    matched against as `path` with `root_path` stripped off the front; with
+    `path` already rewritten to "/", it can never start with a non-empty
+    `root_path` (mirroring `root_path` the way `Mount` would, i.e.
+    `root_path + "/mcp"`, breaks this: `path` and `root_path` would then both
+    be "/mcp", and get_route_path's `path == root_path` case returns "",
+    which matches nothing). Leaving `root_path` untouched also avoids
+    corrupting it for URL generation behind a reverse proxy that sets one.
+    """
+
+    def __init__(self, asgi_app):
+        self._asgi_app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        inner_scope = {**scope, "path": "/"}
+        await self._asgi_app(inner_scope, receive, send)
