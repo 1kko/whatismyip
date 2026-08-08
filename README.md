@@ -257,6 +257,26 @@ Any MCP client that speaks Streamable HTTP works the same way — point it at
 with no `Origin` header at all — the normal case for a backend MCP client —
 is unaffected.)
 
+### Discovery from the HTML
+
+An agent that lands on a page rather than the endpoint can find the machine
+interface from `<head>` without scraping the body:
+
+```html
+<link rel="service-doc" href="https://github.com/1kko/whatismyip#mcp-model-context-protocol">
+<meta name="mcp-endpoint"  content="https://ip.1kko.com/mcp">
+<meta name="mcp-transport" content="streamable-http">
+<meta name="mcp-auth"      content="none">
+<meta name="mcp-tools"     content="lookup, dns_records, ssl_certificate, whoami_caller">
+<meta name="mcp-install"   content="claude mcp add --transport http whatismyip https://ip.1kko.com/mcp">
+<meta name="mcp-note"      content="whoami_caller returns whoever opened the connection…">
+<meta name="api-endpoint"  content="https://ip.1kko.com/{target}">
+```
+
+`service-doc` is the IANA-registered relation for human-readable service
+documentation (RFC 8631). The `mcp-*` and `api-*` names are this site's own
+convention — no registry covers them yet, so treat them as a hint, not a spec.
+
 ### Tools
 
 | Tool | What it does |
