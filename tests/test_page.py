@@ -269,12 +269,18 @@ class TestBrowserPage:
 
     def test_mcp_note_says_whose_ip_it_reports(self):
         # The honesty contract, on the page where someone decides to install it.
-        # This service is called "what is my IP", so a visitor will assume the MCP
-        # server tells their agent their address. It reports the AI provider's.
+        # This service is called "what is my IP", so a visitor will assume the
+        # MCP server tells their agent their address. The truth is conditional:
+        # a local client (Claude Code) connects from their machine and does
+        # return their IP; a hosted one (claude.ai) does not. Both branches have
+        # to survive, because stating only one of them is how this note was
+        # wrong the first time.
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         body = html.split('id="acc-raw"')[1].split("</details>")[0]
         assert "whoami_caller" in body
-        assert "not your machine" in body
+        assert "your own machine" in body  # local client
+        assert "datacenter" in body  # hosted client
+        assert "browser" in body  # the definitive answer
 
     def test_ssl_certificate_section_renders_and_reports_absence_for_an_ip(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
