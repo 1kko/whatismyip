@@ -128,3 +128,24 @@ SITE_DOMAIN_FALLBACK = os.getenv("SITE_DOMAIN_FALLBACK", "ip.1kko.com")
 # legible; that costs ~15 tile requests on desktop and ~6 on mobile.
 DESKTOP_CANVAS = {"width": 1440, "height": 380, "focus_x": 0.58, "fit_ratio": 0.4}
 MOBILE_CANVAS = {"width": 350, "height": 255, "focus_x": 0.5, "fit_ratio": 0.78}
+
+# MCP (Model Context Protocol) endpoint. Set MCP_ENABLED=false to drop the
+# mount and its lifespan entirely, so the endpoint can be turned off with an
+# env change and a restart rather than a deploy.
+MCP_ENABLED = os.getenv("MCP_ENABLED", "true").lower() != "false"
+
+# streamable_http_app() cannot know the hostname it is served behind, so with
+# no allowlist it arms DNS-rebinding protection for localhost only and answers
+# EVERY production request with 421 Misdirected Request. Entries are exact
+# strings: list both the bare host and the ":*" any-port form.
+MCP_ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.getenv("MCP_ALLOWED_HOSTS", "ip.1kko.com,ip.1kko.com:*").split(",")
+    if h.strip()
+]
+
+# MCP traffic gets its own bucket. Every user of a hosted AI client arrives from
+# a handful of provider egress IPs, so this is far looser than the browser limit
+# and, unlike it, never escalates to a ban (see the /mcp branch in main.py).
+MCP_RATE_LIMIT_PER_MINUTE = int(os.getenv("MCP_RATE_LIMIT_PER_MINUTE", "120"))
+MCP_RATE_LIMIT_PER_SECOND = int(os.getenv("MCP_RATE_LIMIT_PER_SECOND", "20"))
