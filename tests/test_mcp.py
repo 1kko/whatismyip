@@ -192,3 +192,94 @@ def test_mcp_response_carries_no_csp():
         response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
         assert "Content-Security-Policy" not in response.headers
         assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_dns_records_returns_the_full_sweep():
+    async def fake_gather(target):
+        return {
+            **FAKE_LOOKUP,
+            "domain": {
+                "a": ["93.184.216.34"],
+                "mx": [{"host": "mail.example.com", "priority": 10}],
+                "ns": ["a.iana-servers.net"],
+                "txt": ["v=spf1 -all"],
+                "spf": ["v=spf1 -all"],
+                "cname": None,
+                "ptr": [],
+            },
+        }
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "dns_records", "arguments": {"domain": "example.com"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["records"]["ns"] == ["a.iana-servers.net"]
+        assert payload["records"]["txt"] == ["v=spf1 -all"]
+
+
+def test_dns_records_narrows_to_requested_types():
+    async def fake_gather(target):
+        return {
+            **FAKE_LOOKUP,
+            "domain": {"a": ["1.2.3.4"], "mx": [], "ns": ["ns1.example.com"]},
+        }
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {
+                    "name": "dns_records",
+                    "arguments": {"domain": "example.com", "types": ["ns"]},
+                },
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert set(payload["records"]) == {"ns"}
+
+
+def test_ssl_certificate_reports_the_expiry_clock():
+    cert = {
+        "issuer": ((("organizationName", "Let's Encrypt"),),),
+        "subject": ((("commonName", "example.com"),),),
+        "subjectAltName": (("DNS", "example.com"), ("DNS", "www.example.com")),
+        "notAfter": "Dec 31 23:59:59 2099 GMT",
+        "protocol": "TLSv1.3",
+    }
+
+    async def fake_gather(target):
+        return {**FAKE_LOOKUP, "ssl": cert, "resolved_ip": "93.184.216.34"}
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "ssl_certificate", "arguments": {"domain": "example.com"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["issuer"] == "Let's Encrypt"
+        assert payload["san"] == ["example.com", "www.example.com"]
+        assert payload["days_remaining"] > 0
+
+
+def test_ssl_certificate_without_a_certificate_is_an_error():
+    async def fake_gather(target):
+        return {**FAKE_LOOKUP, "ssl": None}
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "ssl_certificate", "arguments": {"domain": "example.com"}},
+            )
+        assert "error" in response.json()["result"]["structuredContent"]

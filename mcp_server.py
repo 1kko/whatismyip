@@ -21,7 +21,13 @@ from lookup import PrivateAddressError, gather, sanitize_log_input
 
 # Certificate parsing already exists in viewmodel.py, which is pure and
 # stdlib-only, so there is no cycle and no reason to restate it here.
-from viewmodel import _cert_expiry, _cert_issuer, _cert_subject_cn
+from viewmodel import (
+    _cert_expiry,
+    _cert_issuer,
+    _cert_san,
+    _cert_subject_cn,
+    _cert_validation,
+)
 
 mcp = MCPServer("whatismyip")
 
@@ -114,6 +120,66 @@ async def lookup(target: str) -> dict[str, Any]:
         "network": compact_network(loc),
         "registration": compact_registration(data["whois"]),
         "tls": compact_ssl(data["ssl"]),
+    }
+
+
+_RECORD_TYPES = ("a", "aaaa", "mx", "ns", "cname", "txt", "spf", "ptr")
+
+
+@mcp.tool()
+async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, Any]:
+    """Every DNS record for a domain: A, AAAA, MX, NS, CNAME, TXT, SPF, PTR.
+    Pass `types` (lowercase, e.g. ["mx", "txt"]) to fetch a subset; omit it for
+    everything. Use this for mail-routing and SPF/DMARC questions, where the
+    summary from `lookup` is not enough.
+    """
+    try:
+        data = await gather(domain)
+    except PrivateAddressError:
+        return {"error": "Private or reserved addresses are not allowed"}
+    except Exception:
+        logging.exception("MCP dns_records failed for %s", sanitize_log_input(domain))
+        return {"error": "DNS lookup failed"}
+
+    records = data["domain"] or {}
+    wanted = [t.lower() for t in types] if types else list(_RECORD_TYPES)
+    return {
+        "domain": data["address"],
+        "resolved_ip": data["resolved_ip"],
+        "records": {k: v for k, v in records.items() if k in wanted},
+    }
+
+
+@mcp.tool()
+async def ssl_certificate(domain: str) -> dict[str, Any]:
+    """The TLS certificate a domain serves on port 443: issuer, subject,
+    every SAN, the validity window, and how many days remain before it
+    expires. Use this for "when does this certificate expire?" and "does this
+    certificate cover this hostname?".
+    """
+    try:
+        data = await gather(domain)
+    except PrivateAddressError:
+        return {"error": "Private or reserved addresses are not allowed"}
+    except Exception:
+        logging.exception(
+            "MCP ssl_certificate failed for %s", sanitize_log_input(domain)
+        )
+        return {"error": "TLS lookup failed"}
+
+    cert = data["ssl"]
+    if not cert:
+        return {"error": f"No TLS certificate served by {data['address']} on port 443"}
+
+    summary = compact_ssl(cert)
+    return {
+        **summary,
+        "domain": data["address"],
+        "san": _cert_san(cert),
+        "validation": _cert_validation(cert),
+        "not_before": cert.get("notBefore"),
+        "serial_number": cert.get("serialNumber"),
+        "cipher": cert.get("cipher"),
     }
 
 
