@@ -197,11 +197,21 @@ _caller_ip: ContextVar[str] = ContextVar("mcp_caller_ip", default="unknown")
 class CallerIPMiddleware:
     """Record the verified peer address for whoami_caller.
 
-    Deliberately a pure-ASGI wrapper rather than BaseHTTPMiddleware: that class
-    runs the downstream app in a child task, and the ContextVar has to be set in
-    the same task the tool body later runs in. A tool cannot read the peer
-    itself — the SDK gives it request headers, and headers are client-supplied
-    input, never an identity.
+    A tool cannot read the peer itself: the SDK hands it request headers, and
+    headers are client-supplied input, never an identity. So the address is
+    resolved here, once, from the ASGI scope.
+
+    The ContextVar survives the hops between here and the tool body because
+    contextvars are copied at task *creation*: a value set before any spawn
+    propagates into every task created afterwards in the same chain. That
+    includes the MCP SDK's own spawn — under stateless_http the transport runs
+    the tool via task_group.start() — so the set below still reaches it.
+
+    Pure ASGI rather than BaseHTTPMiddleware for simplicity, not because
+    BaseHTTPMiddleware would break this direction (it would not; its documented
+    contextvars pitfall is the reverse one, where state set *inside* call_next
+    is invisible to the middleware afterwards). A plain wrapper introduces no
+    task hop of its own and needs no reasoning about which direction is safe.
     """
 
     def __init__(self, app):

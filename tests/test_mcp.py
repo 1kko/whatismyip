@@ -425,3 +425,32 @@ def test_whoami_caller_reports_the_connecting_peer_not_the_user():
         assert payload["geo"]["country_code"] == "US"
         # The honesty contract: the answer must say whose IP this is.
         assert "ip.1kko.com" in payload["note"]
+
+
+def test_whoami_caller_reports_unavailable_when_the_peer_is_unknown():
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.client_ip_from_scope", return_value="unknown"):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "whoami_caller", "arguments": {}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["error"] == "Caller address unavailable"
+
+
+def test_whoami_caller_reports_an_error_when_location_lookup_fails():
+    async def boom(ip):
+        raise RuntimeError("geoip database unavailable")
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.lookup_location", boom):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "whoami_caller", "arguments": {}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["error"] == "Location lookup failed"
