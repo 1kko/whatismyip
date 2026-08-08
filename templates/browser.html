@@ -134,6 +134,18 @@
                         <button type="button" class="copy-btn" id="copy-curl"
                                 data-value="curl {{ api_base }}{{ view.target }}">Copy</button>
                     </div>
+                    <p class="api-note">AI agents can call it over MCP — paste this into Claude, Cursor, or any MCP client:</p>
+                    <div class="code">
+                        <pre id="mcp-endpoint">{{ api_base }}mcp</pre>
+                        <button type="button" class="copy-btn" id="copy-mcp-endpoint"
+                                data-value="{{ api_base }}mcp">Copy</button>
+                    </div>
+                    <div class="code">
+                        <pre id="mcp-install">claude mcp add --transport http whatismyip {{ api_base }}mcp</pre>
+                        <button type="button" class="copy-btn" id="copy-mcp-install"
+                                data-value="claude mcp add --transport http whatismyip {{ api_base }}mcp">Copy</button>
+                    </div>
+                    <p class="api-note tone-muted">Tools: lookup, dns_records, ssl_certificate, whoami_caller. Note that whoami_caller reports the AI provider's server, not your machine — no remote MCP server can see your address.</p>
                     <div id="raw-json"></div>
                     {% elif item.id == 'dns' %}
                     <table class="records records--dns">
@@ -199,6 +211,8 @@
     <footer class="footer inset">
         <span class="wordmark">{{ site_domain }}</span>
         <span class="mono">{{ view.meta_line }}</span>
+        <a class="mono" href="https://github.com/1kko/whatismyip#mcp-model-context-protocol"
+           target="_blank" rel="noopener noreferrer" title="Use this service from an AI agent">MCP server</a>
         <a class="icon-link" href="https://github.com/1kko/whatismyip" target="_blank"
            rel="noopener noreferrer" aria-label="Source on GitHub" title="1kko/whatismyip">
             <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" focusable="false">

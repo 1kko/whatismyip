@@ -3,11 +3,14 @@ detection, a static-path whitelist, and country-level geo-blocking.
 """
 
 import datetime
+import ipaddress
 import json
 import logging
 import os
 import re
 from collections import defaultdict
+
+from starlette.requests import Request
 
 from config import (
     BAN_DURATION_SUSPICIOUS,
@@ -19,6 +22,7 @@ from config import (
     GEO_RULES_FILE,
     RATE_LIMIT_REQUESTS_PER_MINUTE,
     RATE_LIMIT_REQUESTS_PER_SECOND,
+    TRUSTED_PROXIES,
 )
 from managers import GeoIpManager
 
@@ -416,3 +420,52 @@ class GeoBlockManager:
             "region": region_full,
             "reason": "Default allow",
         }
+
+
+def _extract_forwarded_ip(request: Request) -> str | None:
+    """Extract client IP from proxy headers (x-real-ip or x-forwarded-for)."""
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        # X-Forwarded-For format: "client, proxy1, proxy2" - first is the client
+        return forwarded_for.split(",")[0].strip()
+    return None
+
+
+def _peer_is_trusted(peer: str | None) -> bool:
+    # Explicit allowlist wins.
+    if TRUSTED_PROXIES:
+        return bool(peer) and peer in TRUSTED_PROXIES
+    # No allowlist: only trust proxy headers when the direct peer is a
+    # private-range address. Docker/K8s/Traefik sidecars always talk from
+    # RFC1918 / CGNAT / link-local space, so this correctly covers the
+    # intended reverse-proxy case without requiring per-deploy config.
+    # If the app is accidentally exposed directly, peer is the attacker's
+    # public IP and headers are ignored (fail-closed).
+    if not peer:
+        return False
+    try:
+        ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def get_client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else None
+    if _peer_is_trusted(peer):
+        return _extract_forwarded_ip(request) or peer or "unknown"
+    return peer or "unknown"
+
+
+def client_ip_from_scope(scope: dict) -> str:
+    """get_client_ip for a raw ASGI scope.
+
+    The MCP transport is a mounted ASGI app, so its wrapper sees a scope rather
+    than a FastAPI Request. Starlette's Request is a thin view over the scope
+    and needs no receive channel to read headers and client, so this reuses the
+    trusted-proxy logic above instead of restating it.
+    """
+    return get_client_ip(Request(scope))

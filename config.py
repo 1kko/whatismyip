@@ -128,3 +128,41 @@ SITE_DOMAIN_FALLBACK = os.getenv("SITE_DOMAIN_FALLBACK", "ip.1kko.com")
 # legible; that costs ~15 tile requests on desktop and ~6 on mobile.
 DESKTOP_CANVAS = {"width": 1440, "height": 380, "focus_x": 0.58, "fit_ratio": 0.4}
 MOBILE_CANVAS = {"width": 350, "height": 255, "focus_x": 0.5, "fit_ratio": 0.78}
+
+# MCP (Model Context Protocol) endpoint. Set MCP_ENABLED=false to drop the
+# mount and its lifespan entirely, so the endpoint can be turned off with an
+# env change and a restart rather than a deploy.
+MCP_ENABLED = os.getenv("MCP_ENABLED", "true").lower() != "false"
+
+# streamable_http_app() cannot know the hostname it is served behind, so with
+# no allowlist it arms DNS-rebinding protection for localhost only and answers
+# EVERY production request with 421 Misdirected Request. Entries are exact
+# strings: list both the bare host and the ":*" any-port form.
+MCP_ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.getenv("MCP_ALLOWED_HOSTS", "ip.1kko.com,ip.1kko.com:*").split(",")
+    if h.strip()
+]
+
+# The SDK's transport_security treats a request with no Origin header as
+# same-origin (always allowed — most MCP clients are backend processes and
+# never send one), but 403s any request that *does* carry one unless it's
+# listed here. Empty by default, matching MCP_ALLOWED_HOSTS's "nothing
+# wildcarded unless configured" posture; set this if a specific browser-based
+# MCP client needs to be let through.
+MCP_ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+
+# MCP traffic gets its own bucket. Every user of a hosted AI client arrives from
+# a handful of provider egress IPs, so this is far looser than the browser limit
+# and, unlike it, never escalates to a ban (see the /mcp branch in main.py).
+MCP_RATE_LIMIT_PER_MINUTE = int(os.getenv("MCP_RATE_LIMIT_PER_MINUTE", "120"))
+# 5, not the browser path's 10: no legitimate agent bursts anywhere near that,
+# and each request can spin up a nested thread pool (see mcp_server._bounded_gather).
+MCP_RATE_LIMIT_PER_SECOND = int(os.getenv("MCP_RATE_LIMIT_PER_SECOND", "5"))
+
+# 256 KiB is generous for a JSON-RPC call — the SDK itself enforces no cap
+# (see security_middleware's /mcp branch, which rejects an oversized or
+# unbounded-length body with 413 before it's ever read into memory).
+MCP_MAX_BODY_BYTES = int(os.getenv("MCP_MAX_BODY_BYTES", str(256 * 1024)))

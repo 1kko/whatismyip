@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -81,7 +81,7 @@ poetry run ruff format .
 **Modules:**
 - `config.py`: every environment-driven constant (timeouts, cache TTLs, file paths, rate-limit/ban settings, geo-block defaults, trusted proxies, map canvases). Pure values — imported by everything, imports nothing app-local, which keeps the tree cycle-free.
 - `managers.py` — data-gathering managers, one thin wrapper per source:
-  - `GeoIpManager`: GeoIP database updates (every 3 days via APScheduler, failed refreshes retried hourly) + geoip2fast lookups with GeoLite2-City coordinate and GeoLite2-ASN carrier overlays; `GET /healthz` reports which DBs are actually loaded
+  - `GeoIpManager`: GeoIP database updates (every 3 days via APScheduler) + geoip2fast lookups with a GeoLite2-City coordinate overlay
   - `DomainManager`: DNS (A, MX, NS, CNAME, TXT), reverse DNS, domain validation
   - `SSLManager`: SSL certificate retrieval for HTTPS endpoints
   - `HeaderManager`: strips proxy/forwarding headers
@@ -254,6 +254,6 @@ pytest
 ```
 
 ## Commit Conventions
-- Never include Claude session URLs or metadata in commit messages.
+- Never include Codex session URLs or metadata in commit messages.
 - Do not add "Co-Authored-By" lines.
 

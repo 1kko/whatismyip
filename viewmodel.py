@@ -80,9 +80,15 @@ def _cert_expiry(ssl_data: dict) -> tuple[str, int | None]:
     raw = ssl_data.get("notAfter")
     if not raw:
         return DASH, None
-    parsed = datetime.datetime.strptime(raw, "%b %d %H:%M:%S %Y %Z").replace(
-        tzinfo=datetime.timezone.utc
-    )
+    try:
+        parsed = datetime.datetime.strptime(raw, "%b %d %H:%M:%S %Y %Z").replace(
+            tzinfo=datetime.timezone.utc
+        )
+    except ValueError:
+        # getpeercert()'s notAfter is always this exact format in practice, but
+        # a malformed value must not raise past every caller's contract —
+        # mirrors _format_cert_date below, which guards the same parse.
+        return raw, None
     days_left = (parsed - datetime.datetime.now(tz=datetime.timezone.utc)).days
     return parsed.date().isoformat(), days_left
 

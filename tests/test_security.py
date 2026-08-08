@@ -17,20 +17,20 @@ os.environ["TRUSTED_PROXIES"] = "127.0.0.1,10.0.0.1"
 os.environ["BANNED_IPS_FILE"] = "/tmp/test_banned_ips.json"
 os.environ["GEO_RULES_FILE"] = "/tmp/test_geo_rules.json"
 
+from lookup import is_safe_ip
 from main import (
     GeoRulesUpdate,
     IPBanManager,
     RateLimiter,
     SuspiciousPatternDetector,
     WhitelistManager,
-    _extract_forwarded_ip,
     app,
     get_client_ip,
     ip_ban_manager,
-    is_safe_ip,
     rate_limiter,
     sanitize_log_input,
 )
+from security import _extract_forwarded_ip
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -74,7 +74,7 @@ class TestXSSPrevention:
     def setup_method(self):
         _reset_security_state()
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_script_tag_escaped_in_self_info(self, mock_rev, mock_geo, mock_whois):
@@ -89,7 +89,7 @@ class TestXSSPrevention:
         # json.dumps + .replace("</", "<\\/") should produce <\/
         assert "<\\/script>" not in body or "</script>" not in body.split("jsonData")[0]
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     @patch("main.domain_manager.is_valid_domain", return_value=False)
@@ -114,7 +114,7 @@ class TestXSSPrevention:
             # (it should be <\/script> if present at all)
             assert "</script>" not in json_part or json_part.endswith("")
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_json_data_uses_escaped_slash(self, mock_rev, mock_geo, mock_whois):
@@ -180,7 +180,7 @@ class TestIPSpoofingPrevention:
         result = get_client_ip(mock_request)
         assert result == "127.0.0.1"
 
-    @patch("main.TRUSTED_PROXIES", [])
+    @patch("security.TRUSTED_PROXIES", [])
     def test_no_trusted_proxies_trusts_x_real_ip(self):
         """IP Spoofing: when TRUSTED_PROXIES is empty, trust x-real-ip."""
         mock_request = MagicMock()
@@ -191,7 +191,7 @@ class TestIPSpoofingPrevention:
         result = get_client_ip(mock_request)
         assert result == "203.0.113.50"
 
-    @patch("main.TRUSTED_PROXIES", [])
+    @patch("security.TRUSTED_PROXIES", [])
     def test_no_trusted_proxies_trusts_x_forwarded_for(self):
         """IP Spoofing: when TRUSTED_PROXIES is empty, trust x-forwarded-for
         for reverse proxies like Traefik/Coolify that don't set x-real-ip."""
@@ -266,28 +266,28 @@ class TestSSRFPrevention:
         assert not is_safe_ip("not-an-ip")
         assert not is_safe_ip("")
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     def test_private_ip_returns_400(self, mock_whois):
         """SSRF: Requesting a private IP via endpoint returns 400."""
         response = client.get("/192.168.1.1")
         assert response.status_code == 400
         assert "Private or reserved" in response.json()["detail"]
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     def test_loopback_returns_400(self, mock_whois):
         """SSRF: Requesting 127.0.0.1 via endpoint returns 400."""
         response = client.get("/127.0.0.1")
         assert response.status_code == 400
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     def test_metadata_endpoint_returns_400(self, mock_whois):
         """SSRF: AWS metadata IP (169.254.169.254) returns 400."""
         response = client.get("/169.254.169.254")
         assert response.status_code == 400
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.domain_manager.is_valid_domain", return_value=True)
-    @patch("main.dns.resolver.resolve")
+    @patch("lookup.dns.resolver.resolve")
     def test_domain_resolving_to_private_ip_returns_400(
         self, mock_resolve, mock_valid, mock_whois
     ):
@@ -373,9 +373,14 @@ def _handler_sources(*handlers) -> str:
     """Source of the handlers plus the helpers they delegate blocking work to."""
     import inspect
 
-    import main
+    import lookup
 
-    helpers = (main.lookup_whois, main._whois_fallback, main.lookup_location)
+    helpers = (
+        lookup.lookup_whois,
+        lookup._whois_fallback,
+        lookup.lookup_location,
+        lookup.gather,
+    )
     return "\n".join(inspect.getsource(fn) for fn in (*handlers, *helpers))
 
 
@@ -425,7 +430,7 @@ class TestAsyncIO:
             bare = rf"await\s+{_re.escape(target)}\("
             assert not _re.search(bare, source), f"{target} awaited without to_thread"
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_self_info_endpoint_still_works(self, mock_rev, mock_geo, mock_whois):
@@ -437,7 +442,7 @@ class TestAsyncIO:
         assert "address" in data
         assert "location" in data
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value="dns.google")
     @patch(
@@ -636,7 +641,7 @@ class TestSecurityMiddleware:
         assert response.status_code == 403
         _reset_security_state()
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_whitelisted_path_passes(self, mock_rev, mock_geo, mock_whois):
@@ -751,7 +756,7 @@ class TestResponseSecurityHeaders:
     def setup_method(self):
         _reset_security_state()
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def _fetch_root(self, mock_rev, mock_geo, mock_whois):
@@ -792,7 +797,7 @@ class TestResponseSecurityHeaders:
         assert "object-src 'none'" in csp
         assert "base-uri 'self'" in csp
 
-    @patch("main.whois.whois", return_value=MOCK_WHOIS)
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_csp_nonce_matches_template_script(self, mock_rev, mock_geo, mock_whois):
@@ -826,7 +831,7 @@ class TestResponseSecurityHeaders:
 # ---------------------------------------------------------------------------
 class TestSSLRebindingDefense:
     def test_get_ssl_info_skips_without_verified_ip(self):
-        from main import SSLManager
+        from managers import SSLManager
 
         # Must return None without attempting any network I/O when the
         # caller could not safely verify the IP.
@@ -836,7 +841,7 @@ class TestSSLRebindingDefense:
             mock_sock.assert_not_called()
 
     def test_get_ssl_info_connects_to_verified_ip(self):
-        from main import SSLManager
+        from managers import SSLManager
 
         # When verified_ip is provided, socket.connect must use the IP,
         # not the hostname (prevents DNS re-resolution / rebinding).

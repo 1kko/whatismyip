@@ -9,6 +9,7 @@ import datetime
 
 import pytest
 
+import lookup
 import main
 import rdap
 
@@ -118,23 +119,23 @@ class TestLookupWhoisRouting:
     answer. These patch the two lookups so nothing touches the network."""
 
     def setup_method(self):
-        main._whois_cache._data.clear()
+        lookup._whois_cache._data.clear()
 
     def test_rdap_hit_skips_whois(self, monkeypatch):
         canonical = {"source": "rdap", "name": "google.com"}
-        monkeypatch.setattr(main, "lookup_rdap", lambda target: canonical)
+        monkeypatch.setattr(lookup, "lookup_rdap", lambda target: canonical)
 
         def boom(*a, **k):
             raise AssertionError("WHOIS must not run when RDAP answers")
 
-        monkeypatch.setattr(main.whois, "whois", boom)
+        monkeypatch.setattr(lookup.whois, "whois", boom)
         out = asyncio.run(main.lookup_whois("google.com"))
         assert out == canonical
 
     def test_rdap_miss_falls_back_to_whois(self, monkeypatch):
-        monkeypatch.setattr(main, "lookup_rdap", lambda target: None)
+        monkeypatch.setattr(lookup, "lookup_rdap", lambda target: None)
         monkeypatch.setattr(
-            main.whois,
+            lookup.whois,
             "whois",
             lambda target, quiet=True: {"domain_name": "naver.co.kr"},
         )
@@ -149,7 +150,7 @@ class TestLookupWhoisRouting:
             calls["n"] += 1
             return {"source": "rdap", "name": target}
 
-        monkeypatch.setattr(main, "lookup_rdap", once)
+        monkeypatch.setattr(lookup, "lookup_rdap", once)
         asyncio.run(main.lookup_whois("example.com"))
         asyncio.run(main.lookup_whois("example.com"))
         assert calls["n"] == 1  # second call served from cache
