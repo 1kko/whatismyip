@@ -279,13 +279,17 @@ class CallerIPMiddleware:
 
 @mcp.tool()
 async def whoami_caller() -> dict[str, Any]:
-    """The IP address and location of whatever is making this MCP connection.
+    """The IP address and location of whatever opened this MCP connection.
 
-    IMPORTANT: this is almost never the user's own computer. A hosted MCP
-    client connects from the AI provider's servers, so this reports that
-    datacenter — useful for "which region is my agent running in?" and nothing
-    else. For the user's real IP address they must open https://ip.1kko.com in
-    their own browser; no remote MCP server can see it.
+    Whose address that is depends on where the client runs, and the difference
+    matters. A local client (Claude Code, Cursor, Claude Desktop) connects from
+    the user's own machine, so this IS the user's address. A hosted client
+    (claude.ai, ChatGPT) connects from the provider's servers, so this is a
+    datacenter and tells you nothing about the user.
+
+    Either way, report it as the origin of this connection rather than as "your
+    IP address" — you cannot tell from here which case you are in. If the user
+    needs certainty, have them open https://ip.1kko.com in a browser.
     """
     ip = _caller_ip.get()
     if ip == "unknown":
@@ -300,10 +304,12 @@ async def whoami_caller() -> dict[str, Any]:
         "geo": compact_location(loc),
         "network": compact_network(loc),
         "note": (
-            "This is the address of the client connecting to this MCP server, "
-            "which is normally the AI provider's infrastructure rather than the "
-            "user's own machine. For the user's real IP address, have them open "
-            "https://ip.1kko.com in a browser."
+            "This is the address that opened this MCP connection. Where that is "
+            "depends on the client: a local one (Claude Code, Cursor, Claude "
+            "Desktop) connects from the user's own machine, so this is their "
+            "address; a hosted one (claude.ai, ChatGPT) connects from the "
+            "provider's servers, so this is a datacenter. This server cannot "
+            "tell which. Open https://ip.1kko.com in a browser to be certain."
         ),
     }
 

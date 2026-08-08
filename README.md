@@ -266,12 +266,20 @@ is unaffected.)
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining. |
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |
 
-### `whoami_caller` does not return your IP
+### What `whoami_caller` actually reports
 
-A remote MCP server sees the AI provider's servers, not your computer. The tool
-reports the address that actually connected, which is useful for "which region
-is my agent running in?" and nothing else. **For your own IP address, open
-<https://ip.1kko.com> in a browser.**
+The address that opened the MCP connection — which is **not always yours**, and
+the difference is easy to get wrong:
+
+| Client | Connects from | So you get |
+|---|---|---|
+| Claude Code, Cursor, Claude Desktop | your own machine | your real IP |
+| claude.ai, ChatGPT | the provider's servers | a datacenter IP |
+
+Local clients run on your computer, so the connection genuinely originates with
+you. Hosted clients do not, and no remote MCP server can see past them. The tool
+cannot tell which case it is in, so it reports the connection's origin and says
+so. **When it matters, open <https://ip.1kko.com> in a browser.**
 
 ### Configuration
 

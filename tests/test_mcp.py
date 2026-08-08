@@ -524,18 +524,25 @@ def test_whoami_caller_reports_the_connecting_peer_not_the_user():
         payload = response.json()["result"]["structuredContent"]
         assert payload["ip"] == "203.0.113.9"
         assert payload["geo"]["country_code"] == "US"
-        # The honesty contract: the note must say whose address this actually is,
-        # and where the user gets their own. Asserted on the two semantic halves
-        # rather than on a hostname substring — `"host" in url` is the exact
-        # shape CodeQL flags as bypassable URL sanitisation
-        # (py/incomplete-url-substring-sanitization), and a test should not model
-        # a check we would never write in production. This is also stricter: it
-        # pins the meaning, so softening the note into "returns your IP" fails
-        # even if the link survives.
+        # The honesty contract. An earlier version of this note asserted the
+        # address is "normally the AI provider's infrastructure rather than the
+        # user's own machine" — which is false for the client `claude mcp add`
+        # configures. Claude Code is a local CLI, so it connects from the user's
+        # own network and the tool returns their real IP. Calling it against
+        # production returned a Korea Telecom address, not a datacenter.
+        #
+        # So the contract is no longer "it isn't yours" but "it depends, and
+        # this server cannot tell". Both branches must stay named, or the note
+        # is wrong for half its callers again.
         note = payload["note"]
-        assert "rather than the user's own machine" in note
-        assert "have them open" in note
-        assert "in a browser" in note
+        assert "own machine" in note  # the local-client case
+        assert "datacenter" in note  # the hosted-client case
+        assert "cannot tell" in note  # the server does not know which
+        assert "in a browser" in note  # where to get a definitive answer
+        # Asserted on meaning rather than a hostname substring: `"host" in url`
+        # is the shape CodeQL flags as bypassable URL sanitisation
+        # (py/incomplete-url-substring-sanitization), and a test should not
+        # model a check we would never write in production.
 
 
 def test_whoami_caller_reports_unavailable_when_the_peer_is_unknown():

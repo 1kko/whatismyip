@@ -145,7 +145,7 @@
                         <button type="button" class="copy-btn" id="copy-mcp-install"
                                 data-value="claude mcp add --transport http whatismyip {{ api_base }}mcp">Copy</button>
                     </div>
-                    <p class="api-note tone-muted">Tools: lookup, dns_records, ssl_certificate, whoami_caller. Note that whoami_caller reports the AI provider's server, not your machine — no remote MCP server can see your address.</p>
+                    <p class="api-note tone-muted">Tools: lookup, dns_records, ssl_certificate, whoami_caller. whoami_caller reports whoever opened the connection — your own machine from a local client like Claude Code, a datacenter from a hosted one like claude.ai. It cannot tell which, so open this page in a browser when you need certainty.</p>
                     <div id="raw-json"></div>
                     {% elif item.id == 'dns' %}
                     <table class="records records--dns">
