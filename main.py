@@ -42,6 +42,7 @@ from config import (
     PUBLIC_BASE_URL,
     RATE_LIMIT_CLEANUP_INTERVAL,
     SITE_DOMAIN_FALLBACK,
+    TLD_UPDATE_RETRY_SECONDS,
 )
 from managers import HeaderManager
 from mcp_server import McpBarePathRoute, McpDisabled, build_mcp, mcp_dispatch
@@ -55,6 +56,7 @@ from lookup import (
     lookup_whois,
     normalize_lookup_target,
     sanitize_log_input,
+    tld_names_manager,
 )
 from security import (
     GeoBlockManager,
@@ -361,23 +363,24 @@ geo_block_manager = GeoBlockManager(geo_ip_manager)
 scheduler = BackgroundScheduler()
 
 
-def _refresh_with_retry(refresh, name: str):
-    """Run one GeoIP database refresh; when it fails, retry on a short one-shot
-    timer instead of waiting out the 3-day interval — a failed boot-time refresh
-    otherwise leaves the bundled country-only DB (no carrier data) serving for
-    days. The fixed job id caps the pending retries at one per database."""
+def _refresh_with_retry(
+    refresh, name: str, retry_seconds: int = GEOIP_UPDATE_RETRY_SECONDS
+):
+    """Run one dataset refresh; when it fails, retry on a short one-shot timer
+    instead of waiting out the full interval — a failed boot-time refresh
+    otherwise leaves the bundled country-only DB (no carrier data), or a stale
+    suffix list, serving for days. The fixed job id caps the pending retries at
+    one per dataset."""
 
     def run():
         if refresh():
             return
-        logging.warning(
-            "%s refresh failed; retrying in %ss", name, GEOIP_UPDATE_RETRY_SECONDS
-        )
+        logging.warning("%s refresh failed; retrying in %ss", name, retry_seconds)
         scheduler.add_job(
             run,
             "date",
             run_date=datetime.datetime.now()
-            + datetime.timedelta(seconds=GEOIP_UPDATE_RETRY_SECONDS),
+            + datetime.timedelta(seconds=retry_seconds),
             id=f"retry-{name}",
             replace_existing=True,
         )
@@ -390,6 +393,9 @@ refresh_city_db = _refresh_with_retry(
     geo_ip_manager.update_city_database, "GeoLite2-City"
 )
 refresh_asn_db = _refresh_with_retry(geo_ip_manager.update_asn_database, "GeoLite2-ASN")
+refresh_tld_names = _refresh_with_retry(
+    tld_names_manager.update, "public-suffix-list", TLD_UPDATE_RETRY_SECONDS
+)
 scheduler.add_job(refresh_geoip_db, "interval", days=3)
 scheduler.add_job(refresh_city_db, "interval", days=3)
 scheduler.add_job(refresh_asn_db, "interval", days=3)
@@ -411,8 +417,14 @@ scheduler.add_job(
 # check daily and only re-fetch when it is older than a week. The first lookup
 # bootstraps lazily, so nothing here blocks startup.
 scheduler.add_job(refresh_rdap_bootstrap, "interval", days=1)
+# The public suffix list is only re-fetched once the local copy is older than
+# TLD_MAX_AGE_DAYS, so a daily check costs nothing and a restart does not
+# re-download. A fresh container seeds from the bundled snapshot, which is
+# stamped expired, so it does pull once on first boot.
+scheduler.add_job(refresh_tld_names, "interval", days=1)
 scheduler.start()
 refresh_geoip_db()
+refresh_tld_names()
 # The mmdb overlays are tens of MB, so only fetch them on first boot; the
 # scheduler refreshes them afterwards. Lookups degrade gracefully to geoip2fast
 # until they land.
@@ -447,6 +459,33 @@ def verify_admin_key(api_key: str = Header(None, alias="api-key")):
     if not hmac.compare_digest(api_key or "", ADMIN_API_KEY):
         raise HTTPException(status_code=404, detail="Not Found")
     return True
+
+
+def _suspicious_path_is_ordinary(request_path: str) -> bool:
+    """Whether a path that matched a suspicious pattern is in fact ordinary
+    traffic, and so must not be banned.
+
+    The patterns match on shape, and a lookup target is a single path segment,
+    so "/admin.php" and "/nasa.gov" are the same shape — which is why matching
+    alone used to be enough to exempt every single-segment path and let probes
+    through. What separates them is whether the segment has a public suffix:
+    "admin.php" and ".env" do not, "nasa.gov" does. is_valid_domain answers from
+    the list TldNamesManager keeps current, so a newly delegated TLD stops
+    reading as a probe within one refresh interval rather than at the next
+    release of the `tld` package.
+
+    Static assets are exempt outright: `static/geo/*.json` matches the
+    detector's `\\.json$` rule, and banning a visitor for loading the page's own
+    data would be absurd.
+    """
+    if whitelist_manager.is_static(request_path):
+        return True
+    if not whitelist_manager.is_lookup(request_path):
+        return False
+    target = request_path.lstrip("/")
+    if not target:  # "/" itself
+        return True
+    return domain_manager.is_valid_domain(target) or domain_manager.is_ipv4(target)
 
 
 # Security middleware
@@ -555,14 +594,14 @@ async def security_middleware(request: Request, call_next):
             },
         )
 
-    # 3. Check for suspicious patterns, unless the path is whitelisted.
+    # 3. Check for suspicious patterns, unless the request is ordinary traffic.
     # The whitelist used to return early here, which also skipped the rate
     # limit below — so the two paths that do the real work, / and /{domain_ip},
     # were the only ones never rate limited. It now exempts a path from this
     # check alone; the limiter is gated separately, on is_static.
-    if not whitelist_manager.is_whitelisted(
+    if suspicious_detector.is_suspicious(
         request_path
-    ) and suspicious_detector.is_suspicious(request_path):
+    ) and not _suspicious_path_is_ordinary(request_path):
         ip_ban_manager.ban_ip(
             client_ip,
             reason="suspicious_request",
@@ -647,7 +686,11 @@ async def healthz():
     """Liveness plus which GeoIP databases are actually serving lookups, so a
     silent fallback to the bundled country-only DB is visible from outside.
     Declared before /{domain_ip}, which would otherwise swallow the path."""
-    return {"status": "ok", "databases": geo_ip_manager.database_status()}
+    return {
+        "status": "ok",
+        "databases": geo_ip_manager.database_status(),
+        "public_suffix_list": tld_names_manager.status(),
+    }
 
 
 @app.get("/", response_model=None)

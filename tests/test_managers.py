@@ -14,6 +14,10 @@ import os
 import shutil
 import tarfile
 
+import pytest
+from tld import conf as tld_conf
+from tld.utils import reset_tld_names
+
 import managers
 
 
@@ -354,3 +358,123 @@ class TestDatabaseStatus:
         status = managers.GeoIpManager().database_status()
         assert status["geoip2fast"]["source"] == "volume"
         assert status["geoip2fast"]["build"]
+
+
+# ---------------------------------------------------------------------------
+# Public suffix list
+# ---------------------------------------------------------------------------
+def _fake_urlopen(body: str):
+    """Stand in for urllib.request.urlopen as a context manager returning body."""
+
+    class _Response:
+        def read(self):
+            return body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def urlopen(*args, **kwargs):
+        return _Response()
+
+    return urlopen
+
+
+@pytest.fixture
+def tld_dir(tmp_path):
+    """A TldNamesManager on a throwaway directory.
+
+    NAMES_LOCAL_PATH_PARENT is a process-wide setting inside the `tld` package,
+    so constructing a manager repoints domain validation for every other module
+    too. Put it back afterwards or the rest of the suite reads a deleted
+    tmp_path and every domain stops validating.
+    """
+    original = tld_conf.get_setting("NAMES_LOCAL_PATH_PARENT")
+    yield managers.TldNamesManager(directory=str(tmp_path))
+    tld_conf.set_setting("NAMES_LOCAL_PATH_PARENT", original)
+    reset_tld_names()
+
+
+class TestTldNamesManager:
+    """The list decides whether a single-segment request is a lookup or a probe,
+    so a missing, stale or corrupt copy has teeth: it makes the middleware read
+    ordinary domains as probes and ban the visitors asking for them. No network
+    — every fetch is stubbed.
+    """
+
+    def test_seeds_from_the_bundled_snapshot(self, tld_dir):
+        assert os.path.exists(tld_dir.path)
+        with (
+            open(tld_dir.path, "rb") as copied,
+            open(tld_dir.bundled_path, "rb") as bundled,
+        ):
+            assert copied.read() == bundled.read()
+
+    def test_a_seeded_copy_counts_as_stale(self, tld_dir):
+        """Otherwise a year-old bundled snapshot hides behind a fresh mtime for
+        a full interval and is never replaced on first boot."""
+        assert tld_dir.age_days() is None
+        assert tld_dir.is_stale()
+        assert tld_dir.status()["source"] == "bundled"
+
+    def test_update_writes_the_list_and_clears_stale(self, tld_dir, monkeypatch):
+        body = "// ===BEGIN ICANN DOMAINS===\ncom\nexample\n"
+        monkeypatch.setattr(managers.urllib.request, "urlopen", _fake_urlopen(body))
+        assert tld_dir.update() is True
+        with open(tld_dir.path, encoding="utf-8") as handle:
+            assert handle.read() == body
+        assert not tld_dir.is_stale()
+        assert tld_dir.status()["source"] == "downloaded"
+
+    def test_a_bad_response_never_replaces_a_good_list(self, tld_dir, monkeypatch):
+        """The failure that matters: a captive portal or half-finished download
+        would otherwise install a list matching nothing, and every domain would
+        start reading as a probe."""
+        with open(tld_dir.path, "rb") as handle:
+            before = handle.read()
+        monkeypatch.setattr(
+            managers.urllib.request,
+            "urlopen",
+            _fake_urlopen("<html>captive portal</html>"),
+        )
+        assert tld_dir.update() is False
+        with open(tld_dir.path, "rb") as handle:
+            assert handle.read() == before
+        assert not os.path.exists(tld_dir.path + ".tmp")
+
+    def test_a_fresh_list_is_not_refetched(self, tld_dir, monkeypatch):
+        """The job runs daily but the list is only pulled every TLD_MAX_AGE_DAYS,
+        so a restart must not re-download."""
+        os.utime(tld_dir.path, None)  # pretend it was just downloaded
+
+        def explode(*args, **kwargs):
+            raise AssertionError("should not have been fetched")
+
+        monkeypatch.setattr(managers.urllib.request, "urlopen", explode)
+        assert tld_dir.update() is True
+
+    def test_force_refetches_a_fresh_list(self, tld_dir, monkeypatch):
+        os.utime(tld_dir.path, None)
+        body = "// ===BEGIN ICANN DOMAINS===\ncom\n"
+        monkeypatch.setattr(managers.urllib.request, "urlopen", _fake_urlopen(body))
+        assert tld_dir.update(force=True) is True
+        with open(tld_dir.path, encoding="utf-8") as handle:
+            assert handle.read() == body
+
+
+class TestIsValidDomain:
+    def test_empty_and_punctuation_targets_do_not_raise(self):
+        """get_tld raises TldBadUrl, not TldDomainNotFound, for these. The MCP
+        lookup tool hands user input straight in and the security middleware
+        asks before banning, so this has to be total."""
+        manager = managers.DomainManager()
+        for value in ("", "//", ".", "..", " "):
+            assert manager.is_valid_domain(value) is False
+
+    def test_real_domains_still_validate(self):
+        manager = managers.DomainManager()
+        assert manager.is_valid_domain("nasa.gov")
+        assert manager.is_valid_domain("foo.dev")
+        assert not manager.is_valid_domain("admin.php")

@@ -666,6 +666,45 @@ class TestSecurityMiddleware:
             rate_limiter.requests_per_second = original_per_second
             _reset_security_state()
 
+    def test_single_segment_probes_are_banned(self):
+        """A probe and a lookup are the same shape, so the ban turns on whether
+        the target has a public suffix. Before this, every one of these returned
+        200 and was answered as a (failing) domain lookup."""
+        for path in ("/.env", "/admin", "/admin.php", "/wp-login.php"):
+            _reset_security_state()
+            response = client.get(path)
+            assert response.status_code == 403, path
+            assert ip_ban_manager.is_banned("testclient"), path
+        _reset_security_state()
+
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
+    @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
+    @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
+    @patch("main.domain_manager.get_records", return_value=dict(MOCK_DNS_RECORDS))
+    @patch("managers.SSLManager.get_ssl_info", return_value=None)
+    @patch("dns.resolver.resolve")
+    def test_real_domains_are_not_banned_for_their_shape(
+        self, mock_resolve, mock_ssl, mock_records, mock_rev, mock_geo, mock_whois
+    ):
+        """The counterpart risk. `.dev` and `.zip` are delegated TLDs, and a
+        lookup of one must never be mistaken for a probe."""
+        mock_resolve.return_value = [MagicMock(__str__=lambda self: "93.184.216.34")]
+        for path in ("/foo.dev", "/foo.zip"):
+            _reset_security_state()
+            response = client.get(path)
+            assert response.status_code == 200, path
+            assert not ip_ban_manager.is_banned("testclient"), path
+        _reset_security_state()
+
+    def test_page_data_is_never_a_probe(self):
+        """static/geo/*.json matches the detector's \\.json$ rule. Banning a
+        visitor for loading the page's own gazetteer would be absurd."""
+        _reset_security_state()
+        response = client.get("/static/geo/countries.json")
+        assert response.status_code == 200
+        assert not ip_ban_manager.is_banned("testclient")
+        _reset_security_state()
+
     def test_static_assets_are_exempt_from_rate_limit(self):
         """One page load pulls the stylesheet, three scripts, four fonts, three
         icons and the manifest. If those counted against the limiter, a

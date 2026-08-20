@@ -261,6 +261,9 @@ class WhitelistManager:
         self.compiled_static = [
             re.compile(p, re.IGNORECASE) for p in self.static_patterns
         ]
+        self.compiled_lookup = [
+            re.compile(p, re.IGNORECASE) for p in self.lookup_patterns
+        ]
         self.compiled_patterns = [
             re.compile(p, re.IGNORECASE) for p in self.whitelist_patterns
         ]
@@ -268,6 +271,12 @@ class WhitelistManager:
     def is_static(self, path: str) -> bool:
         """Whether the path is a static asset, and so exempt from rate limiting."""
         return any(pattern.match(path) for pattern in self.compiled_static)
+
+    def is_lookup(self, path: str) -> bool:
+        """Whether the path is shaped like a lookup. Shape only — whether the
+        segment is a real domain is a separate question, and the one the ban
+        decision turns on; see _suspicious_path_is_ordinary in main.py."""
+        return any(pattern.match(path) for pattern in self.compiled_lookup)
 
     def is_whitelisted(self, path: str) -> bool:
         """Whether the path is legitimate, and so exempt from the detector."""

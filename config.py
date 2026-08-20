@@ -87,6 +87,27 @@ MAXMIND_LICENSE_KEY = os.getenv("MAXMIND_LICENSE_KEY")
 MAXMIND_CITY_EDITION = os.getenv("MAXMIND_CITY_EDITION", "GeoLite2-City")
 MAXMIND_ASN_EDITION = os.getenv("MAXMIND_ASN_EDITION", "GeoLite2-ASN")
 
+# Public Suffix List (Mozilla), the list `tld` parses and therefore what
+# DomainManager.is_valid_domain answers from. It decides whether a single-segment
+# request is a real lookup target ("nasa.gov") or a probe ("admin.php"), so a
+# stale copy means a newly delegated TLD reads as a probe.
+#
+# Two problems with leaving it to the `tld` package. Its bundled snapshot ages
+# with the release, and on a cache miss it downloads the list synchronously
+# inside whichever request needs it first — writing into its own package
+# directory, which is root-owned once the container drops to appuser, so the
+# write fails and every later lookup retries it. The list therefore lives in the
+# writable data volume, seeded from the bundled copy at startup and refreshed on
+# a schedule, never from a request.
+TLD_NAMES_DIR = os.getenv("TLD_NAMES_DIR", os.path.join(_APP_DIR, "data", "tld"))
+TLD_LIST_URL = os.getenv(
+    "TLD_LIST_URL", "https://publicsuffix.org/list/public_suffix_list.dat"
+)
+# The PSL changes most weeks, but only at the margins; a fortnight bounds how
+# long a brand-new suffix can be mistaken for a probe.
+TLD_MAX_AGE_DAYS = int(os.getenv("TLD_MAX_AGE_DAYS", "14"))
+TLD_UPDATE_RETRY_SECONDS = int(os.getenv("TLD_UPDATE_RETRY_SECONDS", "3600"))
+
 # Background Job Intervals (seconds)
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "300"))
 RATE_LIMIT_CLEANUP_INTERVAL = int(os.getenv("RATE_LIMIT_CLEANUP_INTERVAL", "60"))
