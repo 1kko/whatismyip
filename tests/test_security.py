@@ -5,6 +5,7 @@ They use FastAPI's TestClient and mock external dependencies.
 """
 
 import datetime
+import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,7 @@ os.environ["TRUSTED_PROXIES"] = "127.0.0.1,10.0.0.1"
 os.environ["BANNED_IPS_FILE"] = "/tmp/test_banned_ips.json"
 os.environ["GEO_RULES_FILE"] = "/tmp/test_geo_rules.json"
 
+import main
 from lookup import is_safe_ip
 from main import (
     GeoRulesUpdate,
@@ -346,7 +348,7 @@ class TestAdminSecurityEnforcement:
         ip_ban_manager.ban_ip("testclient", reason="test", duration=3600)
         response = client.get("/admin/stats", headers={"api-key": "test-secret-key"})
         assert response.status_code == 403
-        assert "banned" in response.json()["error"].lower()
+        assert response.json() == main.ACCESS_DENIED
         ip_ban_manager.unban_ip("testclient")
 
     def test_rate_limit_applies_to_admin(self):
@@ -665,6 +667,45 @@ class TestSecurityMiddleware:
         finally:
             rate_limiter.requests_per_second = original_per_second
             _reset_security_state()
+
+    def test_every_403_says_the_same_thing(self):
+        """A blocked requester learns that they were blocked and nothing else.
+        Which rule fired only helps whoever is probing for the edge of it, so
+        the ban, the country filter and the probe detector must be
+        indistinguishable from the outside — reasons live in the log."""
+        bodies = []
+
+        _reset_security_state()
+        ip_ban_manager.ban_ip("testclient", reason="test", duration=3600)
+        bodies.append(client.get("/").json())  # banned
+        bodies.append(
+            client.get("/admin/stats", headers={"api-key": "test-secret-key"}).json()
+        )  # banned, admin surface
+        bodies.append(client.post("/mcp", json={}).json())  # banned, mcp surface
+
+        _reset_security_state()
+        bodies.append(client.get("/.git/config").json())  # suspicious, nested
+        _reset_security_state()
+        bodies.append(client.get("/admin.php").json())  # suspicious, single token
+
+        _reset_security_state()
+        with patch(
+            "main.geo_block_manager.check_access",
+            return_value={
+                "allowed": False,
+                "country": "CN",
+                "region": "Asia",
+                "reason": "Country in blocklist",
+            },
+        ):
+            bodies.append(client.get("/").json())  # geo-blocked
+
+        assert all(b == main.ACCESS_DENIED for b in bodies), bodies
+        # Nothing that names the mechanism leaks into the body.
+        blob = json.dumps(bodies).lower()
+        for leak in ("banned", "country", "reason", "location", "contact", "cn"):
+            assert leak not in blob, leak
+        _reset_security_state()
 
     def test_single_segment_probes_are_banned(self):
         """A probe and a lookup are the same shape, so the ban turns on whether

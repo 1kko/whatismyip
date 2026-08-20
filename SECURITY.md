@@ -508,6 +508,35 @@ Use `/admin/geo/lookup/{ip}` to find region codes for specific IPs.
 - `404` - Not Found (endpoint doesn't exist, or invalid/missing admin API key - returns this for security to hide admin endpoints)
 - `429` - Too Many Requests (rate limit exceeded)
 
+Every `403` returns the same body, whichever rule fired — a ban, the country
+filter or the probe detector:
+
+```json
+{"error": "Access denied due to the policy"}
+```
+
+Knowing which rule fired only helps whoever is probing for the edge of it. The
+reason, the country and the matched path stay in the log line for that branch,
+which is where an operator can use them.
+
+## Getting Unbanned
+
+There is no self-service route, and the `403` body deliberately says nothing
+about how to appeal.
+
+1. **Wait for the TTL.** One hour for a rate-limit breach, 24 hours for a probe.
+   Expired entries are swept every `CLEANUP_INTERVAL_SECONDS`.
+2. **Lift it by hand:**
+   ```bash
+   curl -H "api-key: $API_KEY" http://localhost:8000/admin/bans
+   curl -X DELETE -H "api-key: $API_KEY" http://localhost:8000/admin/ban/203.0.113.7
+   ```
+3. **Redeploy**, where `data/` is not a persistent volume — the list goes with it.
+
+Note there is **no permanent allowlist**. Unbanning removes the entry; it does
+not exempt the address from being banned again. `bypass_ips` in
+`data/geo_rules.json` bypasses geo-blocking only and has no effect on bans.
+
 ## Security Logs
 
 All security events are logged with this format:
