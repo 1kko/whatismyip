@@ -28,7 +28,7 @@ dnspython = "^2.8"
 
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.16.1"
+ruff = "^0.16.3"
 pytest = "^9.1.1"
 pip-audit = "^2.10.1"
 pytest-asyncio = "^1.4.0"
