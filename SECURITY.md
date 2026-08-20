@@ -58,9 +58,19 @@ Requests are processed in this order:
 
 1. **IP Ban Check** - Block banned IPs immediately
 2. **Geographic Check** - Apply country/region restrictions
-3. **Whitelist Check** - Allow legitimate requests (static files, main endpoints)
-4. **Suspicious Pattern Detection** - Block malicious request patterns
-5. **Rate Limiting** - Prevent abuse through request frequency limits
+3. **Suspicious Pattern Detection** - Block malicious request patterns. Skipped
+   for whitelisted paths: static assets, and the lookup surface, whose target is
+   an arbitrary domain and would otherwise trip rules like `\.json$`.
+4. **Rate Limiting** - Prevent abuse through request frequency limits. Static
+   assets under `/static/` are exempt, because a single page load fetches about
+   a dozen of them and would otherwise trip the per-second limit. Everything
+   else is limited, including `/` and `/{domain-or-ip}` — that is where the DNS,
+   RDAP/WHOIS and TLS work happens.
+
+`/admin/*` and `/mcp` are handled ahead of this chain: both check bans, `/admin/*`
+is rate limited on the same bucket, and `/mcp` uses its own looser bucket and
+never escalates to a ban (every user of a hosted AI client shares a handful of
+provider egress IPs).
 
 ## Configuration
 
@@ -82,7 +92,7 @@ BAN_DURATION_SUSPICIOUS=86400     # 24 hours for suspicious requests
 
 ### Suspicious Patterns
 
-Automatically detected patterns (in `main.py`):
+Automatically detected patterns (in `security.py`, `SuspiciousPatternDetector`):
 - `.env` files
 - `.php`, `.asp`, `.aspx` scripts
 - `.json`, `.xml`, `.sql` files
@@ -91,16 +101,83 @@ Automatically detected patterns (in `main.py`):
 - `/.git/`, `/cgi-bin/` paths
 - Hidden files (dotfiles)
 
+A lookup target is a single path segment, so `/admin.php` and `/nasa.gov` are
+the same shape and a pattern match alone cannot separate a probe from a lookup.
+What separates them is whether the target has a **public suffix**: a matching
+request is banned unless it is a real domain or IP.
+
+```
+/.env                       -> 403 + 24h ban
+/admin                      -> 403 + 24h ban
+/admin.php                  -> 403 + 24h ban
+/wp-login.php               -> 403 + 24h ban
+/config.json                -> 403 + 24h ban
+/path/.env                  -> 403 + 24h ban
+/.git/config                -> 403 + 24h ban
+/nasa.gov                   -> 200, ordinary lookup
+/example.dev                -> 200, ordinary lookup (delegated TLD)
+/8.8.8.8                    -> 200, ordinary lookup
+/static/geo/countries.json  -> 200, static asset, exempt outright
+```
+
+The answer comes from `DomainManager.is_valid_domain`, which reads the Public
+Suffix List that `TldNamesManager` keeps current — see "Public Suffix List"
+below. The site's own search box refuses these targets before navigating, so a
+visitor cannot be banned by the page's own form.
+
 ### Whitelisted Patterns
 
-Allowed requests:
-- `/static/*.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2)` - Static assets
+Whitelisting exempts a path from suspicious-pattern detection. Only the static
+group is additionally exempt from rate limiting.
+
+Static assets (skip the detector **and** the rate limiter):
+- `/static/*.(css|js|json|png|jpg|jpeg|gif|svg|ico|webmanifest|woff|woff2)`
+
+Lookup surface (skips the detector **only when the target is a real domain or
+IP**, and is always rate limited):
 - `/` - Root endpoint (own IP info)
 - `/[domain-or-ip]` - Main feature (domain/IP lookup)
 
+### Public Suffix List
+
+Source: <https://publicsuffix.org/list/public_suffix_list.dat> (Mozilla), the
+same list the `tld` package parses. IANA's flat top-level list at
+<https://data.iana.org/TLD/tlds-alpha-by-domain.txt> is an alternative, but the
+PSL also covers multi-label suffixes like `co.uk`, which domain validation needs.
+
+It is not left to the `tld` package. The bundled snapshot only ages with the
+release, so a TLD delegated afterwards would read as a probe; and on a cache
+miss `tld` downloads the list synchronously inside whichever request needs it
+first, writing into its own package directory — root-owned once the container
+drops to `appuser`, so the write fails and every later lookup retries it.
+
+The list therefore lives in the data volume:
+
+| When | What happens |
+| --- | --- |
+| startup | seeded from the copy bundled with `tld`, stamped expired |
+| first boot | pulled once, because the seed is expired by definition |
+| daily | re-checked; re-fetched only once older than `TLD_MAX_AGE_DAYS` (14) |
+| on failure | retried after `TLD_UPDATE_RETRY_SECONDS` (1 hour) |
+
+A response missing the `===BEGIN ICANN DOMAINS===` marker is rejected rather
+than installed — a list that matches nothing would make every domain read as a
+probe and ban the visitors looking them up. `GET /healthz` reports which copy is
+live (`downloaded`, `bundled` or `missing`) and its age.
+
 ## Admin API Usage
 
-All admin endpoints require the `api-key` header with your `ADMIN_API_KEY`.
+All admin endpoints require the `api-key` header with your `ADMIN_API_KEY`,
+compared using `hmac.compare_digest`. A missing or wrong key returns `404`
+rather than `401`, so the endpoints look like paths that do not exist.
+
+**There is no IP allowlist on `/admin/*`.** The key is the entire perimeter:
+the endpoints are reachable from any address, and the only IP-based checks
+applied to them are the ban list and the rate limiter (exceeding it bans, with
+reason `rate_limit_admin`). Note that `bypass_ips` in `data/geo_rules.json` is a
+geo-blocking bypass and plays no part in admin authentication. To restrict admin
+by source address, do it in the reverse proxy or with `GEO_MODE=allowlist`;
+neither is configured by default.
 
 ### Authentication
 
