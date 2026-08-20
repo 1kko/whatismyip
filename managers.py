@@ -10,9 +10,11 @@ import io
 import ipaddress
 import logging
 import os
+import shutil
 import socket
 import ssl
 import tarfile
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -24,6 +26,10 @@ import maxminddb
 from geoip2fast import GeoIP2Fast
 from tld import exceptions as tld_exceptions
 from tld import get_tld
+
+from tld import defaults as tld_defaults
+from tld.conf import set_setting as set_tld_setting
+from tld.utils import MozillaTLDSourceParser, reset_tld_names
 
 from config import (
     DNS_QUERY_LIFETIME,
@@ -39,6 +45,9 @@ from config import (
     MAXMIND_LICENSE_KEY,
     PUBLIC_RESOLVERS,
     TIMEOUT_SECONDS,
+    TLD_LIST_URL,
+    TLD_MAX_AGE_DAYS,
+    TLD_NAMES_DIR,
 )
 
 # MaxMind's licensed direct-download endpoint. It returns a .tar.gz (Basic auth
@@ -376,6 +385,123 @@ class GeoIpManager:
                 city["subdivision_code"] = subdivisions[0]["iso_code"]
 
 
+class TldNamesManager:
+    """Keeps the Public Suffix List that `tld` parses in the writable data
+    volume, and keeps it current.
+
+    Two jobs, and both matter for the same reason: `is_valid_domain` is what
+    separates a real lookup target from a probe, so a missing or stale list
+    turns real domains into probes.
+
+    `_seed` copies the snapshot bundled with the `tld` package into the volume
+    the first time. Without it the first `get_tld` call would hit a missing file
+    and `tld` would download the list synchronously inside that request, then
+    fail writing it to its own package directory — root-owned once the container
+    drops to appuser — and repeat that on every later lookup.
+
+    `update` replaces the copy with the current list, atomically, and drops the
+    parsed trie so the next lookup reads the new file.
+    """
+
+    # tld resolves its data file as NAMES_LOCAL_PATH_PARENT + the parser's own
+    # relative path. Read that name off the parser instead of hardcoding it, so
+    # a package upgrade that renames the file cannot silently strand us on a
+    # copy nothing reads.
+    _RELATIVE_PATH = MozillaTLDSourceParser.local_path
+
+    def __init__(self, directory: str = TLD_NAMES_DIR, url: str = TLD_LIST_URL):
+        self.url = url
+        self.directory = directory
+        self.path = os.path.join(directory, self._RELATIVE_PATH)
+        self.bundled_path = os.path.join(
+            tld_defaults.NAMES_LOCAL_PATH_PARENT, self._RELATIVE_PATH
+        )
+        # Must happen before anything calls get_tld(); see lookup.py, where this
+        # manager is constructed ahead of DomainManager.
+        set_tld_setting("NAMES_LOCAL_PATH_PARENT", directory)
+        self._seed()
+
+    def _seed(self) -> bool:
+        """Put the bundled snapshot in place if the volume has no copy yet."""
+        if os.path.exists(self.path):
+            return False
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            shutil.copyfile(self.bundled_path, self.path)
+            # Stamp the copy as expired. The bundled snapshot is only as fresh
+            # as the installed `tld` release, so dating it "now" would hide a
+            # year-old list behind a current-looking mtime for a full interval.
+            os.utime(self.path, (0, 0))
+            logging.info("Seeded the public suffix list from %s", self.bundled_path)
+            return True
+        except Exception:
+            logging.exception(
+                "Could not seed the public suffix list from %s", self.bundled_path
+            )
+            return False
+
+    def age_days(self) -> float | None:
+        """Age of the downloaded list, or None when there isn't one — the file
+        is missing, or it is the bundled seed stamped with mtime 0."""
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            return None
+        return None if mtime == 0 else (time.time() - mtime) / 86400
+
+    def is_stale(self) -> bool:
+        age = self.age_days()
+        return age is None or age >= TLD_MAX_AGE_DAYS
+
+    def update(self, force: bool = False) -> bool:
+        """Fetch the list and swap it in when the local copy has aged out.
+
+        Returns whether the local copy is current afterwards, so a run skipped
+        because the list is still fresh counts as success and does not arm the
+        retry timer.
+        """
+        if not force and not self.is_stale():
+            return True
+        try:
+            # url is the hardcoded https publicsuffix.org endpoint by default.
+            with urllib.request.urlopen(  # noqa: S310
+                self.url, timeout=TIMEOUT_SECONDS * 4
+            ) as response:
+                text = response.read().decode("utf-8")
+            # A truncated download or a captive-portal error page must never
+            # replace a working list: the parser would build a trie that matches
+            # nothing, is_valid_domain would answer False for every domain, and
+            # the middleware would then read ordinary lookups as probes and ban
+            # the visitors making them.
+            if "===BEGIN ICANN DOMAINS===" not in text:
+                raise ValueError(f"{self.url} did not return a public suffix list")
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(tmp, self.path)
+            # Drop the parsed trie, or get_tld keeps answering from the copy it
+            # read at boot for the life of the process.
+            reset_tld_names()
+            logging.info("Public suffix list updated (%d bytes)", len(text))
+            return True
+        except Exception:
+            logging.exception("Error updating the public suffix list")
+            return False
+
+    def status(self) -> Dict[str, Any]:
+        age = self.age_days()
+        if not os.path.exists(self.path):
+            source = "missing"
+        else:
+            source = "downloaded" if age is not None else "bundled"
+        return {
+            "source": source,
+            "age_days": round(age, 1) if age is not None else None,
+            "stale": self.is_stale(),
+        }
+
+
 class DomainManager:
     def is_ipv4(self, ip: str) -> bool:
         try:
@@ -384,10 +510,19 @@ class DomainManager:
             return False
 
     def is_valid_domain(self, domain) -> bool:
+        """Whether the string has a public suffix, per the list TldNamesManager
+        keeps current.
+
+        TldBadUrl is caught alongside TldDomainNotFound: an empty or
+        punctuation-only target ("", "//") raises the former, not the latter,
+        and this has to be total — the MCP lookup tool passes user input
+        straight in, and the security middleware asks it whether a suspicious
+        path is a real domain before deciding to ban.
+        """
         try:
             get_tld(domain, fix_protocol=True)
             return True
-        except tld_exceptions.TldDomainNotFound:
+        except (tld_exceptions.TldDomainNotFound, tld_exceptions.TldBadUrl):
             return False
 
     def remove_subdomains(self, domain: str) -> str:

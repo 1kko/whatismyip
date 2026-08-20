@@ -18,12 +18,20 @@ const progress = document.getElementById("progress");
 const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 const DOMAIN = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
 
+// The server bans a request whose path matches a probe pattern and whose target
+// has no public suffix, so the search box must not navigate to one. DOMAIN below
+// is happy with "admin.php" — one label, a dot, three letters — and submitting
+// it would earn the visitor a 24 hour ban from this page's own form. These are
+// the extensions in the server's detector that also pass DOMAIN; the rest of it
+// (dotfiles, /wp-, nested paths) can't be produced by a single-segment target.
+const PROBE_SUFFIX = /\.(php|aspx?|json|xml|sql|bak|conf|config|ini|log)$/i;
+
 function isLookupTarget(value) {
   const octets = value.match(IPV4);
   if (octets) {
     return octets.slice(1).every((part) => Number(part) <= 255);
   }
-  return DOMAIN.test(value);
+  return DOMAIN.test(value) && !PROBE_SUFFIX.test(value);
 }
 
 function showError(message) {

@@ -178,6 +178,8 @@ data/geo_rules.json
 # GeoIP databases: downloaded and refreshed at runtime. Never commit them.
 data/*.dat.gz
 data/*.mmdb
+# Public suffix list: seeded from the tld package and refreshed at runtime.
+data/tld/
 
 # Claude Code local state: plugins, worktrees, per-machine settings
 .claude/

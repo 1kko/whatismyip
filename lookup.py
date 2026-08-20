@@ -23,7 +23,7 @@ from config import (
     WHOIS_CACHE_TTL,
     WHOIS_TIMEOUT_SECONDS,
 )
-from managers import DomainManager, GeoIpManager, SSLManager
+from managers import DomainManager, GeoIpManager, SSLManager, TldNamesManager
 from rdap import lookup_rdap, normalize_whois
 
 
@@ -96,6 +96,10 @@ def is_safe_ip(ip_str: str) -> bool:
 
 
 geo_ip_manager = GeoIpManager()
+# Before DomainManager: it repoints `tld` at the data volume and seeds the
+# suffix list there, and is_valid_domain would otherwise read whatever copy the
+# first get_tld call happened to find.
+tld_names_manager = TldNamesManager()
 domain_manager = DomainManager()
 
 
