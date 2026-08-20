@@ -31,6 +31,27 @@ jobs:
       - name: Ruff format check
         run: poetry run ruff format --check .
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install poetry
+          poetry install
+
+      - name: Run tests
+        # The suite mocks every external lookup and needs no GeoIP data files:
+        # GeoIpManager falls back to the database bundled with geoip2fast when
+        # data/ is absent, as it is on a fresh checkout.
+        run: poetry run pytest -q
+
   security:
     runs-on: ubuntu-latest
     steps:
