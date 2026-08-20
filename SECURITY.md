@@ -531,7 +531,10 @@ about how to appeal.
    curl -H "api-key: $API_KEY" http://localhost:8000/admin/bans
    curl -X DELETE -H "api-key: $API_KEY" http://localhost:8000/admin/ban/203.0.113.7
    ```
-3. **Redeploy**, where `data/` is not a persistent volume — the list goes with it.
+3. **Redeploy**, but only where `data/` is *not* a persistent volume. Behind a
+   real volume the list survives redeploys and this is not a way out; without
+   one it goes with the container. Verify with
+   `docker inspect <container> --format '{{json .Mounts}}'` rather than assuming.
 
 Note there is **no permanent allowlist**. Unbanning removes the entry; it does
 not exempt the address from being banned again. `bypass_ips` in

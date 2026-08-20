@@ -572,9 +572,12 @@ about how to appeal. Three ways out:
    curl -H "api-key: $API_KEY" https://your-host/admin/bans          # who is banned, and why
    curl -X DELETE -H "api-key: $API_KEY" https://your-host/admin/ban/203.0.113.7
    ```
-3. **Redeploy.** The ban list lives in `data/`, so it survives a restart — but
-   only if `data/` is a real volume. Where it is not (a Coolify deploy with no
-   volume mount, for instance) every redeploy clears the list.
+3. **Redeploy — only where `data/` is not persistent.** The ban list lives in
+   `data/banned_ips.json`, so with a real volume behind it (what `make serve`
+   and any sane deployment give you) bans survive restarts *and* redeploys, and
+   this is not a way out. Without one, the container's `data/` goes with the
+   container and every redeploy clears the list. Check before relying on it:
+   `docker inspect <container> --format '{{json .Mounts}}'`.
 
 There is **no permanent allowlist**: unbanning removes the entry, it does not
 exempt the address from being banned again. If you need one, it belongs in
