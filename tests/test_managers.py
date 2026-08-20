@@ -21,6 +21,31 @@ from tld.utils import reset_tld_names
 import managers
 
 
+@pytest.fixture(autouse=True)
+def restore_live_geoip():
+    """Rebind geoip2fast's shared state to the real database after every test
+    here.
+
+    GeoIP2Fast instances are not independent: constructing one rebinds the data
+    that every *existing* instance reads from. The tests below deliberately
+    build throwaway managers over corrupt, absent and temporary files, which
+    leaves the app's live manager — a different object, still reporting the
+    volume database in db_info — answering from whichever file was loaded last.
+    On a clean checkout that made 127.0.0.1 come back as United States instead
+    of private, and test_page's `test_private_client_gets_no_map` failed
+    because a private client got a map.
+
+    It only reproduced where the geoip2fast package still holds its pristine
+    country-only database; on a machine where an earlier run had overwritten it
+    with a full city database, the pollution was invisible.
+
+    Constructing one more manager under the real config is enough to put the
+    shared state back; the object itself is discarded.
+    """
+    yield
+    managers.GeoIpManager()
+
+
 class TestGeoIpResilience:
     def test_corrupt_db_falls_back_to_bundled(self, tmp_path, monkeypatch):
         bad = tmp_path / "geoip.dat.gz"
