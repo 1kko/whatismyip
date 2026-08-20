@@ -386,6 +386,16 @@ handshake. `map` is `null` when the target has no resolvable coordinates, and
 | `421` | `Host` header not in `MCP_ALLOWED_HOSTS` |
 | `429` | rate limit exceeded |
 
+Every `403` answers with the same body, whichever rule fired:
+
+```json
+{"error": "Access denied due to the policy"}
+```
+
+Which rule it was — a ban, the country filter, a probe pattern — only helps
+whoever is probing for the edge of it. The reason, the country and the matched
+path all stay in the log line. See [Getting unbanned](#getting-unbanned).
+
 ## MCP (Model Context Protocol)
 
 The service is also an MCP server, so AI agents can run these lookups directly.
@@ -548,6 +558,28 @@ body size and applies its own rate bucket, never escalating to a ban.
 
 - **Rate limit exceeded** — 60 req/min or 10 req/sec → 1 hour ban
 - **Suspicious request** — `.env`, `.php`, `/admin`, dotfiles, … → 24 hour ban
+
+### Getting unbanned
+
+There is no self-service route, and the `403` body deliberately says nothing
+about how to appeal. Three ways out:
+
+1. **Wait.** Bans carry a TTL — one hour for a rate-limit breach, 24 hours for a
+   probe — and expire on their own. A background job sweeps expired entries
+   every `CLEANUP_INTERVAL_SECONDS`.
+2. **Lift it by hand**, if you run the service:
+   ```bash
+   curl -H "api-key: $API_KEY" https://your-host/admin/bans          # who is banned, and why
+   curl -X DELETE -H "api-key: $API_KEY" https://your-host/admin/ban/203.0.113.7
+   ```
+3. **Redeploy.** The ban list lives in `data/`, so it survives a restart — but
+   only if `data/` is a real volume. Where it is not (a Coolify deploy with no
+   volume mount, for instance) every redeploy clears the list.
+
+There is **no permanent allowlist**: unbanning removes the entry, it does not
+exempt the address from being banned again. If you need one, it belongs in
+`IPBanManager` — `bypass_ips` in `data/geo_rules.json` is a geo-blocking bypass
+and has no effect on bans.
 
 ### Blocked request patterns
 

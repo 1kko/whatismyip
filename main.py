@@ -461,6 +461,14 @@ def verify_admin_key(api_key: str = Header(None, alias="api-key")):
     return True
 
 
+# Every 403 answers with exactly this. A blocked requester learns that they
+# were blocked and nothing else: which rule fired — a manual ban, the country
+# filter, a probe pattern — only helps whoever is probing to find the edge of
+# it. The reason, the country and the matched path all stay in the log line
+# next to each branch, which is where an operator can actually use them.
+ACCESS_DENIED = {"error": "Access denied due to the policy"}
+
+
 def _suspicious_path_is_ordinary(request_path: str) -> bool:
     """Whether a path that matched a suspicious pattern is in fact ordinary
     traffic, and so must not be banned.
@@ -502,10 +510,7 @@ async def security_middleware(request: Request, call_next):
                 "SECURITY: Blocked banned IP %s on admin endpoint",
                 client_ip,
             )
-            return JSONResponse(
-                status_code=403,
-                content={"error": "IP address is banned"},
-            )
+            return JSONResponse(status_code=403, content=ACCESS_DENIED)
         if not rate_limiter.allow_request(client_ip):
             ip_ban_manager.ban_ip(
                 client_ip,
@@ -527,9 +532,7 @@ async def security_middleware(request: Request, call_next):
                 "SECURITY: Blocked banned IP %s on MCP endpoint",
                 sanitize_log_input(client_ip),
             )
-            return JSONResponse(
-                status_code=403, content={"error": "IP address is banned"}
-            )
+            return JSONResponse(status_code=403, content=ACCESS_DENIED)
         # `request.body()` inside the SDK buffers the whole thing into memory
         # with no cap of its own — checked directly against the installed
         # package, there is no content-length check and no 413 anywhere in it.
@@ -575,7 +578,7 @@ async def security_middleware(request: Request, call_next):
         logging.warning(f"SECURITY: Blocked banned IP {client_ip}")
         return JSONResponse(
             status_code=403,
-            content={"error": "IP address is banned", "contact": "admin@example.com"},
+            content=ACCESS_DENIED,
         )
 
     # 2. Check geographic restrictions
@@ -585,14 +588,7 @@ async def security_middleware(request: Request, call_next):
             f"SECURITY: Blocked {client_ip} from {geo_check['country']} "
             f"({geo_check['region']}) - {geo_check['reason']}"
         )
-        return JSONResponse(
-            status_code=403,
-            content={
-                "error": "Access denied from your location",
-                "country": geo_check["country"],
-                "reason": geo_check["reason"],
-            },
-        )
+        return JSONResponse(status_code=403, content=ACCESS_DENIED)
 
     # 3. Check for suspicious patterns, unless the request is ordinary traffic.
     # The whitelist used to return early here, which also skipped the rate
@@ -613,7 +609,7 @@ async def security_middleware(request: Request, call_next):
             f"SECURITY: Banned {client_ip} ({geo_check['country']}) "
             f"for suspicious request: {request_path}"
         )
-        return JSONResponse(status_code=403, content={"error": "Forbidden"})
+        return JSONResponse(status_code=403, content=ACCESS_DENIED)
 
     # 4. Rate limit check. Static assets are exempt — a single page load fetches
     # a dozen of them, which would trip the per-second limit and ban a
