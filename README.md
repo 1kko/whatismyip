@@ -89,6 +89,8 @@ RDAP registration data and the full TLS certificate, expanded.
 ### Security
 
 - **IP banning** — persistent ban list with TTL and automatic cleanup
+- **Per-IP rules** — a hand-edited JSON allow/block list with names and
+  descriptions, re-read without a restart
 - **Rate limiting** — sliding window (60 req/min, 10 req/sec per IP) covering
   the lookup surface, with static assets exempt and a separate, looser bucket
   for `/mcp`
@@ -227,6 +229,9 @@ RATE_LIMIT_REQUESTS_PER_SECOND=10    # burst protection
 # Ban durations (seconds)
 BAN_DURATION_RATE_LIMIT=3600         # 1 hour for rate-limit violations
 BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
+
+# Hand-written per-IP allow/block rules (see "Per-IP rules" below)
+# IP_RULES_FILE=data/ip_rules.json
 
 # Reverse proxy: which peers may set x-real-ip / x-forwarded-for.
 # Unset means "private and loopback peers only" (fail-closed).
@@ -490,6 +495,11 @@ restricted by source address, do it in the reverse proxy or with
 - `POST /admin/ban/{ip}?duration=3600` — ban an IP manually
 - `DELETE /admin/ban/{ip}` — unban an IP
 
+### Per-IP rules
+
+- `GET /admin/ip-rules` — the rules currently in effect (read-only; the file is
+  edited by hand and re-read on change)
+
 ### Geographic blocking
 
 - `GET /admin/geo/rules` — current geo-blocking configuration
@@ -537,6 +547,9 @@ curl -H "api-key: $API_KEY" http://localhost:8000/admin/geo/lookup/8.8.8.8
 
 Requests pass through the middleware in this order:
 
+0. **Per-IP rules** — a hand-written entry in `data/ip_rules.json` decides
+   first: `block: true` refuses, `block: false` skips layers 1–3 below (see
+   [Per-IP rules](#per-ip-rules))
 1. **IP ban check** — banned IPs are rejected immediately (`403`)
 2. **Geographic filtering** — country/region access control (`403`)
 3. **Suspicious pattern detection** — auto-ban on malicious paths (`403` + 24h
@@ -559,6 +572,36 @@ body size and applies its own rate bucket, never escalating to a ban.
 - **Rate limit exceeded** — 60 req/min or 10 req/sec → 1 hour ban
 - **Suspicious request** — `.env`, `.php`, `/admin`, dotfiles, … → 24 hour ban
 
+### Per-IP rules
+
+`data/ip_rules.json` is a hand-written list that sits in front of every check
+above. It is the one security file meant to be read and edited by a person, so
+each entry carries a name and a description:
+
+```json
+[
+  {"name": "abc-menubot", "ipv4": "100.86.195.17", "block": false, "ratelimit": true,  "description": "menu bot"},
+  {"name": "office",      "ipv4": "203.0.113.0/24", "block": false, "ratelimit": false, "description": "Seoul office"},
+  {"name": "rogue-host",  "ipv4": "203.0.113.9",    "block": true,                      "description": "compromised box in the office range"}
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `ipv4` | A single address or a CIDR range. A bare address is just a `/32`. |
+| `block` | `false` — trusted: never auto-banned, an existing ban is ignored, geo-blocking and the probe detector are skipped. `true` — refused outright, with no expiry. Defaults to `false`. |
+| `ratelimit` | Whether a trusted address still pays the rate limit. Defaults to **`true`** — waiving the ceiling is the more dangerous choice, so it has to be asked for. A trusted address that trips the limit gets `429` and is *not* banned. |
+| `name`, `description` | For whoever reads the file, and for the log line when a rule changes what would have happened. |
+
+The most specific network wins, so the `rogue-host` `/32` above beats the
+`office` `/24` regardless of the order they appear in.
+
+The file is re-read whenever its mtime changes, so adding a bot is an edit, not
+a redeploy. A malformed file keeps the rules already loaded; a malformed *entry*
+is logged and skipped — a typo must not take the service down, and must not
+silently widen access either. `GET /admin/ip-rules` shows what is actually in
+effect.
+
 ### Getting unbanned
 
 There is no self-service route, and the `403` body deliberately says nothing
@@ -572,14 +615,18 @@ about how to appeal. Three ways out:
    curl -H "api-key: $API_KEY" https://your-host/admin/bans          # who is banned, and why
    curl -X DELETE -H "api-key: $API_KEY" https://your-host/admin/ban/203.0.113.7
    ```
-3. **Redeploy.** The ban list lives in `data/`, so it survives a restart — but
-   only if `data/` is a real volume. Where it is not (a Coolify deploy with no
-   volume mount, for instance) every redeploy clears the list.
+3. **Redeploy — only where `data/` is not persistent.** The ban list lives in
+   `data/banned_ips.json`, so with a real volume behind it (what `make serve`
+   and any sane deployment give you) bans survive restarts *and* redeploys, and
+   this is not a way out. Without one, the container's `data/` goes with the
+   container and every redeploy clears the list. Check before relying on it:
+   `docker inspect <container> --format '{{json .Mounts}}'`.
 
-There is **no permanent allowlist**: unbanning removes the entry, it does not
-exempt the address from being banned again. If you need one, it belongs in
-`IPBanManager` — `bypass_ips` in `data/geo_rules.json` is a geo-blocking bypass
-and has no effect on bans.
+Unbanning removes the entry but does not exempt the address from being banned
+again. For that, add a `block: false` entry to
+[`data/ip_rules.json`](#per-ip-rules) — that is the permanent allowlist.
+(`bypass_ips` in `data/geo_rules.json` is a geo-blocking bypass and has no
+effect on bans.)
 
 ### Blocked request patterns
 
@@ -659,6 +706,7 @@ So the list lives in the data volume instead:
 
 - `data/banned_ips.json` — banned IPs with expiry times
 - `data/geo_rules.json` — geographic blocking configuration
+- `data/ip_rules.json` — per-IP allow/block rules (hand-written)
 - `data/geoip2fast.dat.gz`, `data/GeoLite2-City.mmdb`, `data/GeoLite2-ASN.mmdb` —
   GeoIP databases, refreshed every 3 days (a failed refresh is retried hourly)
 - `data/tld/res/effective_tld_names.dat.txt` — the public suffix list above

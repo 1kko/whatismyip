@@ -5,6 +5,7 @@
 This application includes comprehensive security features to protect against malicious traffic, abuse, and unauthorized access:
 
 - **IP Banning**: Persistent ban list with TTL support
+- **Per-IP Rules**: Hand-edited allow/block list with names and descriptions
 - **Rate Limiting**: Sliding window rate limiter (per-minute and per-second limits)
 - **Suspicious Request Detection**: Pattern-based detection of malicious requests
 - **Geographic Blocking**: Country/region-based access control using GeoIP
@@ -56,6 +57,9 @@ make serve
 
 Requests are processed in this order:
 
+0. **Per-IP Rules** - A hand-written entry in `data/ip_rules.json` decides
+   first: `block: true` refuses, `block: false` skips steps 1-3 (see
+   [Per-IP Rules](#per-ip-rules))
 1. **IP Ban Check** - Block banned IPs immediately
 2. **Geographic Check** - Apply country/region restrictions
 3. **Suspicious Pattern Detection** - Block malicious request patterns. Skipped
@@ -171,13 +175,16 @@ All admin endpoints require the `api-key` header with your `ADMIN_API_KEY`,
 compared using `hmac.compare_digest`. A missing or wrong key returns `404`
 rather than `401`, so the endpoints look like paths that do not exist.
 
-**There is no IP allowlist on `/admin/*`.** The key is the entire perimeter:
-the endpoints are reachable from any address, and the only IP-based checks
-applied to them are the ban list and the rate limiter (exceeding it bans, with
-reason `rate_limit_admin`). Note that `bypass_ips` in `data/geo_rules.json` is a
-geo-blocking bypass and plays no part in admin authentication. To restrict admin
-by source address, do it in the reverse proxy or with `GEO_MODE=allowlist`;
-neither is configured by default.
+**Nothing about the source address grants admin access.** The key is the entire
+perimeter: the endpoints are reachable from any address, and the IP-based checks
+applied to them only ever take access away — the ban list, the rate limiter
+(exceeding it bans, with reason `rate_limit_admin`) and a `block: true` per-IP
+rule. A `block: false` rule exempts an address from the first two; it does not
+let it in without the key. `bypass_ips` in `data/geo_rules.json` is a
+geo-blocking bypass and plays no part here either.
+
+To restrict admin *to* a set of addresses, do it in the reverse proxy — none of
+the above does that, and none is configured by default.
 
 ### Authentication
 
@@ -519,6 +526,54 @@ Knowing which rule fired only helps whoever is probing for the edge of it. The
 reason, the country and the matched path stay in the log line for that branch,
 which is where an operator can use them.
 
+## Per-IP Rules
+
+`data/ip_rules.json` (`IP_RULES_FILE`) is a hand-written list that runs before
+every check above. It is the one security file meant to be read and edited by a
+person, so each entry carries a name and a description:
+
+```json
+[
+  {"name": "abc-menubot", "ipv4": "100.86.195.17", "block": false, "ratelimit": true,  "description": "menu bot"},
+  {"name": "office",      "ipv4": "203.0.113.0/24", "block": false, "ratelimit": false, "description": "Seoul office"},
+  {"name": "rogue-host",  "ipv4": "203.0.113.9",    "block": true,                      "description": "compromised box in the office range"}
+]
+```
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `ipv4` | A single address or a CIDR range; a bare address is a `/32` | required |
+| `block` | `true` refuses the request outright, with no expiry. `false` is trust: never auto-banned, an existing ban ignored, geo-blocking and the probe detector skipped | `false` |
+| `ratelimit` | Whether a trusted address still pays the rate limit. A trusted address that trips it gets `429` and is **not** banned | `true` |
+| `name` | Shown in the log line when the rule changes an outcome | `""` |
+| `description` | For whoever reads the file | `""` |
+
+`ratelimit` defaults to `true` on purpose: waiving the ceiling is the more
+dangerous of the two choices, so it has to be asked for rather than inherited
+from an omission.
+
+**Most specific wins.** The `rogue-host` `/32` above beats the `office` `/24`
+whatever order they appear in, so a single exception inside a trusted range
+behaves the way whoever wrote it expects.
+
+**Reloading.** The file is re-read whenever its mtime changes — adding a bot is
+an edit, not a redeploy. A malformed file keeps the rules already loaded rather
+than dropping every rule because of a half-saved edit; a malformed *entry* is
+logged and skipped. A rule that does not parse does not apply, so a typo can
+never silently widen access.
+
+**Inspecting.** `GET /admin/ip-rules` returns what is actually in effect. It is
+read-only: the file is the source of truth.
+
+```bash
+curl -H "api-key: $API_KEY" http://localhost:8000/admin/ip-rules
+```
+
+This is also the answer to "can a banned address be allowlisted?" — add it with
+`block: false`, and the ban is ignored from the next request. Unlike
+`DELETE /admin/ban/{ip}`, which only removes the current entry, this also stops
+it being banned again.
+
 ## Getting Unbanned
 
 There is no self-service route, and the `403` body deliberately says nothing
@@ -531,7 +586,13 @@ about how to appeal.
    curl -H "api-key: $API_KEY" http://localhost:8000/admin/bans
    curl -X DELETE -H "api-key: $API_KEY" http://localhost:8000/admin/ban/203.0.113.7
    ```
-3. **Redeploy**, where `data/` is not a persistent volume — the list goes with it.
+3. **Add a `block: false` rule** for the address in `data/ip_rules.json`. Unlike
+   an unban this also stops it being banned again — see
+   [Per-IP Rules](#per-ip-rules).
+4. **Redeploy**, but only where `data/` is *not* a persistent volume. Behind a
+   real volume the list survives redeploys and this is not a way out; without
+   one it goes with the container. Verify with
+   `docker inspect <container> --format '{{json .Mounts}}'` rather than assuming.
 
 Note there is **no permanent allowlist**. Unbanning removes the entry; it does
 not exempt the address from being banned again. `bypass_ips` in

@@ -61,6 +61,7 @@ from lookup import (
 from security import (
     GeoBlockManager,
     IPBanManager,
+    IpRuleManager,
     RateLimiter,
     SuspiciousPatternDetector,
     WhitelistManager,
@@ -355,6 +356,7 @@ mcp_rate_limiter = RateLimiter(
     requests_per_minute=MCP_RATE_LIMIT_PER_MINUTE,
     requests_per_second=MCP_RATE_LIMIT_PER_SECOND,
 )
+ip_rule_manager = IpRuleManager()
 suspicious_detector = SuspiciousPatternDetector()
 whitelist_manager = WhitelistManager()
 geo_block_manager = GeoBlockManager(geo_ip_manager)
@@ -503,20 +505,36 @@ async def security_middleware(request: Request, call_next):
     client_ip = get_client_ip(request)
     request_path = request.url.path
 
+    # A hand-written rule for this address, if there is one, decided before
+    # anything else and honoured by every branch below. `block: true` refuses
+    # outright; `block: false` is trust — never banned, no geo check, no probe
+    # check — with the rate limiter still applied unless the rule waives it.
+    rule = ip_rule_manager.match(client_ip)
+    if rule and rule.block:
+        logging.warning(
+            "SECURITY: Refused %s by IP rule %s",
+            sanitize_log_input(client_ip),
+            rule.label,
+        )
+        return JSONResponse(status_code=403, content=ACCESS_DENIED)
+    trusted = rule is not None and not rule.block
+    rate_limited = rule.ratelimit if trusted else True
+
     # Admin endpoints: still check bans and rate limits, skip geo/suspicious checks
     if request_path.startswith("/admin/"):
-        if ip_ban_manager.is_banned(client_ip):
+        if not trusted and ip_ban_manager.is_banned(client_ip):
             logging.warning(
                 "SECURITY: Blocked banned IP %s on admin endpoint",
                 client_ip,
             )
             return JSONResponse(status_code=403, content=ACCESS_DENIED)
-        if not rate_limiter.allow_request(client_ip):
-            ip_ban_manager.ban_ip(
-                client_ip,
-                reason="rate_limit_admin",
-                duration=BAN_DURATION_RATE_LIMIT,
-            )
+        if rate_limited and not rate_limiter.allow_request(client_ip):
+            if not trusted:
+                ip_ban_manager.ban_ip(
+                    client_ip,
+                    reason="rate_limit_admin",
+                    duration=BAN_DURATION_RATE_LIMIT,
+                )
             return JSONResponse(status_code=429, content={"error": "Too many requests"})
         return await call_next(request)
 
@@ -527,7 +545,7 @@ async def security_middleware(request: Request, call_next):
     # is meaningless. The payload is a JSON-RPC body, not a path, so the
     # suspicious-path detector has nothing to look at either.
     if request_path == "/mcp" or request_path.startswith("/mcp/"):
-        if ip_ban_manager.is_banned(client_ip):
+        if not trusted and ip_ban_manager.is_banned(client_ip):
             logging.warning(
                 "SECURITY: Blocked banned IP %s on MCP endpoint",
                 sanitize_log_input(client_ip),
@@ -565,7 +583,7 @@ async def security_middleware(request: Request, call_next):
                     status_code=413,
                     content={"error": "Request body too large"},
                 )
-        if not mcp_rate_limiter.allow_request(client_ip):
+        if rate_limited and not mcp_rate_limiter.allow_request(client_ip):
             logging.warning(
                 "SECURITY: MCP rate limit hit for %s (no ban)",
                 sanitize_log_input(client_ip),
@@ -574,7 +592,7 @@ async def security_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 1. Check if IP is banned (highest priority)
-    if ip_ban_manager.is_banned(client_ip):
+    if not trusted and ip_ban_manager.is_banned(client_ip):
         logging.warning(f"SECURITY: Blocked banned IP {client_ip}")
         return JSONResponse(
             status_code=403,
@@ -583,7 +601,7 @@ async def security_middleware(request: Request, call_next):
 
     # 2. Check geographic restrictions
     geo_check = geo_block_manager.check_access(client_ip)
-    if not geo_check["allowed"]:
+    if not trusted and not geo_check["allowed"]:
         logging.warning(
             f"SECURITY: Blocked {client_ip} from {geo_check['country']} "
             f"({geo_check['region']}) - {geo_check['reason']}"
@@ -595,9 +613,11 @@ async def security_middleware(request: Request, call_next):
     # limit below — so the two paths that do the real work, / and /{domain_ip},
     # were the only ones never rate limited. It now exempts a path from this
     # check alone; the limiter is gated separately, on is_static.
-    if suspicious_detector.is_suspicious(
-        request_path
-    ) and not _suspicious_path_is_ordinary(request_path):
+    if (
+        not trusted
+        and suspicious_detector.is_suspicious(request_path)
+        and not _suspicious_path_is_ordinary(request_path)
+    ):
         ip_ban_manager.ban_ip(
             client_ip,
             reason="suspicious_request",
@@ -616,15 +636,18 @@ async def security_middleware(request: Request, call_next):
     # first-time visitor before the page finished rendering. Everything else is
     # limited, including the lookup surface: that is where the DNS, RDAP/WHOIS
     # and TLS work happens, so it is exactly what needs the ceiling.
-    if not whitelist_manager.is_static(request_path) and not rate_limiter.allow_request(
-        client_ip
+    if (
+        rate_limited
+        and not whitelist_manager.is_static(request_path)
+        and not rate_limiter.allow_request(client_ip)
     ):
-        ip_ban_manager.ban_ip(
-            client_ip,
-            reason="rate_limit",
-            duration=BAN_DURATION_RATE_LIMIT,
-            country=geo_check["country"],
-        )
+        if not trusted:
+            ip_ban_manager.ban_ip(
+                client_ip,
+                reason="rate_limit",
+                duration=BAN_DURATION_RATE_LIMIT,
+                country=geo_check["country"],
+            )
         logging.warning(
             f"SECURITY: Banned {client_ip} ({geo_check['country']}) "
             f"for rate limit violation"
@@ -815,6 +838,17 @@ async def get_ip_info(domain_ip: str, request: Request):
 
 
 # Admin endpoints for security management
+@app.get("/admin/ip-rules")
+async def get_ip_rules(authenticated: bool = Depends(verify_admin_key)):
+    """The hand-written per-IP overrides currently loaded.
+
+    Read-only on purpose: the file is edited by a person and re-read on mtime
+    change, so there is nothing here to write. This exists to answer "is my
+    entry actually in effect?" without shelling into the container.
+    """
+    return {"file": ip_rule_manager.rules_file, "rules": ip_rule_manager.as_list()}
+
+
 @app.get("/admin/bans")
 async def get_all_bans(authenticated: bool = Depends(verify_admin_key)):
     """Get all currently banned IPs"""

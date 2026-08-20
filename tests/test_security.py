@@ -23,6 +23,7 @@ from lookup import is_safe_ip
 from main import (
     GeoRulesUpdate,
     IPBanManager,
+    IpRuleManager,
     RateLimiter,
     SuspiciousPatternDetector,
     WhitelistManager,
@@ -35,6 +36,11 @@ from main import (
 from security import _extract_forwarded_ip
 
 client = TestClient(app, raise_server_exceptions=False)
+# Peer 127.0.0.1 is in TRUSTED_PROXIES, so x-real-ip is honoured and a test
+# can choose the client address it is exercising.
+proxy_client = TestClient(
+    app, client=("127.0.0.1", 41234), raise_server_exceptions=False
+)
 
 # Mock data for external service responses
 MOCK_WHOIS = {"domain_name": "EXAMPLE.COM", "registrar": "Test Registrar"}
@@ -1038,3 +1044,215 @@ class TestPrivatePeerHeuristic:
         assert not _peer_is_trusted(None)
         assert not _peer_is_trusted("")
         assert not _peer_is_trusted("not-an-ip")
+
+
+# ---------------------------------------------------------------------------
+# Hand-written per-IP rules
+# ---------------------------------------------------------------------------
+class TestIpRuleManager:
+    """Parsing and matching, without the middleware."""
+
+    def _write(self, tmp_path, entries):
+        path = tmp_path / "ip_rules.json"
+        path.write_text(json.dumps(entries), encoding="utf-8")
+        return IpRuleManager(rules_file=str(path))
+
+    def test_matches_a_bare_address(self, tmp_path):
+        m = self._write(tmp_path, [{"name": "bot", "ipv4": "100.86.195.17"}])
+        assert m.match("100.86.195.17").name == "bot"
+        assert m.match("100.86.195.18") is None
+
+    def test_matches_a_cidr(self, tmp_path):
+        m = self._write(tmp_path, [{"name": "office", "ipv4": "203.0.113.0/24"}])
+        assert m.match("203.0.113.9").name == "office"
+        assert m.match("203.0.114.9") is None
+
+    def test_the_most_specific_rule_wins(self, tmp_path):
+        """A /32 exception inside a trusted /24 must not depend on file order."""
+        m = self._write(
+            tmp_path,
+            [
+                {"name": "office", "ipv4": "203.0.113.0/24", "block": False},
+                {"name": "rogue", "ipv4": "203.0.113.9", "block": True},
+            ],
+        )
+        assert m.match("203.0.113.9").name == "rogue"
+        assert m.match("203.0.113.10").name == "office"
+
+    def test_ratelimit_defaults_to_true(self, tmp_path):
+        """Waiving the limiter is the more dangerous choice, so it must be
+        asked for rather than inherited from an omission."""
+        m = self._write(tmp_path, [{"name": "bot", "ipv4": "100.86.195.17"}])
+        assert m.match("100.86.195.17").ratelimit is True
+        m = self._write(
+            tmp_path, [{"name": "bot", "ipv4": "100.86.195.17", "ratelimit": False}]
+        )
+        assert m.match("100.86.195.17").ratelimit is False
+
+    def test_block_defaults_to_false(self, tmp_path):
+        m = self._write(tmp_path, [{"name": "bot", "ipv4": "100.86.195.17"}])
+        assert m.match("100.86.195.17").block is False
+
+    def test_a_bad_entry_is_skipped_not_fatal(self, tmp_path):
+        """A typo must not take the service down, and must not widen access
+        either — the unusable rule simply does not apply."""
+        m = self._write(
+            tmp_path,
+            [
+                {"name": "typo", "ipv4": "100.86.195.999"},
+                {"name": "missing"},
+                "not an object",
+                {"name": "good", "ipv4": "100.86.195.17"},
+            ],
+        )
+        assert [r.name for r in m.rules] == ["good"]
+        assert m.match("100.86.195.17").name == "good"
+
+    def test_a_broken_file_keeps_the_previous_rules(self, tmp_path):
+        path = tmp_path / "ip_rules.json"
+        path.write_text(json.dumps([{"name": "bot", "ipv4": "100.86.195.17"}]))
+        m = IpRuleManager(rules_file=str(path))
+        path.write_text("{ this is not json")
+        m.reload()
+        assert m.match("100.86.195.17").name == "bot"
+
+    def test_a_missing_file_means_no_rules(self, tmp_path):
+        m = IpRuleManager(rules_file=str(tmp_path / "absent.json"))
+        assert m.rules == []
+        assert m.match("100.86.195.17") is None
+
+    def test_edits_are_picked_up_without_a_restart(self, tmp_path):
+        """Adding a bot should take an edit, not a redeploy."""
+        path = tmp_path / "ip_rules.json"
+        path.write_text(json.dumps([]))
+        m = IpRuleManager(rules_file=str(path))
+        assert m.match("100.86.195.17") is None
+
+        path.write_text(json.dumps([{"name": "bot", "ipv4": "100.86.195.17"}]))
+        os.utime(path, (0, 0))  # force a different mtime, whatever the clock did
+        assert m.match("100.86.195.17").name == "bot"
+
+
+@pytest.fixture
+def ip_rules(tmp_path):
+    """Point the live rule manager at a throwaway file for one test."""
+    path = tmp_path / "ip_rules.json"
+    original = main.ip_rule_manager.rules_file
+
+    def write(entries):
+        path.write_text(json.dumps(entries), encoding="utf-8")
+        main.ip_rule_manager.rules_file = str(path)
+        main.ip_rule_manager.reload()
+
+    yield write
+    main.ip_rule_manager.rules_file = original
+    main.ip_rule_manager.reload()
+
+
+class TestIpRulesInTheMiddleware:
+    """What a rule actually changes about a request.
+
+    Driven through proxy_client, whose peer is 127.0.0.1: TRUSTED_PROXIES lists
+    it, so x-real-ip is honoured and each test gets its own client address. The
+    module-level client's peer is the string "testclient", which is not trusted
+    and would make every request look like it came from the same place.
+    """
+
+    def setup_method(self):
+        _reset_security_state()
+
+    def teardown_method(self):
+        _reset_security_state()
+
+    def test_block_true_refuses_outright(self, ip_rules):
+        ip_rules([{"name": "scanner", "ipv4": "203.0.113.9", "block": True}])
+        r = proxy_client.get("/healthz", headers={"x-real-ip": "203.0.113.9"})
+        assert r.status_code == 403
+        assert r.json() == main.ACCESS_DENIED
+
+    def test_block_true_needs_no_ban_entry(self, ip_rules):
+        """An operator decision, not something the app worked out — so it lives
+        in the file and never touches the ban list."""
+        ip_rules([{"name": "scanner", "ipv4": "203.0.113.9", "block": True}])
+        proxy_client.get("/healthz", headers={"x-real-ip": "203.0.113.9"})
+        assert not ip_ban_manager.is_banned("203.0.113.9")
+
+    def test_trusted_address_survives_a_probe_path(self, ip_rules):
+        """block: false skips the probe detector, so a trusted monitor hitting
+        an awkward path is answered rather than banned."""
+        ip_rules([{"name": "menubot", "ipv4": "203.0.113.10", "block": False}])
+        r = proxy_client.get("/.git/config", headers={"x-real-ip": "203.0.113.10"})
+        assert r.status_code != 403
+        assert not ip_ban_manager.is_banned("203.0.113.10")
+
+    def test_trusted_address_ignores_an_existing_ban(self, ip_rules):
+        ip_ban_manager.ban_ip("203.0.113.11", reason="test", duration=3600)
+        ip_rules([{"name": "menubot", "ipv4": "203.0.113.11", "block": False}])
+        r = proxy_client.get("/healthz", headers={"x-real-ip": "203.0.113.11"})
+        assert r.status_code == 200
+
+    def test_trusted_but_rate_limited_gets_429_and_no_ban(self, ip_rules):
+        """ratelimit: true keeps the ceiling, but breaching it must not ban —
+        being banned is exactly what block: false rules out."""
+        ip_rules([{"name": "menubot", "ipv4": "203.0.113.12", "ratelimit": True}])
+        original = rate_limiter.requests_per_second
+        rate_limiter.requests_per_second = 2
+        try:
+            statuses = [
+                proxy_client.get(
+                    "/healthz", headers={"x-real-ip": "203.0.113.12"}
+                ).status_code
+                for _ in range(5)
+            ]
+            assert 429 in statuses
+            assert not ip_ban_manager.is_banned("203.0.113.12")
+        finally:
+            rate_limiter.requests_per_second = original
+
+    def test_ratelimit_false_waives_the_ceiling(self, ip_rules):
+        ip_rules([{"name": "menubot", "ipv4": "203.0.113.13", "ratelimit": False}])
+        original = rate_limiter.requests_per_second
+        rate_limiter.requests_per_second = 2
+        try:
+            statuses = [
+                proxy_client.get(
+                    "/healthz", headers={"x-real-ip": "203.0.113.13"}
+                ).status_code
+                for _ in range(6)
+            ]
+            assert statuses == [200] * 6
+        finally:
+            rate_limiter.requests_per_second = original
+
+    def test_an_unlisted_address_is_unaffected(self, ip_rules):
+        """The rules must change nothing for everyone else."""
+        ip_rules([{"name": "menubot", "ipv4": "203.0.113.10", "block": False}])
+        r = proxy_client.get("/.git/config", headers={"x-real-ip": "203.0.113.99"})
+        assert r.status_code == 403
+        assert ip_ban_manager.is_banned("203.0.113.99")
+
+    def test_admin_endpoint_reports_the_loaded_rules(self, ip_rules):
+        ip_rules(
+            [
+                {
+                    "name": "menubot",
+                    "ipv4": "203.0.113.14",
+                    "block": False,
+                    "description": "menu bot",
+                }
+            ]
+        )
+        r = client.get("/admin/ip-rules", headers={"api-key": "test-secret-key"})
+        assert r.status_code == 200
+        assert r.json()["rules"] == [
+            {
+                "name": "menubot",
+                "ipv4": "203.0.113.14/32",
+                "block": False,
+                "ratelimit": True,
+                "description": "menu bot",
+            }
+        ]
+
+    def test_admin_endpoint_needs_the_key(self):
+        assert client.get("/admin/ip-rules").status_code == 404

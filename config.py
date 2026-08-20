@@ -44,6 +44,11 @@ BAN_DURATION_SUSPICIOUS = int(os.getenv("BAN_DURATION_SUSPICIOUS", "86400"))  # 
 # File Paths
 BANNED_IPS_FILE = os.getenv("BANNED_IPS_FILE", "data/banned_ips.json")
 GEO_RULES_FILE = os.getenv("GEO_RULES_FILE", "data/geo_rules.json")
+# Per-IP overrides, hand-edited: which addresses are trusted (and whether they
+# still pay the rate limit) and which are blocked outright. Unlike the ban list
+# this file is written by a person, never by the app, so entries carry a name
+# and a description and the loader tolerates a bad one instead of failing.
+IP_RULES_FILE = os.getenv("IP_RULES_FILE", "data/ip_rules.json")
 # GeoIP DB lives in a writable volume; the bundled DB inside the geoip2fast
 # package directory is read-only when the container runs as a non-root user.
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
