@@ -555,12 +555,14 @@ async def security_middleware(request: Request, call_next):
             },
         )
 
-    # 3. Check whitelist (allow static files and main endpoints)
-    if whitelist_manager.is_whitelisted(request_path):
-        return await call_next(request)
-
-    # 4. Check for suspicious patterns
-    if suspicious_detector.is_suspicious(request_path):
+    # 3. Check for suspicious patterns, unless the path is whitelisted.
+    # The whitelist used to return early here, which also skipped the rate
+    # limit below — so the two paths that do the real work, / and /{domain_ip},
+    # were the only ones never rate limited. It now exempts a path from this
+    # check alone; the limiter is gated separately, on is_static.
+    if not whitelist_manager.is_whitelisted(
+        request_path
+    ) and suspicious_detector.is_suspicious(request_path):
         ip_ban_manager.ban_ip(
             client_ip,
             reason="suspicious_request",
@@ -574,8 +576,14 @@ async def security_middleware(request: Request, call_next):
         )
         return JSONResponse(status_code=403, content={"error": "Forbidden"})
 
-    # 5. Rate limit check
-    if not rate_limiter.allow_request(client_ip):
+    # 4. Rate limit check. Static assets are exempt — a single page load fetches
+    # a dozen of them, which would trip the per-second limit and ban a
+    # first-time visitor before the page finished rendering. Everything else is
+    # limited, including the lookup surface: that is where the DNS, RDAP/WHOIS
+    # and TLS work happens, so it is exactly what needs the ceiling.
+    if not whitelist_manager.is_static(request_path) and not rate_limiter.allow_request(
+        client_ip
+    ):
         ip_ban_manager.ban_ip(
             client_ip,
             reason="rate_limit",

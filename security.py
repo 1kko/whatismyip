@@ -233,20 +233,44 @@ class SuspiciousPatternDetector:
 
 
 class WhitelistManager:
-    """Manage whitelisted request patterns"""
+    """Request paths that are legitimate rather than probe traffic.
+
+    Split in two because the two exemptions are not the same thing:
+
+    - `static_patterns` are cheap to serve and arrive in a burst. One page load
+      pulls the stylesheet, three scripts, four fonts, three icons and the
+      manifest — well over the per-second limit — so they are exempt from the
+      rate limiter as well as from the suspicious-path detector. `.webmanifest`
+      and the gazetteer `.json` are listed explicitly: without them the manifest
+      counts against the limiter, and `static/geo/*.json` would trip the
+      detector's `\\.json$` rule and ban the visitor outright.
+    - `lookup_patterns` are the product surface. A lookup target is an arbitrary
+      domain, so it must skip the suspicious-path detector — but it is also the
+      expensive request (DNS + RDAP/WHOIS + TLS) and stays rate limited.
+    """
 
     def __init__(self):
-        self.whitelist_patterns = [
-            r"^/static/.*\.(css|js|png|jpg|jpeg|gif|svg|ico|woff2?)$",  # Static files
+        self.static_patterns = [
+            r"^/static/.*\.(css|js|json|png|jpg|jpeg|gif|svg|ico|webmanifest|woff2?)$",
+        ]
+        self.lookup_patterns = [
             r"^/$",  # Root endpoint
             r"^/[a-zA-Z0-9\.\-]+$",  # Domain/IP lookup (main feature)
+        ]
+        self.whitelist_patterns = self.static_patterns + self.lookup_patterns
+        self.compiled_static = [
+            re.compile(p, re.IGNORECASE) for p in self.static_patterns
         ]
         self.compiled_patterns = [
             re.compile(p, re.IGNORECASE) for p in self.whitelist_patterns
         ]
 
+    def is_static(self, path: str) -> bool:
+        """Whether the path is a static asset, and so exempt from rate limiting."""
+        return any(pattern.match(path) for pattern in self.compiled_static)
+
     def is_whitelisted(self, path: str) -> bool:
-        """Check if a request path is whitelisted"""
+        """Whether the path is legitimate, and so exempt from the detector."""
         for pattern in self.compiled_patterns:
             if pattern.match(path):
                 return True

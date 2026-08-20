@@ -649,6 +649,53 @@ class TestSecurityMiddleware:
         response = client.get("/")
         assert response.status_code == 200
 
+    @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
+    @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
+    @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
+    def test_lookup_path_is_rate_limited(self, mock_rev, mock_geo, mock_whois):
+        """The lookup surface is the expensive one (DNS + RDAP/WHOIS + TLS), so
+        being on the whitelist must exempt it from the suspicious-path detector
+        only — never from the rate limiter."""
+        original_per_second = rate_limiter.requests_per_second
+        rate_limiter.requests_per_second = 2
+        try:
+            statuses = [client.get("/").status_code for _ in range(5)]
+            assert 429 in statuses or 403 in statuses
+            assert ip_ban_manager.is_banned("testclient")
+        finally:
+            rate_limiter.requests_per_second = original_per_second
+            _reset_security_state()
+
+    def test_static_assets_are_exempt_from_rate_limit(self):
+        """One page load pulls the stylesheet, three scripts, four fonts, three
+        icons and the manifest. If those counted against the limiter, a
+        first-time visitor would ban themselves before the page finished
+        rendering."""
+        assets = [
+            "/static/css/whatismyip.css",
+            "/static/js/app.js",
+            "/static/js/map.js",
+            "/static/js/fingerprint.js",
+            "/static/fonts/InterVariable.woff2",
+            "/static/fonts/JetBrainsMono-Regular.woff2",
+            "/static/fonts/JetBrainsMono-Medium.woff2",
+            "/static/fonts/JetBrainsMono-SemiBold.woff2",
+            "/static/favicon.svg",
+            "/static/favicon.ico",
+            "/static/apple-touch-icon.png",
+            "/static/site.webmanifest",
+        ]
+        original_per_second = rate_limiter.requests_per_second
+        rate_limiter.requests_per_second = 2
+        try:
+            statuses = [client.get(path).status_code for path in assets]
+            assert 429 not in statuses
+            assert 403 not in statuses
+            assert not ip_ban_manager.is_banned("testclient")
+        finally:
+            rate_limiter.requests_per_second = original_per_second
+            _reset_security_state()
+
 
 # ---------------------------------------------------------------------------
 # Utility class tests
@@ -689,6 +736,33 @@ class TestWhitelistManager:
         assert not WhitelistManager().is_whitelisted("/.git/config")
         assert not WhitelistManager().is_whitelisted("/admin/bans")
         assert not WhitelistManager().is_whitelisted("/cgi-bin/test")
+
+    def test_page_assets_are_static(self):
+        """Everything the page pulls on load must read as static, or the
+        limiter counts it. site.webmanifest and the gazetteer JSON are the two
+        that a naive extension list misses."""
+        wm = WhitelistManager()
+        assert wm.is_static("/static/css/whatismyip.css")
+        assert wm.is_static("/static/js/app.js")
+        assert wm.is_static("/static/fonts/InterVariable.woff2")
+        assert wm.is_static("/static/favicon.ico")
+        assert wm.is_static("/static/site.webmanifest")
+        assert wm.is_static("/static/geo/cities.json")
+
+    def test_lookup_surface_is_not_static(self):
+        """is_static gates the rate-limit exemption, so the lookup paths must
+        not qualify however they are spelled."""
+        wm = WhitelistManager()
+        assert not wm.is_static("/")
+        assert not wm.is_static("/google.com")
+        assert not wm.is_static("/8.8.8.8")
+        assert not wm.is_static("/healthz")
+
+    def test_non_static_paths_are_not_static(self):
+        wm = WhitelistManager()
+        assert not wm.is_static("/.git/config")
+        assert not wm.is_static("/staticfoo.com")
+        assert not wm.is_static("/static/../main.py")
 
 
 class TestRateLimiter:
