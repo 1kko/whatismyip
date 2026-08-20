@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from collections import defaultdict
+from typing import Any
 
 from starlette.requests import Request
 
@@ -20,6 +21,7 @@ from config import (
     GEO_BLOCKED_COUNTRIES_INITIAL,
     GEO_MODE_INITIAL,
     GEO_RULES_FILE,
+    IP_RULES_FILE,
     RATE_LIMIT_REQUESTS_PER_MINUTE,
     RATE_LIMIT_REQUESTS_PER_SECOND,
     TRUSTED_PROXIES,
@@ -130,6 +132,149 @@ class IPBanManager:
         """Get all current bans"""
         self.cleanup_expired_bans()
         return self.banned_ips
+
+
+class IpRule:
+    """One hand-written entry from IP_RULES_FILE.
+
+    `network` is an ip_network either way: a bare address parses as a /32 (or
+    /128), so "100.86.195.17" and "203.0.113.0/24" are matched by the same code.
+    `name` and `description` exist only to be read — by a person editing the
+    file, and in the log line when the rule changes what would have happened.
+    """
+
+    __slots__ = ("network", "name", "description", "block", "ratelimit")
+
+    def __init__(
+        self, network, name: str, description: str, block: bool, ratelimit: bool
+    ):
+        self.network = network
+        self.name = name
+        self.description = description
+        self.block = block
+        self.ratelimit = ratelimit
+
+    @property
+    def label(self) -> str:
+        parts = [self.name or str(self.network)]
+        if self.description:
+            parts.append(f"({self.description})")
+        return " ".join(parts)
+
+
+class IpRuleManager:
+    """Per-IP overrides that sit in front of the ban list, geo-blocking and the
+    suspicious-path detector.
+
+    The file is a JSON array, edited by hand:
+
+        [{"name": "abc-menubot", "ipv4": "100.86.195.17",
+          "block": false, "description": "menu bot", "ratelimit": true}]
+
+    - `block: false` — trusted. Never auto-banned, an existing ban is ignored,
+      and geo-blocking and the probe detector are skipped.
+    - `block: true`  — refused outright, with no expiry. The ban list is for
+      what the app decides on its own; this is for what an operator decides.
+    - `ratelimit`    — whether a trusted address still pays the rate limit.
+      Defaults to true: waiving the limiter is the more dangerous choice, so it
+      has to be asked for. A trusted address that trips it gets 429 and is not
+      banned, since being banned is exactly what `block: false` rules out.
+
+    Re-read whenever the file's mtime changes, so adding a bot takes an edit
+    rather than a redeploy. A malformed file or entry is logged and skipped: a
+    typo must not take the service down, and must not silently widen access
+    either — a rule that does not parse simply does not apply.
+    """
+
+    def __init__(self, rules_file: str = IP_RULES_FILE):
+        self.rules_file = rules_file
+        self.rules: list[IpRule] = []
+        self._mtime: float | None = None
+        self.reload()
+
+    def _current_mtime(self) -> float | None:
+        try:
+            return os.path.getmtime(self.rules_file)
+        except OSError:
+            return None
+
+    def reload(self) -> None:
+        mtime = self._current_mtime()
+        self._mtime = mtime
+        if mtime is None:
+            self.rules = []
+            return
+        try:
+            with open(self.rules_file, "r") as handle:
+                raw = json.load(handle)
+        except Exception:
+            # Keep whatever was loaded before rather than dropping every rule
+            # because of a half-saved edit.
+            logging.exception("Could not read IP rules from %s", self.rules_file)
+            return
+        if not isinstance(raw, list):
+            logging.error("%s must contain a JSON array of rules", self.rules_file)
+            return
+        self.rules = [r for r in (self._parse(e) for e in raw) if r is not None]
+        logging.info("Loaded %d IP rule(s) from %s", len(self.rules), self.rules_file)
+
+    @staticmethod
+    def _parse(entry: Any) -> "IpRule | None":
+        if not isinstance(entry, dict):
+            logging.error("Ignoring IP rule that is not an object: %r", entry)
+            return None
+        value = entry.get("ipv4")
+        try:
+            network = ipaddress.ip_network(str(value), strict=False)
+        except ValueError:
+            logging.error("Ignoring IP rule with unusable ipv4=%r: %r", value, entry)
+            return None
+        return IpRule(
+            network=network,
+            name=str(entry.get("name") or ""),
+            description=str(entry.get("description") or ""),
+            block=bool(entry.get("block", False)),
+            # Absent means "still rate limited": the safer default, and the one
+            # that matches what an operator adding a trusted bot expects.
+            ratelimit=bool(entry.get("ratelimit", True)),
+        )
+
+    def match(self, ip: str) -> "IpRule | None":
+        """The rule covering this address, or None.
+
+        The most specific network wins, so a /32 exception inside a trusted /24
+        behaves the way whoever wrote it expects rather than depending on the
+        order of the file.
+        """
+        if self._current_mtime() != self._mtime:
+            self.reload()
+        if not self.rules:
+            return None
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return None
+        matches = [
+            rule
+            for rule in self.rules
+            if rule.network.version == address.version and address in rule.network
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda rule: rule.network.prefixlen)
+
+    def as_list(self) -> list[dict]:
+        """The loaded rules, for the admin endpoint."""
+        return [
+            {
+                "name": rule.name,
+                "ipv4": str(rule.network),
+                "block": rule.block,
+                "ratelimit": rule.ratelimit,
+                "description": rule.description,
+            }
+            for rule in self.rules
+        ]
 
 
 class RateLimiter:
