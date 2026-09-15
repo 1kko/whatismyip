@@ -387,6 +387,15 @@ class TestBrowserPage:
         assert "openstreetmap.org/copyright" in js
         assert "contributors" in js
 
+    def test_osm_tiles_send_an_origin_only_referer(self):
+        # OSM's tile usage policy requires web pages to send a Referer; a tile
+        # requested without one comes back as a 403 "Access blocked" image. The
+        # page itself stays no-referrer, so the tile <img> overrides it with
+        # strict-origin: OSM sees https://ip.1kko.com/, never the lookup path.
+        js = Path("static/js/map.js").read_text(encoding="utf-8")
+        assert 'img.referrerPolicy = "strict-origin";' in js
+        assert 'img.referrerPolicy = "no-referrer"' not in js
+
     def test_json_editor_is_not_loaded_eagerly(self):
         html = client.get("/", headers=BROWSER_UA).text
         # The tree only boots when Raw JSON is opened.

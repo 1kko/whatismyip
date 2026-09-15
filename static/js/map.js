@@ -110,9 +110,13 @@ function paint(container, canvas, distanceText, originIp, targetIp) {
   for (const tile of canvas.tiles) {
     if (!OSM_TILE_URL.test(tile.url)) continue;
     const img = document.createElement("img");
+    // OSM's tile policy requires a Referer; tiles fetched without one come back
+    // as a 403 "Access blocked" image. The page is no-referrer, so override it
+    // here, before src starts the request. strict-origin sends only the
+    // origin, never the path, so the looked-up target stays private.
+    img.referrerPolicy = "strict-origin";
     img.src = tile.url;
     img.alt = "";
-    img.referrerPolicy = "no-referrer";
     img.width = canvas.tile_size;
     img.height = canvas.tile_size;
     img.style.left = `${tile.x}px`;
