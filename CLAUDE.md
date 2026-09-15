@@ -215,7 +215,10 @@ line would run the wrong way across Europe. `fit_zoom()` frames the whole sample
 not just the endpoints, because the great circle bulges far north of both cities.
 
 **Tiles**: fetched by the browser straight from `tile.openstreetmap.org` (no API key).
-CSP allows exactly that one host in `img-src`. Tiles are requested one zoom level out and
+CSP allows exactly that one host in `img-src`. Tile `<img>`s must send a Referer:
+OSM blocks referer-less web traffic with a 403 "Access blocked" tile, so map.js
+sets `referrerPolicy = "strict-origin"` on them, overriding the page-wide
+`no-referrer` without leaking the lookup path. Tiles are requested one zoom level out and
 painted at 2× so a page view costs ~4 requests, and inverted in CSS to turn OSM's light
 basemap dark. **Attribution is mandatory** and appears on the map and in the footer.
 

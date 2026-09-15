@@ -701,6 +701,13 @@ Set by `security_headers_middleware` in `main.py` on every response.
 | `Cross-Origin-Opener-Policy` | `same-origin` | Process isolation |
 | `Server` | `hidden` | Obscure fingerprinting (+ `uvicorn --no-server-header`) |
 
+`Referrer-Policy: no-referrer` has one deliberate exception: `static/js/map.js`
+gives each map tile `<img>` `referrerPolicy = "strict-origin"`. OpenStreetMap's
+tile usage policy requires web pages to send a Referer, and answers tile
+requests without one with a 403 "Access blocked" image. `strict-origin` sends
+only the site's origin, never the path, so OSM does not learn which domain or
+IP was looked up. Do not set these tiles back to `no-referrer`.
+
 The inline `<script>` in `templates/browser.html` gets a fresh nonce
 per request from `request.state.csp_nonce`; click handlers are wired
 via `addEventListener` on `data-toggle` / `data-copy` attributes
