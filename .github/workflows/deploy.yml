@@ -33,10 +33,13 @@ jobs:
           echo "Deploying (force=${FORCE})"
           # Flags kept compatible with the runner image's curl 7.68 (no
           # --fail-with-body / --retry-all-errors, which need 7.76 / 7.71).
+          # Coolify's deploy endpoint is POST-only now; a GET gets 405. The
+          # parameters stay in the query string, so the POST carries no body.
           curl --fail --show-error --silent \
                --retry 3 --retry-delay 2 --max-time 30 \
-               -X GET "http://localhost:8000/api/v1/deploy?uuid=${UUID}&force=${FORCE}" \
+               -X POST "http://localhost:8000/api/v1/deploy?uuid=${UUID}&force=${FORCE}" \
                -H "Authorization: Bearer ${TOKEN}" \
-               -H "Accept: application/json"
+               -H "Accept: application/json" \
+               -H "Content-Length: 0"
           echo
           echo "Deploy request accepted."
