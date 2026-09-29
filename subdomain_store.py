@@ -25,6 +25,22 @@ from dataclasses import dataclass
 
 from config import SUBDOMAIN_MAX_ROWS, SUBDOMAIN_STORE_FILE
 
+
+def sanitize_log(value: str) -> str:
+    """Strip control characters before logging a caller-supplied domain.
+
+    Duplicated from lookup.sanitize_log_input rather than imported, because
+    `subdomains` must not import `lookup` -- doing so would construct
+    GeoIpManager(), TldNamesManager() and DomainManager() at module scope and
+    pull the GeoIP database into every test that touches subdomain code.
+
+    It lives here, in the leaf of this subsystem's import graph, so the
+    subsystem needs exactly one copy: `subdomains` imports this module, and a
+    helper defined the other way round would be a cycle.
+    """
+    return value.replace("\n", "").replace("\r", "").replace("\x00", "")
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS subdomains (
   domain     TEXT PRIMARY KEY,
@@ -147,7 +163,9 @@ class SubdomainStore:
                 )
                 self._conn.commit()
         except Exception:
-            logging.exception("Subdomain store write failed for %s", domain)
+            logging.exception(
+                "Subdomain store write failed for %s", sanitize_log(domain)
+            )
             return
         self.prune()
 

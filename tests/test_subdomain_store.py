@@ -102,3 +102,15 @@ def test_a_failing_close_degrades_instead_of_raising(tmp_path):
     s.close()
     # Store must be left closed.
     assert s._conn is None
+
+
+def test_sanitize_log_strips_control_characters():
+    """A caller-supplied domain reaches the logger, and these logs ship to a
+    remote pipeline, so a forged line must not be constructible. Tested
+    directly: this is a second copy of lookup.sanitize_log_input (the import is
+    banned, see the docstring), and without its own test the two can drift
+    apart while the suite stays green."""
+    from subdomain_store import sanitize_log
+
+    assert sanitize_log("a\r\nINFO: forged\x00b") == "aINFO: forgedb"
+    assert sanitize_log("plain.example.com") == "plain.example.com"

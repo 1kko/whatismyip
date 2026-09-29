@@ -142,7 +142,7 @@
             <details class="accordion" id="acc-{{ item.id }}">
                 <summary class="accordion__header">
                     <span class="accordion__title">{{ item.title }}</span>
-                    <span class="hint">{{ item.hint }}</span>
+                    <span class="hint" id="hint-{{ item.id }}">{{ item.hint }}</span>
                 </summary>
                 <div class="accordion__body">
                     {% if item.id == 'raw' %}
@@ -167,19 +167,25 @@
                     <div id="raw-json"></div>
                     {% elif item.id == 'subdomains' %}
                     <p class="api-note">
-                        Names seen in public Certificate Transparency logs. This is a
-                        passive lookup &mdash; nothing is sent to {{ view.target }}.
-                        Source: <a href="https://crt.sh" rel="noreferrer">crt.sh</a>.
+                        This is a passive lookup &mdash; source:
+                        <a href="https://crt.sh" rel="noreferrer">crt.sh</a>
                     </p>
                     {% if view.subdomains %}
                       {% if view.subdomains.error %}
                       <p class="subdomains__error">Lookup failed: {{ view.subdomains.error }}</p>
                       {% else %}
-                      <p class="subdomains__meta">
-                          {{ view.subdomains.count }} found{% if view.subdomains.stale %} · refreshing{% endif %}
-                      </p>
+                      {# The count lives in the summary hint above; repeating it
+                         here would just say the same thing twice. This line is
+                         only for what the hint cannot show. #}
+                      {% if view.subdomains.stale %}
+                      <p class="subdomains__meta">refreshing</p>
+                      {% endif %}
                       <ul class="subdomains__list" id="subdomains-list">
-                          {% for name in view.subdomains_shown %}<li>{{ name }}</li>{% endfor %}
+                          {# Each name links to its own lookup. Safe as an href without
+                             further escaping: normalization in subdomains.py admits only
+                             [a-z0-9._-], so a name cannot carry a scheme, a slash or a
+                             quote. urlencode is belt-and-braces if that rule ever widens. #}
+                          {% for name in view.subdomains_shown %}<li><a href="/{{ name|urlencode }}">{{ name }}</a></li>{% endfor %}
                       </ul>
                       {% if view.subdomains.count > view.subdomains_shown|length %}
                       <p class="subdomains__meta">

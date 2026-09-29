@@ -577,12 +577,18 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
     # from the route.
     subdomain_data = response.get("subdomains")
     if subdomains_enabled and not _is_ip(response.get("address") or ""):
+        # The hint doubles as the panel's call to action: nothing is fetched
+        # until the accordion is opened, so before that it says what opening it
+        # will do rather than where the data comes from. static/js/app.js
+        # rewrites it to the same "N subdomains found" wording once the lazy
+        # fetch lands, so the two paths read identically.
         if subdomain_data and subdomain_data.get("error"):
             hint = "lookup failed"
         elif subdomain_data:
-            hint = f"{subdomain_data.get('count', 0)} found"
+            count = subdomain_data.get("count", 0)
+            hint = f"{count} subdomain{'s' if count != 1 else ''} found"
         else:
-            hint = "from certificate transparency"
+            hint = "click to lookup"
         accordions.append({"id": "subdomains", "title": "Subdomains", "hint": hint})
 
     accordions.extend(

@@ -137,7 +137,24 @@ rawAccordion.addEventListener("toggle", () => {
 // ordinary lookup never causes an outbound crt.sh fetch.
 const subdomainAccordion = document.getElementById("acc-subdomains");
 const subdomainSlot = document.getElementById("subdomains-slot");
+const subdomainHint = document.getElementById("hint-subdomains");
 let subdomainsBooted = false;
+
+// The summary's hint starts as "click to lookup" and becomes the result once
+// the fetch lands, so the lazy path ends up reading the same as the
+// server-rendered one (see _accordions in viewmodel.py). A failed lookup must
+// say so there too: leaving "click to lookup" next to an error would invite
+// the reader to try again forever.
+function setSubdomainHint(text) {
+  if (subdomainHint) {
+    subdomainHint.textContent = text;
+  }
+}
+
+function subdomainFailed(message) {
+  subdomainSlot.textContent = message;
+  setSubdomainHint("lookup failed");
+}
 
 if (subdomainAccordion && subdomainSlot) {
   subdomainAccordion.addEventListener("toggle", async () => {
@@ -159,38 +176,50 @@ if (subdomainAccordion && subdomainSlot) {
       // so both bail out with an explicit failure rather than falling
       // through to an empty {} that renders "undefined found".
       if (!response.ok) {
-        subdomainSlot.textContent = "Lookup failed.";
+        subdomainFailed("Lookup failed.");
         return;
       }
       const payload = await response.json();
       const data = payload.subdomains;
       if (!data) {
-        subdomainSlot.textContent = "Lookup failed.";
+        subdomainFailed("Lookup failed.");
         return;
       }
 
       if (data.error) {
-        subdomainSlot.textContent = `Lookup failed: ${data.error}`;
+        subdomainFailed(`Lookup failed: ${data.error}`);
         return;
       }
 
       const names = data.names || [];
       const shown = names.slice(0, 100);
       subdomainSlot.textContent = "";
+      setSubdomainHint(
+        `${data.count} subdomain${data.count === 1 ? "" : "s"} found`,
+      );
 
-      const meta = document.createElement("p");
-      meta.className = "subdomains__meta";
-      meta.textContent =
-        `${data.count} found` + (data.stale ? " · refreshing" : "");
-      subdomainSlot.appendChild(meta);
+      // The count lives in the summary hint (set above), so this line carries
+      // only what the hint cannot -- currently just the refreshing state.
+      if (data.stale) {
+        const meta = document.createElement("p");
+        meta.className = "subdomains__meta";
+        meta.textContent = "refreshing";
+        subdomainSlot.appendChild(meta);
+      }
 
       const list = document.createElement("ul");
       list.className = "subdomains__list";
       // textContent, never innerHTML: these names come from third-party
-      // certificates and are not ours to trust as markup.
+      // certificates and are not ours to trust as markup. The href is built
+      // with encodeURIComponent for the same reason -- normalization already
+      // restricts names to [a-z0-9._-], but nothing here should depend on
+      // that rule staying narrow.
       for (const name of shown) {
         const item = document.createElement("li");
-        item.textContent = name;
+        const link = document.createElement("a");
+        link.href = `/${encodeURIComponent(name)}`;
+        link.textContent = name;
+        item.appendChild(link);
         list.appendChild(item);
       }
       subdomainSlot.appendChild(list);
@@ -203,7 +232,7 @@ if (subdomainAccordion && subdomainSlot) {
         subdomainSlot.appendChild(more);
       }
     } catch (err) {
-      subdomainSlot.textContent = "Lookup failed.";
+      subdomainFailed("Lookup failed.");
     }
   });
 }

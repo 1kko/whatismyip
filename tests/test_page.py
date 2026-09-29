@@ -684,10 +684,63 @@ class TestSubdomainPanel:
                     "/example.com?subdomains=include", headers=BROWSER_UA
                 ).text
         list_markup = html.split('id="subdomains-list"')[1].split("</ul>")[0]
-        assert list_markup.count("h0.example.com") == 1
+        # Counted on the anchor, not the bare name: each entry now renders its
+        # name twice, once in the href and once as the link text.
+        assert list_markup.count('<a href="/h0.example.com">') == 1
         assert "h499.example.com" not in list_markup
         assert "500" in html
-        assert "500" in html
+
+    def test_each_rendered_name_links_to_its_own_lookup(self):
+        """A subdomain is itself a lookup target, so the list is navigable
+        rather than a wall of text to copy out by hand."""
+        payload = {
+            "names": ["api-watch.example.com"],
+            "count": 1,
+            "truncated": False,
+            "source": "crt.sh",
+            "fetched_at": "2026-09-29T00:00:00+00:00",
+            "stale": False,
+            "error": None,
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=payload
+            ):
+                html = client.get(
+                    "/example.com?subdomains=include", headers=BROWSER_UA
+                ).text
+        list_markup = html.split('id="subdomains-list"')[1].split("</ul>")[0]
+        assert (
+            '<a href="/api-watch.example.com">api-watch.example.com</a>' in list_markup
+        )
+
+    def test_the_summary_hint_reports_the_count_once_loaded(self):
+        payload = {
+            "names": ["a.example.com"],
+            "count": 29,
+            "truncated": False,
+            "source": "crt.sh",
+            "fetched_at": "2026-09-29T00:00:00+00:00",
+            "stale": False,
+            "error": None,
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=payload
+            ):
+                html = client.get(
+                    "/example.com?subdomains=include", headers=BROWSER_UA
+                ).text
+        assert "29 subdomains found" in html
+
+    def test_the_unopened_panel_says_click_to_lookup(self):
+        """static/js/app.js rewrites this hint by id once its fetch lands, so
+        the id has to be in the markup for the lazy path to work at all."""
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch("main.get_subdomains", new_callable=AsyncMock):
+                html = client.get("/example.com", headers=BROWSER_UA).text
+        assert 'id="hint-subdomains"' in html
+        assert "click to lookup" in html
 
     def test_a_failed_fetch_is_reported_not_rendered_as_empty(self):
         """Review I2. static/js/app.js reaches this same JSON endpoint from
