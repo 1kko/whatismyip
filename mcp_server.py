@@ -22,10 +22,14 @@ from config import (
     MCP_ALLOWED_HOSTS,
     MCP_ALLOWED_ORIGINS,
     RDAP_TIMEOUT_SECONDS,
+    SUBDOMAIN_ENABLED,
+    SUBDOMAIN_MCP_DEFAULT_LIMIT,
+    SUBDOMAIN_MCP_MAX_LIMIT,
     WHOIS_TIMEOUT_SECONDS,
 )
 from lookup import PrivateAddressError, gather, lookup_location, sanitize_log_input
 from security import client_ip_from_scope
+from subdomains import get_subdomains
 
 # Certificate parsing already exists in viewmodel.py, which is pure and
 # stdlib-only, so there is no cycle and no reason to restate it here.
@@ -237,6 +241,53 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
         "serial_number": cert.get("serialNumber"),
         "cipher": cert.get("cipher"),
     }
+
+
+async def subdomains(
+    domain: str, limit: int = SUBDOMAIN_MCP_DEFAULT_LIMIT
+) -> dict[str, Any]:
+    """Subdomains of a domain, as seen in public Certificate Transparency logs.
+    This is a passive lookup of certificate records — nothing is sent to the
+    domain itself, and it finds only names that appear in a published
+    certificate, so it is evidence of existence and never a complete inventory.
+    Use it for "what else is under this domain?". `limit` caps how many names
+    come back; `count` always reports the true total.
+    """
+    if limit < 1:
+        return {"error": "limit must be at least 1"}
+    limit = min(limit, SUBDOMAIN_MCP_MAX_LIMIT)
+
+    try:
+        data = await get_subdomains(domain)
+    except Exception:
+        logging.exception("MCP subdomains failed for %s", sanitize_log_input(domain))
+        return {"error": "Subdomain lookup failed"}
+
+    # An empty list must never stand in for a failure. dns_records rejects a
+    # record type this server does not query for the same reason: a model
+    # reading {} or [] states it as fact, and "we could not ask" would reach the
+    # user as "there are none".
+    if data.get("error"):
+        return {"domain": domain, "error": data["error"]}
+
+    names = data.get("names") or []
+    shown = names[:limit]
+    return {
+        "domain": domain,
+        "names": shown,
+        "count": data.get("count", len(names)),
+        "truncated": data.get("count", len(names)) > len(shown),
+        "source": data.get("source"),
+        "fetched_at": data.get("fetched_at"),
+        "stale": data.get("stale", False),
+    }
+
+
+# Registered conditionally so that with SUBDOMAIN_ENABLED=false an agent sees a
+# server that does not offer this, rather than one that offers it and always
+# fails. The decorator form cannot express that.
+if SUBDOMAIN_ENABLED:
+    mcp.tool()(subdomains)
 
 
 _caller_ip: ContextVar[str] = ContextVar("mcp_caller_ip", default="unknown")
