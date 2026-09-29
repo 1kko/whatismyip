@@ -182,9 +182,18 @@ def reset_state(store_path: str | None = None) -> None:
     # Request cancellation and drop the references: a background task left
     # over from a previous event loop (a previous test) is bound to a future
     # tied to that closed loop, and a later drain_background() on it raises
-    # "attached to a different loop" in a test that never touched it.
+    # "attached to a different loop" in a test that never touched it. That
+    # same leftover task's loop may already be closed by the time this runs,
+    # and Task.cancel() on a closed loop raises RuntimeError from deep inside
+    # asyncio's callback scheduling — skip and swallow rather than let
+    # cleanup abort the reset itself, which must complete regardless.
     for task in _background:
-        task.cancel()
+        if task.get_loop().is_closed():
+            continue
+        try:
+            task.cancel()
+        except RuntimeError:
+            pass
     _store.close()
     _store = SubdomainStore(path=store_path) if store_path else SubdomainStore()
     _budget = _MinuteBudget(SUBDOMAIN_FETCH_PER_MINUTE)
@@ -198,6 +207,23 @@ async def drain_background() -> None:
     """Await outstanding background refreshes. Tests only."""
     while _background:
         await asyncio.gather(*list(_background), return_exceptions=True)
+
+
+def _record_failure(domain: str) -> None:
+    """Record a failure for `domain` and sweep out stale ones.
+
+    Nothing else prunes _failures, and reset_state() is test-only, so
+    without this a domain that ever fails leaves a permanent entry for the
+    life of the process. Sweeping on every write costs nothing extra: writes
+    are already capped by _budget, and this is the only path that adds
+    entries, so the one just added is never the one removed. No scheduler
+    job, matching the rest of this feature.
+    """
+    now = time.time()
+    _failures[domain] = now
+    for stale_domain, failed_at in list(_failures.items()):
+        if now - failed_at >= SUBDOMAIN_ERROR_TTL:
+            del _failures[stale_domain]
 
 
 def _result(
@@ -282,10 +308,10 @@ def _schedule_refresh(domain: str) -> None:
             # background refresh (and a fresh budget slot) scheduled on every
             # subsequent stale read; one broken popular domain would
             # otherwise starve every other domain's budget.
-            _failures[domain] = time.time()
+            _record_failure(domain)
             logging.info("Subdomain refresh failed for %s: %s", domain, exc)
         except Exception:
-            _failures[domain] = time.time()
+            _record_failure(domain)
             logging.exception("Subdomain refresh crashed for %s", domain)
 
     task = asyncio.create_task(run())
@@ -317,6 +343,13 @@ async def get_subdomains(domain: str) -> dict:
             entry.names, entry.count, entry.truncated, entry.fetched_at, stale, None
         )
 
+    # A refresh failure recorded above can, narrowly, also gate this cold
+    # path: if the domain's store row is evicted by SubdomainStore.prune()
+    # (LRU by fetched_at) between a failed refresh and the next lookup, the
+    # domain lands here and gets "lookup failed recently" with no fetch
+    # attempted, for up to SUBDOMAIN_ERROR_TTL. That window is bounded and
+    # acceptable, not a scheduler-visible incident — written down here so it
+    # doesn't read as a bug later.
     failed_at = _failures.get(domain)
     if failed_at and time.time() - failed_at < SUBDOMAIN_ERROR_TTL:
         return _result([], 0, False, None, False, "lookup failed recently")
@@ -324,11 +357,11 @@ async def get_subdomains(domain: str) -> dict:
     try:
         names, count = await _fetch_and_store(domain)
     except SubdomainError as exc:
-        _failures[domain] = time.time()
+        _record_failure(domain)
         return _result([], 0, False, None, False, str(exc))
     except Exception:
         logging.exception("Subdomain lookup crashed for %s", domain)
-        _failures[domain] = time.time()
+        _record_failure(domain)
         return _result([], 0, False, None, False, "lookup failed")
 
     return _result(names, count, count > len(names), time.time(), False, None)

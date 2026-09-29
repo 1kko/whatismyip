@@ -7,6 +7,7 @@ committing a real one would be the same privacy failure the code prevents.
 """
 
 import json
+import time
 from unittest.mock import patch
 
 import pytest
@@ -343,3 +344,24 @@ class TestGetSubdomains:
         assert first["stale"] is True
         assert second["stale"] is True
         assert second["names"]  # still served despite the failing source
+
+    @pytest.mark.asyncio
+    async def test_a_stale_failure_entry_is_evicted_opportunistically(self):
+        """Review Important (promoted). Nothing but reset_state() — test only
+        — ever removed a _failures entry, so in production every domain that
+        ever failed left a permanent dict entry for the life of the process.
+        Recording a new failure must sweep out old ones instead.
+        """
+        with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
+            await subdomains.get_subdomains("old.example")
+        assert "old.example" in subdomains._failures
+        # Backdate it past the error TTL, as if it had sat there for a while.
+        subdomains._failures["old.example"] = (
+            time.time() - subdomains.SUBDOMAIN_ERROR_TTL - 1
+        )
+
+        with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
+            await subdomains.get_subdomains("new.example")
+
+        assert "old.example" not in subdomains._failures
+        assert "new.example" in subdomains._failures
