@@ -12,6 +12,12 @@ from typing import Any
 
 from config import SUBDOMAIN_ENABLED
 
+# Mirrors rdap.NOT_REGISTERED rather than importing it: `rdap` pulls in whoisit,
+# which costs ~400ms of import time -- twelve times this whole module's -- and
+# viewmodel is the pure module every template test imports. Same trade as
+# subdomain_store.sanitize_log. If the sentinel changes, it changes in both.
+NOT_REGISTERED = "not registered"
+
 DASH = "—"
 
 
@@ -316,14 +322,26 @@ def _reverse_column(location: dict, domain: dict) -> dict:
 
 def _whois_column(whois_data: dict | None, location: dict) -> dict:
     whois_data = whois_data or {}
-    failed = "error" in whois_data or not whois_data
+    error = whois_data.get("error")
+    # Three states, not two. "not registered" is an answer -- the registry was
+    # reached and said there is no such registration, which is the normal result
+    # for a subdomain -- while "unavailable" means we could not find out.
+    if error == NOT_REGISTERED:
+        status, tone = "not registered", "muted"
+    elif error or not whois_data:
+        status, tone = "unavailable", "warning"
+    else:
+        status, tone = "available", "success"
+    # Separate from the status above: this one only asks whether there is a
+    # usable record to draw values from, and there isn't in either failing case.
+    no_record = bool(error) or not whois_data
     return {
         "title": "WHOIS",
         "rows": [
             {
                 "label": "Status",
-                "value": "unavailable" if failed else "available",
-                "tone": "warning" if failed else "success",
+                "value": status,
+                "tone": tone,
             },
             {
                 "label": "Netblock",
@@ -338,7 +356,7 @@ def _whois_column(whois_data: dict | None, location: dict) -> dict:
             {
                 "label": "Updated",
                 "value": str(whois_data.get("updated_date") or DASH),
-                "tone": "muted" if failed else "default",
+                "tone": "muted" if no_record else "default",
             },
         ],
     }
@@ -462,8 +480,13 @@ def whois_display(whois_data: dict | None) -> dict:
     the WHOIS accordion. Returns an error row on failure and {} when absent."""
     if not whois_data:
         return {}
-    if whois_data.get("error"):
-        return {"Error": str(whois_data["error"])}
+    error = whois_data.get("error")
+    if error == NOT_REGISTERED:
+        # Labelling this "Error" would send a reader off to retry a lookup that
+        # already succeeded. Subdomains land here on every visit.
+        return {"Status": "no registration record for this name"}
+    if error:
+        return {"Error": str(error)}
     out: dict[str, str] = {}
     for key, label in _WHOIS_ROWS:
         text = _whois_value(key, whois_data.get(key))
@@ -527,7 +550,10 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
     domain = response.get("domain") or {}
     headers = response.get("headers") or {}
 
-    if "error" in whois_data or not whois_data:
+    whois_error = whois_data.get("error")
+    if whois_error == NOT_REGISTERED:
+        whois_hint = "not registered"
+    elif whois_error or not whois_data:
         whois_hint = "lookup failed"
     else:
         who = (

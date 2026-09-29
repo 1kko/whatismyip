@@ -421,8 +421,18 @@ class TestWhoisDisplay:
         assert out["DNSSEC"] == "unsigned"
 
     def test_error_record_shows_a_single_error_row(self):
-        assert whois_display({"error": "not registered"}) == {"Error": "not registered"}
+        assert whois_display({"error": "WHOIS lookup timed out"}) == {
+            "Error": "WHOIS lookup timed out"
+        }
         assert whois_display(None) == {}
+
+    def test_not_registered_is_reported_as_an_answer_not_an_error(self):
+        """The registry was reached and said there is no such registration --
+        which is what every subdomain looks like. Labelling it "Error" sends a
+        reader off to retry a lookup that already succeeded."""
+        out = whois_display({"error": "not registered"})
+        assert "Error" not in out
+        assert out == {"Status": "no registration record for this name"}
 
 
 class TestGeoIpSection:
@@ -551,3 +561,57 @@ def test_a_single_result_is_not_pluralised():
 def test_a_failed_lookup_says_so_rather_than_inviting_another_click():
     hint = _subdomain_hint({"names": [], "count": 0, "error": "timed out"})
     assert hint == "lookup failed"
+
+
+class TestWhoisNotRegistered:
+    """A subdomain has no registration object -- registries register
+    example.com, not docs.example.com -- so "not registered" is the normal
+    answer for one, and must not read the same as a timeout."""
+
+    @staticmethod
+    def _view(whois):
+        return build_view(
+            {
+                "address": "docs.example.com",
+                "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
+                "location": {},
+                "whois": whois,
+            },
+            is_self=False,
+        )
+
+    @staticmethod
+    def _hint(view):
+        return next(i["hint"] for i in view["accordions"] if i["id"] == "whois")
+
+    @staticmethod
+    def _status(whois):
+        """The WHOIS facts column is only built for an IP target -- a domain
+        gets DNS and certificate columns instead -- so this path is reached by
+        an unallocated address, not by a subdomain."""
+        view = build_view(
+            {"address": "192.0.2.1", "domain": {}, "location": {}, "whois": whois},
+            is_self=False,
+        )
+        col = next(c for c in view["facts"] if c["title"] == "WHOIS")
+        return next(r for r in col["rows"] if r["label"] == "Status")
+
+    def test_the_accordion_hint_distinguishes_the_two(self):
+        assert self._hint(self._view({"error": "not registered"})) == "not registered"
+        assert self._hint(self._view({"error": "WHOIS lookup timed out"})) == (
+            "lookup failed"
+        )
+        assert self._hint(self._view(None)) == "lookup failed"
+
+    def test_the_facts_column_has_three_states_not_two(self):
+        not_reg = self._status({"error": "not registered"})
+        assert not_reg["value"] == "not registered"
+        assert not_reg["tone"] != "warning"  # nothing is wrong
+
+        failed = self._status({"error": "WHOIS lookup timed out"})
+        assert failed["value"] == "unavailable"
+        assert failed["tone"] == "warning"
+
+        ok = self._status({"registrar": "Example Registrar"})
+        assert ok["value"] == "available"
+        assert ok["tone"] == "success"
