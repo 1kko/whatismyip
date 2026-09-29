@@ -72,6 +72,7 @@ class SubdomainStore:
         self._open()
 
     def _open(self) -> None:
+        conn = None
         try:
             os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
             conn = sqlite3.connect(self._path, check_same_thread=False)
@@ -83,6 +84,12 @@ class SubdomainStore:
             # Degraded, not broken: get() returns None and put() is a no-op, so
             # every lookup pays the fetch and nothing else changes.
             logging.exception("Subdomain store unavailable at %s", self._path)
+            # Close the handle explicitly if connect() succeeded but setup failed.
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: S110
+                    pass
             self._conn = None
 
     def get(self, domain: str) -> Entry | None:
@@ -171,5 +178,9 @@ class SubdomainStore:
     def close(self) -> None:
         with self._lock:
             if self._conn is not None:
-                self._conn.close()
-                self._conn = None
+                try:
+                    self._conn.close()
+                except Exception:
+                    logging.exception("Subdomain store close failed")
+                finally:
+                    self._conn = None

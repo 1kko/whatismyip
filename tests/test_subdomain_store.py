@@ -84,3 +84,21 @@ def test_a_corrupt_database_degrades_instead_of_raising(tmp_path):
     s.put("example.com", ["a.example.com"], 1, False, "crt.sh")
     assert s.get("example.com") is None
     s.close()
+
+
+def test_a_failing_close_degrades_instead_of_raising(tmp_path):
+    """close() is the only public method not wrapped in try/except. It must
+    degrade like the others: a WAL checkpoint failure or vanished volume must
+    not break the contract stated in the module docstring. Also verify the
+    store is left in a consistent state (_conn is None) regardless."""
+
+    class RaisingConnection:
+        def close(self) -> None:
+            raise RuntimeError("Simulated close failure")
+
+    s = SubdomainStore(path=str(tmp_path / "t.sqlite3"), max_rows=5)
+    s._conn = RaisingConnection()  # type: ignore
+    # This should not raise despite _conn.close() raising.
+    s.close()
+    # Store must be left closed.
+    assert s._conn is None
