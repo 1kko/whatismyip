@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -507,3 +508,108 @@ class TestDesignTokens:
 
     def test_no_light_mode_branch(self):
         assert "prefers-color-scheme" not in CSS.read_text(encoding="utf-8")
+
+
+# gather() is patched throughout this class. tests/test_page.py has no mocking
+# layer — every existing test here uses an IP target — and "/example.com" would
+# otherwise drive real DNS, a real TLS handshake and a real RDAP query, putting
+# the network on the suite's critical path. The payload below is the shape
+# gather() returns for a domain.
+GATHERED = {
+    "address": "example.com",
+    "domain": {"a": ["93.184.216.34"], "mx": [], "ns": [], "txt": []},
+    "location": {"country_code": "US", "country_name": "United States"},
+    "whois": {"registrar": "Example Registrar"},
+    "ssl": None,
+    "resolved_ip": "93.184.216.34",
+    "reverse_dns": None,
+}
+
+
+class TestSubdomainsParameter:
+    FAKE = {
+        "names": ["a.example.com"],
+        "count": 1,
+        "truncated": False,
+        "source": "crt.sh",
+        "fetched_at": "2026-09-29T00:00:00+00:00",
+        "stale": False,
+        "error": None,
+    }
+
+    def test_absent_parameter_leaves_the_response_unchanged(self):
+        """The regression test that guards the whole design."""
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch("main.get_subdomains", new_callable=AsyncMock) as fetch:
+                response = client.get("/example.com", headers=JSON_UA)
+        assert response.status_code == 200
+        assert "subdomains" not in response.json()
+        fetch.assert_not_called()
+
+    def test_include_adds_the_key_without_disturbing_the_others(self):
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=self.FAKE
+            ):
+                plain = client.get("/example.com", headers=JSON_UA).json()
+                enriched = client.get(
+                    "/example.com?subdomains=include", headers=JSON_UA
+                ).json()
+        assert enriched["subdomains"]["names"] == ["a.example.com"]
+        for key in plain:
+            if key not in ("datetime", "elapsed_ms"):
+                assert enriched[key] == plain[key]
+
+    def test_only_returns_json_to_a_browser_user_agent(self):
+        """Content negotiation is user-agent based, so a fetch() from our own
+        page would otherwise receive a full HTML document."""
+        browser = {"user-agent": "Mozilla/5.0 (Macintosh)"}
+        with patch(
+            "main.get_subdomains", new_callable=AsyncMock, return_value=self.FAKE
+        ):
+            response = client.get("/example.com?subdomains=only", headers=browser)
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json()["subdomains"]["names"] == ["a.example.com"]
+
+    def test_only_skips_the_rest_of_the_pipeline(self):
+        with patch("main.gather", new_callable=AsyncMock) as gather_mock:
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=self.FAKE
+            ):
+                response = client.get("/example.com?subdomains=only", headers=JSON_UA)
+        gather_mock.assert_not_called()
+        assert set(response.json()) == {"address", "subdomains"}
+
+    def test_only_rejects_an_ip_address(self):
+        response = client.get("/8.8.8.8?subdomains=only", headers=JSON_UA)
+        assert response.status_code == 400
+
+    def test_only_rejects_an_invalid_domain(self):
+        response = client.get("/not-a-domain?subdomains=only", headers=JSON_UA)
+        assert response.status_code == 400
+
+    def test_an_unrecognised_value_is_rejected_rather_than_ignored(self):
+        response = client.get("/example.com?subdomains=1", headers=JSON_UA)
+        assert response.status_code == 400
+        assert "include" in response.json()["detail"]
+
+    def test_exclude_is_accepted_explicitly(self):
+        response = client.get("/example.com?subdomains=exclude", headers=JSON_UA)
+        assert response.status_code == 200
+        assert "subdomains" not in response.json()
+
+    def test_the_parameter_is_rejected_when_the_feature_is_disabled(self):
+        """SUBDOMAIN_ENABLED=false must turn the surface off, not leave one that
+        accepts the parameter and returns nothing useful."""
+        with patch("main.SUBDOMAIN_ENABLED", False):
+            response = client.get("/example.com?subdomains=include", headers=JSON_UA)
+        assert response.status_code == 400
+
+    def test_disabling_the_feature_leaves_an_ordinary_lookup_untouched(self):
+        with patch("main.SUBDOMAIN_ENABLED", False):
+            with patch(
+                "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
+            ):
+                response = client.get("/example.com", headers=JSON_UA)
+        assert response.status_code == 200
+        assert "subdomains" not in response.json()
