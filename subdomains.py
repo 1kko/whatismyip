@@ -36,6 +36,7 @@ from config import (
     SUBDOMAIN_USER_AGENT,
 )
 from subdomain_store import SubdomainStore
+from subdomain_store import sanitize_log as _sanitize_log
 
 SOURCE = "crt.sh"
 
@@ -60,18 +61,6 @@ class SubdomainBudgetError(SubdomainError):
     caller still sees a "busy, try again" style error; only the durable
     negative-cache write is skipped.
     """
-
-
-def _sanitize_log(value: str) -> str:
-    """Strip control characters before logging a caller-supplied domain.
-
-    Duplicated from lookup.sanitize_log_input rather than imported: this
-    module must not import `lookup` (see the module docstring) -- doing so
-    would construct GeoIpManager(), TldNamesManager() and DomainManager() at
-    module scope and pull the GeoIP database into every test that touches
-    subdomain code.
-    """
-    return value.replace("\n", "").replace("\r", "").replace("\x00", "")
 
 
 def extract_names(payload: object) -> list[str]:

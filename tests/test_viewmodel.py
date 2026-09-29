@@ -513,3 +513,41 @@ def test_the_kill_switch_removes_the_subdomains_accordion_for_a_domain():
     )
     ids = [item["id"] for item in view["accordions"]]
     assert "subdomains" not in ids
+
+
+def _subdomain_hint(subdomains=None):
+    """The hint on the Subdomains accordion for a domain lookup."""
+    response = {
+        "address": "example.com",
+        "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
+        "location": {},
+    }
+    if subdomains is not None:
+        response["subdomains"] = subdomains
+    view = build_view(response, is_self=False)
+    return next(i["hint"] for i in view["accordions"] if i["id"] == "subdomains")
+
+
+def test_the_unopened_panel_invites_a_click_rather_than_naming_its_source():
+    """Nothing is fetched until the accordion opens, so the hint says what
+    opening it does. Where the data comes from is inside the panel."""
+    assert _subdomain_hint() == "click to lookup"
+
+
+def test_a_loaded_panel_reports_the_count():
+    hint = _subdomain_hint(
+        {"names": ["a.example.com"], "count": 29, "error": None, "stale": False}
+    )
+    assert hint == "29 subdomains found"
+
+
+def test_a_single_result_is_not_pluralised():
+    hint = _subdomain_hint(
+        {"names": ["a.example.com"], "count": 1, "error": None, "stale": False}
+    )
+    assert hint == "1 subdomain found"
+
+
+def test_a_failed_lookup_says_so_rather_than_inviting_another_click():
+    hint = _subdomain_hint({"names": [], "count": 0, "error": "timed out"})
+    assert hint == "lookup failed"
