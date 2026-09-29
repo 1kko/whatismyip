@@ -192,3 +192,32 @@ MCP_RATE_LIMIT_PER_SECOND = int(os.getenv("MCP_RATE_LIMIT_PER_SECOND", "5"))
 # (see security_middleware's /mcp branch, which rejects an oversized or
 # unbounded-length body with 413 before it's ever read into memory).
 MCP_MAX_BODY_BYTES = int(os.getenv("MCP_MAX_BODY_BYTES", str(256 * 1024)))
+
+# Subdomain lookup (Certificate Transparency). Opt-in per request: the default
+# lookup path never touches crt.sh, so its unpredictable latency (measured
+# 2.6-13.5s for the same query within one hour) cannot reach a page view.
+SUBDOMAIN_ENABLED = os.getenv("SUBDOMAIN_ENABLED", "true").lower() != "false"
+# `%25.` is a URL-encoded "%." — crt.sh's wildcard for "any name under".
+SUBDOMAIN_SOURCE_URL = os.getenv(
+    "SUBDOMAIN_SOURCE_URL", "https://crt.sh/?q=%25.{domain}&output=json"
+)
+SUBDOMAIN_USER_AGENT = os.getenv(
+    "SUBDOMAIN_USER_AGENT", "whatismyip/0.2 (+https://ip.1kko.com)"
+)
+SUBDOMAIN_STORE_FILE = os.getenv(
+    "SUBDOMAIN_STORE_FILE", os.path.join(_APP_DIR, "data", "subdomains.sqlite3")
+)
+SUBDOMAIN_TIMEOUT_SECONDS = float(os.getenv("SUBDOMAIN_TIMEOUT_SECONDS", "20"))
+# CT history changes slowly; a week-old list is still a useful answer, and it is
+# served immediately while a refresh runs behind it.
+SUBDOMAIN_CACHE_TTL = int(os.getenv("SUBDOMAIN_CACHE_TTL", str(7 * 24 * 3600)))
+SUBDOMAIN_ERROR_TTL = int(os.getenv("SUBDOMAIN_ERROR_TTL", "300"))
+SUBDOMAIN_MAX_NAMES = int(os.getenv("SUBDOMAIN_MAX_NAMES", "5000"))
+SUBDOMAIN_MAX_ROWS = int(os.getenv("SUBDOMAIN_MAX_ROWS", "10000"))
+SUBDOMAIN_MAX_CONCURRENT = int(os.getenv("SUBDOMAIN_MAX_CONCURRENT", "4"))
+# Concurrency caps simultaneous connections, not total volume. An agent sweeping
+# domains inside the 120/min MCP bucket would otherwise drive that many crt.sh
+# fetches, so the budget is counted globally across every surface.
+SUBDOMAIN_FETCH_PER_MINUTE = int(os.getenv("SUBDOMAIN_FETCH_PER_MINUTE", "30"))
+SUBDOMAIN_MCP_DEFAULT_LIMIT = int(os.getenv("SUBDOMAIN_MCP_DEFAULT_LIMIT", "200"))
+SUBDOMAIN_MCP_MAX_LIMIT = int(os.getenv("SUBDOMAIN_MCP_MAX_LIMIT", "2000"))

@@ -6,7 +6,7 @@ runs the lifespan when used as a context manager; without it the first request
 fails with "RuntimeError: Task group is not initialized".
 """
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -64,7 +64,7 @@ def test_initialize_handshake():
         assert "tools" in result["capabilities"]
 
 
-def test_tools_list_exposes_the_four_tools():
+def test_tools_list_exposes_the_five_tools():
     with TestClient(app) as client:
         client.post("/mcp", json=INIT, headers=MCP_HEADERS)
         response = _rpc(client, "tools/list")
@@ -74,6 +74,7 @@ def test_tools_list_exposes_the_four_tools():
             "dns_records",
             "ssl_certificate",
             "whoami_caller",
+            "subdomains",
         }
 
 
@@ -572,3 +573,102 @@ def test_whoami_caller_reports_an_error_when_location_lookup_fails():
             )
         payload = response.json()["result"]["structuredContent"]
         assert payload["error"] == "Location lookup failed"
+
+
+SUBDOMAIN_PAYLOAD = {
+    "names": [f"h{i}.example.com" for i in range(300)],
+    "count": 300,
+    "truncated": False,
+    "source": "crt.sh",
+    "fetched_at": "2026-09-29T00:00:00+00:00",
+    "stale": False,
+    "error": None,
+}
+
+
+def test_the_subdomains_tool_caps_the_list_and_reports_the_true_total():
+    """Context budget is the binding constraint: nasa.gov's 2,585 names are
+    roughly 20,000 tokens."""
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch(
+            "mcp_server.get_subdomains",
+            new_callable=AsyncMock,
+            return_value=SUBDOMAIN_PAYLOAD,
+        ):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "subdomains", "arguments": {"domain": "example.com"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert len(payload["names"]) == 200
+        assert payload["count"] == 300
+        assert payload["truncated"] is True
+
+
+def test_subdomains_limit_is_honoured_and_clamped():
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch(
+            "mcp_server.get_subdomains",
+            new_callable=AsyncMock,
+            return_value=SUBDOMAIN_PAYLOAD,
+        ):
+            small = _rpc(
+                client,
+                "tools/call",
+                {
+                    "name": "subdomains",
+                    "arguments": {"domain": "example.com", "limit": 5},
+                },
+            ).json()["result"]["structuredContent"]
+            huge = _rpc(
+                client,
+                "tools/call",
+                {
+                    "name": "subdomains",
+                    "arguments": {"domain": "example.com", "limit": 99999},
+                },
+            ).json()["result"]["structuredContent"]
+        assert len(small["names"]) == 5
+        assert len(huge["names"]) == 300  # clamped to the ceiling, then to what exists
+
+
+def test_a_subdomains_source_failure_is_an_error_never_an_empty_list():
+    """The most important test here. A model reading names=[] would tell the
+    user the domain has no subdomains — a confident falsehood built from an
+    outage. Mirrors dns_records refusing to answer an unsupported type."""
+    failed = dict(
+        SUBDOMAIN_PAYLOAD, names=[], count=0, error="source request timed out"
+    )
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch(
+            "mcp_server.get_subdomains", new_callable=AsyncMock, return_value=failed
+        ):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "subdomains", "arguments": {"domain": "example.com"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["error"]
+        assert "names" not in payload or payload["names"] == []
+
+
+def test_subdomains_tool_reports_staleness_so_a_model_can_qualify_its_answer():
+    stale = dict(SUBDOMAIN_PAYLOAD, stale=True)
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch(
+            "mcp_server.get_subdomains", new_callable=AsyncMock, return_value=stale
+        ):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "subdomains", "arguments": {"domain": "example.com"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["stale"] is True
+        assert payload["fetched_at"]

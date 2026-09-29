@@ -42,6 +42,7 @@ from config import (
     PUBLIC_BASE_URL,
     RATE_LIMIT_CLEANUP_INTERVAL,
     SITE_DOMAIN_FALLBACK,
+    SUBDOMAIN_ENABLED,
     TLD_UPDATE_RETRY_SECONDS,
 )
 from managers import HeaderManager
@@ -58,6 +59,7 @@ from lookup import (
     sanitize_log_input,
     tld_names_manager,
 )
+from subdomains import get_subdomains
 from security import (
     GeoBlockManager,
     IPBanManager,
@@ -312,7 +314,9 @@ def site_domain(request: Request) -> str:
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
-    view = build_view(response_data, is_self=is_self)
+    view = build_view(
+        response_data, is_self=is_self, subdomains_enabled=SUBDOMAIN_ENABLED
+    )
 
     # map.js labels the pins with the two IPs and draws the distance on the arc.
     # These ride along with the browser's map payload rather than polluting the
@@ -333,6 +337,7 @@ def render_page(request: Request, response_data: dict, is_self: bool):
         {
             "view": view,
             "view_map": map_data is not None,
+            "subdomains_enabled": SUBDOMAIN_ENABLED,
             "api_base": public_base_url(request),
             "site_domain": site_domain(request),
             "dns_rows": _dns_rows(response_data),
@@ -700,6 +705,27 @@ async def security_headers_middleware(request: Request, call_next):
     return response
 
 
+_SUBDOMAIN_MODES = ("exclude", "include", "only")
+
+
+def _subdomain_mode(raw: str | None) -> str:
+    """Validate the `subdomains` query parameter.
+
+    An unrecognised value is rejected rather than quietly treated as "exclude",
+    following dns_records in mcp_server.py: a value the server does not
+    understand must not be answered as though it were understood. "?subdomains=1"
+    is therefore an error, not a synonym for "include".
+    """
+    if raw is None:
+        return "exclude"
+    if not SUBDOMAIN_ENABLED or raw.lower() not in _SUBDOMAIN_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"subdomains must be one of: {', '.join(_SUBDOMAIN_MODES)}",
+        )
+    return raw.lower()
+
+
 @app.get("/healthz")
 async def healthz():
     """Liveness plus which GeoIP databases are actually serving lookups, so a
@@ -775,7 +801,7 @@ async def get_self_info(request: Request):
 
 
 @app.get("/{domain_ip}", response_model=None)
-async def get_ip_info(domain_ip: str, request: Request):
+async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None = None):
     started = time.perf_counter()
     # Normalize before the log line below so it records what the pipeline
     # actually resolves, not a raw pasted URL/path. gather() normalizes again
@@ -795,13 +821,39 @@ async def get_ip_info(domain_ip: str, request: Request):
         sanitize_log_input(domain_ip),
     )
 
+    mode = _subdomain_mode(subdomains)
+
+    if mode == "only":
+        # Skips gather() entirely: this mode exists so the page's toggle can ask
+        # for the list alone rather than re-running DNS, TLS, GeoIP and the map
+        # payload for data it already has.
+        if not domain_manager.is_valid_domain(domain_ip):
+            raise HTTPException(
+                status_code=400, detail="subdomains=only requires a domain name"
+            )
+        return {
+            "address": domain_ip,
+            "subdomains": await get_subdomains(domain_ip),
+        }
+
     # The visitor's own location only feeds the distance line, so it runs
     # alongside the target lookup rather than after it.
     origin_task = asyncio.create_task(lookup_location(client_ip))
+    # An IP target burns a budget slot and a crt.sh round trip that cannot
+    # possibly match, so `include` gets the same domain gate `only` already
+    # has above -- just without rejecting the request: `include` is additive,
+    # so an IP still gets its normal lookup, only without a subdomains fetch.
+    subdomain_task = (
+        asyncio.create_task(get_subdomains(domain_ip))
+        if mode == "include" and domain_manager.is_valid_domain(domain_ip)
+        else None
+    )
     try:
         data = await gather(domain_ip)
     except PrivateAddressError:
         origin_task.cancel()
+        if subdomain_task is not None:
+            subdomain_task.cancel()
         raise HTTPException(
             status_code=400,
             detail="Private or reserved IP addresses are not allowed",
@@ -827,6 +879,9 @@ async def get_ip_info(domain_ip: str, request: Request):
         "origin": origin,
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
+
+    if subdomain_task is not None:
+        response_data["subdomains"] = await subdomain_task
 
     user_agent = request.headers.get("user-agent", "")
     if BrowserDetector.is_browser(user_agent):

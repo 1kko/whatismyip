@@ -471,3 +471,45 @@ class TestSelfFlag:
     def test_non_self_lookup_is_flagged(self):
         view = build_view({"address": "1.2.3.4", "location": {}}, is_self=False)
         assert view["is_self"] is False
+
+
+def test_a_domain_lookup_offers_the_subdomains_accordion():
+    view = build_view(
+        {
+            # "a" holds {"ip": ...} dicts, not bare strings -- see IP_RESPONSE /
+            # DOMAIN_RESPONSE above; _tags() reads first_a["ip"].
+            "address": "example.com",
+            "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
+            "location": {},
+        },
+        is_self=False,
+    )
+    ids = [item["id"] for item in view["accordions"]]
+    assert "subdomains" in ids
+
+
+def test_an_ip_lookup_does_not_offer_the_subdomains_accordion():
+    """An IP address has no subdomains; offering the panel would invite a
+    request that can only fail."""
+    view = build_view(
+        {"address": "8.8.8.8", "domain": {}, "location": {}}, is_self=False
+    )
+    ids = [item["id"] for item in view["accordions"]]
+    assert "subdomains" not in ids
+
+
+def test_the_kill_switch_removes_the_subdomains_accordion_for_a_domain():
+    """Review M2. SUBDOMAIN_ENABLED=false must not leave the page still
+    offering a panel whose only possible outcome is a 400 from the route --
+    the flag gets flipped exactly when something is on fire."""
+    view = build_view(
+        {
+            "address": "example.com",
+            "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
+            "location": {},
+        },
+        is_self=False,
+        subdomains_enabled=False,
+    )
+    ids = [item["id"] for item in view["accordions"]]
+    assert "subdomains" not in ids

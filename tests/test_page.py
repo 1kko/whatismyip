@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -507,3 +508,214 @@ class TestDesignTokens:
 
     def test_no_light_mode_branch(self):
         assert "prefers-color-scheme" not in CSS.read_text(encoding="utf-8")
+
+
+# gather() is patched throughout this class. tests/test_page.py has no mocking
+# layer — every existing test here uses an IP target — and "/example.com" would
+# otherwise drive real DNS, a real TLS handshake and a real RDAP query, putting
+# the network on the suite's critical path. The payload below is the shape
+# gather() returns for a domain.
+GATHERED = {
+    "address": "example.com",
+    # "a" holds the same shape DomainManager.get_dns_records() returns
+    # (managers.py) -- dicts with an "ip" key, not bare strings -- because
+    # viewmodel._tags() reads first_a["ip"] when rendering an HTML page for a
+    # domain target.
+    "domain": {
+        "a": [{"ip": "93.184.216.34", "ttl": 300}],
+        "mx": [],
+        "ns": [],
+        "txt": [],
+    },
+    "location": {"country_code": "US", "country_name": "United States"},
+    "whois": {"registrar": "Example Registrar"},
+    "ssl": None,
+    "resolved_ip": "93.184.216.34",
+    "reverse_dns": None,
+}
+
+
+class TestSubdomainsParameter:
+    FAKE = {
+        "names": ["a.example.com"],
+        "count": 1,
+        "truncated": False,
+        "source": "crt.sh",
+        "fetched_at": "2026-09-29T00:00:00+00:00",
+        "stale": False,
+        "error": None,
+    }
+
+    def test_absent_parameter_leaves_the_response_unchanged(self):
+        """The regression test that guards the whole design."""
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch("main.get_subdomains", new_callable=AsyncMock) as fetch:
+                response = client.get("/example.com", headers=JSON_UA)
+        assert response.status_code == 200
+        assert "subdomains" not in response.json()
+        fetch.assert_not_called()
+
+    def test_include_adds_the_key_without_disturbing_the_others(self):
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=self.FAKE
+            ):
+                plain = client.get("/example.com", headers=JSON_UA).json()
+                enriched = client.get(
+                    "/example.com?subdomains=include", headers=JSON_UA
+                ).json()
+        assert enriched["subdomains"]["names"] == ["a.example.com"]
+        for key in plain:
+            if key not in ("datetime", "elapsed_ms"):
+                assert enriched[key] == plain[key]
+
+    def test_include_on_an_ip_target_skips_the_fetch_but_still_looks_up(self):
+        """Review M1. `only` already rejects an IP target outright (see
+        test_only_rejects_an_ip_address); `include` is additive and must
+        not: an IP still gets its normal lookup, just without a subdomains
+        fetch that can only fail and would otherwise burn a budget slot and
+        a crt.sh round trip for nothing.
+        """
+        ip_gathered = {**GATHERED, "address": "8.8.8.8", "domain": {}}
+        with patch("main.gather", new_callable=AsyncMock, return_value=ip_gathered):
+            with patch("main.get_subdomains", new_callable=AsyncMock) as fetch:
+                response = client.get("/8.8.8.8?subdomains=include", headers=JSON_UA)
+        assert response.status_code == 200
+        assert "subdomains" not in response.json()
+        fetch.assert_not_called()
+
+    def test_only_returns_json_to_a_browser_user_agent(self):
+        """Content negotiation is user-agent based, so a fetch() from our own
+        page would otherwise receive a full HTML document."""
+        browser = {"user-agent": "Mozilla/5.0 (Macintosh)"}
+        with patch(
+            "main.get_subdomains", new_callable=AsyncMock, return_value=self.FAKE
+        ):
+            response = client.get("/example.com?subdomains=only", headers=browser)
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json()["subdomains"]["names"] == ["a.example.com"]
+
+    def test_only_skips_the_rest_of_the_pipeline(self):
+        with patch("main.gather", new_callable=AsyncMock) as gather_mock:
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=self.FAKE
+            ):
+                response = client.get("/example.com?subdomains=only", headers=JSON_UA)
+        gather_mock.assert_not_called()
+        assert set(response.json()) == {"address", "subdomains"}
+
+    def test_only_rejects_an_ip_address(self):
+        response = client.get("/8.8.8.8?subdomains=only", headers=JSON_UA)
+        assert response.status_code == 400
+
+    def test_only_rejects_an_invalid_domain(self):
+        response = client.get("/not-a-domain?subdomains=only", headers=JSON_UA)
+        assert response.status_code == 400
+
+    def test_an_unrecognised_value_is_rejected_rather_than_ignored(self):
+        response = client.get("/example.com?subdomains=1", headers=JSON_UA)
+        assert response.status_code == 400
+        assert "include" in response.json()["detail"]
+
+    def test_exclude_is_accepted_explicitly(self):
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            response = client.get("/example.com?subdomains=exclude", headers=JSON_UA)
+        assert response.status_code == 200
+        assert "subdomains" not in response.json()
+
+    def test_the_parameter_is_rejected_when_the_feature_is_disabled(self):
+        """SUBDOMAIN_ENABLED=false must turn the surface off, not leave one that
+        accepts the parameter and returns nothing useful."""
+        with patch("main.SUBDOMAIN_ENABLED", False):
+            response = client.get("/example.com?subdomains=include", headers=JSON_UA)
+        assert response.status_code == 400
+
+    def test_disabling_the_feature_leaves_an_ordinary_lookup_untouched(self):
+        with patch("main.SUBDOMAIN_ENABLED", False):
+            with patch(
+                "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
+            ):
+                response = client.get("/example.com", headers=JSON_UA)
+        assert response.status_code == 200
+        assert "subdomains" not in response.json()
+
+
+class TestSubdomainPanel:
+    """BROWSER_UA is required on every request here. Content negotiation is
+    user-agent based, and TestClient's default UA ("testclient") is not a
+    browser — without the header these calls return JSON and every HTML
+    assertion below fails. GATHERED and the gather() patch come from
+    TestSubdomainsParameter's rationale: no network in the suite.
+    """
+
+    def test_the_panel_renders_collapsed_and_inert_for_a_domain(self):
+        """Discoverable but costing nothing: no fetch happens until it opens."""
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch("main.get_subdomains", new_callable=AsyncMock) as fetch:
+                html = client.get("/example.com", headers=BROWSER_UA).text
+        assert 'id="acc-subdomains"' in html
+        assert "?subdomains=include" in html  # the no-JavaScript path
+        fetch.assert_not_called()
+
+    def test_the_rendered_list_is_capped(self):
+        """Review Focus 3. nasa.gov yields 2,585 names (~64 KiB of markup); the
+        rendered <ul> must cap what it shows and say how many there really are.
+
+        Scoped to the <ul id="subdomains-list"> markup rather than the whole
+        page: main.py separately embeds the complete, uncapped response_data
+        (subdomains included) as pageData for the Raw JSON accordion -- that
+        is that feature's job (showing the true raw response) and is out of
+        scope here, so h499 legitimately still appears elsewhere in `html`.
+        """
+        many = {
+            "names": [f"h{i}.example.com" for i in range(500)],
+            "count": 500,
+            "truncated": False,
+            "source": "crt.sh",
+            "fetched_at": "2026-09-29T00:00:00+00:00",
+            "stale": False,
+            "error": None,
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=many
+            ):
+                html = client.get(
+                    "/example.com?subdomains=include", headers=BROWSER_UA
+                ).text
+        list_markup = html.split('id="subdomains-list"')[1].split("</ul>")[0]
+        assert list_markup.count("h0.example.com") == 1
+        assert "h499.example.com" not in list_markup
+        assert "500" in html
+        assert "500" in html
+
+    def test_a_failed_fetch_is_reported_not_rendered_as_empty(self):
+        """Review I2. static/js/app.js reaches this same JSON endpoint from
+        the browser via fetch(); a non-200 (429 rate limit, 403 ban, 400 when
+        the feature is disabled) must never be read as "no subdomains" --
+        response.ok must gate before the payload is used, and a payload with
+        no `subdomains` key must not fall through to an empty {} that
+        renders "undefined found". No JS runtime in this suite (see the
+        map.js/fingerprint.js tests above), so this checks the source text
+        the same way those do.
+        """
+        js = Path("static/js/app.js").read_text(encoding="utf-8")
+        assert "response.ok" in js
+        assert "payload.subdomains || {}" not in js
+
+    def test_disabling_the_feature_removes_the_panel_and_the_tool_advertisement(self):
+        """Review M2. SUBDOMAIN_ENABLED=false already turns off the route and
+        the MCP tool registration (main.py, mcp_server.py); the page must not
+        keep selling a feature that is off -- no accordion to click, and no
+        discovery meta tag telling an agent the tool still exists. The flag
+        gets flipped exactly when something is on fire, the worst moment to
+        find the UI still advertising it.
+        """
+        with patch("main.SUBDOMAIN_ENABLED", False):
+            with patch(
+                "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
+            ):
+                html = client.get("/example.com", headers=BROWSER_UA).text
+        assert 'id="acc-subdomains"' not in html
+        meta = html.split('name="mcp-tools"')[1].split(">")[0]
+        assert "subdomains" not in meta

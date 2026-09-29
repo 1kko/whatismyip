@@ -27,11 +27,13 @@ from main import (
     RateLimiter,
     SuspiciousPatternDetector,
     WhitelistManager,
+    _suspicious_path_is_ordinary,
     app,
     get_client_ip,
     ip_ban_manager,
     rate_limiter,
     sanitize_log_input,
+    whitelist_manager,
 )
 from security import _extract_forwarded_ip
 
@@ -1256,3 +1258,13 @@ class TestIpRulesInTheMiddleware:
 
     def test_admin_endpoint_needs_the_key(self):
         assert client.get("/admin/ip-rules").status_code == 404
+
+
+def test_subdomains_parameter_does_not_change_path_classification():
+    """The whole point of a query parameter rather than a new route: the
+    middleware reads request.url.path (main.py:506), which excludes the query
+    string, so WhitelistManager classifies this exactly as it does today. A new
+    path shape would need lookup_patterns widened, and without that a target
+    matching a detector rule would ban a legitimate visitor for 24 hours."""
+    assert whitelist_manager.is_lookup("/example.com")
+    assert _suspicious_path_is_ordinary("/example.com")

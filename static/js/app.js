@@ -132,3 +132,78 @@ rawAccordion.addEventListener("toggle", () => {
   });
   document.body.appendChild(script);
 });
+
+// Opening the accordion is the opt-in: nothing is requested until then, so an
+// ordinary lookup never causes an outbound crt.sh fetch.
+const subdomainAccordion = document.getElementById("acc-subdomains");
+const subdomainSlot = document.getElementById("subdomains-slot");
+let subdomainsBooted = false;
+
+if (subdomainAccordion && subdomainSlot) {
+  subdomainAccordion.addEventListener("toggle", async () => {
+    if (!subdomainAccordion.open || subdomainsBooted) {
+      return;
+    }
+    subdomainsBooted = true;
+    subdomainSlot.textContent = "Loading…";
+
+    try {
+      const target = subdomainSlot.dataset.target;
+      const response = await fetch(
+        `/${encodeURIComponent(target)}?subdomains=only`,
+        { headers: { Accept: "application/json" } },
+      );
+      // A non-200 (429 rate limit, 403 ban, 400 when the feature is
+      // disabled) must never be read as "no subdomains" -- and a payload
+      // with no `subdomains` object is the same confident-falsehood risk,
+      // so both bail out with an explicit failure rather than falling
+      // through to an empty {} that renders "undefined found".
+      if (!response.ok) {
+        subdomainSlot.textContent = "Lookup failed.";
+        return;
+      }
+      const payload = await response.json();
+      const data = payload.subdomains;
+      if (!data) {
+        subdomainSlot.textContent = "Lookup failed.";
+        return;
+      }
+
+      if (data.error) {
+        subdomainSlot.textContent = `Lookup failed: ${data.error}`;
+        return;
+      }
+
+      const names = data.names || [];
+      const shown = names.slice(0, 100);
+      subdomainSlot.textContent = "";
+
+      const meta = document.createElement("p");
+      meta.className = "subdomains__meta";
+      meta.textContent =
+        `${data.count} found` + (data.stale ? " · refreshing" : "");
+      subdomainSlot.appendChild(meta);
+
+      const list = document.createElement("ul");
+      list.className = "subdomains__list";
+      // textContent, never innerHTML: these names come from third-party
+      // certificates and are not ours to trust as markup.
+      for (const name of shown) {
+        const item = document.createElement("li");
+        item.textContent = name;
+        list.appendChild(item);
+      }
+      subdomainSlot.appendChild(list);
+
+      if (names.length > shown.length) {
+        const more = document.createElement("p");
+        more.className = "subdomains__meta";
+        more.textContent =
+          `Showing ${shown.length} of ${data.count}. The full list is in the JSON response.`;
+        subdomainSlot.appendChild(more);
+      }
+    } catch (err) {
+      subdomainSlot.textContent = "Lookup failed.";
+    }
+  });
+}

@@ -642,3 +642,38 @@ table.records--dns td:nth-child(4) {
   table.records--dns th:nth-child(4),
   table.records--dns td:nth-child(4) { width: 52px; }
 }
+
+.subdomains__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 22rem;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.subdomains__list li {
+  padding: 0.125rem 0;
+  word-break: break-all;
+}
+
+.subdomains__meta {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  margin: 0.5rem 0;
+}
+
+.subdomains__error {
+  color: var(--danger);
+  font-size: 0.8125rem;
+  margin: 0.5rem 0;
+}
+
+/* The crt.sh attribution is the first link to appear inside .api-note, and no
+   link colour is defined for it — the browser default is near-invisible on this
+   background. Attribution is mandatory, so it has to be readable. */
+.api-note a {
+  color: var(--accent);
+}

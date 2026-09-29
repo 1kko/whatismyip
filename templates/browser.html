@@ -16,7 +16,7 @@
     <meta name="mcp-endpoint" content="{{ api_base }}mcp">
     <meta name="mcp-transport" content="streamable-http">
     <meta name="mcp-auth" content="none">
-    <meta name="mcp-tools" content="lookup, dns_records, ssl_certificate, whoami_caller">
+    <meta name="mcp-tools" content="lookup, dns_records, ssl_certificate, whoami_caller{% if subdomains_enabled %}, subdomains{% endif %}">
     <meta name="mcp-install" content="claude mcp add --transport http whatismyip {{ api_base }}mcp">
     <meta name="mcp-note" content="whoami_caller returns whoever opened the connection: your own machine from a local client such as Claude Code, a provider datacenter from a hosted one such as claude.ai. The server cannot tell which, so do not report it as the user's IP without checking.">
     <meta name="api-endpoint" content="{{ api_base }}{target}">
@@ -165,6 +165,36 @@
                     </div>
                     <p class="api-note tone-muted">Tools: lookup, dns_records, ssl_certificate, whoami_caller. whoami_caller reports whoever opened the connection — your own machine from a local client like Claude Code, a datacenter from a hosted one like claude.ai. It cannot tell which, so open this page in a browser when you need certainty.</p>
                     <div id="raw-json"></div>
+                    {% elif item.id == 'subdomains' %}
+                    <p class="api-note">
+                        Names seen in public Certificate Transparency logs. This is a
+                        passive lookup &mdash; nothing is sent to {{ view.target }}.
+                        Source: <a href="https://crt.sh" rel="noreferrer">crt.sh</a>.
+                    </p>
+                    {% if view.subdomains %}
+                      {% if view.subdomains.error %}
+                      <p class="subdomains__error">Lookup failed: {{ view.subdomains.error }}</p>
+                      {% else %}
+                      <p class="subdomains__meta">
+                          {{ view.subdomains.count }} found{% if view.subdomains.stale %} · refreshing{% endif %}
+                      </p>
+                      <ul class="subdomains__list" id="subdomains-list">
+                          {% for name in view.subdomains_shown %}<li>{{ name }}</li>{% endfor %}
+                      </ul>
+                      {% if view.subdomains.count > view.subdomains_shown|length %}
+                      <p class="subdomains__meta">
+                          Showing {{ view.subdomains_shown|length }} of {{ view.subdomains.count }}.
+                          The full list is in the JSON response.
+                      </p>
+                      {% endif %}
+                      {% endif %}
+                    {% else %}
+                      <div id="subdomains-slot" data-target="{{ view.target }}">
+                          <noscript>
+                              <a href="/{{ view.target }}?subdomains=include">Load subdomains</a>
+                          </noscript>
+                      </div>
+                    {% endif %}
                     {% elif item.id == 'dns' %}
                     <table class="records records--dns">
                         <thead><tr><th>TYPE</th><th>NAME</th><th>VALUE</th><th>TTL</th></tr></thead>
