@@ -16,17 +16,27 @@ would load the GeoIP database into every test run that touches a subdomain.
 """
 
 import asyncio
+import collections
+import datetime
 import json
+import logging
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
 from config import (
+    SUBDOMAIN_CACHE_TTL,
+    SUBDOMAIN_ERROR_TTL,
+    SUBDOMAIN_FETCH_PER_MINUTE,
+    SUBDOMAIN_MAX_CONCURRENT,
     SUBDOMAIN_MAX_NAMES,
     SUBDOMAIN_SOURCE_URL,
     SUBDOMAIN_TIMEOUT_SECONDS,
     SUBDOMAIN_USER_AGENT,
 )
+from subdomain_store import SubdomainStore
 
 SOURCE = "crt.sh"
 
@@ -123,5 +133,171 @@ async def fetch_from_source(domain: str) -> tuple[list[str], int]:
     try:
         payload = await asyncio.to_thread(_fetch_sync, domain)
     except Exception as exc:
-        raise SubdomainError(str(exc)) from exc
+        # Some exceptions carry no message (bare TimeoutError() from a stdlib
+        # timeout has an empty str()) — fall back to the class name so a
+        # caller checking `error` for truthiness never sees an empty string.
+        raise SubdomainError(str(exc) or type(exc).__name__) from exc
     return normalize_names(extract_names(payload), domain)
+
+
+class _MinuteBudget:
+    """At most `limit` outbound fetches per rolling minute, across every surface.
+
+    The concurrency semaphore caps simultaneous connections but not total
+    volume, and the MCP tool makes fan-out cheap: an agent sweeping domains
+    inside the 120/min MCP bucket would otherwise drive that many crt.sh
+    fetches. Event-loop only, so it needs no lock.
+    """
+
+    def __init__(self, limit: int):
+        self._limit = limit
+        self._hits: collections.deque[float] = collections.deque()
+
+    def take(self) -> bool:
+        now = time.monotonic()
+        while self._hits and now - self._hits[0] > 60:
+            self._hits.popleft()
+        if len(self._hits) >= self._limit:
+            return False
+        self._hits.append(now)
+        return True
+
+
+_store = SubdomainStore()
+_semaphore = asyncio.Semaphore(SUBDOMAIN_MAX_CONCURRENT)
+_budget = _MinuteBudget(SUBDOMAIN_FETCH_PER_MINUTE)
+# Keyed on the domain alone, so a page request and an MCP call for the same cold
+# domain share one outbound fetch.
+_inflight: dict[str, asyncio.Future] = {}
+# Background refreshes are held here until they finish: without a strong
+# reference the event loop may collect a task mid-flight.
+_background: set[asyncio.Task] = set()
+# Failures live here, never in SQLite — a transient outage must not become a
+# durable empty answer.
+_failures: dict[str, float] = {}
+
+
+def reset_state(store_path: str | None = None) -> None:
+    """Rebuild module state. Tests only."""
+    global _store, _budget, _inflight, _failures
+    _store.close()
+    _store = SubdomainStore(path=store_path) if store_path else SubdomainStore()
+    _budget = _MinuteBudget(SUBDOMAIN_FETCH_PER_MINUTE)
+    _inflight = {}
+    _failures = {}
+
+
+async def drain_background() -> None:
+    """Await outstanding background refreshes. Tests only."""
+    while _background:
+        await asyncio.gather(*list(_background), return_exceptions=True)
+
+
+def _result(
+    names: list[str],
+    count: int,
+    truncated: bool,
+    fetched_at: float | None,
+    stale: bool,
+    error: str | None,
+) -> dict:
+    return {
+        "names": names,
+        "count": count,
+        "truncated": truncated,
+        "source": SOURCE,
+        "fetched_at": (
+            datetime.datetime.fromtimestamp(
+                fetched_at, tz=datetime.timezone.utc
+            ).isoformat()
+            if fetched_at
+            else None
+        ),
+        "stale": stale,
+        "error": error,
+    }
+
+
+async def _fetch_and_store(domain: str) -> tuple[list[str], int]:
+    """One budgeted, single-flighted fetch that writes through to the store."""
+    existing = _inflight.get(domain)
+    if existing is not None:
+        return await existing
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    _inflight[domain] = future
+    try:
+        if not _budget.take():
+            raise SubdomainError("source request budget exhausted; try again shortly")
+        async with _semaphore:
+            names, count = await fetch_from_source(domain)
+        await asyncio.to_thread(
+            _store.put, domain, names, count, count > len(names), SOURCE
+        )
+        future.set_result((names, count))
+        return names, count
+    except BaseException as exc:
+        if not future.done():
+            future.set_exception(exc)
+        raise
+    finally:
+        _inflight.pop(domain, None)
+        # Retrieve the exception so a future nobody else awaited does not log
+        # "exception was never retrieved" when it is collected. Guarded on
+        # cancelled(): .exception() re-raises CancelledError on a cancelled
+        # future, which would replace the real error with a spurious one.
+        if future.done() and not future.cancelled():
+            future.exception()
+
+
+def _schedule_refresh(domain: str) -> None:
+    async def run():
+        try:
+            await _fetch_and_store(domain)
+        except SubdomainError as exc:
+            # The stale entry stays exactly where it is. A bad refresh must
+            # never destroy a good answer.
+            logging.info("Subdomain refresh failed for %s: %s", domain, exc)
+        except Exception:
+            logging.exception("Subdomain refresh crashed for %s", domain)
+
+    task = asyncio.create_task(run())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def get_subdomains(domain: str) -> dict:
+    """Subdomains of `domain`, from the store when possible.
+
+    Stale-while-revalidate on read, with no scheduler job. GeoIP and the public
+    suffix list are refreshed ahead of time because every request reads them;
+    this store is filled and read on demand, so a periodic sweep would spend
+    crt.sh's capacity re-fetching domains nobody asked about again.
+    """
+    domain = domain.strip().lower().rstrip(".")
+    entry = await asyncio.to_thread(_store.get, domain)
+
+    if entry is not None:
+        stale = entry.age() > SUBDOMAIN_CACHE_TTL
+        if stale:
+            _schedule_refresh(domain)
+        return _result(
+            entry.names, entry.count, entry.truncated, entry.fetched_at, stale, None
+        )
+
+    failed_at = _failures.get(domain)
+    if failed_at and time.time() - failed_at < SUBDOMAIN_ERROR_TTL:
+        return _result([], 0, False, None, False, "lookup failed recently")
+
+    try:
+        names, count = await _fetch_and_store(domain)
+    except SubdomainError as exc:
+        _failures[domain] = time.time()
+        return _result([], 0, False, None, False, str(exc))
+    except Exception:
+        logging.exception("Subdomain lookup crashed for %s", domain)
+        _failures[domain] = time.time()
+        return _result([], 0, False, None, False, "lookup failed")
+
+    return _result(names, count, count > len(names), time.time(), False, None)

@@ -128,3 +128,109 @@ class TestFetchFromSource:
             names, total = await subdomains.fetch_from_source("example.com")
         assert names == []
         assert total == 0
+
+
+class TestGetSubdomains:
+    @pytest.fixture(autouse=True)
+    def isolated(self, tmp_path):
+        subdomains.reset_state(store_path=str(tmp_path / "s.sqlite3"))
+        yield
+        subdomains.reset_state()
+
+    @pytest.mark.asyncio
+    async def test_a_miss_fetches_and_stores(self):
+        with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS) as f:
+            first = await subdomains.get_subdomains("example.com")
+            second = await subdomains.get_subdomains("example.com")
+        assert f.call_count == 1  # second call served from the store
+        assert first["names"] == second["names"]
+        assert first["stale"] is False
+        assert first["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_stale_entry_is_served_immediately_and_refreshed_behind(self):
+        with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS):
+            await subdomains.get_subdomains("example.com")
+        with patch.object(subdomains, "SUBDOMAIN_CACHE_TTL", -1):
+            with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS) as f:
+                result = await subdomains.get_subdomains("example.com")
+                assert result["stale"] is True
+                assert result["names"]  # served without waiting
+                await subdomains.drain_background()
+                assert f.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_refresh_leaves_the_stale_entry_intact(self):
+        with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS):
+            good = await subdomains.get_subdomains("example.com")
+        with patch.object(subdomains, "SUBDOMAIN_CACHE_TTL", -1):
+            with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
+                await subdomains.get_subdomains("example.com")
+                await subdomains.drain_background()
+        with patch.object(subdomains, "_fetch_sync", side_effect=AssertionError):
+            after = await subdomains.get_subdomains("example.com")
+        assert after["names"] == good["names"]
+
+    @pytest.mark.asyncio
+    async def test_a_failure_on_a_cold_domain_reports_error_not_empty(self):
+        """A model or a page reading names=[] would state as fact that the
+        domain has no subdomains. Failure must be distinguishable."""
+        with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
+            result = await subdomains.get_subdomains("cold.example")
+        assert result["error"]
+        assert result["names"] == []
+        assert result["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_failure_is_not_written_to_the_durable_store(self):
+        with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
+            await subdomains.get_subdomains("cold.example")
+        assert subdomains._store.get("cold.example") is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cold_requests_make_one_outbound_fetch(self):
+        """Review Focus 4. Single-flight is keyed on the domain, not on the
+        surface, so a page request and an MCP call coalesce with each other.
+
+        `_fetch_sync` runs via asyncio.to_thread, so it can block on a plain
+        threading.Event without stalling the loop the tasks live on.
+        """
+        import asyncio as aio
+        import threading
+
+        gate = threading.Event()
+        calls = []
+
+        def slow(domain):
+            calls.append(domain)
+            gate.wait(timeout=5)
+            return CRTSH_ROWS
+
+        with patch.object(subdomains, "_fetch_sync", side_effect=slow):
+            tasks = [
+                aio.create_task(subdomains.get_subdomains("example.com"))
+                for _ in range(5)
+            ]
+            await aio.sleep(0.1)  # let every task reach the single-flight map
+            gate.set()
+            results = await aio.gather(*tasks)
+
+        assert len(calls) == 1
+        assert all(r["names"] == results[0]["names"] for r in results)
+
+    @pytest.mark.asyncio
+    async def test_the_outbound_budget_refuses_a_cold_fetch_once_exhausted(self):
+        with patch.object(subdomains, "_budget", subdomains._MinuteBudget(0)):
+            with patch.object(subdomains, "_fetch_sync", side_effect=AssertionError):
+                result = await subdomains.get_subdomains("cold.example")
+        assert result["error"]
+        assert result["names"] == []
+
+    @pytest.mark.asyncio
+    async def test_the_budget_does_not_block_a_cached_answer(self):
+        with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS):
+            await subdomains.get_subdomains("example.com")
+        with patch.object(subdomains, "_budget", subdomains._MinuteBudget(0)):
+            result = await subdomains.get_subdomains("example.com")
+        assert result["names"]
+        assert result["error"] is None
