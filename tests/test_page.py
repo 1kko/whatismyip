@@ -594,7 +594,8 @@ class TestSubdomainsParameter:
         assert "include" in response.json()["detail"]
 
     def test_exclude_is_accepted_explicitly(self):
-        response = client.get("/example.com?subdomains=exclude", headers=JSON_UA)
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            response = client.get("/example.com?subdomains=exclude", headers=JSON_UA)
         assert response.status_code == 200
         assert "subdomains" not in response.json()
 
