@@ -28,6 +28,7 @@ from config import (
     WHOIS_TIMEOUT_SECONDS,
 )
 from lookup import PrivateAddressError, gather, lookup_location, sanitize_log_input
+from rdap import NOT_REGISTERED
 from security import client_ip_from_scope
 from subdomains import get_subdomains
 
@@ -76,8 +77,17 @@ def compact_network(loc: dict) -> dict:
 
 def compact_registration(whois: dict | None) -> dict:
     whois = whois or {}
-    if whois.get("error"):
-        return {"error": whois["error"]}
+    error = whois.get("error")
+    # "not registered" is an answer, not a failure, and the distinction matters
+    # more to a model than to a person: told `error`, it reports that the lookup
+    # broke and the user should try again; told `registered: false`, it can say
+    # the name has no registration -- which is simply what a subdomain looks
+    # like. Same reasoning as dns_records refusing to return {} for a record
+    # type this server never queried.
+    if error == NOT_REGISTERED:
+        return {"registered": False, "name": whois.get("name")}
+    if error:
+        return {"error": error}
     return {
         "source": whois.get("source"),
         "name": whois.get("name"),

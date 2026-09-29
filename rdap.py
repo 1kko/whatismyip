@@ -48,6 +48,15 @@ import whoisit
 # running in the thread pool cannot race the first bootstrap against each other.
 _bootstrap_lock = threading.Lock()
 
+# An authoritative "this name has no registration" is a successful lookup with a
+# negative answer, not a failure. It travels in `error` so consumers that only
+# ask "is there registration data?" keep working unchanged, but anything that
+# reports the outcome to a person or a model compares against this sentinel
+# instead, because the two read very differently: a subdomain like
+# docs.github.com is not registered and never will be, while a timeout means we
+# simply do not know.
+NOT_REGISTERED = "not registered"
+
 # Fields we surface, in the order the template renders them. Anything empty is
 # dropped by whois_display(), so IP results simply omit the domain-only rows.
 CANONICAL_FIELDS = (
@@ -175,7 +184,7 @@ def lookup_rdap(target: str) -> dict | None:
     except whoisit.errors.ResourceDoesNotExist:
         # RDAP authoritatively says the name/allocation is unregistered; do not
         # waste a WHOIS round-trip re-confirming it.
-        return {"error": "not registered"}
+        return {"error": NOT_REGISTERED}
     except Exception:
         logging.info("RDAP lookup failed for %s; trying WHOIS", target)
         return None

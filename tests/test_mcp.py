@@ -672,3 +672,34 @@ def test_subdomains_tool_reports_staleness_so_a_model_can_qualify_its_answer():
         payload = response.json()["result"]["structuredContent"]
         assert payload["stale"] is True
         assert payload["fetched_at"]
+
+
+class TestRegistrationShaping:
+    """`not registered` is an answer, not a failure, and the distinction costs
+    more here than in the browser: handed `error`, a model reports that the
+    lookup broke and suggests retrying; handed `registered: false`, it can say
+    the name has no registration -- which is simply what a subdomain is. Same
+    reasoning as dns_records refusing to return {} for a type it never queried.
+    """
+
+    def test_a_real_failure_is_still_an_error(self):
+        from mcp_server import compact_registration
+
+        out = compact_registration({"error": "WHOIS lookup timed out"})
+        assert out == {"error": "WHOIS lookup timed out"}
+
+    def test_not_registered_is_not_reported_as_an_error(self):
+        from mcp_server import compact_registration
+
+        out = compact_registration({"error": "not registered", "name": "x.example.com"})
+        assert "error" not in out
+        assert out["registered"] is False
+        assert out["name"] == "x.example.com"
+
+    def test_a_successful_record_is_unchanged(self):
+        from mcp_server import compact_registration
+
+        out = compact_registration({"source": "rdap", "registrar": "Example Registrar"})
+        assert out["registrar"] == "Example Registrar"
+        assert "registered" not in out
+        assert "error" not in out
