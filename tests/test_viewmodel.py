@@ -471,3 +471,28 @@ class TestSelfFlag:
     def test_non_self_lookup_is_flagged(self):
         view = build_view({"address": "1.2.3.4", "location": {}}, is_self=False)
         assert view["is_self"] is False
+
+
+def test_a_domain_lookup_offers_the_subdomains_accordion():
+    view = build_view(
+        {
+            # "a" holds {"ip": ...} dicts, not bare strings -- see IP_RESPONSE /
+            # DOMAIN_RESPONSE above; _tags() reads first_a["ip"].
+            "address": "example.com",
+            "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
+            "location": {},
+        },
+        is_self=False,
+    )
+    ids = [item["id"] for item in view["accordions"]]
+    assert "subdomains" in ids
+
+
+def test_an_ip_lookup_does_not_offer_the_subdomains_accordion():
+    """An IP address has no subdomains; offering the panel would invite a
+    request that can only fail."""
+    view = build_view(
+        {"address": "8.8.8.8", "domain": {}, "location": {}}, is_self=False
+    )
+    ids = [item["id"] for item in view["accordions"]]
+    assert "subdomains" not in ids

@@ -517,7 +517,16 @@ class TestDesignTokens:
 # gather() returns for a domain.
 GATHERED = {
     "address": "example.com",
-    "domain": {"a": ["93.184.216.34"], "mx": [], "ns": [], "txt": []},
+    # "a" holds the same shape DomainManager.get_dns_records() returns
+    # (managers.py) -- dicts with an "ip" key, not bare strings -- because
+    # viewmodel._tags() reads first_a["ip"] when rendering an HTML page for a
+    # domain target.
+    "domain": {
+        "a": [{"ip": "93.184.216.34", "ttl": 300}],
+        "mx": [],
+        "ns": [],
+        "txt": [],
+    },
     "location": {"country_code": "US", "country_name": "United States"},
     "whois": {"registrar": "Example Registrar"},
     "ssl": None,
@@ -614,3 +623,53 @@ class TestSubdomainsParameter:
                 response = client.get("/example.com", headers=JSON_UA)
         assert response.status_code == 200
         assert "subdomains" not in response.json()
+
+
+class TestSubdomainPanel:
+    """BROWSER_UA is required on every request here. Content negotiation is
+    user-agent based, and TestClient's default UA ("testclient") is not a
+    browser — without the header these calls return JSON and every HTML
+    assertion below fails. GATHERED and the gather() patch come from
+    TestSubdomainsParameter's rationale: no network in the suite.
+    """
+
+    def test_the_panel_renders_collapsed_and_inert_for_a_domain(self):
+        """Discoverable but costing nothing: no fetch happens until it opens."""
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch("main.get_subdomains", new_callable=AsyncMock) as fetch:
+                html = client.get("/example.com", headers=BROWSER_UA).text
+        assert 'id="acc-subdomains"' in html
+        assert "?subdomains=include" in html  # the no-JavaScript path
+        fetch.assert_not_called()
+
+    def test_the_rendered_list_is_capped(self):
+        """Review Focus 3. nasa.gov yields 2,585 names (~64 KiB of markup); the
+        rendered <ul> must cap what it shows and say how many there really are.
+
+        Scoped to the <ul id="subdomains-list"> markup rather than the whole
+        page: main.py separately embeds the complete, uncapped response_data
+        (subdomains included) as pageData for the Raw JSON accordion -- that
+        is that feature's job (showing the true raw response) and is out of
+        scope here, so h499 legitimately still appears elsewhere in `html`.
+        """
+        many = {
+            "names": [f"h{i}.example.com" for i in range(500)],
+            "count": 500,
+            "truncated": False,
+            "source": "crt.sh",
+            "fetched_at": "2026-09-29T00:00:00+00:00",
+            "stale": False,
+            "error": None,
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=many
+            ):
+                html = client.get(
+                    "/example.com?subdomains=include", headers=BROWSER_UA
+                ).text
+        list_markup = html.split('id="subdomains-list"')[1].split("</ul>")[0]
+        assert list_markup.count("h0.example.com") == 1
+        assert "h499.example.com" not in list_markup
+        assert "500" in html
+        assert "500" in html

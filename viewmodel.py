@@ -557,18 +557,39 @@ def _accordions(response: dict) -> list[dict]:
     geoip_hint = " · ".join(p for p in (geo_city, geo_country) if p) or "no data"
 
     header_count = len(headers)
-    return [
+    accordions = [
         {"id": "whois", "title": "WHOIS", "hint": whois_hint},
         {"id": "dns", "title": "DNS records", "hint": dns_hint},
         {"id": "ssl", "title": "SSL certificate", "hint": ssl_hint},
         {"id": "geoip", "title": "GeoIP", "hint": geoip_hint},
-        {
-            "id": "headers",
-            "title": "Your headers",
-            "hint": f"{header_count} header{'s' if header_count != 1 else ''}",
-        },
-        {"id": "raw", "title": "Raw JSON", "hint": "full response"},
     ]
+
+    # Only for a domain. An IP address has no subdomains, so offering the panel
+    # would invite a request that can only fail. `domain` truthiness alone
+    # isn't a reliable signal here: an IP lookup still carries a populated
+    # `domain` dict (its own A record, used for the DNS accordion's hint
+    # above), so this checks the address shape instead, same as build_view().
+    subdomain_data = response.get("subdomains")
+    if not _is_ip(response.get("address") or ""):
+        if subdomain_data and subdomain_data.get("error"):
+            hint = "lookup failed"
+        elif subdomain_data:
+            hint = f"{subdomain_data.get('count', 0)} found"
+        else:
+            hint = "from certificate transparency"
+        accordions.append({"id": "subdomains", "title": "Subdomains", "hint": hint})
+
+    accordions.extend(
+        [
+            {
+                "id": "headers",
+                "title": "Your headers",
+                "hint": f"{header_count} header{'s' if header_count != 1 else ''}",
+            },
+            {"id": "raw", "title": "Raw JSON", "hint": "full response"},
+        ]
+    )
+    return accordions
 
 
 def build_view(response: dict, is_self: bool) -> dict:
@@ -610,4 +631,6 @@ def build_view(response: dict, is_self: bool) -> dict:
         "accordions": _accordions(response),
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         "geoip_rows": geoip_rows(location),
+        "subdomains": response.get("subdomains"),
+        "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],
     }
