@@ -212,6 +212,11 @@ class TestGetSubdomains:
                 for _ in range(5)
             ]
             await aio.sleep(0.1)  # let every task reach the single-flight map
+            # Proves coalescing while it still matters: after the gate opens
+            # and every task completes, _inflight is empty either way, so
+            # only checking after gather() would pass even without
+            # single-flight.
+            assert len(subdomains._inflight) == 1
             gate.set()
             results = await aio.gather(*tasks)
 
@@ -234,3 +239,107 @@ class TestGetSubdomains:
             result = await subdomains.get_subdomains("example.com")
         assert result["names"]
         assert result["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_waiters_cancellation_does_not_poison_the_shared_future(self):
+        """Review Critical 1. A waiter task uses the shared future as its
+        _fut_waiter while suspended on it: Task.cancel() cancels whatever
+        future a task is currently suspended on, so an unshielded
+        `await existing` lets Task.cancel() on ONE waiter cancel the future
+        the owner and every OTHER waiter depend on — a second, uninvolved
+        waiter would be cancelled too, even though it never asked to be.
+        _fetch_and_store must shield the waiter path so only the cancelled
+        waiter's own task is affected.
+        """
+        import asyncio as aio
+        import threading
+
+        gate = threading.Event()
+
+        def slow(domain):
+            gate.wait(timeout=5)
+            return CRTSH_ROWS
+
+        with patch.object(subdomains, "_fetch_sync", side_effect=slow):
+            owner = aio.create_task(subdomains._fetch_and_store("example.com"))
+            await aio.sleep(0.05)  # owner claims _inflight, blocks in the thread
+            assert "example.com" in subdomains._inflight
+
+            waiter_to_cancel = aio.create_task(
+                subdomains._fetch_and_store("example.com")
+            )
+            survivor = aio.create_task(subdomains._fetch_and_store("example.com"))
+            await aio.sleep(0.05)  # both attach to the shared future
+
+            waiter_to_cancel.cancel()
+            with pytest.raises(aio.CancelledError):
+                await waiter_to_cancel
+
+            gate.set()
+            owner_names, _ = await owner
+            survivor_names, _ = await survivor  # must NOT be cancelled too
+
+        assert owner_names
+        assert survivor_names == owner_names
+
+    @pytest.mark.asyncio
+    async def test_the_owners_cancellation_gives_waiters_an_error_not_a_cancellation(
+        self,
+    ):
+        """Review Critical 2. A cancelled owner must not publish
+        CancelledError onto the shared future — every waiter riding it would
+        then surface as a cancelled task rather than a normal error result,
+        turning one abandoned request into N failed ones. The owner itself
+        must still end up correctly cancelled.
+        """
+        import asyncio as aio
+        import threading
+
+        gate = threading.Event()
+
+        def slow(domain):
+            gate.wait(timeout=5)
+            return CRTSH_ROWS
+
+        try:
+            with patch.object(subdomains, "_fetch_sync", side_effect=slow):
+                owner = aio.create_task(subdomains._fetch_and_store("example.com"))
+                await aio.sleep(0.05)
+                assert "example.com" in subdomains._inflight
+
+                waiter = aio.create_task(subdomains._fetch_and_store("example.com"))
+                await aio.sleep(0.05)
+
+                owner.cancel()
+                with pytest.raises(aio.CancelledError):
+                    await owner
+
+                with pytest.raises(subdomains.SubdomainError):
+                    await waiter
+        finally:
+            gate.set()  # release the blocked thread so it doesn't outlive the test
+
+    @pytest.mark.asyncio
+    async def test_a_failing_refresh_does_not_retry_on_every_stale_read(self):
+        """Review Important. With the source failing, a stale domain must
+        not schedule an unbounded series of background refreshes — each one
+        spends a slot from the global per-minute budget, so one broken
+        popular domain would otherwise starve every other domain's cold
+        lookups. The stale entry keeps being served regardless.
+        """
+        with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS):
+            await subdomains.get_subdomains("example.com")
+        with patch.object(subdomains, "SUBDOMAIN_CACHE_TTL", -1):
+            with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError) as f:
+                first = await subdomains.get_subdomains("example.com")
+                await subdomains.drain_background()
+                assert f.call_count == 1
+
+                second = await subdomains.get_subdomains("example.com")
+                await subdomains.drain_background()
+                assert f.call_count == 1  # no second refresh while the
+                # recorded failure is still fresh
+
+        assert first["stale"] is True
+        assert second["stale"] is True
+        assert second["names"]  # still served despite the failing source

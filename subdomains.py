@@ -22,7 +22,6 @@ import json
 import logging
 import re
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -179,11 +178,19 @@ _failures: dict[str, float] = {}
 
 def reset_state(store_path: str | None = None) -> None:
     """Rebuild module state. Tests only."""
-    global _store, _budget, _inflight, _failures
+    global _store, _budget, _semaphore, _inflight, _background, _failures
+    # Request cancellation and drop the references: a background task left
+    # over from a previous event loop (a previous test) is bound to a future
+    # tied to that closed loop, and a later drain_background() on it raises
+    # "attached to a different loop" in a test that never touched it.
+    for task in _background:
+        task.cancel()
     _store.close()
     _store = SubdomainStore(path=store_path) if store_path else SubdomainStore()
     _budget = _MinuteBudget(SUBDOMAIN_FETCH_PER_MINUTE)
+    _semaphore = asyncio.Semaphore(SUBDOMAIN_MAX_CONCURRENT)
     _inflight = {}
+    _background = set()
     _failures = {}
 
 
@@ -222,7 +229,12 @@ async def _fetch_and_store(domain: str) -> tuple[list[str], int]:
     """One budgeted, single-flighted fetch that writes through to the store."""
     existing = _inflight.get(domain)
     if existing is not None:
-        return await existing
+        # Shielded: a waiter's own task lives on `existing` as its
+        # _fut_waiter while it awaits, so an unshielded await lets
+        # Task.cancel() on ONE waiter cancel the future the owner and every
+        # other waiter depend on. shield() gives this waiter a future of its
+        # own to be cancelled instead, leaving `existing` untouched.
+        return await asyncio.shield(existing)
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future = loop.create_future()
@@ -235,11 +247,19 @@ async def _fetch_and_store(domain: str) -> tuple[list[str], int]:
         await asyncio.to_thread(
             _store.put, domain, names, count, count > len(names), SOURCE
         )
-        future.set_result((names, count))
+        if not future.done():
+            future.set_result((names, count))
         return names, count
     except BaseException as exc:
         if not future.done():
-            future.set_exception(exc)
+            if isinstance(exc, asyncio.CancelledError):
+                # A cancelled owner must not publish CancelledError onto the
+                # shared future: every waiter riding it would then surface as
+                # a cancelled task instead of a normal error result. The
+                # owner's own cancellation still propagates via `raise` below.
+                future.set_exception(SubdomainError("upstream request was cancelled"))
+            else:
+                future.set_exception(exc)
         raise
     finally:
         _inflight.pop(domain, None)
@@ -257,9 +277,15 @@ def _schedule_refresh(domain: str) -> None:
             await _fetch_and_store(domain)
         except SubdomainError as exc:
             # The stale entry stays exactly where it is. A bad refresh must
-            # never destroy a good answer.
+            # never destroy a good answer. Recorded in _failures too — a
+            # domain whose refresh keeps failing must not get a fresh
+            # background refresh (and a fresh budget slot) scheduled on every
+            # subsequent stale read; one broken popular domain would
+            # otherwise starve every other domain's budget.
+            _failures[domain] = time.time()
             logging.info("Subdomain refresh failed for %s: %s", domain, exc)
         except Exception:
+            _failures[domain] = time.time()
             logging.exception("Subdomain refresh crashed for %s", domain)
 
     task = asyncio.create_task(run())
@@ -281,7 +307,12 @@ async def get_subdomains(domain: str) -> dict:
     if entry is not None:
         stale = entry.age() > SUBDOMAIN_CACHE_TTL
         if stale:
-            _schedule_refresh(domain)
+            failed_at = _failures.get(domain)
+            if not failed_at or time.time() - failed_at >= SUBDOMAIN_ERROR_TTL:
+                _schedule_refresh(domain)
+            # Either way, the stale entry below is still served immediately —
+            # a recent refresh failure changes only whether a NEW refresh is
+            # scheduled, never whether the caller gets an answer now.
         return _result(
             entry.names, entry.count, entry.truncated, entry.fetched_at, stale, None
         )
