@@ -50,6 +50,30 @@ class SubdomainError(Exception):
     "no subdomains" and "we could not ask" are different facts."""
 
 
+class SubdomainBudgetError(SubdomainError):
+    """The global outbound budget refused this fetch before one was attempted.
+
+    This is our own back-pressure, not a source failure, so it must never be
+    recorded into _failures: doing so would durably blacklist a cold domain
+    for SUBDOMAIN_ERROR_TTL (5 minutes) purely because the shared 30/min
+    budget happened to be spent at that moment -- long after it refills. The
+    caller still sees a "busy, try again" style error; only the durable
+    negative-cache write is skipped.
+    """
+
+
+def _sanitize_log(value: str) -> str:
+    """Strip control characters before logging a caller-supplied domain.
+
+    Duplicated from lookup.sanitize_log_input rather than imported: this
+    module must not import `lookup` (see the module docstring) -- doing so
+    would construct GeoIpManager(), TldNamesManager() and DomainManager() at
+    module scope and pull the GeoIP database into every test that touches
+    subdomain code.
+    """
+    return value.replace("\n", "").replace("\r", "").replace("\x00", "")
+
+
 def extract_names(payload: object) -> list[str]:
     """Pull every candidate name out of a crt.sh JSON body.
 
@@ -267,7 +291,9 @@ async def _fetch_and_store(domain: str) -> tuple[list[str], int]:
     _inflight[domain] = future
     try:
         if not _budget.take():
-            raise SubdomainError("source request budget exhausted; try again shortly")
+            raise SubdomainBudgetError(
+                "source request budget exhausted; try again shortly"
+            )
         async with _semaphore:
             names, count = await fetch_from_source(domain)
         await asyncio.to_thread(
@@ -301,6 +327,12 @@ def _schedule_refresh(domain: str) -> None:
     async def run():
         try:
             await _fetch_and_store(domain)
+        except SubdomainBudgetError as exc:
+            # Our own back-pressure, not a source failure -- must not be
+            # recorded into _failures. See SubdomainBudgetError.
+            logging.info(
+                "Subdomain refresh skipped for %s: %s", _sanitize_log(domain), exc
+            )
         except SubdomainError as exc:
             # The stale entry stays exactly where it is. A bad refresh must
             # never destroy a good answer. Recorded in _failures too — a
@@ -309,10 +341,12 @@ def _schedule_refresh(domain: str) -> None:
             # subsequent stale read; one broken popular domain would
             # otherwise starve every other domain's budget.
             _record_failure(domain)
-            logging.info("Subdomain refresh failed for %s: %s", domain, exc)
+            logging.info(
+                "Subdomain refresh failed for %s: %s", _sanitize_log(domain), exc
+            )
         except Exception:
             _record_failure(domain)
-            logging.exception("Subdomain refresh crashed for %s", domain)
+            logging.exception("Subdomain refresh crashed for %s", _sanitize_log(domain))
 
     task = asyncio.create_task(run())
     _background.add(task)
@@ -356,11 +390,15 @@ async def get_subdomains(domain: str) -> dict:
 
     try:
         names, count = await _fetch_and_store(domain)
+    except SubdomainBudgetError as exc:
+        # Our own back-pressure, not a source failure -- must not be
+        # recorded into _failures. See SubdomainBudgetError.
+        return _result([], 0, False, None, False, str(exc))
     except SubdomainError as exc:
         _record_failure(domain)
         return _result([], 0, False, None, False, str(exc))
     except Exception:
-        logging.exception("Subdomain lookup crashed for %s", domain)
+        logging.exception("Subdomain lookup crashed for %s", _sanitize_log(domain))
         _record_failure(domain)
         return _result([], 0, False, None, False, "lookup failed")
 

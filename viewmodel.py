@@ -10,6 +10,8 @@ import datetime
 import ipaddress
 from typing import Any
 
+from config import SUBDOMAIN_ENABLED
+
 DASH = "—"
 
 
@@ -520,7 +522,7 @@ def geoip_rows(location: dict | None) -> list[dict]:
     ]
 
 
-def _accordions(response: dict) -> list[dict]:
+def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
     whois_data = response.get("whois") or {}
     domain = response.get("domain") or {}
     headers = response.get("headers") or {}
@@ -569,8 +571,12 @@ def _accordions(response: dict) -> list[dict]:
     # isn't a reliable signal here: an IP lookup still carries a populated
     # `domain` dict (its own A record, used for the DNS accordion's hint
     # above), so this checks the address shape instead, same as build_view().
+    #
+    # Also gated on the kill switch: SUBDOMAIN_ENABLED=false must not leave
+    # the page still advertising a panel whose only possible outcome is a 400
+    # from the route.
     subdomain_data = response.get("subdomains")
-    if not _is_ip(response.get("address") or ""):
+    if subdomains_enabled and not _is_ip(response.get("address") or ""):
         if subdomain_data and subdomain_data.get("error"):
             hint = "lookup failed"
         elif subdomain_data:
@@ -592,7 +598,9 @@ def _accordions(response: dict) -> list[dict]:
     return accordions
 
 
-def build_view(response: dict, is_self: bool) -> dict:
+def build_view(
+    response: dict, is_self: bool, subdomains_enabled: bool = SUBDOMAIN_ENABLED
+) -> dict:
     location = response.get("location") or {}
     domain = response.get("domain") or {}
     address = response.get("address") or ""
@@ -628,7 +636,7 @@ def build_view(response: dict, is_self: bool) -> dict:
         "map_link": osm_link(location),
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
-        "accordions": _accordions(response),
+        "accordions": _accordions(response, subdomains_enabled),
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         "geoip_rows": geoip_rows(location),
         "subdomains": response.get("subdomains"),

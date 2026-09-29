@@ -314,7 +314,9 @@ def site_domain(request: Request) -> str:
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
-    view = build_view(response_data, is_self=is_self)
+    view = build_view(
+        response_data, is_self=is_self, subdomains_enabled=SUBDOMAIN_ENABLED
+    )
 
     # map.js labels the pins with the two IPs and draws the distance on the arc.
     # These ride along with the browser's map payload rather than polluting the
@@ -335,6 +337,7 @@ def render_page(request: Request, response_data: dict, is_self: bool):
         {
             "view": view,
             "view_map": map_data is not None,
+            "subdomains_enabled": SUBDOMAIN_ENABLED,
             "api_base": public_base_url(request),
             "site_domain": site_domain(request),
             "dns_rows": _dns_rows(response_data),
@@ -836,8 +839,14 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     # The visitor's own location only feeds the distance line, so it runs
     # alongside the target lookup rather than after it.
     origin_task = asyncio.create_task(lookup_location(client_ip))
+    # An IP target burns a budget slot and a crt.sh round trip that cannot
+    # possibly match, so `include` gets the same domain gate `only` already
+    # has above -- just without rejecting the request: `include` is additive,
+    # so an IP still gets its normal lookup, only without a subdomains fetch.
     subdomain_task = (
-        asyncio.create_task(get_subdomains(domain_ip)) if mode == "include" else None
+        asyncio.create_task(get_subdomains(domain_ip))
+        if mode == "include" and domain_manager.is_valid_domain(domain_ip)
+        else None
     )
     try:
         data = await gather(domain_ip)

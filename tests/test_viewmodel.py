@@ -496,3 +496,20 @@ def test_an_ip_lookup_does_not_offer_the_subdomains_accordion():
     )
     ids = [item["id"] for item in view["accordions"]]
     assert "subdomains" not in ids
+
+
+def test_the_kill_switch_removes_the_subdomains_accordion_for_a_domain():
+    """Review M2. SUBDOMAIN_ENABLED=false must not leave the page still
+    offering a panel whose only possible outcome is a 400 from the route --
+    the flag gets flipped exactly when something is on fire."""
+    view = build_view(
+        {
+            "address": "example.com",
+            "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
+            "location": {},
+        },
+        is_self=False,
+        subdomains_enabled=False,
+    )
+    ids = [item["id"] for item in view["accordions"]]
+    assert "subdomains" not in ids

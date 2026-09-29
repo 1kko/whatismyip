@@ -153,8 +153,21 @@ if (subdomainAccordion && subdomainSlot) {
         `/${encodeURIComponent(target)}?subdomains=only`,
         { headers: { Accept: "application/json" } },
       );
+      // A non-200 (429 rate limit, 403 ban, 400 when the feature is
+      // disabled) must never be read as "no subdomains" -- and a payload
+      // with no `subdomains` object is the same confident-falsehood risk,
+      // so both bail out with an explicit failure rather than falling
+      // through to an empty {} that renders "undefined found".
+      if (!response.ok) {
+        subdomainSlot.textContent = "Lookup failed.";
+        return;
+      }
       const payload = await response.json();
-      const data = payload.subdomains || {};
+      const data = payload.subdomains;
+      if (!data) {
+        subdomainSlot.textContent = "Lookup failed.";
+        return;
+      }
 
       if (data.error) {
         subdomainSlot.textContent = `Lookup failed: ${data.error}`;

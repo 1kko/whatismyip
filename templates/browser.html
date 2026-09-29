@@ -16,7 +16,7 @@
     <meta name="mcp-endpoint" content="{{ api_base }}mcp">
     <meta name="mcp-transport" content="streamable-http">
     <meta name="mcp-auth" content="none">
-    <meta name="mcp-tools" content="lookup, dns_records, ssl_certificate, whoami_caller, subdomains">
+    <meta name="mcp-tools" content="lookup, dns_records, ssl_certificate, whoami_caller{% if subdomains_enabled %}, subdomains{% endif %}">
     <meta name="mcp-install" content="claude mcp add --transport http whatismyip {{ api_base }}mcp">
     <meta name="mcp-note" content="whoami_caller returns whoever opened the connection: your own machine from a local client such as Claude Code, a provider datacenter from a hosted one such as claude.ai. The server cannot tell which, so do not report it as the user's IP without checking.">
     <meta name="api-endpoint" content="{{ api_base }}{target}">

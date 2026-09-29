@@ -569,6 +569,21 @@ class TestSubdomainsParameter:
             if key not in ("datetime", "elapsed_ms"):
                 assert enriched[key] == plain[key]
 
+    def test_include_on_an_ip_target_skips_the_fetch_but_still_looks_up(self):
+        """Review M1. `only` already rejects an IP target outright (see
+        test_only_rejects_an_ip_address); `include` is additive and must
+        not: an IP still gets its normal lookup, just without a subdomains
+        fetch that can only fail and would otherwise burn a budget slot and
+        a crt.sh round trip for nothing.
+        """
+        ip_gathered = {**GATHERED, "address": "8.8.8.8", "domain": {}}
+        with patch("main.gather", new_callable=AsyncMock, return_value=ip_gathered):
+            with patch("main.get_subdomains", new_callable=AsyncMock) as fetch:
+                response = client.get("/8.8.8.8?subdomains=include", headers=JSON_UA)
+        assert response.status_code == 200
+        assert "subdomains" not in response.json()
+        fetch.assert_not_called()
+
     def test_only_returns_json_to_a_browser_user_agent(self):
         """Content negotiation is user-agent based, so a fetch() from our own
         page would otherwise receive a full HTML document."""
@@ -673,3 +688,34 @@ class TestSubdomainPanel:
         assert "h499.example.com" not in list_markup
         assert "500" in html
         assert "500" in html
+
+    def test_a_failed_fetch_is_reported_not_rendered_as_empty(self):
+        """Review I2. static/js/app.js reaches this same JSON endpoint from
+        the browser via fetch(); a non-200 (429 rate limit, 403 ban, 400 when
+        the feature is disabled) must never be read as "no subdomains" --
+        response.ok must gate before the payload is used, and a payload with
+        no `subdomains` key must not fall through to an empty {} that
+        renders "undefined found". No JS runtime in this suite (see the
+        map.js/fingerprint.js tests above), so this checks the source text
+        the same way those do.
+        """
+        js = Path("static/js/app.js").read_text(encoding="utf-8")
+        assert "response.ok" in js
+        assert "payload.subdomains || {}" not in js
+
+    def test_disabling_the_feature_removes_the_panel_and_the_tool_advertisement(self):
+        """Review M2. SUBDOMAIN_ENABLED=false already turns off the route and
+        the MCP tool registration (main.py, mcp_server.py); the page must not
+        keep selling a feature that is off -- no accordion to click, and no
+        discovery meta tag telling an agent the tool still exists. The flag
+        gets flipped exactly when something is on fire, the worst moment to
+        find the UI still advertising it.
+        """
+        with patch("main.SUBDOMAIN_ENABLED", False):
+            with patch(
+                "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
+            ):
+                html = client.get("/example.com", headers=BROWSER_UA).text
+        assert 'id="acc-subdomains"' not in html
+        meta = html.split('name="mcp-tools"')[1].split(">")[0]
+        assert "subdomains" not in meta

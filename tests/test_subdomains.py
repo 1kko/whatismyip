@@ -233,6 +233,31 @@ class TestGetSubdomains:
         assert result["names"] == []
 
     @pytest.mark.asyncio
+    async def test_budget_exhaustion_does_not_poison_the_failure_cache(self):
+        """Review I1. A budget refusal is our own back-pressure, not a source
+        failure. Recording it into _failures would durably blacklist a cold
+        domain for SUBDOMAIN_ERROR_TTL (five minutes) even though the shared
+        budget refills within a minute and a fetch was never attempted --
+        one client stays under the lookup rate limit while blacking out the
+        feature for every other cold domain it names.
+        """
+        with patch.object(subdomains, "_budget", subdomains._MinuteBudget(0)):
+            with patch.object(subdomains, "_fetch_sync", side_effect=AssertionError):
+                exhausted = await subdomains.get_subdomains("exhausted.example")
+        assert exhausted["error"]
+        assert "exhausted.example" not in subdomains._failures
+
+        # The budget has refilled (the patch above is out of scope, so the
+        # real _budget from the `isolated` fixture is back in effect). A
+        # DIFFERENT cold domain must be genuinely fetched, not answered
+        # "lookup failed recently" from a negative-cache entry that was
+        # never a real source failure.
+        with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS) as f:
+            result = await subdomains.get_subdomains("different.example")
+        assert f.call_count == 1
+        assert result["error"] is None
+
+    @pytest.mark.asyncio
     async def test_the_budget_does_not_block_a_cached_answer(self):
         with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS):
             await subdomains.get_subdomains("example.com")
