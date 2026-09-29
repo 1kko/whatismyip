@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A FastAPI-based web service that provides WHOIS, GeoIP, DNS records, and SSL certificate information for IP addresses and domain names. The service features automatic GeoIP database updates and supports both browser (HTML) and API (JSON) responses based on user-agent detection.
+A FastAPI-based web service that provides WHOIS, GeoIP, DNS records, and SSL certificate information for IP addresses and domain names, plus opt-in subdomain discovery via Certificate Transparency logs. The service features automatic GeoIP database updates and supports both browser (HTML) and API (JSON) responses based on user-agent detection.
 
 ## Development Commands
 
@@ -91,14 +91,25 @@ poetry run ruff format .
 - `lookup.py`: transport-agnostic lookup pipeline (`gather()`), shared by the
   HTTP routes and the MCP tools. Raises `PrivateAddressError` rather than
   `HTTPException` so it stays free of FastAPI.
+- `subdomains.py`: subdomain discovery from Certificate Transparency (crt.sh),
+  opt-in per request. Owns normalization, single-flight, and a global outbound
+  budget. Must not import `lookup` or `main` — importing `lookup` builds the
+  GeoIP/TLD/Domain managers at module scope, which would drag the GeoIP
+  database into every test that touches subdomain code.
+- `subdomain_store.py`: SQLite cache for the above, at `data/subdomains.sqlite3`
+  (gitignored, along with its WAL sidecars). No network; every operation
+  degrades to a miss rather than raising.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
-  Streamable HTTP). Four tools, all thin shells over `lookup.gather()` that
-  reshape its output for an LLM context.
+  Streamable HTTP). Five tools, all thin shells over `lookup.gather()` (or, for
+  `subdomains`, over `subdomains.get_subdomains()`) that reshape output for an
+  LLM context.
 - `main.py`: FastAPI app + middleware + routes + page rendering; wires the managers/security singletons and the scheduler. `BrowserDetector` (HTML-vs-JSON by user-agent) lives here.
 
 **API Endpoints**:
 - `GET /` - Returns client's own IP information (detects client IP from x-real-ip header or request.client.host)
 - `GET /{domain_ip}` - Returns information for specified domain or IP address
+- `GET /{domain_ip}?subdomains=include|only` - opt-in Certificate Transparency
+  subdomain list; see [Subdomain lookup](#subdomain-lookup)
 
 ### Response Flow
 
@@ -169,6 +180,8 @@ whatismyip/
 ├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
 ├── models.py            # Pydantic models (WhoisResponse, GeoRulesUpdate)
 ├── lookup.py            # transport-agnostic lookup pipeline (gather())
+├── subdomains.py        # crt.sh adapter, normalization, cache-fill orchestration
+├── subdomain_store.py   # SQLite cache for subdomains.py (data/subdomains.sqlite3)
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
@@ -189,10 +202,13 @@ whatismyip/
 │   ├── test_mapgeom.py  # projection, tiles, arcs (unit)
 │   ├── test_viewmodel.py# view model + WHOIS/SSL rendering (unit)
 │   ├── test_rdap.py     # RDAP/WHOIS normalisation + fallback routing (unit)
+│   ├── test_subdomains.py       # crt.sh adapter, normalization, single-flight (unit)
+│   ├── test_subdomain_store.py  # SQLite cache, degrades to a miss on failure (unit)
 │   ├── test_page.py     # API + HTML via TestClient
 │   ├── test_basic.py    # endpoint smoke tests via TestClient (mocked I/O)
 │   └── test_security.py # security subsystem via TestClient (mocked I/O)
-├── data/                # Volume mount for persistent data (Docker)
+├── data/                # Volume mount for persistent data (Docker); also holds
+│                         # subdomains.sqlite3 (gitignored, created on first use)
 ├── Dockerfile           # Multi-stage build with poetry + uv
 ├── Makefile             # Docker workflow automation
 └── pyproject.toml       # Poetry dependencies and project metadata
@@ -222,6 +238,53 @@ sets `referrerPolicy = "strict-origin"` on them, overriding the page-wide
 painted at 2× so a page view costs ~4 requests, and inverted in CSS to turn OSM's light
 basemap dark. **Attribution is mandatory** and appears on the map and in the footer.
 
+### Subdomain lookup
+
+**Opt-in by query parameter, not by route.** `?subdomains=include|only` on the
+existing `/{domain_ip}` route. The security middleware reads `request.url.path`
+(`main.py:508`, `main.py:689`), which excludes the query string, so the path
+stays `/{domain}` and `WhitelistManager` classifies it exactly as before — no
+security policy was widened to add this. A route like `/api/certs/{domain}`
+would need `lookup_patterns` widened — it matches a single path segment — and
+without that change, a target matching a detector rule (`\.config$`, `\.log$`
+and friends use `search()`) would ban a legitimate visitor for 24 hours.
+
+**crt.sh constraints, measured against the live service on 2026-09-28/29.**
+crt.sh publishes no bulk dump — its `certwatch` database is the entire CT
+ecosystem, billions of certificates. Its Postgres endpoint times out on every
+query form tried (21-57s), so deduplication happens on our side, at ingest. Its
+HTTP endpoint offers no server-side dedup either: `&deduplicate=Y` hangs, and
+`&exclude=expired` is *slower* for only a 23% size reduction. Latency varied
+2.6s-13.5s for the *same* query within one hour — that unpredictability is why
+a cached lookup must not depend on it. One response is also mostly redundant:
+1,224 rows reduce to 58 names for 1kko.com; nasa.gov's 3,531 rows give 2,585
+names.
+
+**Names containing `@` are discarded.** crt.sh's `name_value` carries
+`rfc822Name` entries from S/MIME certificates — real people's email addresses,
+551 of them in nasa.gov's data alone. This is a privacy rule with its own test
+(`normalize_names` in `subdomains.py`), not a formatting nicety.
+
+**No scheduler job**, unlike GeoIP and the public suffix list. Those are read
+by every request, so pre-refreshing always pays. This store is filled and read
+on demand, so a periodic sweep would re-fetch domains nobody asked about again.
+`get_subdomains()` instead does stale-while-revalidate on read: a stale entry
+is served immediately, with a refresh kicked off in the background.
+
+**A failure is never an empty list.** Both the accordion panel and the MCP
+`subdomains` tool distinguish "no subdomains" from "could not ask" — an empty
+list reads to a model, and to a person, as a confident fact, so a failed fetch
+returns `{"error": "..."}` instead.
+
+**`subdomains.py` must not import `lookup` or `main`.** Importing `lookup`
+builds `GeoIpManager()`, `TldNamesManager()` and `DomainManager()` at module
+scope, which would load the GeoIP database into every test that so much as
+touches subdomain code. `subdomain_store.py` owns durability (SQLite at
+`data/subdomains.sqlite3`, gitignored along with its WAL sidecars) and knows
+nothing about crt.sh; `subdomains.py` owns the source and knows nothing about
+SQL. Every store operation degrades to a miss rather than raising, so a
+read-only volume or a full disk costs the cache, not the request.
+
 ### Dependencies
 
 **Core:**
@@ -249,6 +312,9 @@ Every test runs against FastAPI's `TestClient` with the external lookups
 (RDAP/WHOIS, GeoIP, DNS, reverse DNS) mocked, so `pytest` needs no running
 service and no network. Coverage spans:
 - Pure units: gazetteer/distance, map projection, the view model, RDAP/WHOIS normalisation
+- Subdomain discovery: crt.sh adapter normalisation/dedup (including the `@`
+  discard rule), single-flight, the outbound budget, and the SQLite cache's
+  degrade-to-a-miss behaviour
 - Endpoint behaviour and HTML rendering via `TestClient`
 - The security subsystem: proxy-header trust, SSRF guards, bans, rate limiting, geo-blocking
 

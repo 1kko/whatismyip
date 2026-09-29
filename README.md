@@ -82,7 +82,7 @@ RDAP registration data and the full TLS certificate, expanded.
 
 - JSON from the same URL for any non-browser user-agent — no key, no separate
   API host.
-- An MCP server at `/mcp` with four tools (see [MCP](#mcp-model-context-protocol)).
+- An MCP server at `/mcp` with five tools (see [MCP](#mcp-model-context-protocol)).
 - Discovery metadata in `<head>`, so an agent that lands on the page can find the
   machine interface without scraping the body.
 
@@ -277,6 +277,28 @@ Information about the given domain or IP. A pasted URL is normalised to its host
 so `https://example.com/path?q=1` and `example.com` behave identically. Private
 and reserved addresses are rejected with `400`.
 
+### Subdomains (opt-in)
+
+`GET /{domain}?subdomains=include` adds a list of the domain's subdomains, as
+seen in public Certificate Transparency logs. `?subdomains=only` skips the rest
+of the pipeline (DNS, TLS, GeoIP, the map) and returns just that list; it only
+accepts a domain, not an IP, and answers `400` for one.
+
+Omitting the parameter changes nothing: the default lookup never contacts
+crt.sh, so its latency and uptime cannot affect an ordinary request. Any value
+other than `include`/`only`/`exclude` is rejected with `400` — and so is any
+value at all once `SUBDOMAIN_ENABLED=false`.
+
+This is a **passive** lookup. It reads published certificate records and sends
+nothing to the domain being queried. It finds only names that appear in a
+certificate, so it is evidence of existence, never a complete inventory. Email
+addresses embedded in S/MIME certificates are discarded and never returned.
+
+Results are cached in `data/subdomains.sqlite3` and served from there; a stale
+entry (older than `SUBDOMAIN_CACHE_TTL`, 7 days by default) is still returned
+immediately, with a refresh kicked off in the background. Data from
+[crt.sh](https://crt.sh).
+
 ### `GET /healthz`
 
 Liveness plus which GeoIP databases are actually serving lookups:
@@ -384,7 +406,7 @@ handshake. `map` is `null` when the target has no resolvable coordinates, and
 | Code | Meaning |
 | --- | --- |
 | `200` | success |
-| `400` | private or reserved address |
+| `400` | private or reserved address, or an invalid `subdomains` parameter |
 | `403` | banned IP, geo-blocked, or suspicious request |
 | `404` | unknown endpoint — also the answer to a wrong admin API key |
 | `413` | `POST /mcp` body over `MCP_MAX_BODY_BYTES` |
@@ -424,6 +446,7 @@ is unaffected.)
 | `dns_records(domain, types?)` | Full A / MX / NS / CNAME / TXT / SPF / PTR sweep. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining. |
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |
+| `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |
 
 ### What `whoami_caller` actually reports
 
@@ -450,7 +473,7 @@ interface from `<head>` without scraping the body:
 <meta name="mcp-endpoint"  content="https://ip.1kko.com/mcp">
 <meta name="mcp-transport" content="streamable-http">
 <meta name="mcp-auth"      content="none">
-<meta name="mcp-tools"     content="lookup, dns_records, ssl_certificate, whoami_caller">
+<meta name="mcp-tools"     content="lookup, dns_records, ssl_certificate, whoami_caller, subdomains">
 <meta name="mcp-install"   content="claude mcp add --transport http whatismyip https://ip.1kko.com/mcp">
 <meta name="mcp-note"      content="whoami_caller returns whoever opened the connection…">
 <meta name="api-endpoint"  content="https://ip.1kko.com/{target}">
