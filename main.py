@@ -549,11 +549,13 @@ async def security_middleware(request: Request, call_next):
     # IPs, so an automatic ban would take all of them offline at once, and the
     # provider's datacenter country says nothing about the user — geo-blocking
     # is meaningless. The payload is a JSON-RPC body, not a path, so the
-    # suspicious-path detector has nothing to look at either.
+    # suspicious-path detector has nothing to look at either. That includes an
+    # automatic ban earned on the lookup paths (rate_limit, suspicious_request):
+    # it still holds there, but only a manual ban carries over to /mcp.
     if request_path == "/mcp" or request_path.startswith("/mcp/"):
-        if not trusted and ip_ban_manager.is_banned(client_ip):
+        if not trusted and ip_ban_manager.is_banned(client_ip, reason="manual"):
             logging.warning(
-                "SECURITY: Blocked banned IP %s on MCP endpoint",
+                "SECURITY: Blocked manually banned IP %s on MCP endpoint",
                 sanitize_log_input(client_ip),
             )
             return JSONResponse(status_code=403, content=ACCESS_DENIED)

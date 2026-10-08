@@ -684,7 +684,8 @@ class TestSecurityMiddleware:
         bodies = []
 
         _reset_security_state()
-        ip_ban_manager.ban_ip("testclient", reason="test", duration=3600)
+        # Manual, because that is the only ban /mcp honours.
+        ip_ban_manager.ban_ip("testclient", reason="manual", duration=3600)
         bodies.append(client.get("/").json())  # banned
         bodies.append(
             client.get("/admin/stats", headers={"api-key": "test-secret-key"}).json()

@@ -162,7 +162,9 @@ poetry run ruff format .
 - `/mcp` is exempt from geo-blocking, the suspicious-path detector, and
   automatic bans — every hosted-AI user shares a few provider egress IPs, so a
   ban would take all of them offline at once. It gets its own rate bucket and
-  returns `429` with no escalation.
+  returns `429` with no escalation. An automatic ban earned on the lookup
+  paths doesn't carry over either: `/mcp` checks
+  `is_banned(ip, reason="manual")`, so only an admin ban applies there.
 - MCP tests must use `with TestClient(app) as client:`; the rest of the suite
   uses a module-level client, which never runs the lifespan.
 - Prefix matching on request paths is dangerous here because `/{domain_ip}` is

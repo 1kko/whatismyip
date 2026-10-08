@@ -62,8 +62,13 @@ class IPBanManager:
         except Exception as e:
             logging.error(f"Error saving ban list: {e}")
 
-    def is_banned(self, ip: str) -> bool:
-        """Check if an IP is currently banned"""
+    def is_banned(self, ip: str, reason: str | None = None) -> bool:
+        """Check if an IP is currently banned.
+
+        With `reason`, only a ban recorded for that reason counts — /mcp asks
+        for "manual" alone. Expiry is checked first, so an expired ban is
+        swept whatever the filter.
+        """
         if ip not in self.banned_ips:
             return False
 
@@ -76,7 +81,7 @@ class IPBanManager:
             self.save_bans()
             return False
 
-        return True
+        return reason is None or ban_info.get("reason") == reason
 
     def ban_ip(
         self,
