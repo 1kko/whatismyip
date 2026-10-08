@@ -14,6 +14,14 @@ from dotenv import load_dotenv
 # already set in the environment, so tests (which set them in conftest) win.
 load_dotenv()
 
+# The commit this process was built from, reported as /healthz "version": the
+# deploy workflow polls it until it reads back the SHA that CI passed. Coolify
+# sets SOURCE_COMMIT in the container's runtime environment on every deploy.
+# Empty counts as unset — the image's ENV SOURCE_COMMIT is "" when built
+# without the build arg — and "unknown" matches what Coolify itself writes when
+# it could not resolve a commit.
+APP_VERSION = os.getenv("SOURCE_COMMIT", "").strip() or "unknown"
+
 TIMEOUT_SECONDS = 5
 
 # DNS record sweep: query the fast, cached public resolvers concurrently with a

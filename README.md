@@ -301,11 +301,13 @@ immediately, with a refresh kicked off in the background. Data from
 
 ### `GET /healthz`
 
-Liveness plus which GeoIP databases are actually serving lookups:
+Liveness, the deployed commit, and which GeoIP databases are actually serving
+lookups:
 
 ```json
 {
   "status": "ok",
+  "version": "08fe93c34e33922e1bdd38be3cd9528ac1342f85",
   "databases": {
     "geoip2fast": {
       "source": "volume",
@@ -318,6 +320,11 @@ Liveness plus which GeoIP databases are actually serving lookups:
   "public_suffix_list": { "source": "downloaded", "age_days": 0.0, "stale": false }
 }
 ```
+
+`version` is the commit SHA from the `SOURCE_COMMIT` environment variable
+(Coolify sets it on every deploy; a plain `docker build` takes it as a build
+arg), or `unknown` when it is unset. The deploy workflow polls it until it reads
+back the commit CI passed.
 
 `public_suffix_list.source` is `downloaded` once a refresh has landed, `bundled`
 while still running on the snapshot shipped with the `tld` package, and

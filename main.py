@@ -27,6 +27,7 @@ from mapgeom import build_canvas
 from rdap import refresh_rdap_bootstrap
 from viewmodel import build_view, whois_display
 from config import (
+    APP_VERSION,
     BAN_DURATION_RATE_LIMIT,
     BAN_DURATION_SUSPICIOUS,
     CLEANUP_INTERVAL_SECONDS,
@@ -730,9 +731,15 @@ def _subdomain_mode(raw: str | None) -> str:
 async def healthz():
     """Liveness plus which GeoIP databases are actually serving lookups, so a
     silent fallback to the bundled country-only DB is visible from outside.
-    Declared before /{domain_ip}, which would otherwise swallow the path."""
+    Declared before /{domain_ip}, which would otherwise swallow the path.
+
+    `version` is the deployed commit; the deploy workflow reads it back to
+    confirm production runs the SHA it shipped. Keep it ahead of the nested
+    objects: the runner has no JSON parser, so the workflow takes the first
+    "version" in the body."""
     return {
         "status": "ok",
+        "version": APP_VERSION,
         "databases": geo_ip_manager.database_status(),
         "public_suffix_list": tld_names_manager.status(),
     }
