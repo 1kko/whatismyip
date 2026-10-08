@@ -211,20 +211,41 @@ class TestDnsRows:
         assert ttls["NS"] == 20675
         assert ttls["A"] == 300
 
+    # The shape fetch_cname() actually returns. This fixture used to be a bare
+    # string, which is why the page could print the whole dict's repr unnoticed.
+    CNAME = {"cname": "example.com.", "ttl": 300}
+
     def test_cname_is_listed_when_present(self):
         from main import _dns_rows
 
         rows = _dns_rows(
-            {"address": "www.example.com", "domain": {"cname": "example.com."}}
+            {"address": "www.example.com", "domain": {"cname": dict(self.CNAME)}}
         )
         assert rows == [
             {
                 "type": "CNAME",
                 "name": "www.example.com",
                 "value": "example.com.",
-                "ttl": "",
+                "ttl": 300,
             }
         ]
+
+    def test_cname_row_renders_target_and_ttl_in_their_own_cells(self):
+        gathered = {
+            **GATHERED,
+            "address": "www.example.com",
+            "domain": {**GATHERED["domain"], "cname": dict(self.CNAME)},
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            html = client.get("/www.example.com", headers=BROWSER_UA).text
+
+        row = re.search(r"<tr>\s*<td>CNAME</td>.*?</tr>", html, re.S)
+        assert row, "no CNAME row in the DNS table"
+        cells = re.findall(r"<td>(.*?)</td>", row.group(0), re.S)
+        assert cells == ["CNAME", "www.example.com", "example.com.", "300"]
+        # Jinja autoescapes the quotes, so a leaked repr shows up either way.
+        assert "{'cname'" not in html
+        assert "{&#39;cname&#39;" not in html
 
 
 class TestSecurityHeaders:

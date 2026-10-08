@@ -230,7 +230,7 @@ def _record_value(kind: str, record) -> str:
 
     DomainManager returns each type with its own shape: A is {ip, ttl}, MX is
     {preference, hostname, ttl, ip}, NS is {hostname, ttl, ip} and TXT is
-    {text: [...], ttl}.
+    {text: [...], ttl}. CNAME is a single {cname, ttl}, not a list.
     """
     if not isinstance(record, dict):
         return str(record)
@@ -245,6 +245,8 @@ def _record_value(kind: str, record) -> str:
         return f"{preference} {hostname}".strip()
     if kind == "NS":
         return str(record.get("hostname", ""))
+    if kind == "CNAME":
+        return str(record.get("cname", ""))
     if kind == "TXT":
         # Chunks are 255-byte wire splits, not words (RFC 7208 §3.3).
         text = record.get("text", "")
@@ -271,7 +273,14 @@ def _dns_rows(response_data: dict) -> list[dict]:
 
     cname = domain.get("cname")
     if cname:
-        rows.append({"type": "CNAME", "name": address, "value": str(cname), "ttl": ""})
+        rows.append(
+            {
+                "type": "CNAME",
+                "name": address,
+                "value": _record_value("CNAME", cname),
+                "ttl": cname.get("ttl", "") if isinstance(cname, dict) else "",
+            }
+        )
     return rows
 
 
