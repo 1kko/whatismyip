@@ -1,8 +1,19 @@
 name: Deploy
 
+# Ships only commits CI has passed. This used to run on `push`, in parallel with
+# CI, so commits failing pip-audit still went out (b53136e and 39fcf29 on
+# 2026-09-29). Now CI's completion triggers it, and the job below deploys only
+# a successful CI run of a push to main in this repository.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    # Filters out CI runs on PR branches before a run is even created; the job
+    # condition still does the real gating (a fork's branch can be "main" too).
     branches: [main]
+  # Emergency path: a newly published CVE fails pip-audit and blocks every
+  # unrelated deploy until a fixed release exists. Dispatch it from main —
+  # Coolify deploys main's head whatever ref the run was started on.
   workflow_dispatch:
     inputs:
       force:
@@ -13,23 +24,89 @@ on:
 
 permissions: {}
 
+# No `concurrency` group, deliberately. Coolify's deploy endpoint takes no
+# commit: it builds whatever main's head is when the build starts. So each run
+# deploys only if its commit is still main's head, and otherwise steps aside
+# for the newer commit, which deploys once its own CI passes. A concurrency
+# group would undo that: GitHub keeps one pending run per group and cancels the
+# older one, and CI runs don't finish in commit order, so the cancelled run can
+# be the one for main's head — after which every surviving run steps aside and
+# nothing deploys it.
 jobs:
   deploy:
     # Runs on the self-hosted runner container that lives on the Coolify host, so
     # it reaches Coolify at localhost with no Tailscale hop and nothing exposed
-    # publicly. This runner is used ONLY by this push/dispatch-triggered job;
-    # CI, CodeQL and the security audit stay on GitHub-hosted runners so a fork
-    # pull request can never execute code on the server.
+    # publicly. This runner is used ONLY by this CI-gated/dispatch-triggered
+    # job; CI, CodeQL and the security audit stay on GitHub-hosted runners so a
+    # fork pull request can never execute code on the server. workflow_run also
+    # fires for CI runs on pull requests, forks included, so the event, branch
+    # and repository are all checked here, not just the conclusion.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: [self-hosted, coolify]
-    timeout-minutes: 5
+    # Reading main's head through the API. The repo is public, so this grants
+    # nothing that isn't already readable anonymously.
+    permissions:
+      contents: read
+    # A warm-cache deploy served the new build ~30s after the request (measured
+    # 2026-09-29); a forced rebuild reinstalls every dependency. The verify
+    # step gives up after 10 minutes; this is only the backstop.
+    timeout-minutes: 15
+    env:
+      HEALTHZ_URL: https://ip.1kko.com/healthz
     steps:
+      - name: Check the commit is still main's head
+        id: target
+        env:
+          # The SHA CI passed; for a dispatch, the commit it was started on.
+          EXPECTED: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The .sha media type answers with the bare 40-character SHA, so
+          # there is no JSON to parse (the runner has no jq).
+          head=$(curl --fail --show-error --silent \
+                      --retry 3 --retry-delay 2 --max-time 15 \
+                      -H "Accept: application/vnd.github.sha" \
+                      -H "Authorization: Bearer ${GH_TOKEN}" \
+                      "https://api.github.com/repos/${REPO}/commits/main")
+          echo "sha=${EXPECTED}" >> "$GITHUB_OUTPUT"
+          if [ "$head" = "$EXPECTED" ]; then
+            echo "Deploying ${EXPECTED} (main's head)."
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "workflow_run" ]; then
+            # Coolify would build ${head}, whose CI may not have passed yet.
+            echo "::notice::Not deploying ${EXPECTED}: main has moved on to ${head}, which deploys once its own CI passes."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::This run is for ${EXPECTED}, but main's head is ${head} and Coolify only deploys main's head. Dispatch from main (again, if it just moved)."
+            exit 1
+          fi
+
       - name: Trigger Coolify deploy
+        id: deploy
+        if: steps.target.outputs.deploy == 'true'
         env:
           UUID: ${{ secrets.COOLIFY_UUID }}
           FORCE: ${{ inputs.force || false }}
           TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
         run: |
           set -euo pipefail
+          # What production serves before this deploy, so the next step can
+          # tell a newer build from the old one. Empty if unreachable or if
+          # the running build predates the version field.
+          if ! before=$(curl --fail --silent --max-time 10 "$HEALTHZ_URL" \
+                          | grep -o '"version":"[^"]*"' | head -n 1 | cut -d '"' -f 4); then
+            before=""
+          fi
+          echo "before=${before}" >> "$GITHUB_OUTPUT"
+          echo "Production currently reports: ${before:-<no version>}"
           echo "Deploying (force=${FORCE})"
           # Flags kept compatible with the runner image's curl 7.68 (no
           # --fail-with-body / --retry-all-errors, which need 7.76 / 7.71).
@@ -43,3 +120,49 @@ jobs:
                -H "Content-Length: 0"
           echo
           echo "Deploy request accepted."
+
+      - name: Wait for production to report the commit
+        if: steps.target.outputs.deploy == 'true'
+        env:
+          EXPECTED: ${{ steps.target.outputs.sha }}
+          BEFORE: ${{ steps.deploy.outputs.before }}
+        run: |
+          set -euo pipefail
+          # Coolify answering the POST only means the deploy was queued; this
+          # is what makes a green run mean production serves ${EXPECTED}.
+          # /healthz is single-line JSON and "version" is its first such key
+          # (main.healthz keeps it ahead of the nested objects), so grep is
+          # enough without jq or python3 on the runner.
+          served_version() {
+            curl --fail --silent --max-time 10 "$HEALTHZ_URL" \
+              | grep -o '"version":"[^"]*"' | head -n 1 | cut -d '"' -f 4
+          }
+          if [ "$BEFORE" = "$EXPECTED" ]; then
+            echo "::notice::Production already reported ${EXPECTED} before this deploy, so this only confirms it is still served, not that a new container replaced it."
+          fi
+          deadline=$(( $(date +%s) + 600 ))
+          while :; do
+            seen=$(served_version) || seen=""
+            if [ "$seen" = "$EXPECTED" ]; then
+              echo "Production is serving ${EXPECTED}."
+              exit 0
+            fi
+            # Neither the old build nor ours. Almost always main moved between
+            # the head check and Coolify starting the build, so Coolify built
+            # the newer head; that commit's own run verifies it once its CI
+            # passes. Waiting longer would not change the answer.
+            if [ -n "$BEFORE" ] && [ -n "$seen" ] && [ "$seen" != "unknown" ] \
+               && [ "$seen" != "$BEFORE" ]; then
+              echo "::error::Production reports ${seen}, not ${EXPECTED}: Coolify deployed a different commit, most likely because main moved after the head check."
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              if [ "$seen" = "unknown" ]; then
+                echo "::error::Production reports version 'unknown': SOURCE_COMMIT is not reaching the container. Check that Coolify sets it (or enable Include Source Commit in Build)."
+              else
+                echo "::error::Production still reports '${seen:-<unreachable or no version>}' after 10 minutes, not ${EXPECTED}. Check the deployment in Coolify."
+              fi
+              exit 1
+            fi
+            sleep 10
+          done
