@@ -28,7 +28,7 @@ from rdap import lookup_rdap, normalize_whois
 
 
 class PrivateAddressError(Exception):
-    """The target is (or resolves to) a private/reserved address.
+    """The target is (or resolves to) an address that is not public unicast.
 
     Raised instead of HTTPException so this module stays free of FastAPI:
     main.py turns it into a 400, mcp_server.py turns it into {"error": ...}.
@@ -85,14 +85,28 @@ def normalize_lookup_target(raw: str) -> str:
 
 
 def is_safe_ip(ip_str: str) -> bool:
-    """Check if an IP address is safe to query (not private/reserved)."""
+    """Whether an address may become the target of an outbound connection.
+
+    An allowlist: only globally reachable unicast passes. The denylist it
+    replaced (private, loopback, link-local, reserved) passed every range it
+    did not name -- CGNAT 100.64.0.0/10, where Tailscale's MagicDNS answers at
+    100.100.100.100, and multicast -- so a domain whose A record pointed there
+    got a TLS handshake from this server.
+
+    is_global follows IANA's special-purpose registry but still counts three
+    kinds of address as global, so they are refused by hand: multicast; IPv6's
+    unassigned blocks (is_reserved), whose ::/8 holds the NAT64 prefix
+    64:ff9b::/96 embedding an IPv4 address; and fec0::/10, IPv6's deprecated
+    site-local space. The registry's own exceptions, such as 192.0.0.9 and
+    192.0.0.10, are public anycast services and pass on purpose.
+    """
     try:
         ip = ipaddress.ip_address(ip_str)
-        return not (
-            ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-        )
     except ValueError:
         return False
+    if not ip.is_global or ip.is_multicast or ip.is_reserved:
+        return False
+    return not (ip.version == 6 and ip.is_site_local)
 
 
 geo_ip_manager = GeoIpManager()

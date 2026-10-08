@@ -721,9 +721,34 @@ The FastAPI app is constructed with `openapi_url=None` so
 User-supplied domains/IPs flow into WHOIS, DNS, GeoIP, and SSL
 certificate lookups. Two defenses:
 
-1. **Private/reserved IP filter** (`is_safe_ip`). Any IP that falls
-   in RFC1918, loopback, link-local, or reserved ranges is rejected
-   with HTTP 400 before any outbound request.
+1. **Public-address allowlist** (`is_safe_ip`). An IP given as the
+   target, and the A record a domain resolves to, must be globally
+   reachable unicast; anything else is rejected with HTTP 400 (an
+   `error` result from the MCP tools) before anything connects to it.
+   The rule is Python's `ipaddress` `is_global`, which follows IANA's
+   special-purpose address registries, so every non-public range is
+   refused:
+
+   | Range | What it is |
+   | --- | --- |
+   | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` | private (RFC1918, IPv6 ULA) |
+   | `127.0.0.0/8`, `::1` | loopback |
+   | `169.254.0.0/16`, `fe80::/10` | link-local, including cloud metadata at `169.254.169.254` |
+   | `100.64.0.0/10` | CGNAT shared space, including Tailscale's MagicDNS at `100.100.100.100` |
+   | `0.0.0.0/8`, `192.0.0.0/24`, `240.0.0.0/4`, `255.255.255.255` | "this network", IETF protocol assignments, reserved, broadcast |
+   | `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `198.18.0.0/15`, `2001:db8::/32` | documentation and benchmarking |
+
+   Three kinds of address that `is_global` still counts as global are
+   refused on top of it: multicast (`224.0.0.0/4`, `ff00::/8`), IPv6's
+   unassigned blocks (`is_reserved`; `::/8` among them holds the NAT64
+   prefix `64:ff9b::/96`), and IPv6's deprecated site-local
+   `fec0::/10`. The registry's own exceptions pass on purpose: `192.0.0.9`
+   and `192.0.0.10` are public anycast services, not internal space.
+
+   This used to be a denylist of RFC1918, loopback, link-local and
+   reserved ranges, which let everything it did not name through: a
+   domain whose A record pointed into CGNAT or multicast space got a TLS
+   handshake on port 443.
 2. **SSL lookup requires a verified IP** (`SSLManager.get_ssl_info`).
    The caller resolves DNS once, runs `is_safe_ip`, and passes the
    verified IP. The socket connects to that IP directly and uses the
