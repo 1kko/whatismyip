@@ -14,7 +14,6 @@ import re
 import time
 from typing import Any
 
-import dns.resolver
 import whois
 
 from config import (
@@ -23,7 +22,13 @@ from config import (
     WHOIS_CACHE_TTL,
     WHOIS_TIMEOUT_SECONDS,
 )
-from managers import DomainManager, GeoIpManager, SSLManager, TldNamesManager
+from managers import (
+    DomainManager,
+    GeoIpManager,
+    SSLManager,
+    TldNamesManager,
+    _recursive_resolver,
+)
 from rdap import lookup_rdap, normalize_whois
 
 
@@ -197,7 +202,11 @@ async def gather(target: str) -> dict:
         if domain_manager.is_valid_domain(target):
             logging.debug("domain=%s", sanitize_log_input(target))
             try:
-                a_records = await asyncio.to_thread(dns.resolver.resolve, target, "A")
+                # Same public resolvers and time budget as the record sweep;
+                # the system resolver in the container is Docker's 127.0.0.11.
+                a_records = await asyncio.to_thread(
+                    _recursive_resolver().resolve, target, "A"
+                )
                 resolved_ip = str(a_records[0])
             except Exception as e:
                 logging.warning("No A record for %s: %s", sanitize_log_input(target), e)

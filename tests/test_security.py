@@ -297,16 +297,16 @@ class TestSSRFPrevention:
 
     @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.domain_manager.is_valid_domain", return_value=True)
-    @patch("lookup.dns.resolver.resolve")
+    @patch("lookup._recursive_resolver")
     def test_domain_resolving_to_private_ip_returns_400(
-        self, mock_resolve, mock_valid, mock_whois
+        self, mock_resolver, mock_valid, mock_whois
     ):
         """SSRF: Domain resolving to private IP should be blocked."""
         mock_record = MagicMock()
         mock_record.__str__ = lambda self: "10.0.0.1"
         mock_answer = MagicMock()
         mock_answer.__getitem__ = lambda self, idx: mock_record
-        mock_resolve.return_value = mock_answer
+        mock_resolver.return_value.resolve.return_value = mock_answer
         response = client.get("/evil-internal.example.com")
         assert response.status_code == 400
 
@@ -421,7 +421,7 @@ class TestAsyncIO:
         for target in (
             "lookup_rdap",
             "whois.whois",
-            "dns.resolver.resolve",
+            "_recursive_resolver().resolve",
             "SSLManager.get_ssl_info",
             "geo_ip_manager.fetch_location",
         ):
@@ -435,7 +435,11 @@ class TestAsyncIO:
         from main import get_ip_info, get_self_info
 
         source = _handler_sources(get_self_info, get_ip_info)
-        blocking = ("whois.whois", "dns.resolver.resolve", "SSLManager.get_ssl_info")
+        blocking = (
+            "whois.whois",
+            "_recursive_resolver().resolve",
+            "SSLManager.get_ssl_info",
+        )
         for target in blocking:
             bare = rf"await\s+{_re.escape(target)}\("
             assert not _re.search(bare, source), f"{target} awaited without to_thread"
@@ -731,13 +735,15 @@ class TestSecurityMiddleware:
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     @patch("main.domain_manager.get_records", return_value=dict(MOCK_DNS_RECORDS))
     @patch("managers.SSLManager.get_ssl_info", return_value=None)
-    @patch("dns.resolver.resolve")
+    @patch("lookup._recursive_resolver")
     def test_real_domains_are_not_banned_for_their_shape(
-        self, mock_resolve, mock_ssl, mock_records, mock_rev, mock_geo, mock_whois
+        self, mock_resolver, mock_ssl, mock_records, mock_rev, mock_geo, mock_whois
     ):
         """The counterpart risk. `.dev` and `.zip` are delegated TLDs, and a
         lookup of one must never be mistaken for a probe."""
-        mock_resolve.return_value = [MagicMock(__str__=lambda self: "93.184.216.34")]
+        mock_resolver.return_value.resolve.return_value = [
+            MagicMock(__str__=lambda self: "93.184.216.34")
+        ]
         for path in ("/foo.dev", "/foo.zip"):
             _reset_security_state()
             response = client.get(path)
