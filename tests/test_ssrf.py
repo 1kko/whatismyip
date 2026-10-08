@@ -95,9 +95,10 @@ def test_domain_resolving_there_is_refused_without_tls(ip):
         records as records_mock,
         ssl_info as ssl_mock,
         patch("lookup.domain_manager.is_valid_domain", return_value=True),
-        # gather() reads str(answer[0]).
-        patch("lookup.dns.resolver.resolve", return_value=[ip]),
+        # gather() reads str(answer[0]) from the public resolver's answer.
+        patch("lookup._recursive_resolver") as resolver,
     ):
+        resolver.return_value.resolve.return_value = [ip]
         response = client.get("/internal.example.com")
     assert response.status_code == 400
     records_mock.assert_not_called()
@@ -111,7 +112,9 @@ async def test_gather_opens_no_socket_for_a_domain_resolving_there(ip, monkeypat
     monkeypatch.setattr(lookup, "lookup_whois", AsyncMock(return_value={}))
     monkeypatch.setattr(lookup.domain_manager, "is_valid_domain", lambda d: True)
     monkeypatch.setattr(lookup.domain_manager, "get_records", MagicMock())
-    monkeypatch.setattr(lookup.dns.resolver, "resolve", lambda name, rtype: [ip])
+    resolver = MagicMock()
+    resolver.resolve.return_value = [ip]
+    monkeypatch.setattr(lookup, "_recursive_resolver", lambda: resolver)
     sock = MagicMock(side_effect=AssertionError("socket opened"))
     with patch.object(managers.socket, "socket", sock):
         with pytest.raises(lookup.PrivateAddressError):

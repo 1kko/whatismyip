@@ -674,13 +674,19 @@ class DomainManager:
     def perform_reverse_lookup(self, ip: str) -> str:
         try:
             reverse_name = dns.reversename.from_address(ip)
-            ptr_records = dns.resolver.resolve(
-                reverse_name, "PTR", lifetime=TIMEOUT_SECONDS
-            )
+            # The public resolvers, not the system one: in the container that
+            # is Docker's 127.0.0.11 with a 5s lifetime, and the self page
+            # waits on this answer before it starts the DNS sweep.
+            ptr_records = _recursive_resolver().resolve(reverse_name, "PTR")
             return str(ptr_records[0])
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer) as e:
+            # Most client IPs have no PTR record. That is an answer, not a
+            # failure, so it stays out of the warning stream.
+            logging.debug("No PTR record for %s: %s", ip, e)
+            return None
         except Exception as e:
-            # Most reverse lookups miss because client IPs lack a PTR record
-            # (NXDOMAIN). Log at warning level so SigNoz error metrics stay clean.
+            # Timeouts and SERVFAIL are the resolver failing and stay visible,
+            # at warning rather than error so SigNoz error metrics stay clean.
             logging.warning(f"Reverse lookup failed for IP {ip}: {str(e)}")
             return None
 
