@@ -602,9 +602,10 @@ class DomainManager:
         def spf_from(answer) -> list:
             spf = []
             for r in answer:
-                joined = " ".join(
-                    s.decode("utf-8", errors="replace") for s in r.strings
-                )
+                # A policy over 255 bytes arrives split wherever byte 255
+                # falls, often mid-address; RFC 7208 §3.3 says concatenate
+                # with no separator.
+                joined = "".join(s.decode("utf-8", errors="replace") for s in r.strings)
                 if joined.startswith("v=spf1"):
                     spf.append({"text": joined, "ttl": answer.rrset.ttl})
             return spf
