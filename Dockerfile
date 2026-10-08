@@ -30,6 +30,16 @@ COPY static /app/static
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 USER appuser
 
+# The commit being built, for /healthz "version" and OTel service.version.
+# Coolify also sets SOURCE_COMMIT in the runtime environment on every deploy,
+# which takes precedence over this; the build arg only arrives with Coolify's
+# "Include Source Commit in Build" on, or from a manual
+# `docker build --build-arg SOURCE_COMMIT=$(git rev-parse HEAD)`. Declared
+# after the dependency layers: its value changes on every commit and would
+# otherwise invalidate their cache.
+ARG SOURCE_COMMIT=""
+ENV SOURCE_COMMIT=${SOURCE_COMMIT}
+
 # Expose port 8000 for the FastAPI app to run on
 EXPOSE 8000
 
@@ -39,5 +49,14 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1', 8000))"
 
-# Command to run the FastAPI app using uvicorn, wrapped with OpenTelemetry
-ENTRYPOINT ["opentelemetry-instrument", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]
+# Command to run the FastAPI app using uvicorn, wrapped with OpenTelemetry.
+# The SDK builds its Resource inside opentelemetry-instrument, before main.py is
+# imported, so service.version can only arrive through OTEL_RESOURCE_ATTRIBUTES.
+# The commit is appended to whatever the operator set there rather than
+# replacing it: the SDK lets the last duplicate key win, so it overrides a
+# static service.version and keeps every other attribute
+# (deployment.environment, ...). The shell then execs the command after "sh"
+# ($0), which leaves uvicorn as PID 1 to receive SIGTERM.
+ENTRYPOINT ["/bin/sh", "-c", "if [ -n \"$SOURCE_COMMIT\" ]; then export OTEL_RESOURCE_ATTRIBUTES=\"${OTEL_RESOURCE_ATTRIBUTES:+$OTEL_RESOURCE_ATTRIBUTES,}service.version=$SOURCE_COMMIT\"; fi; exec \"$@\"", \
+            "sh", \
+            "opentelemetry-instrument", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]
