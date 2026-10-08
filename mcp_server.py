@@ -180,6 +180,8 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     set this server queries. Pass `types` (lowercase, a subset of those) to
     narrow the sweep; omit it for everything. Use this for mail-routing and
     SPF/DMARC questions, where the summary from `lookup` is not enough.
+    NS come from `zone`, the DNS zone serving the name. MX rows marked
+    `from_zone` belong to that zone, not the name: it has no MX of its own.
     """
     # `is not None`, not truthiness: types=[] means "narrow to nothing", which is
     # a different request from omitting the argument, and must not silently
@@ -215,6 +217,10 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     return {
         "domain": data["address"],
         "resolved_ip": data["resolved_ip"],
+        # The name the records were asked of (an IP's PTR name, for an IP) and
+        # the zone its NS and inherited MX/SPF came from.
+        "queried_name": records.get("queried_name"),
+        "zone": records.get("zone"),
         "records": {k: v for k, v in records.items() if k in wanted},
     }
 

@@ -113,7 +113,10 @@ poetry run ruff format .
 **DNS Resolution** (main.py:153-230):
 - Uses public DNS servers (8.8.8.8, 1.1.1.1) to avoid Docker DNS issues
 - Attempts to use domain's authoritative nameservers when available
-- Handles subdomain removal for NS/MX record lookups (uses base domain only)
+- NS, the zone's SPF, and MX for a name with none of its own come from the zone
+  apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
+  turned naver.co.kr into co.kr), floored at the registrable domain. Zone MX
+  rows carry `from_zone`; the response names `queried_name` and `zone`
 
 **GeoIP Database** (main.py:120-132):
 - Auto-updates from geoip2fast CDN every 3 days via background scheduler
