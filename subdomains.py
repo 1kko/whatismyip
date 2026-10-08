@@ -18,12 +18,16 @@ would load the GeoIP database into every test run that touches a subdomain.
 import asyncio
 import collections
 import datetime
+import ipaddress
 import json
 import logging
 import re
 import time
 import urllib.parse
 import urllib.request
+
+from tld import exceptions as tld_exceptions
+from tld import get_tld
 
 from config import (
     SUBDOMAIN_CACHE_TTL,
@@ -44,6 +48,10 @@ SOURCE = "crt.sh"
 # labels. Anything outside this set is either an encoding artefact or not a
 # hostname at all.
 _ALLOWED = re.compile(r"^[a-z0-9._-]+$")
+# RFC 1035's limits. A target is ASCII by the time they are checked, so
+# characters and octets are the same count.
+_MAX_NAME = 253
+_MAX_LABEL = 63
 
 
 class SubdomainError(Exception):
@@ -61,6 +69,67 @@ class SubdomainBudgetError(SubdomainError):
     caller still sees a "busy, try again" style error; only the durable
     negative-cache write is skipped.
     """
+
+
+def _normalize_target(domain: str) -> str:
+    return domain.strip().lower().rstrip(".")
+
+
+def invalid_target_reason(domain: str) -> str | None:
+    """Why `domain` must not be sent to the source, or None when it may be.
+
+    The source is queried as `%.{domain}`, so the target is the query itself.
+    A public suffix asks for every subdomain of every domain registered under
+    it, and a `%` in the target is a wildcard of the caller's choosing. Either
+    spends a slot of the shared outbound budget on a query crt.sh may answer
+    by blocking this service's IP, which would take the feature down for
+    everyone. The HTTP gate, the MCP tool and get_subdomains() all ask this
+    one function, so they cannot drift apart.
+
+    The suffix check reads the same parsed list DomainManager.is_valid_domain
+    does: `tld` holds one process-wide trie, and TldNamesManager points it at
+    the data volume when lookup.py is imported, which main.py does before any
+    request arrives. Nothing in this module may call get_tld at import time,
+    or the package's bundled copy would be parsed first and kept.
+    """
+    domain = _normalize_target(domain)
+    if not domain:
+        return "a domain name is required"
+    try:
+        ipaddress.ip_address(domain)
+        return "an IP address has no subdomains; pass a domain name"
+    except ValueError:
+        pass
+    if len(domain) > _MAX_NAME:
+        return f"a domain name is at most {_MAX_NAME} characters"
+    if not _ALLOWED.match(domain):
+        return (
+            "a domain name may contain only letters, digits, hyphens, "
+            "underscores and dots; give an internationalised name in its "
+            "punycode (xn--) form"
+        )
+    for label in domain.split("."):
+        if not label or len(label) > _MAX_LABEL:
+            return f"every label must be 1-{_MAX_LABEL} characters"
+        if label.startswith("-") or label.endswith("-"):
+            return "a label must not start or end with a hyphen"
+    try:
+        parsed = get_tld(domain, fix_protocol=True, as_object=True)
+    except (tld_exceptions.TldDomainNotFound, tld_exceptions.TldBadUrl):
+        return f"{domain} is not under a known public suffix"
+    if parsed.fld == parsed.tld:
+        return (
+            f"{domain} is a public suffix, not a registered domain; "
+            "ask about a domain registered under it"
+        )
+    # `_` is LIKE's single-character wildcard, and nothing documents crt.sh
+    # escaping it. Below the registered name (_dmarc.example.com) that could
+    # only widen the query within one domain; in the registered name itself it
+    # would widen it across the suffix -- "___.com" is every three-letter .com
+    # -- and no registry issues a name with one anyway.
+    if "_" in parsed.fld:
+        return f"{parsed.fld} cannot be a registered domain: it contains '_'"
+    return None
 
 
 def extract_names(payload: object) -> list[str]:
@@ -350,7 +419,13 @@ async def get_subdomains(domain: str) -> dict:
     this store is filled and read on demand, so a periodic sweep would spend
     crt.sh's capacity re-fetching domains nobody asked about again.
     """
-    domain = domain.strip().lower().rstrip(".")
+    domain = _normalize_target(domain)
+    # The HTTP gate and the MCP tool already refuse these; this is the
+    # backstop for a future caller that forgets to. Ahead of the store read and
+    # the budget, so a refused target costs neither a slot nor a _failures entry.
+    reason = invalid_target_reason(domain)
+    if reason:
+        return _result([], 0, False, None, False, reason)
     entry = await asyncio.to_thread(_store.get, domain)
 
     if entry is not None:

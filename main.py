@@ -60,7 +60,7 @@ from lookup import (
     sanitize_log_input,
     tld_names_manager,
 )
-from subdomains import get_subdomains
+from subdomains import get_subdomains, invalid_target_reason
 from security import (
     GeoBlockManager,
     IPBanManager,
@@ -834,10 +834,13 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         # Skips gather() entirely: this mode exists so the page's toggle can ask
         # for the list alone rather than re-running DNS, TLS, GeoIP and the map
         # payload for data it already has.
-        if not domain_manager.is_valid_domain(domain_ip):
-            raise HTTPException(
-                status_code=400, detail="subdomains=only requires a domain name"
-            )
+        #
+        # Not is_valid_domain: that asks only whether the target has a public
+        # suffix, and `com` does -- it IS one. The MCP tool asks the same
+        # function this does.
+        reason = invalid_target_reason(domain_ip)
+        if reason:
+            raise HTTPException(status_code=400, detail=reason)
         return {
             "address": domain_ip,
             "subdomains": await get_subdomains(domain_ip),
@@ -847,12 +850,14 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     # alongside the target lookup rather than after it.
     origin_task = asyncio.create_task(lookup_location(client_ip))
     # An IP target burns a budget slot and a crt.sh round trip that cannot
-    # possibly match, so `include` gets the same domain gate `only` already
-    # has above -- just without rejecting the request: `include` is additive,
-    # so an IP still gets its normal lookup, only without a subdomains fetch.
+    # possibly match -- and a public suffix or a wildcard, one that matches
+    # far too much -- so `include` gets the same target gate `only` already
+    # has above, just without rejecting the request: `include` is additive,
+    # so the target still gets its normal lookup, only without a subdomains
+    # fetch.
     subdomain_task = (
         asyncio.create_task(get_subdomains(domain_ip))
-        if mode == "include" and domain_manager.is_valid_domain(domain_ip)
+        if mode == "include" and invalid_target_reason(domain_ip) is None
         else None
     )
     try:

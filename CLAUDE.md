@@ -265,6 +265,15 @@ names.
 551 of them in nasa.gov's data alone. This is a privacy rule with its own test
 (`normalize_names` in `subdomains.py`), not a formatting nicety.
 
+**A target that would widen the query is refused.** crt.sh is queried as
+`%.{domain}`, so the target *is* the query: `com`, `co.uk` or `github.io` asks
+for every subdomain under a public suffix, and a `%` (or a `_` in the
+registered name) is a wildcard of the caller's choosing. Either could get the
+service IP blocked. `subdomains.invalid_target_reason()` is the one check — the
+`?subdomains=` gate in `main.py`, the MCP `subdomains` tool, and
+`get_subdomains()` itself as a backstop all call it. `is_valid_domain` is no
+substitute: it asks only whether a public suffix is present, and `com` has one.
+
 **No scheduler job**, unlike GeoIP and the public suffix list. Those are read
 by every request, so pre-refreshing always pays. This store is filled and read
 on demand, so a periodic sweep would re-fetch domains nobody asked about again.
