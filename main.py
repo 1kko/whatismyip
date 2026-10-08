@@ -246,8 +246,9 @@ def _record_value(kind: str, record) -> str:
     if kind == "NS":
         return str(record.get("hostname", ""))
     if kind == "TXT":
+        # Chunks are 255-byte wire splits, not words (RFC 7208 §3.3).
         text = record.get("text", "")
-        return " ".join(text) if isinstance(text, list) else str(text)
+        return "".join(text) if isinstance(text, list) else str(text)
     return str(record)
 
 
