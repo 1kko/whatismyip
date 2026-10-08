@@ -379,7 +379,9 @@ class TestGetSubdomains:
         """
         with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
             await subdomains.get_subdomains("old.example.com")
-        assert "old.example.com" in subdomains._failures
+        # .get(), not `in`: CodeQL reads a hostname literal on the left of `in`
+        # as a URL substring check (py/incomplete-url-substring-sanitization).
+        assert subdomains._failures.get("old.example.com") is not None
         # Backdate it past the error TTL, as if it had sat there for a while.
         subdomains._failures["old.example.com"] = (
             time.time() - subdomains.SUBDOMAIN_ERROR_TTL - 1
@@ -388,5 +390,5 @@ class TestGetSubdomains:
         with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
             await subdomains.get_subdomains("new.example.com")
 
-        assert "old.example.com" not in subdomains._failures
-        assert "new.example.com" in subdomains._failures
+        assert subdomains._failures.get("old.example.com") is None
+        assert subdomains._failures.get("new.example.com") is not None
