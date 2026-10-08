@@ -25,6 +25,8 @@ never have to care which one answered:
         "dnssec": bool | str | None,
         "country": str | None,       # IP allocations
         "network": str | None,       # IP: the allocated CIDR/range
+        "assignment_type": str | None,  # IP: e.g. "direct allocation"
+        "parent_handle": str | None,    # IP: handle of the enclosing block
         "rir": str | None,
         "whois_server": str | None,
         "url": str | None,
@@ -74,6 +76,8 @@ CANONICAL_FIELDS = (
     "dnssec",
     "country",
     "network",
+    "assignment_type",
+    "parent_handle",
     "rir",
     "whois_server",
     "url",
@@ -162,6 +166,10 @@ def _normalize_rdap_ip(raw: dict, target: str) -> dict:
         "updated": raw.get("last_changed_date"),
         "country": raw.get("country") or None,
         "network": str(network) if network else None,
+        # whoisit's clean() hands back "" for an absent field; None keeps the
+        # empty case the same as every other canonical field.
+        "assignment_type": raw.get("assignment_type") or None,
+        "parent_handle": raw.get("parent_handle") or None,
         "rir": raw.get("rir"),
         "whois_server": raw.get("whois_server"),
         "url": raw.get("url"),

@@ -320,7 +320,11 @@ def _reverse_column(location: dict, domain: dict) -> dict:
     }
 
 
-def _whois_column(whois_data: dict | None, location: dict) -> dict:
+def _whois_column(whois_data: dict | None) -> dict:
+    # Registration data only. This takes no GeoIP `location` on purpose: the
+    # column used to fill Netblock and Country from GeoIP, which made a column
+    # titled WHOIS disagree with the WHOIS accordion below it. GeoIP values
+    # live in the NETWORK column and the GeoIP accordion.
     whois_data = whois_data or {}
     error = whois_data.get("error")
     # Three states, not two. "not registered" is an answer -- the registry was
@@ -335,31 +339,23 @@ def _whois_column(whois_data: dict | None, location: dict) -> dict:
     # Separate from the status above: this one only asks whether there is a
     # usable record to draw values from, and there isn't in either failing case.
     no_record = bool(error) or not whois_data
-    return {
-        "title": "WHOIS",
-        "rows": [
+    rows = [{"label": "Status", "value": status, "tone": tone}]
+    for key, label in (
+        ("network", "Network"),
+        ("rir", "RIR"),
+        ("abuse_email", "Abuse"),
+        ("updated", "Updated"),
+    ):
+        # Same renderer as the accordion, so a value reads identically in both.
+        value = DASH if no_record else _whois_value(key, whois_data.get(key))
+        rows.append(
             {
-                "label": "Status",
-                "value": status,
-                "tone": tone,
-            },
-            {
-                "label": "Netblock",
-                "value": location.get("cidr") or DASH,
-                "tone": "default",
-            },
-            {
-                "label": "Country",
-                "value": location.get("country_code") or DASH,
-                "tone": "default",
-            },
-            {
-                "label": "Updated",
-                "value": str(whois_data.get("updated_date") or DASH),
-                "tone": "muted" if no_record else "default",
-            },
-        ],
-    }
+                "label": label,
+                "value": value,
+                "tone": "muted" if value == DASH else "default",
+            }
+        )
+    return {"title": "WHOIS", "rows": rows}
 
 
 def _certificate_column(ssl_data: dict | None) -> dict:
@@ -435,6 +431,8 @@ _WHOIS_ROWS = (
     ("dnssec", "DNSSEC"),
     ("country", "Country"),
     ("network", "Network"),
+    ("assignment_type", "Assignment"),
+    ("parent_handle", "Parent handle"),
     ("rir", "RIR"),
     ("whois_server", "WHOIS server"),
     ("url", "RDAP URL"),
@@ -454,7 +452,8 @@ def _whois_value(key: str, value: Any) -> str:
     with datetimes, lists, and the odd bool without leaking Python reprs."""
     if value is None or value == "":
         return DASH
-    if key == "source":
+    if key in ("source", "rir"):
+        # whoisit names the RIR in lower case ("arin"); it is an acronym.
         return str(value).upper()
     if key == "dnssec":
         if isinstance(value, bool):
@@ -646,7 +645,7 @@ def build_view(
         facts = [
             _network_column(location, address),
             _reverse_column(location, domain),
-            _whois_column(response.get("whois"), location),
+            _whois_column(response.get("whois")),
         ]
     else:
         facts = [
