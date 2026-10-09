@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import unicodedata
+from collections.abc import Collection
 from typing import Any
 
 import whois
@@ -248,13 +249,34 @@ async def lookup_location(ip: str) -> dict:
     return data
 
 
-async def gather(target: str) -> dict:
+# The parts of gather() a caller can ask for by name. "resolve" is a domain's A
+# query; "ptr" and "dns" are an IP's reverse lookup and the record sweep (of the
+# domain, or of an IP's PTR name); "geo", "tls" and "whois" are what they say.
+LEGS = frozenset({"resolve", "geo", "ptr", "dns", "tls", "whois"})
+
+
+async def _skipped() -> None:
+    return None
+
+
+async def gather(target: str, legs: Collection[str] | None = None) -> dict:
     """Everything known about one domain or IP, with no rendering concerns.
 
     Lifted from get_ip_info. The visitor's own location is deliberately NOT
     fetched here: it belongs to the page, not to the target, so the caller
     starts that task itself and awaits it alongside this one.
+
+    `legs` narrows the work to the named parts of LEGS, for a caller that wants
+    a few values rather than the whole picture (?fields= on the HTTP routes).
+    None, the default, runs every leg; the page, the full JSON and the MCP tools
+    all pass nothing. A leg that did not run comes back as None ({} for
+    "location"). Every leg but "whois" touches the address, so a domain is still
+    resolved and its address still refused if it is private before any of them
+    runs, whichever were asked for.
     """
+    want = LEGS if legs is None else frozenset(legs)
+    if not want <= LEGS:
+        raise ValueError(f"unknown legs: {', '.join(sorted(want - LEGS))}")
     target = normalize_lookup_target(target)
 
     # Before the WHOIS task exists. It used to be created first, so
@@ -276,7 +298,7 @@ async def gather(target: str) -> dict:
 
     # WHOIS takes seconds and depends on nothing else here, so it runs
     # alongside the DNS/SSL work instead of in front of it.
-    whois_task = asyncio.create_task(lookup_whois(target))
+    whois_task = asyncio.create_task(lookup_whois(target)) if "whois" in want else None
 
     ssl_data = None
     resolved_ip = None
@@ -284,7 +306,7 @@ async def gather(target: str) -> dict:
     reverse_dns_hostname = None
 
     try:
-        if kind == "domain":
+        if kind == "domain" and want - {"whois"}:
             logging.debug("domain=%s", sanitize_log_input(target))
             try:
                 # Same public resolvers and time budget as the record sweep;
@@ -302,8 +324,12 @@ async def gather(target: str) -> dict:
             domain_data, ssl_data = await asyncio.gather(
                 asyncio.to_thread(
                     lambda: domain_manager.get_records(target, ip=resolved_ip)
-                ),
-                asyncio.to_thread(SSLManager.get_ssl_info, target, resolved_ip),
+                )
+                if "dns" in want
+                else _skipped(),
+                asyncio.to_thread(SSLManager.get_ssl_info, target, resolved_ip)
+                if "tls" in want
+                else _skipped(),
                 return_exceptions=True,
             )
             if isinstance(domain_data, BaseException):
@@ -316,24 +342,30 @@ async def gather(target: str) -> dict:
                     "Error getting SSL info for %s", sanitize_log_input(target)
                 )
                 ssl_data = None
-        else:
+        elif kind == "ipv4":
             logging.debug("ip=%s", sanitize_log_input(target))
-            reverse_dns_hostname = await asyncio.to_thread(
-                domain_manager.perform_reverse_lookup, target
-            )
-            domain_data = (
-                await asyncio.to_thread(
-                    lambda: domain_manager.get_records(reverse_dns_hostname, ip=target)
+            # The sweep is of the PTR name, so it needs the PTR too.
+            if want & {"ptr", "dns"}:
+                reverse_dns_hostname = await asyncio.to_thread(
+                    domain_manager.perform_reverse_lookup, target
                 )
-                if reverse_dns_hostname
-                else {}
-            )
+            if "dns" in want:
+                domain_data = (
+                    await asyncio.to_thread(
+                        lambda: domain_manager.get_records(
+                            reverse_dns_hostname, ip=target
+                        )
+                    )
+                    if reverse_dns_hostname
+                    else {}
+                )
             resolved_ip = target
     except BaseException:
-        whois_task.cancel()
+        if whois_task is not None:
+            whois_task.cancel()
         raise
 
-    if resolved_ip:
+    if resolved_ip and "geo" in want:
         ip_data = await lookup_location(resolved_ip)
         # The PTR record was already resolved above; don't ask twice.
         if reverse_dns_hostname:
@@ -345,7 +377,7 @@ async def gather(target: str) -> dict:
         "address": target,
         "domain": domain_data,
         "location": ip_data,
-        "whois": await whois_task,
+        "whois": await whois_task if whois_task is not None else None,
         "ssl": ssl_data,
         "resolved_ip": resolved_ip,
         "reverse_dns": reverse_dns_hostname,
