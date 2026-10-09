@@ -33,7 +33,11 @@ from tld import get_fld, get_tld
 
 from tld import defaults as tld_defaults
 from tld.conf import set_setting as set_tld_setting
-from tld.utils import MozillaTLDSourceParser, reset_tld_names
+from tld.utils import (
+    MozillaPublicOnlyTLDSourceParser,
+    MozillaTLDSourceParser,
+    reset_tld_names,
+)
 
 from config import (
     DNS_HOST_RESOLVE_LIMIT,
@@ -515,11 +519,19 @@ class TldNamesManager:
     # a package upgrade that renames the file cannot silently strand us on a
     # copy nothing reads.
     _RELATIVE_PATH = MozillaTLDSourceParser.local_path
+    # get_fld(search_private=False), which DomainManager.zone_apex uses for its
+    # floor, reads a second file. One list serves both: tld's public-only parser
+    # stops reading at "===BEGIN PRIVATE DOMAINS===", so the full list parsed by
+    # it is exactly the ICANN-only list. Without a copy here, tld fetches
+    # ?publiconly itself inside the first request that needs it, with no
+    # timeout, and nothing ever refreshes what it fetched.
+    _PUBLIC_ONLY_RELATIVE_PATH = MozillaPublicOnlyTLDSourceParser.local_path
 
     def __init__(self, directory: str = TLD_NAMES_DIR, url: str = TLD_LIST_URL):
         self.url = url
         self.directory = directory
         self.path = os.path.join(directory, self._RELATIVE_PATH)
+        self.public_only_path = os.path.join(directory, self._PUBLIC_ONLY_RELATIVE_PATH)
         self.bundled_path = os.path.join(
             tld_defaults.NAMES_LOCAL_PATH_PARENT, self._RELATIVE_PATH
         )
@@ -527,6 +539,7 @@ class TldNamesManager:
         # manager is constructed ahead of DomainManager.
         set_tld_setting("NAMES_LOCAL_PATH_PARENT", directory)
         self._seed()
+        self._mirror_public_only()
 
     def _seed(self) -> bool:
         """Put the bundled snapshot in place if the volume has no copy yet."""
@@ -546,6 +559,42 @@ class TldNamesManager:
                 "Could not seed the public suffix list from %s", self.bundled_path
             )
             return False
+
+    @staticmethod
+    def _replace(path: str, data: bytes) -> None:
+        """Write via a temp file and os.replace, so a reader never sees half."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, path)
+
+    def _mirror_public_only(self) -> bool:
+        """Make the public-only copy the same as the full list. Returns whether
+        it changed. Runs at boot too, because a volume from before this existed
+        has either no copy or the one tld fetched once and never refreshed."""
+        try:
+            with open(self.path, "rb") as handle:
+                full = handle.read()
+        except OSError:
+            return False  # no list at all; _seed has already said why
+        try:
+            with open(self.public_only_path, "rb") as handle:
+                if handle.read() == full:
+                    return False
+        except OSError:
+            pass
+        try:
+            self._replace(self.public_only_path, full)
+        except OSError:
+            logging.exception(
+                "Could not write the public-only suffix list to %s",
+                self.public_only_path,
+            )
+            return False
+        # Drop that parser's trie only; the full list's is still current.
+        reset_tld_names(self._PUBLIC_ONLY_RELATIVE_PATH)
+        return True
 
     def age_days(self) -> float | None:
         """Age of the downloaded list, or None when there isn't one — the file
@@ -576,6 +625,9 @@ class TldNamesManager:
         retry timer.
         """
         if not force and not self.is_stale():
+            # Still current, but a public-only copy that went missing, or failed
+            # to write last time, should not wait out the whole interval.
+            self._mirror_public_only()
             return True
         try:
             # url is the hardcoded https publicsuffix.org endpoint by default.
@@ -590,13 +642,10 @@ class TldNamesManager:
             # the visitors making them.
             if "===BEGIN ICANN DOMAINS===" not in text:
                 raise ValueError(f"{self.url} did not return a public suffix list")
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as handle:
-                handle.write(text)
-            os.replace(tmp, self.path)
-            # Drop the parsed trie, or get_tld keeps answering from the copy it
-            # read at boot for the life of the process.
+            self._replace(self.path, text.encode("utf-8"))
+            self._mirror_public_only()
+            # Drop the parsed tries, or get_tld keeps answering from the copies
+            # it read at boot for the life of the process.
             reset_tld_names()
             logging.info("Public suffix list updated (%d bytes)", len(text))
             return True
