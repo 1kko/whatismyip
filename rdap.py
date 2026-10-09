@@ -273,6 +273,14 @@ class CircuitBreaker:
             self.cooldown,
         )
 
+    def open_hosts(self) -> list[str]:
+        """The hosts lookups are failing fast on right now, for /healthz. One
+        whose window has run out is not listed: the next lookup to it goes
+        through as the probe, so it is no longer being skipped."""
+        with self._lock:
+            now = self._clock()
+            return sorted(h for h, until in self._open_until.items() if now < until)
+
 
 rdap_breaker = CircuitBreaker(RDAP_BREAKER_FAILURES, RDAP_BREAKER_COOLDOWN_SECONDS)
 

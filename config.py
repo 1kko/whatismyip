@@ -151,6 +151,14 @@ RATE_LIMIT_CLEANUP_INTERVAL = int(os.getenv("RATE_LIMIT_CLEANUP_INTERVAL", "60")
 # every 3 days; without this, one failed run leaves stale (or bundled-fallback)
 # data in place for the whole interval.
 GEOIP_UPDATE_RETRY_SECONDS = int(os.getenv("GEOIP_UPDATE_RETRY_SECONDS", "3600"))
+# /healthz reports a loaded GeoLite2 database as stale past this build age.
+# MaxMind publishes twice a week and the refresh runs every 3 days, but the
+# free geolite2-city mirror republishes each build about four days late (the
+# Friday 2026-10-02 build shipped on the 6th), so a healthy mirror build is
+# often well over a week old. Three weeks means the refresh is failing or the
+# feed has frozen, as the geoip2fast feed did from 2026-06-05 and the
+# geolite2-asn mirror has since 2024-07-29.
+GEOIP_MAX_BUILD_AGE_DAYS = float(os.getenv("GEOIP_MAX_BUILD_AGE_DAYS", "21"))
 
 # Geographic Blocking Configuration (optional initial values from .env)
 GEO_MODE_INITIAL = os.getenv("GEO_MODE", "disabled")

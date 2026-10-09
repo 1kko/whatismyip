@@ -333,6 +333,23 @@ class GeoIpManager:
             "asn_overlay": self._mmdb_status(self.asn_reader),
         }
 
+    def build_ages(self) -> Dict[str, float]:
+        """Days since each loaded GeoLite2 database was built, by edition, for
+        /healthz. One that is not loaded is left out: that is reported on its
+        own, and its age would mean nothing."""
+        ages = {}
+        for edition, reader in (
+            (MAXMIND_CITY_EDITION, self.city_reader),
+            (MAXMIND_ASN_EDITION, self.asn_reader),
+        ):
+            try:
+                built = reader.metadata().build_epoch if reader else None
+            except Exception:
+                built = None
+            if built is not None:
+                ages[edition] = (time.time() - built) / 86400
+        return ages
+
     def _update_mmdb(
         self, edition: str, mirror_url: str, path: str, reader_attr: str
     ) -> bool:
@@ -542,6 +559,14 @@ class TldNamesManager:
     def is_stale(self) -> bool:
         age = self.age_days()
         return age is None or age >= TLD_MAX_AGE_DAYS
+
+    def is_overdue(self) -> bool:
+        """Past the point a working refresh would have replaced it, for
+        /healthz. is_stale() turns true at TLD_MAX_AGE_DAYS, but the job that
+        acts on it runs once a day, so a healthy list sits up to a day past
+        that; the second day of grace keeps that from reading as a fault."""
+        age = self.age_days()
+        return age is None or age >= TLD_MAX_AGE_DAYS + 2
 
     def update(self, force: bool = False) -> bool:
         """Fetch the list and swap it in when the local copy has aged out.

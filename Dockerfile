@@ -43,11 +43,12 @@ ENV SOURCE_COMMIT=${SOURCE_COMMIT}
 # Expose port 8000 for the FastAPI app to run on
 EXPOSE 8000
 
-# Liveness probe using only the Python stdlib (no extra install).
-# Succeeds when uvicorn is bound to 8000; start-period covers the
-# first-boot GeoLite2 download.
+# Liveness probe using only the Python stdlib (the image has no curl).
+# Succeeds when GET /healthz answers 200, whether its status is "ok" or
+# "degraded": a restart fixes neither, so degraded must not mark the container
+# unhealthy. start-period covers the first-boot GeoLite2 download.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1', 8000))"
+    CMD ["python", "/app/healthcheck.py"]
 
 # Command to run the FastAPI app using uvicorn, wrapped with OpenTelemetry.
 # The SDK builds its Resource inside opentelemetry-instrument, before main.py is

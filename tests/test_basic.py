@@ -72,7 +72,10 @@ class TestBasic:
         response = client.get("/healthz", headers={"user-agent": "curl/8"})
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "ok"
+        # Which one depends on what this machine downloaded at import (the free
+        # GeoLite2-ASN mirror alone reads as degraded); test_healthz_degraded
+        # pins each reason.
+        assert data["status"] in ("ok", "degraded")
         databases = data["databases"]
         # "bundled" while the geoip2fast fallback answers country, "unused"
         # once GeoLite2-City does.
