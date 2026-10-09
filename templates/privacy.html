@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy — WhatIsMyIP</title>
+    <meta name="description" content="What {{ site_domain }} records, for how long, and which other servers a lookup reaches.">
+
+    <link rel="preload" href="/static/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/static/css/whatismyip.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="shortcut icon" href="/static/favicon.ico">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+    <link rel="manifest" href="/static/site.webmanifest">
+</head>
+<body>
+<div class="progress" id="progress" aria-hidden="true"></div>
+<div class="shell doc-shell">
+    {% include "_search.html" %}
+
+    {# The durations, resolvers and configurable hosts below come from the
+       constants the code runs on (see privacy() in main.py), so the page
+       follows the configuration. #}
+    <main class="inset doc">
+        <p class="eyebrow">PRIVACY</p>
+        <h1 class="doc__title">What this site records, and who else sees a lookup</h1>
+
+        <h2>What is logged</h2>
+        <ul>
+            <li><strong>Every lookup</strong>, from this page, the JSON API or the text API, writes
+                one log line: the time, your IP address and what you looked up. Opening the home
+                page is a lookup of your own address.</li>
+            <li><strong>Refused requests.</strong> When a request is blocked, rate limited or banned,
+                the log keeps your IP address and why, with the country GeoIP puts that address in
+                or the path you asked for where the rule turns on them.</li>
+            <li><strong>Failures.</strong> When a lookup fails, the log names the domain or address
+                that failed, without yours.</li>
+            <li><strong>MCP tool calls</strong> are not logged, except a failed one, which is logged
+                as above: its target, without your address.</li>
+        </ul>
+
+        <h2>How long it is kept</h2>
+        <ul>
+            <li>The log file on the server, <code>service.log</code>, starts afresh every day and
+                keeps the last {{ log_retention }} of old files. Older ones are deleted.</li>
+            {# TODO(operator): confirm both retentions, then replace the marked sentence. #}
+            <li>The same lines also go to the server's console log and, with a trace of each
+                request (method, path and query, so what was looked up, plus status, timing and
+                user-agent), to the operator's SigNoz monitoring.
+                <strong class="doc__todo">[Placeholder, to be confirmed by the operator: SigNoz keeps
+                logs for N days and traces for N days; the hosting platform keeps the console log
+                for N days.]</strong></li>
+            <li>A ban keeps your IP address, the reason and, where they apply, the path and the
+                country until it expires: {{ ban_rate_limit }} for going over the rate limit,
+                {{ ban_suspicious }} for a request shaped like a vulnerability probe. A ban set by
+                hand lasts until it is lifted.</li>
+            <li>The rate limiter holds the times of your recent requests in memory for a few
+                minutes. None of it is written down.</li>
+            <li>Results are cached by what was looked up, never by who asked: registration (RDAP and
+                WHOIS) answers for {{ whois_cache }}, in memory{% if subdomains_enabled %}, and
+                subdomain lists on disk, refreshed when a request finds them older than
+                {{ subdomain_cache }}{% endif %}.</li>
+        </ul>
+
+        <h2>What is not collected</h2>
+        <ul>
+            <li>No cookies, no local storage, no accounts, and no analytics or advertising
+                scripts.</li>
+            <li>The fingerprint panel{% if stun_url %} and the WebRTC leak test{% endif %} run in
+                your browser. What they find is never sent to {{ site_domain }}.</li>
+        </ul>
+
+        <h2>Who else the server contacts</h2>
+        <p>These servers see this server's address, not yours. They do learn what was looked up,
+            and on the home page that is your own address.</p>
+        <ul>
+            <li><strong>Public DNS resolvers</strong> {{ resolvers | join(" and ") }}: the records of
+                the domain you look up, and the reverse-DNS name of an address.</li>
+            <li><strong>RDAP registries</strong>, found through IANA's bootstrap files: the domain or
+                address, sent to the registry or regional internet registry that holds it.</li>
+            <li><strong>WHOIS servers</strong> on port 43: the domain, when its registry has no RDAP
+                service or does not answer.</li>
+            <li><strong>The looked-up host itself</strong>: a TLS connection to its port 443, to read
+                its certificate.</li>
+            {% if subdomains_enabled %}
+            <li><strong>{{ subdomain_host }}</strong>: the domain, and only when you ask for its
+                subdomains.</li>
+            {% endif %}
+        </ul>
+        <p>The server also downloads files that carry nothing about you: the GeoLite2 databases
+            (from {{ geoip_hosts | join(", ") }}), the Public Suffix List ({{ psl_host }}) and
+            IANA's RDAP bootstrap files. Finding an address on the map uses those databases on
+            this server; nobody else is asked.</p>
+
+        <h2>Who else your browser contacts</h2>
+        <ul>
+            <li><strong>tile.openstreetmap.org</strong>, for the map tiles on a page that shows a
+                map: about 15 requests on a desktop, 6 on a phone. OpenStreetMap sees your IP
+                address and this site's name, but not the page's address, so not what you looked
+                up. The tiles it serves do show which part of the map you are viewing.</li>
+            {% if stun_url %}
+            <li><strong>{{ stun_host }}</strong>, a STUN server, and only when you press
+                "Run WebRTC leak test" on the home page. It sees your IP addresses: reporting which
+                ones it sees is the test.</li>
+            {% endif %}
+            <li>Nothing else. Fonts, scripts and styles come from {{ site_domain }}. Links to GitHub,
+                OpenStreetMap{% if subdomains_enabled %}, crt.sh{% endif %} or MaxMind are only
+                followed if you click them.</li>
+        </ul>
+
+        <p>Questions or corrections:
+            <a href="https://github.com/1kko/whatismyip/issues" rel="noopener noreferrer">open an
+            issue</a>.</p>
+    </main>
+
+    {% include "_footer.html" %}
+</div>
+
+<script src="/static/js/app.js" nonce="{{ nonce }}" defer></script>
+</body>
+</html>

@@ -216,8 +216,8 @@ MOBILE_CANVAS = {"width": 350, "height": 255, "focus_x": 0.5, "fit_ratio": 0.78}
 
 # The STUN server the self page's WebRTC leak test asks, from the visitor's
 # browser and only when they press the button. Besides the map tiles it is the
-# only other host the page contacts, so the page footer names it, reading it
-# from here. Empty removes the test.
+# only other host the page contacts, so the page footer and /privacy name it,
+# both reading it from here. Empty removes the test.
 WEBRTC_STUN_URL = os.getenv("WEBRTC_STUN_URL", "stun:stun.cloudflare.com:3478").strip()
 WEBRTC_STUN_HOST = WEBRTC_STUN_URL.removeprefix("stun:")
 

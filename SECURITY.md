@@ -68,7 +68,7 @@ Requests are processed in this order:
 4. **Rate Limiting** - Prevent abuse through request frequency limits. Static
    assets under `/static/` are exempt, because a single page load fetches about
    a dozen of them and would otherwise trip the per-second limit, and so are
-   exactly `/robots.txt` and `/favicon.ico`, which are fixed answers. Everything
+   exactly `/robots.txt`, `/favicon.ico` and `/privacy`, which are fixed answers. Everything
    else is limited, including `/` and `/{domain-or-ip}` — that is where the DNS,
    RDAP/WHOIS and TLS work happens. A `HEAD` on those runs no lookup but is
    counted all the same.
@@ -138,8 +138,8 @@ group is additionally exempt from rate limiting.
 
 Static assets (skip the detector **and** the rate limiter):
 - `/static/*.(css|js|json|png|jpg|jpeg|gif|svg|ico|webmanifest|woff|woff2)`
-- `/robots.txt` and `/favicon.ico` — exact, case-sensitive matches, because
-  `/ROBOTS.TXT` is not those routes and falls through to the lookup surface
+- `/robots.txt`, `/favicon.ico` and `/privacy` — exact, case-sensitive matches,
+  because `/ROBOTS.TXT` is not those routes and falls through to the lookup surface
 
 Lookup surface (skips the detector **only when the target is a real domain or
 IP**, and is always rate limited):
@@ -709,6 +709,7 @@ Set by `security_headers_middleware` in `main.py` on every response.
 | `Permissions-Policy` | `interest-cohort=(), browsing-topics=()` | Opt out of FLoC/Topics |
 | `Cross-Origin-Opener-Policy` | `same-origin` | Process isolation |
 | `Server` | `hidden` | Obscure fingerprinting (+ `uvicorn --no-server-header`) |
+| `Link` | `</privacy>; rel="privacy-policy"` | Every HTML page and every answer from the lookup routes only |
 
 `Referrer-Policy: no-referrer` has one deliberate exception: `static/js/map.js`
 gives each map tile `<img>` `referrerPolicy = "strict-origin"`. OpenStreetMap's

@@ -38,23 +38,32 @@ from config import (
     BAN_DURATION_SUSPICIOUS,
     CLEANUP_INTERVAL_SECONDS,
     DESKTOP_CANVAS,
+    GEOIP_ASN_DB_URL,
+    GEOIP_CITY_DB_URL,
     GEOIP_MAX_BUILD_AGE_DAYS,
     GEOIP_UPDATE_RETRY_SECONDS,
     LOOKUP_BUSY_RETRY_AFTER_SECONDS,
+    MAXMIND_ACCOUNT_ID,
+    MAXMIND_LICENSE_KEY,
     MCP_ENABLED,
     MCP_MAX_BODY_BYTES,
     MCP_RATE_LIMIT_PER_MINUTE,
     MCP_RATE_LIMIT_PER_SECOND,
     MOBILE_CANVAS,
     PUBLIC_BASE_URL,
+    PUBLIC_RESOLVERS,
     RATE_LIMIT_CLEANUP_INTERVAL,
     SITE_DOMAIN_FALLBACK,
+    SUBDOMAIN_CACHE_TTL,
     SUBDOMAIN_ENABLED,
+    SUBDOMAIN_SOURCE_URL,
+    TLD_LIST_URL,
     TLD_UPDATE_RETRY_SECONDS,
     WEBRTC_STUN_HOST,
     WEBRTC_STUN_URL,
+    WHOIS_CACHE_TTL,
 )
-from managers import HeaderManager
+from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
 from mcp_server import McpBarePathRoute, McpDisabled, build_mcp, mcp_dispatch
 from models import GeoRulesUpdate
 from lookup import (
@@ -142,9 +151,11 @@ console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(log_formatter)
 logger.addHandler(console_handler)
 
-# File handler with rotation every 1 days, keeping 7 days of logs
+# File handler with rotation every 1 days, keeping 7 days of logs. /privacy
+# states this retention, reading the same constant.
+LOG_RETENTION_DAYS = 7
 file_handler = TimedRotatingFileHandler(
-    "service.log", when="D", interval=1, backupCount=7
+    "service.log", when="D", interval=1, backupCount=LOG_RETENTION_DAYS
 )
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(log_formatter)
@@ -980,6 +991,8 @@ async def security_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+PRIVACY_POLICY_LINK = '</privacy>; rel="privacy-policy"'
+
 _SECURITY_HEADERS = {
     "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
     "X-Content-Type-Options": "nosniff",
@@ -1032,6 +1045,14 @@ async def security_headers_middleware(request: Request, call_next):
         response.headers.add_vary_header("Accept")
         response.headers.add_vary_header("User-Agent")
         response.headers["Cache-Control"] = "no-store"
+    # The privacy policy (RFC 6903's relation), for a client that never
+    # renders the footer link: on every page, and on every answer from the
+    # lookup routes (JSON and text too), since an API lookup is logged exactly
+    # as a page view is. Not on /static, /healthz, /robots.txt or /mcp.
+    if response.headers.get("content-type", "").startswith("text/html") or (
+        request.scope.get("endpoint") in (get_self_info, get_ip_info, head_lookup)
+    ):
+        response.headers.append("Link", PRIVACY_POLICY_LINK)
     # Obscure server fingerprinting.
     response.headers["server"] = "hidden"
     return response
@@ -1206,6 +1227,55 @@ async def favicon():
     still ask for /favicon.ico on their own, and the catch-all used to answer
     each one with an RDAP query and a port-43 WHOIS attempt."""
     return RedirectResponse("/static/favicon.ico", status_code=301)
+
+
+def _host(url: str) -> str:
+    return urlparse(url).hostname or url
+
+
+def _span(seconds: int) -> str:
+    """3600 -> "1 hour", 86400 -> "24 hours", 604800 -> "7 days"."""
+    for unit, size, least in (("day", 86400, 2), ("hour", 3600, 1), ("minute", 60, 1)):
+        if seconds % size == 0 and seconds // size >= least:
+            count = seconds // size
+            return f"{count} {unit}{'' if count == 1 else 's'}"
+    return f"{seconds} seconds"
+
+
+@app.api_route("/privacy", methods=["GET", "HEAD"])
+async def privacy(request: Request):
+    """What is recorded, for how long, and who else is contacted. One HTML
+    page for every client. Declared before /{domain_ip}, which would
+    otherwise look "privacy" up, and kept out of the lookup rate limit like
+    /robots.txt (WhitelistManager.static_paths).
+
+    Its durations, resolvers and configurable hosts are read from the
+    constants the code runs on, so a config change cannot leave the page
+    saying otherwise.
+    """
+    geoip_hosts = [_host(GEOIP_CITY_DB_URL), _host(GEOIP_ASN_DB_URL)]
+    if MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY:
+        geoip_hosts.insert(0, _host(MAXMIND_DOWNLOAD_URL))
+    return templates.TemplateResponse(
+        request,
+        "privacy.html",
+        {
+            "site_domain": site_domain(request),
+            "nonce": getattr(request.state, "csp_nonce", ""),
+            "log_retention": _span(LOG_RETENTION_DAYS * 86400),
+            "ban_rate_limit": _span(BAN_DURATION_RATE_LIMIT),
+            "ban_suspicious": _span(BAN_DURATION_SUSPICIOUS),
+            "whois_cache": _span(WHOIS_CACHE_TTL),
+            "resolvers": PUBLIC_RESOLVERS,
+            "subdomains_enabled": SUBDOMAIN_ENABLED,
+            "subdomain_host": _host(SUBDOMAIN_SOURCE_URL),
+            "subdomain_cache": _span(SUBDOMAIN_CACHE_TTL),
+            "geoip_hosts": list(dict.fromkeys(geoip_hosts)),
+            "psl_host": _host(TLD_LIST_URL),
+            "stun_url": WEBRTC_STUN_URL,
+            "stun_host": WEBRTC_STUN_HOST,
+        },
+    )
 
 
 def _text_error(message: str, status_code: int = 400) -> PlainTextResponse:

@@ -93,7 +93,10 @@ RDAP registration data and the full TLS certificate, expanded.
 - Self-hosted fonts and a `default-src 'self'` Content-Security-Policy with a
   per-request nonce. The single allowlisted remote origin is
   `tile.openstreetmap.org` in `img-src`. STUN is not a fetch and no CSP
-  directive covers it, so the footer names the STUN server instead.
+  directive covers it, so the footer and `/privacy` name the STUN server
+  instead.
+- **`/privacy`** — what is logged, for how long, and which third parties the
+  server and the browser contact; linked from every footer.
 
 ### Machine interfaces
 
@@ -205,7 +208,7 @@ poetry run python scripts/build_gazetteer.py   # static/geo/*.json from GeoNames
 The Content-Security-Policy is `default-src 'self'`, so fonts must be
 self-hosted. Map tiles come from the single allowlisted host
 `tile.openstreetmap.org`: the browser fetches them directly (no API key, no
-proxy), which means visitor IPs reach OSM — the footer says so, and
+proxy), which means visitor IPs reach OSM — `/privacy` says so, and
 `© OpenStreetMap contributors` attribution is required.
 
 Coordinates for the map come from GeoLite2-City. The GeoNames gazetteer above
@@ -553,6 +556,15 @@ can cost a crt.sh round trip each. `/favicon.ico` is a `301` to
 `/static/favicon.ico`. Neither is looked up as a domain, and like `/static/`
 neither counts against the rate limit.
 
+### `GET /privacy`
+
+An HTML page, for every client, saying what is logged and for how long, and
+which third parties the server and the browser contact. Its durations,
+resolvers and hosts are read from the same configuration the code runs on.
+Like `/robots.txt` it is not a lookup and does not count against the rate
+limit. Every page, and every answer from `/` and `/{domain_or_ip}` (JSON and
+text included), carries `Link: </privacy>; rel="privacy-policy"` (RFC 6903).
+
 ### `HEAD`
 
 `HEAD /` and `HEAD /{domain_or_ip}` answer `200` with the Content-Type a `GET`
@@ -560,7 +572,7 @@ would have (`text/plain` for text, `application/json` for `?fields=`) and no
 body, without running any lookup — for uptime monitors and link checkers. A bad
 `?format=` or `?fields=` is the same `400` as on `GET`. They do not tell you
 whether a given target would be rejected: finding that out takes the lookup.
-`/healthz`, `/robots.txt`, `/favicon.ico` and `/static/` answer `HEAD` as they
+`/healthz`, `/robots.txt`, `/favicon.ico`, `/privacy` and `/static/` answer `HEAD` as they
 answer `GET`, minus the body. `HEAD` passes through the same bans, geo rules and
 rate limit as `GET`.
 
