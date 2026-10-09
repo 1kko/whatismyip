@@ -1,0 +1,79 @@
+name: Publish to MCP Registry
+
+# Publishes server.json to the official MCP Registry
+# (registry.modelcontextprotocol.io) as io.github.1kko/whatismyip.
+#
+# Manual only. The registry never lets a version be changed once it is
+# published, so a publish has to be deliberate: bump "version" in server.json
+# (README -> MCP Registry says when), merge, wait for the deploy, then run this
+# from the Actions tab on main. A trigger on pushes to server.json would race
+# that deploy (Deploy waits for CI; this would not), and an edit merged without
+# a version bump would fail the run.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: mcp-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Only main, so a dispatch from an unmerged branch cannot publish it.
+    if: github.ref == 'refs/heads/main' && github.repository == '1kko/whatismyip'
+    # GitHub-hosted, never the self-hosted runner: that one lives on the Coolify
+    # host and runs only the CI-gated deploy job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # GitHub OIDC. The registry verifies a token GitHub signs for this run
+      # and grants io.github.<repository owner>/*, so there is no secret to
+      # store or leak. The other login methods are ruled out: `login http`
+      # makes the registry fetch a dotfile path from ip.1kko.com, which the
+      # suspicious-path detector bans for 24 hours, and `login dns` needs a
+      # private key kept as a secret.
+      id-token: write
+      contents: read
+    env:
+      # Pinned rather than releases/latest, so a new release cannot change what
+      # runs here unreviewed. To upgrade, take both values from the release's
+      # registry_<version>_checksums.txt (the mcp-publisher_linux_amd64.tar.gz
+      # line). An "invalid audience" error at login means the registry now
+      # needs a newer mcp-publisher than this one.
+      MCP_PUBLISHER_VERSION: v1.8.1
+      MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum --check --strict
+          tar -xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate server.json
+
+      # The registry does not check that a remote answers, and a published
+      # version cannot be withdrawn and republished, only marked deprecated.
+      - name: Check the remote answers MCP
+        run: |
+          set -euo pipefail
+          url=$(jq -r '.remotes[0].url' server.json)
+          curl --fail --silent --show-error --max-time 20 \
+               --header 'Content-Type: application/json' \
+               --header 'Accept: application/json, text/event-stream' \
+               --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"mcp-publish","version":"0"}}}' \
+               "$url" > initialize.json
+          jq -e '.result.serverInfo.name == "whatismyip"' initialize.json
+
+      - name: Log in to the registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish server.json

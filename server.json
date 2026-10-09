@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.1kko/whatismyip",
+  "title": "WhatIsMyIP",
+  "description": "Geolocation, ASN, RDAP/WHOIS, DNS, TLS certificates and CT subdomains for any IP or domain",
+  "version": "1.0.0",
+  "websiteUrl": "https://ip.1kko.com",
+  "repository": {
+    "url": "https://github.com/1kko/whatismyip",
+    "source": "github",
+    "id": "861484271"
+  },
+  "icons": [
+    {
+      "src": "https://ip.1kko.com/static/image/logo.png",
+      "mimeType": "image/png",
+      "sizes": ["512x512"]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://ip.1kko.com/mcp"
+    }
+  ]
+}

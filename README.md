@@ -764,7 +764,7 @@ interface from `<head>` without scraping the body:
 <meta name="mcp-endpoint"  content="https://ip.1kko.com/mcp">
 <meta name="mcp-transport" content="streamable-http">
 <meta name="mcp-auth"      content="none">
-<meta name="mcp-tools"     content="lookup, dns_records, ssl_certificate, whoami_caller, subdomains">
+<meta name="mcp-tools"     content="lookup, dns_records, ssl_certificate, subdomains, whoami_caller">
 <meta name="mcp-install"   content="claude mcp add --transport http whatismyip https://ip.1kko.com/mcp">
 <meta name="mcp-note"      content="whoami_caller returns whoever opened the connection…">
 <meta name="api-endpoint"  content="https://ip.1kko.com/{target}">
@@ -773,6 +773,49 @@ interface from `<head>` without scraping the body:
 `service-doc` is the IANA-registered relation for human-readable service
 documentation (RFC 8631). The `mcp-*` and `api-*` names are this site's own
 convention — no registry covers them yet, so treat them as a hint, not a spec.
+
+`mcp-tools`, and the tool list in the page's Raw JSON panel, are rendered from
+the tools the server registered (`registered_tool_names()` in `mcp_server.py`),
+in `tools/list` order. They cannot list a tool the server does not offer:
+`subdomains` drops out of both with `SUBDOMAIN_ENABLED=false`.
+
+### MCP Registry
+
+[`server.json`](server.json) is this server's entry in the official
+[MCP Registry](https://registry.modelcontextprotocol.io): the name
+`io.github.1kko/whatismyip`, one `streamable-http` remote at
+`https://ip.1kko.com/mcp`, and no package. PulseMCP and Glama pick servers up
+from the registry. The other directories, and what each one needs, are in
+[`docs/ops/mcp-directories.md`](docs/ops/mcp-directories.md).
+
+Publishing is manual, through `.github/workflows/mcp-publish.yml`:
+
+1. Bump `version` in `server.json` (rules below) in the pull request that
+   changes what the listing should say.
+2. Merge, and wait for the Deploy workflow to finish.
+3. Actions → **Publish to MCP Registry** → Run workflow, on `main`.
+4. Check it is listed:
+   `curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=io.github.1kko/whatismyip'`
+
+The workflow runs on a GitHub-hosted runner, never on the self-hosted deploy
+runner. It logs in with GitHub OIDC, which grants the `io.github.1kko/*`
+namespace with no stored secret. It never uses the registry's HTTP login, which
+makes the registry fetch `/.well-known/mcp-registry-auth` from this site: the
+suspicious-path detector bans that path for 24 hours.
+
+**Versioning.** Plain SemVer, starting at `1.0.0`. The registry refuses a
+version it already has, and a published version can never be edited, only
+marked deprecated, so every publish needs a new version. Bump the part a
+connected client would notice:
+
+| Bump | When |
+|---|---|
+| patch | listing text only: description, title, icon, website |
+| minor | a tool added, or an optional argument added to one |
+| major | a tool removed or renamed, an argument removed or made required, or the endpoint URL changed |
+
+Do not add a prerelease suffix such as `1.0.0-1`. SemVer sorts it below
+`1.0.0`, so the registry would not mark it as the latest version.
 
 ### Configuration
 

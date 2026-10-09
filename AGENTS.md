@@ -203,6 +203,15 @@ poetry run ruff format .
   a catch-all: `startswith("/mcp")` also matches the reachable page
   `/mcpfoo.com`. Always match the exact surface (`path == "/mcp" or
   path.startswith("/mcp/")`).
+- Never type tool names into `templates/browser.html`. The `mcp-tools` meta
+  tag and the Raw JSON panel's tool list render `registered_tool_names()`, so
+  they follow `tools/list`, including `subdomains` dropping out under
+  `SUBDOMAIN_ENABLED=false`.
+- `server.json` is the official MCP Registry entry, published by hand through
+  `.github/workflows/mcp-publish.yml` with GitHub OIDC. Never switch it to
+  `mcp-publisher login http`: the registry would fetch
+  `/.well-known/mcp-registry-auth`, which the suspicious-path detector bans
+  for 24 hours.
 
 ### Project Structure
 ```
