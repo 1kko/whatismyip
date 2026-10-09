@@ -222,6 +222,19 @@ def compact_reputation(reputation: dict | None) -> dict | None:
         ],
         "attribution": reputation.get("attribution") or [],
     }
+    abuse = next(
+        (e for e in reputation.get("checked") or [] if e["id"] == "abuseipdb"), None
+    )
+    if abuse is not None:
+        out["abuseipdb"] = {
+            "abuse_confidence": abuse["score"],
+            "reports": abuse.get("reports"),
+            "reporters": abuse.get("reporters"),
+            "last_reported_at": abuse.get("last_reported_at"),
+            "window_days": abuse.get("window_days"),
+            "as_of": abuse["as_of"],
+            "url": abuse.get("url"),
+        }
     if not listed:
         out["note"] = _NOT_SAFE
     return out
@@ -268,6 +281,12 @@ async def lookup(target: str) -> dict[str, Any]:
     that it is on none of the lists checked: never report that as safe, clean
     or trustworthy. Lists under `could_not_check` were not consulted, and a
     null level means none could be.
+
+    For an IP address given directly (not a domain's), `reputation.abuseipdb`
+    adds AbuseIPDB's abuse confidence (0-100) and how many reports, from how
+    many users, it has had in the last `window_days`. The confidence counts
+    toward the level as a weight of the same size. It summarises user reports,
+    so relay it as "AbuseIPDB's confidence is N%", with `url` for the reports.
     """
     try:
         data = await _bounded_gather(target)
@@ -544,7 +563,8 @@ async def whoami_caller() -> dict[str, Any]:
     IP address". Usually you cannot tell from here which case you are in; when
     the address is on a datacenter list, the note says it is likely a hosted
     client. If the user needs certainty, have them open https://ip.1kko.com in
-    a browser. `reputation` is as in `lookup`: "none" is never "safe".
+    a browser. `reputation` is as in `lookup`: "none" is never "safe". It has
+    no AbuseIPDB part: the caller's own address is not sent to anyone.
     """
     ip = _caller_ip.get()
     if ip == "unknown":

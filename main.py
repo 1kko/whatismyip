@@ -33,6 +33,7 @@ from rdap import rdap_breaker, refresh_rdap_bootstrap
 from viewmodel import build_view, dns_failure_text, whois_display, whois_fill
 from concurrency import LookupBusy, lookup_gate
 from config import (
+    ABUSEIPDB_CACHE_TTL,
     APP_VERSION,
     BACKGROUND_REFRESH_ENABLED,
     BAN_DURATION_RATE_LIMIT,
@@ -79,6 +80,7 @@ from models import GeoRulesUpdate
 from lookup import (
     InvalidTargetError,
     PrivateAddressError,
+    abuseipdb_client,
     cached_whois,
     classify_target,
     domain_manager,
@@ -1228,6 +1230,8 @@ def health_reasons() -> list[dict[str, str]]:
             )
     for message in reputation_manager.stale_lists():
         reasons.append(_reason("reputation_list_stale", message))
+    for message in abuseipdb_client.problems():
+        reasons.append(_reason("abuseipdb_key_rejected", message))
     open_hosts = rdap_breaker.open_hosts()
     if open_hosts:
         reasons.append(
@@ -1265,6 +1269,7 @@ async def healthz():
         "databases": geo_ip_manager.database_status(),
         "public_suffix_list": tld_names_manager.status(),
         "reputation": reputation_manager.status(),
+        "abuseipdb": abuseipdb_client.status(),
     }
 
 
@@ -1340,6 +1345,8 @@ async def privacy(request: Request):
                 reputation_manager.hosts() if reputation_manager.enabled else []
             ),
             "reputation_max_age": _span(int(REPUTATION_MAX_AGE_HOURS * 3600)),
+            "abuseipdb_enabled": abuseipdb_client.enabled,
+            "abuseipdb_cache": _span(ABUSEIPDB_CACHE_TTL),
             "stun_url": WEBRTC_STUN_URL,
             "stun_host": WEBRTC_STUN_HOST,
         },

@@ -421,6 +421,17 @@ before the port is bound.
    neither a failed request nor a restart can cause a second one within 24
    hours.
 
+**AbuseIPDB** (only with `ABUSEIPDB_API_KEY` set) is the one reputation source
+asked per lookup. The request goes to a fixed `https://api.abuseipdb.com` URL;
+the address is a query parameter, and only an address that `is_safe_ip` has
+already passed as global unicast, so it adds no SSRF surface either. It is sent
+only for an IP address looked up directly, never for the visitor's own address.
+The key travels in a request header and is never logged. Answers are cached a
+day per address, and requests stop at `ABUSEIPDB_DAILY_LIMIT` a day or when
+AbuseIPDB says the quota is spent, so a flood of lookups costs the quota, not
+more than it. The calls run on a pool of their own with a timeout, so a slow
+AbuseIPDB cannot hold the other lookups.
+
 The ban list is never used as a reputation signal: showing it would reveal
 which rule a `403` answered with, and would mark everyone sharing a CGNAT or
 office address with a banned visitor.

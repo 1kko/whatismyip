@@ -240,6 +240,27 @@ REPUTATION_LEVEL_HIGH = max(int(os.getenv("REPUTATION_LEVEL_HIGH", "80")), 1)
 REPUTATION_LEVEL_MEDIUM = max(int(os.getenv("REPUTATION_LEVEL_MEDIUM", "40")), 1)
 REPUTATION_LEVEL_LOW = max(int(os.getenv("REPUTATION_LEVEL_LOW", "10")), 1)
 
+# AbuseIPDB (abuseipdb.py): how often an address has been reported for abuse,
+# and AbuseIPDB's confidence (0-100) that it is abusive, as one more reputation
+# signal weighted by that confidence. Off until ABUSEIPDB_API_KEY is set (a free
+# key: https://www.abuseipdb.com/register), and off with REPUTATION_ENABLED=false.
+# Unlike the lists above it is a request per address, so only an address looked
+# up directly is sent: never the one a domain resolves to, nor the visitor's own.
+ABUSEIPDB_API_KEY = os.getenv("ABUSEIPDB_API_KEY", "").strip()
+# Reports older than this are not counted (the API's maxAgeInDays, 1-365).
+ABUSEIPDB_MAX_AGE_DAYS = min(
+    max(int(os.getenv("ABUSEIPDB_MAX_AGE_DAYS", "90")), 1), 365
+)
+# Checks per UTC day: the free plan's quota. The service stops asking at this
+# count, or as soon as AbuseIPDB says none remain, until its reset at 00:00 UTC.
+ABUSEIPDB_DAILY_LIMIT = max(int(os.getenv("ABUSEIPDB_DAILY_LIMIT", "1000")), 0)
+# One answer per address per this long, so a day's lookups of one address cost
+# one check. A failed check is retried after five minutes.
+ABUSEIPDB_CACHE_TTL = int(os.getenv("ABUSEIPDB_CACHE_TTL", "86400"))
+ABUSEIPDB_TIMEOUT_SECONDS = float(os.getenv("ABUSEIPDB_TIMEOUT_SECONDS", "4"))
+# Its requests run on a pool of their own (concurrency.py), as RDAP's do.
+ABUSEIPDB_WORKERS = max(int(os.getenv("ABUSEIPDB_WORKERS", "4")), 1)
+
 # Whether the app lifespan starts the background scheduler and, at boot,
 # fetches what the data volume lacks (GeoLite2, the public suffix list). Only
 # the test suite turns it off (tests/conftest.py): every `with TestClient(app)`

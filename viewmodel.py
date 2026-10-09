@@ -532,6 +532,14 @@ def _certificate_column(ssl_data: dict | None) -> dict:
 _LEVEL_TONES = {"high": "danger", "medium": "warning", "low": "warning"}
 
 
+def _signal_name(signal: dict) -> str:
+    """A signal as a tag or hint names it: the list ("Tor exit"), or for
+    AbuseIPDB its confidence score as well ("AbuseIPDB 87%")."""
+    if signal.get("score") is not None:
+        return f"{signal['label']} {signal['score']}%"
+    return signal["label"]
+
+
 def _reputation_tags(response: dict, informational: bool) -> list[dict]:
     """A tag per list the address is on, named for the list ("Tor exit"),
     never for a verdict. An informational signal is left off a domain's hero:
@@ -539,7 +547,10 @@ def _reputation_tags(response: dict, informational: bool) -> list[dict]:
     every domain page and say nothing there."""
     signals = (response.get("reputation") or {}).get("signals") or []
     return [
-        {"text": signal["label"], "tone": _LEVEL_TONES.get(grade([signal]), "default")}
+        {
+            "text": _signal_name(signal),
+            "tone": _LEVEL_TONES.get(grade([signal]), "default"),
+        }
         for signal in signals
         if informational or signal["weight"] > 0
     ]
@@ -761,6 +772,29 @@ def _as_of(value: str | None) -> str:
     return f"{value[:16].replace('T', ' ')} UTC" if value else DASH
 
 
+def _plural(count: int, unit: str) -> str:
+    return f"{count} {unit}{'' if count == 1 else 's'}"
+
+
+def _abuse_text(entry: dict) -> str:
+    """AbuseIPDB's answer as a card row: its confidence score, then the
+    reports behind it. The reports themselves are on AbuseIPDB's page for the
+    address, which the row links to."""
+    text = f"Abuse confidence {entry['score']}%"
+    reports, window = entry.get("reports"), entry.get("window_days")
+    period = f" in the last {window} days" if window else ""
+    if reports == 0:
+        text += f": no reports{period}"
+    elif reports:
+        text += f": {_plural(reports, 'report')}"
+        if entry.get("reporters"):
+            text += f" from {_plural(entry['reporters'], 'user')}"
+        text += period
+        if entry.get("last_reported_at"):
+            text += f", the latest {_as_of(entry['last_reported_at'])}"
+    return f"{text} (as of {_as_of(entry['as_of'])})"
+
+
 def _lists_checked(count: int) -> str:
     return f"{count} list{'' if count == 1 else 's'} checked"
 
@@ -797,22 +831,31 @@ def reputation_view(reputation: dict | None) -> dict | None:
     ]
     for signal in signals:
         effect = "" if signal["weight"] else " · informational, no effect on the level"
+        if signal.get("score") is not None:
+            value = _abuse_text(signal)
+        else:
+            value = f"Listed on {signal['label']} (as of {_as_of(signal['as_of'])})"
         rows.append(
             {
                 "label": signal["source"],
-                "value": f"Listed on {signal['label']} "
-                f"(as of {_as_of(signal['as_of'])}){effect}",
+                "value": value + effect,
                 "tone": _LEVEL_TONES.get(grade([signal]), "default"),
+                "href": signal.get("url"),
             }
         )
     for entry in checked:
         if entry["id"] not in listed:
+            if entry.get("score") is not None:
+                value = _abuse_text(entry)
+            else:
+                as_of = _as_of(entry["as_of"])
+                value = f"Not listed on {entry['label']} (as of {as_of})"
             rows.append(
                 {
                     "label": entry["source"],
-                    "value": f"Not listed on {entry['label']} "
-                    f"(as of {_as_of(entry['as_of'])})",
+                    "value": value,
                     "tone": "muted",
+                    "href": entry.get("url"),
                 }
             )
     for entry in unavailable:
@@ -827,7 +870,7 @@ def reputation_view(reputation: dict | None) -> dict | None:
     if level is None:
         hint = "could not check"
     elif signals:
-        hint = f"{level} · {', '.join(signal['label'] for signal in signals)}"
+        hint = f"{level} · {', '.join(_signal_name(signal) for signal in signals)}"
     else:
         hint = f"not on {_lists_checked(len(checked))}"
     return {

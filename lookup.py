@@ -18,8 +18,11 @@ from typing import Any
 
 import whois
 
-from concurrency import lookup_gate, registration_pool, run_in
+import abuseipdb
+from abuseipdb import AbuseIPDBClient
+from concurrency import abuseipdb_pool, lookup_gate, registration_pool, run_in
 from config import (
+    ABUSEIPDB_TIMEOUT_SECONDS,
     RDAP_TIMEOUT_SECONDS,
     WHOIS_CACHE_ERROR_TTL,
     WHOIS_CACHE_TTL,
@@ -186,6 +189,9 @@ domain_manager = DomainManager()
 # Loads the copies of the reputation lists a previous run left in the data
 # volume; main.py's scheduler keeps them current.
 reputation_manager = ReputationManager()
+# AbuseIPDB's API, asked only for an address looked up directly (see
+# _run_legs). Off without ABUSEIPDB_API_KEY.
+abuseipdb_client = AbuseIPDBClient()
 
 # One hostname label in its ASCII (xn--) form: letters, digits, hyphens, and
 # the underscore that service names such as _dmarc carry.
@@ -336,10 +342,35 @@ def ip_reputation(ip: str, location: dict | None = None) -> dict | None:
     return reputation_manager.check(ip, location.get("asn_number"))
 
 
+# urllib's timeout bounds each socket operation, not the whole request; this
+# bounds the request and any wait for a worker.
+ABUSEIPDB_DEADLINE_SECONDS = ABUSEIPDB_TIMEOUT_SECONDS + 1
+
+
+async def abuse_report(ip: str) -> dict:
+    """AbuseIPDB's answer for `ip` (abuseipdb.py): the cached one if there is
+    one, else a request on its own pool. Never raises; a failure is
+    {"ok": False, "reason"}, which the card shows as "could not check"."""
+    cached = abuseipdb_client.cached(ip)
+    if cached is not None:
+        return cached
+    try:
+        return await asyncio.wait_for(
+            run_in(abuseipdb_pool, abuseipdb_client.check, ip),
+            timeout=ABUSEIPDB_DEADLINE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return {"ok": False, "reason": "AbuseIPDB did not answer in time"}
+    except Exception:
+        logging.exception("AbuseIPDB check errored for %s", sanitize_log_input(ip))
+        return {"ok": False, "reason": "AbuseIPDB could not be asked"}
+
+
 # The parts of gather() a caller can ask for by name. "resolve" is a domain's A
 # query; "ptr" and "dns" are an IP's reverse lookup and the record sweep (of the
 # domain, or of an IP's PTR name); "geo", "tls" and "whois" are what they say;
-# "reputation" is the address checked against the lists in memory.
+# "reputation" is the address checked against the lists in memory, and for an
+# address looked up directly, against AbuseIPDB too.
 LEGS = frozenset({"resolve", "geo", "ptr", "dns", "tls", "whois", "reputation"})
 
 
@@ -401,6 +432,15 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
     # WHOIS takes seconds and depends on nothing else here, so it runs
     # alongside the DNS/SSL work instead of in front of it.
     whois_task = asyncio.create_task(lookup_whois(target)) if "whois" in want else None
+    # AbuseIPDB is a request per address against a daily quota, so it is asked
+    # only about an address given as the target: not the one a domain resolves
+    # to, and never the visitor's own (the self page and whoami_caller do not
+    # come through gather()). It runs alongside the rest, like WHOIS.
+    abuse_task = (
+        asyncio.create_task(abuse_report(target))
+        if kind != "domain" and "reputation" in want and abuseipdb_client.enabled
+        else None
+    )
 
     ssl_data = None
     resolved_ip = None
@@ -514,8 +554,9 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
             resolved_ip = target
             resolution = "literal"
     except BaseException:
-        if whois_task is not None:
-            whois_task.cancel()
+        for task in (whois_task, abuse_task):
+            if task is not None:
+                task.cancel()
         raise
 
     if resolved_ip and "geo" in want:
@@ -532,6 +573,8 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
         if resolved_ip and "reputation" in want
         else None
     )
+    if abuse_task is not None:
+        reputation = abuseipdb.merge(reputation, await abuse_task)
 
     return {
         "address": target,

@@ -401,6 +401,9 @@ table.records td {
 }
 table.records tr:last-child td { border-bottom: 0; }
 table.records td:first-child { color: var(--accent); width: 140px; }
+/* A row's link (AbuseIPDB's reports): the browser default blue is
+   near-invisible on this background, as in .api-note below. */
+table.records a { color: var(--accent); }
 
 /* The DNS table is the only four-column one. Type and TTL are tiny and must not
    wrap; the value takes whatever is left and breaks there instead. */

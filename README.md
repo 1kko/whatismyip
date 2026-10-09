@@ -73,7 +73,9 @@ RDAP registration data and the full TLS certificate, expanded.
   ASN-DROP, Tor exits, and X4BNet's VPN and datacenter ranges, each with its
   source and the date of the copy read, and a level (none/low/medium/high)
   computed from those alone. The lists are downloaded once a day and read in
-  memory, so a lookup asks no one about the address (see
+  memory, so a lookup asks no one about the address. With an
+  `ABUSEIPDB_API_KEY`, an IP address looked up directly also gets AbuseIPDB's
+  abuse confidence score and report counts (see
   [IP reputation](#ip-reputation)).
 - Every independent leg runs concurrently; the response reports its own
   `elapsed_ms`.
@@ -299,6 +301,11 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # REPUTATION_MAX_AGE_HOURS=72        # older lists are "could not check" + degraded
 # REPUTATION_WEIGHT_TOR_EXIT=50      # and _SPAMHAUS_DROP, _SPAMHAUS_ASNDROP, _VPN, _DATACENTER
 # REPUTATION_LEVEL_HIGH=80           # and _MEDIUM (40), _LOW (10)
+
+# AbuseIPDB (see "IP reputation" below); off without a key
+# ABUSEIPDB_API_KEY=your_api_key
+# ABUSEIPDB_DAILY_LIMIT=1000         # the free plan's checks per UTC day
+# ABUSEIPDB_CACHE_TTL=86400          # one check per address per day
 ```
 
 Timeouts and cache TTLs (`RDAP_TIMEOUT_SECONDS`, `WHOIS_TIMEOUT_SECONDS`,
@@ -459,11 +466,12 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `cert_days_remaining` | days left, negative once expired; integer in JSON | TLS handshake on 443 | domain |
 | `risk_level` | `none`, `low`, `medium` or `high` (see [IP reputation](#ip-reputation)); `?` when no list could be checked | the lists in memory (an A query for a domain) | both |
 | `risk_signals` | the ids of the lists the address is on, comma-separated, e.g. `tor_exit,datacenter` | the lists in memory (an A query for a domain) | both |
+| `abuse_score` | AbuseIPDB's abuse confidence, 0-100; `?` when AbuseIPDB did not answer, `-` without `ABUSEIPDB_API_KEY` | AbuseIPDB's API (cached a day) | ip |
 
 The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
 is `cert_expires` here, and its `registration.expires` is `domain_expires`.
-`risk_level` and `risk_signals` are answered only when asked for by name; the
-text block leaves them out, because a bare `risk_level: none` among the other
+`risk_level`, `risk_signals` and `abuse_score` are answered only when asked for
+by name; the text block leaves them out, because a bare `risk_level: none` among the other
 lines would read as a clean bill of health the lists cannot give.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
@@ -777,6 +785,35 @@ page and on `/privacy`. This service's own ban list is never a signal.
 FireHOL level1 is not used: it merges DShield, whose CC BY-NC-SA licence
 restricts commercial use and requires anything derived to carry the same
 licence, and Spamhaus DROP, which is read here directly under its own terms.
+
+#### AbuseIPDB
+
+With `ABUSEIPDB_API_KEY` set, an IP address looked up directly (`GET /{ip}`,
+`?fields=`, the MCP `lookup` tool) is also checked against
+[AbuseIPDB](https://www.abuseipdb.com): its abuse confidence score (0-100) and
+how many reports, from how many users, it has had in the last
+`ABUSEIPDB_MAX_AGE_DAYS` (90). The answer joins `checked`, and when the score
+is above 0 `signals` too, with the score as its weight, so on the default bands
+a score of 80 or more alone is `high`:
+
+```json
+{ "id": "abuseipdb", "label": "AbuseIPDB", "source": "AbuseIPDB", "as_of": "2026-10-09T11:43:06Z",
+  "weight": 100, "score": 100, "reports": 401, "reporters": 128,
+  "last_reported_at": "2026-10-09T08:27:54Z", "window_days": 90,
+  "url": "https://www.abuseipdb.com/check/185.220.101.1" }
+```
+
+Unlike the lists it is a request per address against a daily quota (1,000 on
+the free plan), so it is asked sparingly. Never about the address a domain
+resolves to, and never about a visitor's own address (the home page and
+`whoami_caller`): that would send every visitor's address to a third party
+unasked. Each answer is cached for `ABUSEIPDB_CACHE_TTL` (a day). No request
+goes out once `ABUSEIPDB_DAILY_LIMIT` have been sent that UTC day, or once
+AbuseIPDB reports none left (`X-RateLimit-Remaining: 0` or a `429`), until its
+reset. Only the score and counts are asked for: the reports' comments are
+other users' free text. A timeout, an error or a spent quota puts AbuseIPDB in
+`unavailable` with the reason. `/healthz` shows the day's count under
+`abuseipdb`, and a rejected key makes it `degraded`.
 
 ### Response codes
 

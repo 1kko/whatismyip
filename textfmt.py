@@ -49,13 +49,16 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "cert_days_remaining": (frozenset({"tls"}), _DOMAIN),
     "risk_level": (frozenset({"reputation"}), _BOTH),
     "risk_signals": (frozenset({"reputation"}), _BOTH),
+    # AbuseIPDB is asked only about an address looked up directly.
+    "abuse_score": (frozenset({"reputation"}), _IP),
 }
 
 # Asked for by name only, never in the text block. A bare "risk_level: none"
 # among the other lines reads as a clean bill, which the lists cannot give; a
 # script that asks for it knows what it asked for. With REPUTATION_ENABLED=false
-# both read "-".
-_NOT_IN_BLOCK = frozenset({"risk_level", "risk_signals"})
+# all three read "-", and abuse_score does without ABUSEIPDB_API_KEY too.
+_RISK_FIELDS = ("risk_level", "risk_signals")
+_NOT_IN_BLOCK = frozenset({*_RISK_FIELDS, "abuse_score"})
 
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires")
 
@@ -167,6 +170,7 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "risk_level": reputation.get("level"),
         # The ids, comma-separated: one value per field is the format.
         "risk_signals": ",".join(s["id"] for s in reputation.get("signals") or []),
+        "abuse_score": (reputation.get("abuseipdb") or {}).get("abuse_confidence"),
     }
     # The certificate helpers answer the page, which shows an em dash for "none".
     values = {
@@ -184,8 +188,12 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     }
     # No list could be read: the level is unknown, not "none".
     if reputation and reputation.get("level") is None:
-        for name in _NOT_IN_BLOCK:
+        for name in _RISK_FIELDS:
             errors[name] = "no reputation list could be checked"
+    # Asked, but AbuseIPDB did not answer: unknown, not "-".
+    for entry in reputation.get("could_not_check") or []:
+        if entry["list"] == "AbuseIPDB" and kind in FIELDS["abuse_score"][1]:
+            errors["abuse_score"] = entry["reason"]
     return values, errors
 
 
