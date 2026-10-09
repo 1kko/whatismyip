@@ -67,6 +67,10 @@ CERTIFICATE = {
     "notBefore": "Jun 01 00:00:00 2026 GMT",
     "notAfter": "Jun 01 00:00:00 2099 GMT",
     "subjectAltName": (("DNS", "nasa.gov"), ("DNS", "www.nasa.gov")),
+    # SSLManager's verdict: the page says "TLS valid" only for a trusted chain.
+    "trusted": True,
+    "verify_error": None,
+    "hostname_match": True,
 }
 NASA = {
     "address": "nasa.gov",
