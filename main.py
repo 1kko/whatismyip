@@ -64,7 +64,13 @@ from config import (
     WHOIS_CACHE_TTL,
 )
 from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
-from mcp_server import McpBarePathRoute, McpDisabled, build_mcp, mcp_dispatch
+from mcp_server import (
+    McpBarePathRoute,
+    McpDisabled,
+    build_mcp,
+    mcp_dispatch,
+    registered_tool_names,
+)
 from models import GeoRulesUpdate
 from lookup import (
     InvalidTargetError,
@@ -399,7 +405,7 @@ def render_page(request: Request, response_data: dict, is_self: bool):
         {
             "view": view,
             "view_map": map_data is not None,
-            "subdomains_enabled": SUBDOMAIN_ENABLED,
+            "mcp_tools": registered_tool_names(),
             "stun_url": WEBRTC_STUN_URL,
             "stun_host": WEBRTC_STUN_HOST,
             "api_base": public_base_url(request),

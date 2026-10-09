@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+import mcp_server
 from main import app, build_map_payload, normalize_lookup_target
 from main import _is_route
 
@@ -784,12 +785,18 @@ class TestSubdomainPanel:
         discovery meta tag telling an agent the tool still exists. The flag
         gets flipped exactly when something is on fire, the worst moment to
         find the UI still advertising it.
+
+        The page lists the tools the server registered (mcp_server.py), and
+        the flag skips registering subdomains at import, so both halves of
+        the flag are switched off here.
         """
         with patch("main.SUBDOMAIN_ENABLED", False):
-            with patch(
-                "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
-            ):
-                html = client.get("/example.com", headers=BROWSER_UA).text
+            with patch.dict(mcp_server.mcp._tool_manager._tools):
+                mcp_server.mcp.remove_tool("subdomains")
+                with patch(
+                    "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
+                ):
+                    html = client.get("/example.com", headers=BROWSER_UA).text
         assert 'id="acc-subdomains"' not in html
         meta = html.split('name="mcp-tools"')[1].split(">")[0]
         assert "subdomains" not in meta
