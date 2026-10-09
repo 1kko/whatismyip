@@ -50,10 +50,12 @@ from managers import HeaderManager
 from mcp_server import McpBarePathRoute, McpDisabled, build_mcp, mcp_dispatch
 from models import GeoRulesUpdate
 from lookup import (
+    InvalidTargetError,
     PrivateAddressError,
     domain_manager,
     gather,
     geo_ip_manager,
+    is_safe_ip,
     lookup_location,
     lookup_whois,
     normalize_lookup_target,
@@ -768,16 +770,26 @@ async def get_self_info(request: Request):
     sanitized_ip = sanitize_log_input(client_ip)
     logging.info("client=%s lookup=%s (self)", sanitized_ip, sanitized_ip)
 
+    # A private or reserved client address -- a dev server with no proxy in
+    # front, or a proxy this server was not told to trust -- has no public
+    # registration and no PTR a public resolver would know, so neither is
+    # asked for. GeoIP is a local database and still runs.
+    public_client = is_safe_ip(client_ip)
+
     # WHOIS is the slow one (seconds); it has nothing to do with GeoIP or the
     # reverse lookup, so none of these wait on each other.
-    whois_task = asyncio.create_task(lookup_whois(client_ip))
+    whois_task = asyncio.create_task(lookup_whois(client_ip)) if public_client else None
     location_task = asyncio.create_task(lookup_location(client_ip))
-    reverse_task = asyncio.create_task(
-        asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
+    reverse_task = (
+        asyncio.create_task(
+            asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
+        )
+        if public_client
+        else None
     )
 
     ip_data = await location_task
-    reverse_dns_hostname = await reverse_task
+    reverse_dns_hostname = await reverse_task if reverse_task else None
     if reverse_dns_hostname:
         ip_data["reverse_dns"] = reverse_dns_hostname
 
@@ -788,7 +800,13 @@ async def get_self_info(request: Request):
         if reverse_dns_hostname
         else {}
     )
-    whois_data = await whois_task
+    # An error, not {} or "not registered": nothing was asked, and the page
+    # should say so rather than pass that off as an answer.
+    whois_data = (
+        await whois_task
+        if whois_task
+        else {"error": "Not looked up: private or reserved address"}
+    )
 
     # A self-lookup is never a route: the visitor IS the target, so the
     # distance is 0 km, which build_map_payload collapses to city mode.
@@ -874,10 +892,16 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     )
     try:
         data = await gather(domain_ip)
-    except PrivateAddressError:
+    except (PrivateAddressError, InvalidTargetError) as exc:
         origin_task.cancel()
         if subdomain_task is not None:
             subdomain_task.cancel()
+        if isinstance(exc, InvalidTargetError):
+            # `code` lets a client tell "not a target at all" from "a target
+            # this server does not handle yet" without parsing the message.
+            return JSONResponse(
+                status_code=400, content={"error": exc.message, "code": exc.code}
+            )
         raise HTTPException(
             status_code=400,
             detail="Private or reserved IP addresses are not allowed",

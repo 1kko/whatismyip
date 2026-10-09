@@ -27,7 +27,13 @@ from config import (
     SUBDOMAIN_MCP_MAX_LIMIT,
     WHOIS_TIMEOUT_SECONDS,
 )
-from lookup import PrivateAddressError, gather, lookup_location, sanitize_log_input
+from lookup import (
+    InvalidTargetError,
+    PrivateAddressError,
+    gather,
+    lookup_location,
+    sanitize_log_input,
+)
 from rdap import NOT_REGISTERED
 from security import client_ip_from_scope
 from subdomains import get_subdomains, invalid_target_reason
@@ -144,12 +150,15 @@ async def lookup(target: str) -> dict[str, Any]:
     geolocation, network/ASN owner, registration (RDAP/WHOIS) details, and a
     summary of its TLS certificate. Accepts "example.com", "8.8.8.8", or a
     pasted URL. Use this first; the other tools go deeper on one aspect.
-    Private and reserved addresses are refused.
+    Private and reserved addresses are refused, and IPv6 addresses are not
+    supported yet.
     """
     try:
         data = await _bounded_gather(target)
     except PrivateAddressError:
         return {"error": "Private or reserved addresses are not allowed"}
+    except InvalidTargetError as exc:
+        return {"error": exc.message}
     except TimeoutError:
         return {"error": "Lookup timed out"}
     except Exception:
@@ -207,6 +216,8 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
         data = await _bounded_gather(domain)
     except PrivateAddressError:
         return {"error": "Private or reserved addresses are not allowed"}
+    except InvalidTargetError as exc:
+        return {"error": exc.message}
     except TimeoutError:
         return {"error": "Lookup timed out"}
     except Exception:
@@ -236,6 +247,8 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
         data = await _bounded_gather(domain)
     except PrivateAddressError:
         return {"error": "Private or reserved addresses are not allowed"}
+    except InvalidTargetError as exc:
+        return {"error": exc.message}
     except TimeoutError:
         return {"error": "Lookup timed out"}
     except Exception:

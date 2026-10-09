@@ -12,6 +12,7 @@ import ipaddress
 import logging
 import re
 import time
+import unicodedata
 from typing import Any
 
 import whois
@@ -38,6 +39,29 @@ class PrivateAddressError(Exception):
     Raised instead of HTTPException so this module stays free of FastAPI:
     main.py turns it into a 400, mcp_server.py turns it into {"error": ...}.
     """
+
+
+class InvalidTargetError(Exception):
+    """The target is not something this service can look up, so nothing was
+    sent anywhere.
+
+    Same contract as PrivateAddressError. `code` is the stable, machine-readable
+    half of the answer and `message` the human one; main.py returns both with a
+    400, mcp_server.py returns the message as {"error": ...}.
+
+    An IPv6 literal raises this too, under its own code, for as long as gather()
+    has no IPv6 branch to run.
+    """
+
+    def __init__(
+        self,
+        target: str,
+        code: str = "invalid_target",
+        message: str = "not a domain name or IP address",
+    ):
+        super().__init__(target)
+        self.code = code
+        self.message = message
 
 
 class TTLCache:
@@ -121,6 +145,50 @@ geo_ip_manager = GeoIpManager()
 tld_names_manager = TldNamesManager()
 domain_manager = DomainManager()
 
+# One hostname label in its ASCII (xn--) form: letters, digits, hyphens, and
+# the underscore that service names such as _dmarc carry.
+_HOST_LABEL = re.compile(r"[a-z0-9_-]{1,63}", re.IGNORECASE)
+
+
+def _is_hostname(target: str) -> bool:
+    name = target[:-1] if target.endswith(".") else target
+    try:
+        # The stdlib IDNA codec refuses an empty or over-long label and, for a
+        # non-ASCII one, the code points nameprep prohibits.
+        ascii_name = name.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if not ascii_name or len(ascii_name) > 253:
+        return False
+    return all(_HOST_LABEL.fullmatch(label) for label in ascii_name.split("."))
+
+
+def classify_target(target: str) -> str:
+    """What a lookup target is: "domain", "ipv4", "ipv6" or "invalid".
+
+    Pure string work, so gather() can turn a target away before it spends a
+    WHOIS query, a resolver round trip or a TLS handshake on it. A domain must
+    be a hostname and sit under a public suffix. is_valid_domain alone is far
+    looser: get_tld parses its input as a URL, so it says yes to "foo bar.com",
+    "user@example.com" and "example.com:443". A control character makes any
+    target invalid, since python-whois writes the target into its port-43
+    query verbatim, CR/LF included.
+
+    "ipv4" and "ipv6" say nothing about whether the address is public;
+    is_safe_ip answers that.
+    """
+    if not target or any(unicodedata.category(ch) == "Cc" for ch in target):
+        return "invalid"
+    try:
+        ip = ipaddress.ip_address(target)
+    except ValueError:
+        pass
+    else:
+        return "ipv4" if ip.version == 4 else "ipv6"
+    if _is_hostname(target) and domain_manager.is_valid_domain(target):
+        return "domain"
+    return "invalid"
+
 
 async def _whois_fallback(target: str) -> dict:
     """Port-43 WHOIS, normalised into the same shape RDAP produces. Used only for
@@ -189,6 +257,23 @@ async def gather(target: str) -> dict:
     """
     target = normalize_lookup_target(target)
 
+    # Before the WHOIS task exists. It used to be created first, so
+    # "favicon.ico" or "{target}" cost an RDAP query, a port-43 WHOIS query and
+    # an ERROR log line, and came back as an empty 200 page.
+    kind = classify_target(target)
+    if kind == "invalid":
+        raise InvalidTargetError(target)
+    if kind == "ipv6":
+        # There is no IPv6 branch below: an IPv6 literal got RDAP alone and a
+        # normal-looking answer with GeoIP, ASN, PTR and the map all empty.
+        raise InvalidTargetError(
+            target,
+            code="ipv6_not_supported",
+            message="IPv6 addresses are not supported yet",
+        )
+    if kind == "ipv4" and not is_safe_ip(target):
+        raise PrivateAddressError(target)
+
     # WHOIS takes seconds and depends on nothing else here, so it runs
     # alongside the DNS/SSL work instead of in front of it.
     whois_task = asyncio.create_task(lookup_whois(target))
@@ -199,7 +284,7 @@ async def gather(target: str) -> dict:
     reverse_dns_hostname = None
 
     try:
-        if domain_manager.is_valid_domain(target):
+        if kind == "domain":
             logging.debug("domain=%s", sanitize_log_input(target))
             try:
                 # Same public resolvers and time budget as the record sweep;
@@ -231,10 +316,8 @@ async def gather(target: str) -> dict:
                     "Error getting SSL info for %s", sanitize_log_input(target)
                 )
                 ssl_data = None
-        elif domain_manager.is_ipv4(target):
+        else:
             logging.debug("ip=%s", sanitize_log_input(target))
-            if not is_safe_ip(target):
-                raise PrivateAddressError(target)
             reverse_dns_hostname = await asyncio.to_thread(
                 domain_manager.perform_reverse_lookup, target
             )

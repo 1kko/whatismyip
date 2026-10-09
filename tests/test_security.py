@@ -102,14 +102,12 @@ class TestXSSPrevention:
     @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
-    @patch("main.domain_manager.is_valid_domain", return_value=False)
-    @patch("main.domain_manager.is_ipv4", return_value=False)
-    def test_script_tag_escaped_in_ip_info(
-        self, mock_ipv4, mock_valid, mock_rev, mock_geo, mock_whois
-    ):
+    def test_script_tag_escaped_in_ip_info(self, mock_rev, mock_geo, mock_whois):
         """XSS: </script> must be escaped in HTML response for /{domain_ip}."""
+        # A real target: one that is neither a domain nor an IP ("/test-xss"
+        # used to be) is now a 400 before any page is rendered.
         response = client.get(
-            "/test-xss",
+            "/8.8.8.8",
             headers={"User-Agent": "Mozilla/5.0 Chrome/120"},
         )
         assert response.status_code == 200
