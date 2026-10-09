@@ -31,6 +31,7 @@ from managers import (
     SSLManager,
     TldNamesManager,
     _recursive_resolver,
+    dns_status,
 )
 from rdap import RIR_RDAP_UNAVAILABLE, is_ip, lookup_rdap, normalize_whois
 
@@ -311,6 +312,10 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
 
     ssl_data = None
     resolved_ip = None
+    # How the target became resolved_ip: the gating A query's dns_status() (or
+    # "ok") for a name, "literal" for an IP. Without it a null resolved_ip
+    # cannot say whether the name does not exist or the resolver timed out.
+    resolution = None
     domain_data = None
     reverse_dns_hostname = None
 
@@ -324,7 +329,9 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
                     _recursive_resolver().resolve, target, "A"
                 )
                 resolved_ip = str(a_records[0])
+                resolution = "ok"
             except Exception as e:
+                resolution = dns_status(e)
                 logging.warning("No A record for %s: %s", sanitize_log_input(target), e)
             if resolved_ip and not is_safe_ip(resolved_ip):
                 raise PrivateAddressError(target)
@@ -369,6 +376,7 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
                     else {}
                 )
             resolved_ip = target
+            resolution = "literal"
     except BaseException:
         if whois_task is not None:
             whois_task.cancel()
@@ -389,5 +397,6 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
         "whois": await whois_task if whois_task is not None else None,
         "ssl": ssl_data,
         "resolved_ip": resolved_ip,
+        "resolution": resolution,
         "reverse_dns": reverse_dns_hostname,
     }

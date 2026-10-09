@@ -299,6 +299,18 @@ body {
 .origin__city { font-size: 13px; color: var(--text-secondary); }
 .origin__asn { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
 
+/* The queried name does not exist (NXDOMAIN): said once, above the facts,
+   so the dashes below read as "nothing there" for a reason. */
+.dns-banner {
+  margin: 24px 0 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #FBBF241F;
+  color: var(--warning);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 /* Facts */
 .facts {
   display: grid;

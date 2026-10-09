@@ -31,6 +31,17 @@ SITE_DESCRIPTION = (
     "Also an MCP server, so AI agents can run the same lookups."
 )
 
+# What the page says in place of a record count when the query failed. Keyed by
+# managers.DNS_FAILURES, mirrored rather than imported for the same reason as
+# NOT_REGISTERED: managers loads dnspython and the GeoIP readers. noanswer and
+# nxdomain are answers, so they keep the plain dash (nxdomain also raises the
+# dns_banner below).
+DNS_FAILURE_TEXT = {
+    "timeout": "(timed out)",
+    "servfail": "(server failure)",
+    "error": "(lookup failed)",
+}
+
 
 def country_flag(country_code: str | None) -> str:
     code = (country_code or "").strip().upper()
@@ -295,15 +306,38 @@ def _network_column(location: dict, address: str) -> dict:
     return {"title": "NETWORK", "rows": rows}
 
 
+def dns_failure_text(domain: dict | None, key: str) -> str | None:
+    """'(timed out)' and the like when the `key` query failed, else None."""
+    status = (domain or {}).get("status") or {}
+    return DNS_FAILURE_TEXT.get(status.get(key))
+
+
+def dns_banner(domain: dict | None) -> str | None:
+    """'<name> does not resolve (NXDOMAIN)' when the queried name does not
+    exist. Every per-type row is then an honest dash, and a page of dashes
+    alone reads as a name that exists with nothing published."""
+    domain = domain or {}
+    if (domain.get("status") or {}).get("a") != "nxdomain":
+        return None
+    return f"{domain.get('queried_name')} does not resolve (NXDOMAIN)"
+
+
+def _dns_count_row(label: str, domain: dict, key: str) -> dict:
+    failure = dns_failure_text(domain, key)
+    if failure:
+        return {"label": label, "value": failure, "tone": "warning"}
+    return {"label": label, "value": _count(domain.get(key)), "tone": "default"}
+
+
 def _dns_column(domain: dict) -> dict:
     domain = domain or {}
     return {
         "title": "DNS",
         "rows": [
-            {"label": "A", "value": _count(domain.get("a")), "tone": "default"},
-            {"label": "MX", "value": _count(domain.get("mx")), "tone": "default"},
-            {"label": "NS", "value": _count(domain.get("ns")), "tone": "default"},
-            {"label": "TXT", "value": _count(domain.get("txt")), "tone": "default"},
+            _dns_count_row("A", domain, "a"),
+            _dns_count_row("MX", domain, "mx"),
+            _dns_count_row("NS", domain, "ns"),
+            _dns_count_row("TXT", domain, "txt"),
         ],
     }
 
@@ -320,8 +354,8 @@ def _reverse_column(location: dict, domain: dict) -> dict:
                 "value": reverse or DASH,
                 "tone": "default" if reverse else "muted",
             },
-            {"label": "A", "value": _count(domain.get("a")), "tone": "default"},
-            {"label": "NS", "value": _count(domain.get("ns")), "tone": "default"},
+            _dns_count_row("A", domain, "a"),
+            _dns_count_row("NS", domain, "ns"),
             {
                 "label": "TTL",
                 "value": f"{ttl}s" if ttl else DASH,
@@ -591,9 +625,13 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
         span = f" · {created} → {expires}" if created and expires else ""
         whois_hint = f"{who}{span}"
 
-    dns_hint = " · ".join(
-        f"{label} {len(domain.get(key) or [])}"
-        for label, key in (("A", "a"), ("MX", "mx"), ("NS", "ns"), ("TXT", "txt"))
+    dns_hint = (
+        "does not resolve"
+        if dns_banner(domain)
+        else " · ".join(
+            f"{label} {dns_failure_text(domain, key) or len(domain.get(key) or [])}"
+            for label, key in (("A", "a"), ("MX", "mx"), ("NS", "ns"), ("TXT", "txt"))
+        )
     )
 
     ssl_data = response.get("ssl")
@@ -701,6 +739,7 @@ def build_view(
         "map_link": osm_link(location),
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
+        "dns_banner": dns_banner(domain),
         "accordions": _accordions(response, subdomains_enabled),
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         "geoip_rows": geoip_rows(location),

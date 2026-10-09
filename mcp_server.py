@@ -34,6 +34,7 @@ from lookup import (
     lookup_location,
     sanitize_log_input,
 )
+from managers import DNS_FAILURES
 from rdap import NOT_REGISTERED
 from security import client_ip_from_scope
 from subdomains import get_subdomains, invalid_target_reason
@@ -191,6 +192,11 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     SPF/DMARC questions, where the summary from `lookup` is not enough.
     NS come from `zone`, the DNS zone serving the name. MX rows marked
     `from_zone` belong to that zone, not the name: it has no MX of its own.
+    A type whose query failed is {"error": "timeout" | "servfail" | "error"}:
+    unknown, not empty. An empty list means the name has none of that type.
+    `resolution` is how the name reached `resolved_ip`: "ok", "nxdomain" (the
+    name does not exist), "noanswer" (no A record), "timeout", "servfail" or
+    "error"; "literal" when the target is itself an IP.
     """
     # `is not None`, not truthiness: types=[] means "narrow to nothing", which is
     # a different request from omitting the argument, and must not silently
@@ -225,14 +231,23 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
         return {"error": "DNS lookup failed"}
 
     records = data["domain"] or {}
+    status = records.get("status") or {}
     return {
         "domain": data["address"],
         "resolved_ip": data["resolved_ip"],
+        "resolution": data.get("resolution"),
         # The name the records were asked of (an IP's PTR name, for an IP) and
         # the zone its NS and inherited MX/SPF came from.
         "queried_name": records.get("queried_name"),
         "zone": records.get("zone"),
-        "records": {k: v for k, v in records.items() if k in wanted},
+        # A failed query must not come back as the [] it left behind: a model
+        # states [] as "this name has none", the same trap the subdomains tool
+        # and the unsupported-type check above avoid.
+        "records": {
+            k: {"error": status[k]} if status.get(k) in DNS_FAILURES else v
+            for k, v in records.items()
+            if k in wanted
+        },
     }
 
 
