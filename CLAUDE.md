@@ -89,8 +89,8 @@ poetry run ruff format .
 - `rdap.py`: RDAP lookups (whoisit) with a port-43 WHOIS fallback, both normalised to one canonical dict
 - `models.py`: Pydantic models (`WhoisResponse`, `GeoRulesUpdate`)
 - `lookup.py`: transport-agnostic lookup pipeline (`gather()`), shared by the
-  HTTP routes and the MCP tools. Raises `PrivateAddressError` rather than
-  `HTTPException` so it stays free of FastAPI.
+  HTTP routes and the MCP tools. Raises `PrivateAddressError` and
+  `InvalidTargetError` rather than `HTTPException` so it stays free of FastAPI.
 - `subdomains.py`: subdomain discovery from Certificate Transparency (crt.sh),
   opt-in per request. Owns normalization, single-flight, and a global outbound
   budget. Must not import `lookup` or `main` — importing `lookup` builds the

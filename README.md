@@ -269,13 +269,25 @@ small enough to document here.
 ### `GET /`
 
 Information about the caller's own IP address. HTML for a browser user-agent,
-JSON for anything else.
+JSON for anything else. When the caller's address is private or reserved (a
+development server with no proxy in front), RDAP/WHOIS and reverse DNS are not
+queried; `whois` carries an `error` saying so.
 
 ### `GET /{domain_or_ip}`
 
 Information about the given domain or IP. A pasted URL is normalised to its host,
 so `https://example.com/path?q=1` and `example.com` behave identically. Private
 and reserved addresses are rejected with `400`.
+
+A target that is neither a domain name under a public suffix nor an IP address
+is rejected with `400` before any lookup runs:
+
+```json
+{"error": "not a domain name or IP address", "code": "invalid_target"}
+```
+
+IPv6 addresses are not supported yet and get a `400` with
+`"code": "ipv6_not_supported"`.
 
 ### Subdomains (opt-in)
 
@@ -429,7 +441,7 @@ handshake. `map` is `null` when the target has no resolvable coordinates, and
 | Code | Meaning |
 | --- | --- |
 | `200` | success |
-| `400` | private or reserved address, or an invalid `subdomains` parameter |
+| `400` | private or reserved address, not a domain name or IP address, an IPv6 address, or an invalid `subdomains` parameter |
 | `403` | banned IP, geo-blocked, or suspicious request |
 | `404` | unknown endpoint — also the answer to a wrong admin API key |
 | `413` | `POST /mcp` body over `MCP_MAX_BODY_BYTES` |
