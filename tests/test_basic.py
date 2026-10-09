@@ -2,8 +2,8 @@
 
 These used to hit a separately-launched server on localhost:8000; they now run
 against FastAPI's TestClient with the lookups they check (RDAP/WHOIS, GeoIP,
-DNS) mocked, so no server has to be running. The suite is not fully offline
-yet: "Testing Strategy" in CLAUDE.md lists what still reaches the network.
+DNS) mocked, so no server has to be running. What they leave unmocked fails
+as it would offline (tests/conftest.py), and nothing reaches the network.
 """
 
 from unittest.mock import patch

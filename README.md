@@ -1201,10 +1201,12 @@ poetry run pytest tests/test_basic.py::TestBasic::test_get_domain_info
 poetry run pytest -v
 ```
 
-It is not fully offline yet. Importing the app downloads nothing, but a few
-tests still send real DNS and RDAP-bootstrap queries, and on a fresh checkout
-the DNS tests have the `tld` package download a suffix list of its own. The
-"Testing Strategy" section of [CLAUDE.md](CLAUDE.md) has the details.
+It runs offline. Whatever a test leaves unmocked fails as it would with no
+network, and a test that opens a connection, sends a UDP datagram or resolves a
+hostname anywhere but loopback fails (`tests/conftest.py`). A test that
+genuinely needs the network is marked `@pytest.mark.network` and runs only with
+`RUN_NETWORK_TESTS=1`. The "Testing Strategy" section of
+[CLAUDE.md](CLAUDE.md) has the details.
 
 Coverage spans pure units (gazetteer and distance, map projection, the view
 model, RDAP/WHOIS normalisation), endpoint behaviour and HTML rendering, response
