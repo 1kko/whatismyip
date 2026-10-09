@@ -330,6 +330,22 @@ back the commit CI passed.
 while still running on the snapshot shipped with the `tld` package, and
 `missing` if the file could not be seeded at all.
 
+### `GET /robots.txt`, `GET /favicon.ico`
+
+`/robots.txt` is plain text that keeps crawlers off `?subdomains=` links, which
+can cost a crt.sh round trip each. `/favicon.ico` is a `301` to
+`/static/favicon.ico`. Neither is looked up as a domain, and like `/static/`
+neither counts against the rate limit.
+
+### `HEAD`
+
+`HEAD /` and `HEAD /{domain_or_ip}` answer `200` with the Content-Type a `GET`
+would have and no body, without running any lookup — for uptime monitors and
+link checkers. They do not tell you whether a given target would be rejected:
+finding that out takes the lookup. `/healthz`, `/robots.txt`, `/favicon.ico`
+and `/static/` answer `HEAD` as they answer `GET`, minus the body. `HEAD`
+passes through the same bans, geo rules and rate limit as `GET`.
+
 ### Response example
 
 `curl https://ip.1kko.com/nasa.gov`, abridged:

@@ -18,7 +18,12 @@ import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -739,7 +744,10 @@ def _subdomain_mode(raw: str | None) -> str:
     return raw.lower()
 
 
-@app.get("/healthz")
+# HEAD is accepted on the fixed routes below because answering it costs
+# nothing: the handler runs as for GET and the server drops the body. FastAPI's
+# @app.get answers GET alone, so an uptime monitor's HEAD used to get a 405.
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 async def healthz():
     """Liveness plus which GeoIP databases are actually serving lookups, so a
     silent fallback to the bundled country-only DB is visible from outside.
@@ -755,6 +763,56 @@ async def healthz():
         "databases": geo_ip_manager.database_status(),
         "public_suffix_list": tld_names_manager.status(),
     }
+
+
+# Crawlers are welcome on the lookup pages, but the page links "Load
+# subdomains" for every domain it shows, and on a cache miss that link is a
+# crt.sh round trip. There is deliberately no sitemap: it would need an
+# exception to the detector's `\.xml$` rule, and all it would do is send
+# crawlers to the expensive pages.
+_ROBOTS_TXT = "User-agent: *\nDisallow: /*?subdomains=\n"
+
+
+@app.api_route("/robots.txt", methods=["GET", "HEAD"])
+async def robots_txt():
+    """Declared before /{domain_ip}, which would otherwise look robots.txt up
+    as a domain and hand the crawler an HTML page."""
+    return PlainTextResponse(_ROBOTS_TXT)
+
+
+@app.api_route("/favicon.ico", methods=["GET", "HEAD"])
+async def favicon():
+    """The page links its icons under /static, but browsers and link unfurlers
+    still ask for /favicon.ico on their own, and the catch-all used to answer
+    each one with an RDAP query and a port-43 WHOIS attempt."""
+    return RedirectResponse("/static/favicon.ico", status_code=301)
+
+
+@app.head("/")
+@app.head("/{domain_ip}")
+async def head_lookup(request: Request):
+    """HEAD on the lookup surface, answered without looking anything up.
+
+    HEAD is what uptime monitors and link checkers send, and it only asks
+    whether the page is there. Running WHOIS, DNS and TLS for a body that is
+    then thrown away would make the cheapest request the most expensive one.
+    So the answer is 200 with the Content-Type GET would pick for this
+    user-agent; whether this particular target would get a 400 is not checked,
+    since finding out takes the lookup this exists to skip.
+
+    This is a route, not a middleware, so it runs after the security
+    middleware like everything else: a banned or geo-blocked address still
+    gets its 403, a probe path is still banned, and the request still counts
+    against the lookup rate limit. Routing also decides what is a lookup, so
+    /healthz, /robots.txt and /mcp keep their own handling.
+    """
+    is_browser = BrowserDetector.is_browser(request.headers.get("user-agent", ""))
+    response = Response(media_type="text/html" if is_browser else "application/json")
+    # A HEAD response may carry Content-Length only if it equals what GET would
+    # send (RFC 9110 8.6). Starlette sets 0 for the empty body, and the real
+    # length is unknown without the lookup, so the header goes.
+    del response.headers["content-length"]
+    return response
 
 
 @app.get("/", response_model=None)
