@@ -65,8 +65,8 @@ poetry run pytest tests/test_basic.py::TestBasic::test_get_domain_info
 poetry run pytest -v
 ```
 
-Every test uses FastAPI's `TestClient`. The suite is not fully offline: see
-[Testing Strategy](#testing-strategy) for what still reaches the network.
+Every test uses FastAPI's `TestClient`, and the suite runs offline: a test that
+tries to reach the network fails. See [Testing Strategy](#testing-strategy).
 
 ### Code Quality
 ```bash
@@ -459,7 +459,8 @@ whatismyip/
 │   ├── image/, favicons    # logo (also og:image), icons, web manifest
 │   └── geo/                # cities.json, countries.json (generated, committed)
 ├── tests/                  # see Testing Strategy for each file
-│   ├── conftest.py         # env switches set before main is imported; per-test security reset
+│   ├── conftest.py         # env switches set before main is imported; per-test security reset;
+│   │                       # offline lookup defaults and the network guard
 │   └── fixtures/           # MaxMind's GeoLite2 test mmdbs, the MCP server.json schema
 ├── docs/
 │   ├── images/          # README screenshots
@@ -645,18 +646,34 @@ which never runs the lifespan, and the MCP tests use `with TestClient(app)`,
 which does. `tests/conftest.py` sets the environment before any test module
 imports `main`: `BACKGROUND_REFRESH_ENABLED=false` (no lifespan starts the
 scheduler or downloads anything), `REPUTATION_ENABLED=false`, the admin key, the
-trusted proxies, and ban/geo-rule files under `/tmp`. Its autouse fixture clears
-the rate limiter and ban list around every test.
+trusted proxies, and ban/geo-rule files under `/tmp`. Its `reset_security_state`
+fixture (autouse) clears the rate limiter and ban list around every test.
 
 The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
-and importing `main` makes no network call. The suite is still not fully
-offline:
-- A few tests in `test_basic.py`, `test_page.py` and `test_security.py` leave
-  reverse DNS, the zone SOA lookup or the RDAP bootstrap unmocked, so they send
-  real queries to 8.8.8.8/1.1.1.1 and data.iana.org. Offline those fail inside
-  the app and the tests still pass, only slower.
-- `test_webrtc_leak.py` runs `static/js/webrtc.js` in node and skips those
-  tests when `node` is not installed.
+and importing `main` makes no network call. The suite runs offline, and
+`tests/conftest.py` keeps it that way in two layers:
+- `offline_lookups` (autouse) fails whatever a test leaves unmocked the way a
+  machine with no network would. dnspython's `Resolver.resolve`, which every
+  DNS query goes through (`zone_apex`'s SOA walk and PTR included), raises
+  `NoNameservers`; whoisit's `bootstrap`, `ip` and `domain` raise `QueryError`;
+  python-whois's `whois()` raises `ConnectionRefusedError`. TLS needs no stub:
+  with no address there is no handshake. These sit at the library edge, under
+  every seam the suite mocks, so a test's own patch (`lookup.lookup_rdap`,
+  `managers._recursive_resolver`, `Resolver.resolve`, ...) goes on top and
+  wins. A test that asserts on DNS or RDAP behaviour mocks it itself.
+- A guard on the socket layer, installed when conftest is imported, refuses
+  any `connect`/`connect_ex`, UDP `sendto` or hostname lookup (`getaddrinfo`,
+  `gethostbyname`) that is not to loopback, and fails the test that made it,
+  even when a worker thread made the attempt and the app swallowed the error.
+  Loopback stays open: `TestClient` uses no socket, and `test_tls_reasons.py`
+  and `test_healthz_degraded.py` run real servers on 127.0.0.1.
+  `test_offline_guard.py` pins both layers.
+- A test that genuinely needs the network is marked `@pytest.mark.network`. It
+  is skipped unless `RUN_NETWORK_TESTS=1`, and then runs with neither layer in
+  place. No test needs it today.
+- `test_webrtc_leak.py` and `test_boot.py` run node and a fresh interpreter as
+  subprocesses, outside the guard. The webrtc tests skip when `node` is not
+  installed.
 
 Test files:
 - Units: `test_geo.py` (gazetteer, distance), `test_mapgeom.py` (projection,
@@ -668,7 +685,8 @@ Test files:
   (crt.sh adapter, normalisation and the `@` rule, single-flight, budget),
   `test_subdomain_store.py` (the SQLite cache degrades to a miss)
 - Boot: `test_boot.py` (importing `main` touches no network; the lifespan
-  starts and stops the scheduler)
+  starts and stops the scheduler), `test_offline_guard.py` (the offline
+  defaults and the network guard)
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
   security headers, fingerprint panel, `?subdomains=`), `test_negotiation.py`
