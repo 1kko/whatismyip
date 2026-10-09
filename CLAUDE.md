@@ -275,12 +275,15 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
   turned naver.co.kr into co.kr), floored at the registrable domain. Zone MX
   rows carry `from_zone`; the response names `queried_name` and `zone`
-- Known gap: `zone_apex`'s floor comes from `tld.get_fld(...,
-  search_private=False)`, which reads `tld`'s separate public-only list
+- `zone_apex`'s floor comes from `tld.get_fld(..., search_private=False)`,
+  which reads `tld`'s separate public-only list
   (`data/tld/res/effective_tld_names_public_only.dat.txt`). `TldNamesManager`
-  neither seeds nor refreshes that file, so the first domain lookup on a fresh
-  volume makes `tld` download it from publicsuffix.org synchronously, inside
-  the request, and nothing refreshes it after.
+  keeps it as a byte copy of the full list, at boot (`_mirror_public_only`)
+  and on every refresh: `tld`'s public-only parser stops at
+  `===BEGIN PRIVATE DOMAINS===`, so the full list parses to the ICANN-only
+  one. Without that copy `tld` downloads `?publiconly` itself, inside the
+  request and with no timeout, and offline `get_fld` raises `TypeError` even
+  with `fail_silently`.
 
 #### GeoIP Databases
 
@@ -640,9 +643,6 @@ the rate limiter and ban list around every test.
 The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
 and importing `main` makes no network call. The suite is still not fully
 offline:
-- On a fresh checkout, the DNS tests make `tld` download its public-only suffix
-  list (the `zone_apex` gap above) into `data/tld/res/`. Offline, every test
-  that reaches `zone_apex` fails (84 on 2026-10-09) until that file exists.
 - A few tests in `test_basic.py`, `test_page.py` and `test_security.py` leave
   reverse DNS, the zone SOA lookup or the RDAP bootstrap unmocked, so they send
   real queries to 8.8.8.8/1.1.1.1 and data.iana.org. Offline those fail inside
@@ -674,7 +674,8 @@ Test files:
 - Lookup behaviour: `test_classify_target.py` (refused before any network
   work), `test_ipv6.py` (IPv6 literals, AAAA), `test_dns_status.py` (a failed
   query is never "no records"), `test_zone_apex.py` (NS/MX/SPF from the zone
-  apex), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
+  apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
+  floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
   255 bytes), `test_resolver_unification.py` (one resolver set and budget),
   `test_tls_reasons.py` (why a certificate fails), `test_rdap_budget.py`
   (RDAP/WHOIS cost, no port-43 for an IP), `test_concurrency_gate.py` (gate

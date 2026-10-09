@@ -178,13 +178,13 @@ than installed — a list that matches nothing would make every domain read as a
 probe and ban the visitors looking them up. `GET /healthz` reports which copy is
 live (`downloaded`, `bundled` or `missing`) and its age.
 
-One copy is still left to `tld`. `DomainManager.zone_apex` asks for the
-registrable domain with private suffixes excluded, which `tld` answers from a
-second file, `res/effective_tld_names_public_only.dat.txt`. `TldNamesManager`
-neither seeds nor refreshes it, so the first domain lookup on a fresh volume
-has `tld` download it from publicsuffix.org synchronously, inside that request,
-and it is never refreshed after. Because `tld` is pointed at the data volume,
-the write itself succeeds.
+`DomainManager.zone_apex` asks for the registrable domain with private
+suffixes excluded, which `tld` answers from a second file,
+`res/effective_tld_names_public_only.dat.txt`. `TldNamesManager` keeps that
+file as a copy of the full list, written at boot and on every refresh. `tld`'s
+public-only parser stops at the private section, so the copy parses to exactly
+the ICANN-only list. Without it, `tld` would fetch the file itself, inside the
+first request that needs it and with no timeout, and nothing would refresh it.
 
 ## Admin API Usage
 
