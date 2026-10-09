@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -397,6 +398,20 @@ class TestTooManyRequests:
 # --- The page itself ----------------------------------------------------------
 
 
+def _script_tags(html: str) -> list[dict]:
+    """Attributes of every <script> start tag, read by a real HTML parser so
+    case and attribute order can't hide one."""
+    found = []
+
+    class Collector(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag == "script":
+                found.append(dict(attrs))
+
+    Collector().feed(html)
+    return found
+
+
 class TestErrorPageMarkup:
     @pytest.fixture
     def page(self):
@@ -407,11 +422,11 @@ class TestErrorPageMarkup:
         carries the nonce the CSP header names."""
         csp = page.headers["content-security-policy"]
         nonce = re.search(r"'nonce-([^']+)'", csp).group(1)
-        scripts = re.findall(r"<script\b[^>]*>", page.text)
+        scripts = _script_tags(page.text)
         assert scripts
-        for tag in scripts:
-            assert 'src="/static/' in tag, tag
-            assert f'nonce="{nonce}"' in tag, tag
+        for attrs in scripts:
+            assert (attrs.get("src") or "").startswith("/static/"), attrs
+            assert attrs.get("nonce") == nonce, attrs
         assert "<style" not in page.text
         assert " style=" not in page.text
 
