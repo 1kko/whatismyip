@@ -206,7 +206,7 @@ def mocked_lookups():
         patch(
             "main.gather",
             new_callable=AsyncMock,
-            side_effect=lambda *_: copy.deepcopy(GATHERED),
+            side_effect=lambda *_, **__: copy.deepcopy(GATHERED),
         ) as gather,
         patch(
             "main.lookup_location",
@@ -292,7 +292,7 @@ class TestRoutes:
 
     @pytest.mark.parametrize("path", ROUTES)
     def test_format_text_is_accepted(self, path):
-        """Only that it is not a 400. The body is #9's to define."""
+        """Only that it is not a 400; tests/test_text_format.py has the body."""
         with mocked_lookups():
             response = client.get(f"{path}?format=text", headers={"user-agent": CURL})
         assert response.status_code == 200
