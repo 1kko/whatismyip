@@ -1,0 +1,74 @@
+name: Healthz probe
+
+# Production seen from outside, every 15 minutes. /healthz used to say "ok"
+# whatever state the service was in, and nothing ever read it except the deploy
+# job, so GeoIP stuck on a months-old build and an RDAP registry timing out
+# stayed in telemetry with no one told. A failing scheduled run is that
+# notice: GitHub emails it to whoever last changed the cron line below (with
+# the default Actions notification settings). See docs/ops/alerts.md.
+on:
+  schedule:
+    # Off the hour: GitHub delays and drops scheduled runs most at :00.
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+# The probe reads a public URL and needs no token at all.
+permissions: {}
+
+# A run can take 12 minutes when production is unhealthy; never stack them.
+concurrency:
+  group: healthz-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    # GitHub-hosted, deliberately: the self-hosted runner lives on the Coolify
+    # host, so it would still reach a service the internet cannot, and it
+    # would go down with the host it is meant to be watching.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HEALTHZ_URL: https://ip.1kko.com/healthz
+      # The run fails only when every check fails. Four checks four minutes
+      # apart span 12 minutes, longer than the RDAP breaker's 10-minute
+      # cooldown, so one registry blip or a container swap during a deploy
+      # does not send an email, while a real outage still fails the run.
+      CHECKS: "4"
+      SPACING_SECONDS: "240"
+    steps:
+      - name: Check /healthz answers 200 with status "ok"
+        run: |
+          set -uo pipefail
+          for attempt in $(seq 1 "$CHECKS"); do
+            rm -f body.json
+            # 000 when there was no HTTP answer at all (DNS, TLS, timeout).
+            code=$(curl --silent --show-error --max-time 15 \
+                        --output body.json --write-out '%{http_code}' \
+                        "$HEALTHZ_URL") || true
+            status=$(jq -r '.status // empty' body.json 2>/dev/null) || status=""
+            if [ "$code" = "200" ] && [ "$status" = "ok" ]; then
+              echo "Check ${attempt}/${CHECKS}: ok ($(jq -r '.version' body.json))"
+              exit 0
+            fi
+            if [ "$code" = "000" ]; then
+              problem="unreachable"
+            elif [ "$code" != "200" ]; then
+              problem="HTTP ${code}"
+            elif [ -z "$status" ]; then
+              problem="HTTP 200 without a status field"
+            else
+              # degraded: say why, from the reasons /healthz gives.
+              problem="status ${status}: $(jq -r '[.reasons[]? | "\(.code) (\(.message))"] | join("; ")' body.json)"
+            fi
+            echo "Check ${attempt}/${CHECKS}: ${problem}"
+            if [ "$attempt" -lt "$CHECKS" ]; then
+              sleep "$SPACING_SECONDS"
+            fi
+          done
+          echo "::error title=Production /healthz::${problem} on all ${CHECKS} checks over $(( (CHECKS - 1) * SPACING_SECONDS / 60 )) minutes"
+          {
+            echo "### ${HEALTHZ_URL}"
+            echo
+            echo "${problem}, on all ${CHECKS} checks."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1

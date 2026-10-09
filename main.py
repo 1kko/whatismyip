@@ -29,7 +29,7 @@ from fastapi.templating import Jinja2Templates
 
 from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
-from rdap import refresh_rdap_bootstrap
+from rdap import rdap_breaker, refresh_rdap_bootstrap
 from viewmodel import build_view, dns_failure_text, whois_display
 from config import (
     APP_VERSION,
@@ -37,6 +37,7 @@ from config import (
     BAN_DURATION_SUSPICIOUS,
     CLEANUP_INTERVAL_SECONDS,
     DESKTOP_CANVAS,
+    GEOIP_MAX_BUILD_AGE_DAYS,
     GEOIP_UPDATE_RETRY_SECONDS,
     MCP_ENABLED,
     MCP_MAX_BODY_BYTES,
@@ -501,6 +502,9 @@ geo_block_manager = GeoBlockManager(geo_ip_manager)
 # Initialize scheduler and add jobs
 scheduler = BackgroundScheduler()
 
+# Consecutive failed refreshes per dataset, for /healthz. Cleared on success.
+_refresh_failures: dict[str, int] = {}
+
 
 def _refresh_with_retry(
     refresh, name: str, retry_seconds: int = GEOIP_UPDATE_RETRY_SECONDS
@@ -513,7 +517,9 @@ def _refresh_with_retry(
 
     def run():
         if refresh():
+            _refresh_failures.pop(name, None)
             return
+        _refresh_failures[name] = _refresh_failures.get(name, 0) + 1
         logging.warning("%s refresh failed; retrying in %ss", name, retry_seconds)
         scheduler.add_job(
             run,
@@ -1039,22 +1045,128 @@ def _subdomain_mode(raw: str | None) -> str:
     return raw.lower()
 
 
+# A dataset's refresh must fail this many times in a row before /healthz
+# reports it. One failure has a retry an hour later that usually heals it; the
+# retry failing too means the dataset is stuck, not unlucky.
+REFRESH_FAILURES_DEGRADED = 2
+# A scheduler job this far past its run time means the loop that runs jobs has
+# stopped, even though the scheduler still reads as running.
+SCHEDULER_STALL_SECONDS = 300
+
+
+def _reason(code: str, message: str) -> dict[str, str]:
+    return {"code": code, "message": message}
+
+
+def health_reasons() -> list[dict[str, str]]:
+    """Why the service is degraded; empty when it is not. Each reason is a
+    stable `code` for machines and a `message` for people.
+
+    Only what this process can see without a network call, so /healthz stays
+    cheap enough to poll every 30 seconds: the datasets lookups are served
+    from, the scheduler that refreshes them, and the RDAP servers currently
+    being skipped."""
+    reasons = []
+    if geo_ip_manager.city_reader is None:
+        reasons.append(
+            _reason(
+                "geoip_bundled",
+                "GeoLite2-City is not loaded: country comes from the bundled "
+                "geoip2fast snapshot, with no city, coordinates or time zone",
+            )
+        )
+    if geo_ip_manager.asn_reader is None:
+        reasons.append(
+            _reason(
+                "geoip_asn_missing",
+                "GeoLite2-ASN is not loaded: carrier fields are empty",
+            )
+        )
+    for edition, age in geo_ip_manager.build_ages().items():
+        if age > GEOIP_MAX_BUILD_AGE_DAYS:
+            reasons.append(
+                _reason(
+                    "geoip_build_stale",
+                    f"{edition} build is {age:.0f} days old "
+                    f"(limit {GEOIP_MAX_BUILD_AGE_DAYS:g})",
+                )
+            )
+    if tld_names_manager.is_overdue():
+        age = tld_names_manager.age_days()
+        reasons.append(
+            _reason(
+                "public_suffix_list_overdue",
+                f"the public suffix list is {age:.0f} days old"
+                if age is not None
+                else "the public suffix list has never been downloaded "
+                f"(source: {tld_names_manager.status()['source']})",
+            )
+        )
+    if not scheduler.running:
+        reasons.append(
+            _reason(
+                "scheduler_stopped",
+                "the background scheduler is not running: nothing is refreshed",
+            )
+        )
+    else:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stalled = sorted(
+            job.id
+            for job in scheduler.get_jobs()
+            if job.next_run_time is not None
+            and (now - job.next_run_time).total_seconds() > SCHEDULER_STALL_SECONDS
+        )
+        if stalled:
+            reasons.append(
+                _reason(
+                    "scheduler_stopped",
+                    f"scheduler jobs are over {SCHEDULER_STALL_SECONDS}s overdue "
+                    f"({', '.join(stalled)}): the loop that runs them has stopped",
+                )
+            )
+    for name, failures in sorted(_refresh_failures.items()):
+        if failures >= REFRESH_FAILURES_DEGRADED:
+            reasons.append(
+                _reason(
+                    "refresh_failing",
+                    f"{name} refresh has failed {failures} times in a row",
+                )
+            )
+    open_hosts = rdap_breaker.open_hosts()
+    if open_hosts:
+        reasons.append(
+            _reason(
+                "rdap_breaker_open",
+                "RDAP servers skipped after repeated failures, so their "
+                f"lookups fail fast: {', '.join(open_hosts)}",
+            )
+        )
+    return reasons
+
+
 # HEAD is accepted on the fixed routes below because answering it costs
 # nothing: the handler runs as for GET and the server drops the body. FastAPI's
 # @app.get answers GET alone, so an uptime monitor's HEAD used to get a 405.
 @app.api_route("/healthz", methods=["GET", "HEAD"])
 async def healthz():
-    """Liveness plus which GeoIP databases are actually serving lookups, so a
-    silent fallback to the bundled country-only DB is visible from outside.
-    Declared before /{domain_ip}, which would otherwise swallow the path.
+    """Liveness, the deployed commit, "ok" or "degraded" with the `reasons`,
+    and which GeoIP databases are actually serving lookups. Declared before
+    /{domain_ip}, which would otherwise swallow the path.
+
+    Degraded still answers 200. The container HEALTHCHECK only asks whether the
+    process answers, since a restart fixes neither a stale database nor an RDAP
+    server that is down; the external probe reads `status` itself.
 
     `version` is the deployed commit; the deploy workflow reads it back to
     confirm production runs the SHA it shipped. Keep it ahead of the nested
     objects: the runner has no JSON parser, so the workflow takes the first
     "version" in the body."""
+    reasons = health_reasons()
     return {
-        "status": "ok",
+        "status": "degraded" if reasons else "ok",
         "version": APP_VERSION,
+        "reasons": reasons,
         "databases": geo_ip_manager.database_status(),
         "public_suffix_list": tld_names_manager.status(),
     }
