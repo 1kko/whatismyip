@@ -107,10 +107,13 @@ class TestGatingAQueryLogLevel:
             ({"A": _timeout()}, "timeout"),
             ({"A": dns.resolver.NoNameservers()}, "servfail"),
             ({"A": RuntimeError("resolver bug")}, "error"),
-            ({"A": dns.resolver.NoAnswer(), "AAAA": _timeout()}, None),
+            # A answered "no A record", then AAAA failed: whether the name has
+            # an address is unknown, so `resolution` is the failure, not
+            # "noanswer", which would read as "no address at all".
+            ({"A": dns.resolver.NoAnswer(), "AAAA": _timeout()}, "timeout"),
             (
                 {"A": dns.resolver.NoAnswer(), "AAAA": dns.resolver.NoNameservers()},
-                None,
+                "servfail",
             ),
         ],
         ids=["a-timeout", "a-servfail", "a-error", "aaaa-timeout", "aaaa-servfail"],
@@ -123,8 +126,7 @@ class TestGatingAQueryLogLevel:
         resolver.answers = answers
         data = await lookup.gather(NAME, legs={"resolve"})
         assert data["resolved_ip"] is None
-        if status:
-            assert data["resolution"] == status
+        assert data["resolution"] == status
         assert len(_logged(caplog, logging.WARNING)) == 1
 
 

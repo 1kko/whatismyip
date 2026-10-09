@@ -441,6 +441,10 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
                     resolution = "ok"
                 except Exception as e:
                     aaaa_miss = e
+                    # "noanswer" would claim the name has no address at all,
+                    # but only A said so; a failed AAAA leaves it unknown.
+                    if dns_status(e) in DNS_FAILURES:
+                        resolution = dns_status(e)
             if a_miss is not None:
                 # A miss is a warning only when nothing resolved and a resolver
                 # failed (timeout, SERVFAIL), as for the PTR in
