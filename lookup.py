@@ -348,14 +348,21 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
                 else _skipped(),
                 return_exceptions=True,
             )
+            # return_exceptions hands the errors back as values, so these log
+            # outside any except block, where logging.exception alone records
+            # "NoneType: None". Pass the exception itself for its traceback.
             if isinstance(domain_data, BaseException):
                 logging.exception(
-                    "Error getting DNS records for %s", sanitize_log_input(target)
+                    "Error getting DNS records for %s",
+                    sanitize_log_input(target),
+                    exc_info=domain_data,
                 )
                 domain_data = None
             if isinstance(ssl_data, BaseException):
                 logging.exception(
-                    "Error getting SSL info for %s", sanitize_log_input(target)
+                    "Error getting SSL info for %s",
+                    sanitize_log_input(target),
+                    exc_info=ssl_data,
                 )
                 ssl_data = None
         elif kind == "ipv4":
