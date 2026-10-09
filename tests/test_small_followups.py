@@ -2,6 +2,7 @@
 
 1. gather()'s gating A query logged every miss at WARNING, an IPv6-only name's
    NoAnswer included, though the AAAA fallback then resolved it.
+2. MCP initialize reported serverInfo.version as "", the SDK's default.
 
 Every outbound lookup is faked; nothing here touches the network.
 """
@@ -10,8 +11,11 @@ import logging
 
 import dns.resolver
 import pytest
+from fastapi.testclient import TestClient
 
+import config
 import lookup
+import main
 
 # --- 1. The gating A query's misses are logged by what they mean -------------------
 
@@ -111,3 +115,35 @@ class TestGatingAQueryLogLevel:
         if status:
             assert data["resolution"] == status
         assert len(_logged(caplog, logging.WARNING)) == 1
+
+
+# --- 2. MCP initialize names the deployed build ------------------------------------
+
+MCP_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    "Host": "ip.1kko.com",
+}
+INIT = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2026-07-28",
+        "capabilities": {},
+        "clientInfo": {"name": "pytest", "version": "0"},
+    },
+}
+
+
+def test_mcp_initialize_reports_the_deployed_version():
+    """The commit /healthz reports (SOURCE_COMMIT, or "unknown"), not the SDK's
+    empty default, so a client's log of the handshake names the build."""
+    main.mcp_rate_limiter.request_history.clear()
+    with TestClient(main.app) as client:
+        response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+    assert response.status_code == 200
+    server_info = response.json()["result"]["serverInfo"]
+    assert server_info["name"] == "whatismyip"
+    assert server_info["version"] == config.APP_VERSION
+    assert server_info["version"]

@@ -373,6 +373,11 @@ Configured at `main` module scope:
 - `StreamableHTTPSessionManager.run()` is once-per-instance; calling it twice
   on the same instance raises. The lifespan rebuilds the MCP app on every
   startup so repeated start/stop cycles (as in tests) each get a fresh one.
+- `initialize` reports `serverInfo.version` as `config.APP_VERSION`, passed as
+  `MCPServer(..., version=)`: the deployed commit, the same value as `/healthz`
+  `version`, or `unknown`. The SDK sends `""` when none is given. It is not
+  `server.json`'s registry version, which is not in the image and is bumped
+  only when the listing changes.
 - Tool return annotations need `dict[str, Any]`, not a bare `dict` — the SDK
   can't build an output schema from a bare `dict`, so the response never gets
   `structuredContent`.
