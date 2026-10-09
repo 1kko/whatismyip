@@ -143,7 +143,12 @@ poetry run ruff format .
 
 **Error Handling**:
 - WHOIS failures return `{"error": "..."}` in response rather than 500 errors
-- DNS resolution failures logged and handled gracefully with empty records
+- A DNS query that fails is never an empty list: each record type's outcome is
+  in `domain.status` (`ok|noanswer|nxdomain|timeout|servfail|error`, from
+  `managers.dns_status`), next to the unchanged record keys. The page prints
+  `(timed out)`-style text and an NXDOMAIN banner; MCP `dns_records` returns
+  `{"error": status}` for a failed type. The MX status is the zone's when the
+  name fell back to the zone's MX
 - SSL certificate failures return `None` without breaking response
 
 **Logging** (main.py:32-51):

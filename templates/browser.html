@@ -94,6 +94,10 @@
         </section>
         {% endif %}
 
+        {% if view.dns_banner %}
+        <p class="dns-banner" role="status">{{ view.dns_banner }}</p>
+        {% endif %}
+
         <section class="facts">
             {% for column in view.facts %}
             <div class="facts__col">
@@ -212,7 +216,7 @@
                         <tr>
                             <td>{{ record.type }}</td>
                             <td>{{ record.name }}</td>
-                            <td>{{ record.value }}</td>
+                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{{ record.value }}</td>
                             <td>{{ record.ttl }}</td>
                         </tr>
                         {% else %}

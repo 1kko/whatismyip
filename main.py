@@ -30,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
 from rdap import refresh_rdap_bootstrap
-from viewmodel import build_view, whois_display
+from viewmodel import build_view, dns_failure_text, whois_display
 from config import (
     APP_VERSION,
     BAN_DURATION_RATE_LIMIT,
@@ -278,6 +278,16 @@ def _dns_rows(response_data: dict) -> list[dict]:
     domain = response_data.get("domain") or {}
     address = response_data.get("address", "")
 
+    def failed(kind: str, key: str) -> list[dict]:
+        # A query that failed gets a row saying so; left out, it would read
+        # exactly like a type the name has no records of.
+        text = dns_failure_text(domain, key)
+        if not text:
+            return []
+        return [
+            {"type": kind, "name": address, "value": text, "ttl": "", "tone": "warning"}
+        ]
+
     rows = []
     for kind, key in (("A", "a"), ("MX", "mx"), ("NS", "ns"), ("TXT", "txt")):
         for record in domain.get(key) or []:
@@ -289,6 +299,7 @@ def _dns_rows(response_data: dict) -> list[dict]:
                     "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
                 }
             )
+        rows.extend(failed(kind, key))
 
     cname = domain.get("cname")
     if cname:
@@ -300,6 +311,7 @@ def _dns_rows(response_data: dict) -> list[dict]:
                 "ttl": cname.get("ttl", "") if isinstance(cname, dict) else "",
             }
         )
+    rows.extend(failed("CNAME", "cname"))
     return rows
 
 
@@ -1376,6 +1388,10 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
 
     response_data = {
         "address": data["address"],
+        # Same meaning as in the MCP dns_records tool: the address the target
+        # resolved to, and how (see gather()), so a null address says why.
+        "resolved_ip": data["resolved_ip"],
+        "resolution": data.get("resolution"),
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
         "domain": data["domain"],
         "location": ip_data,

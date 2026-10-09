@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict
 
+import dns.exception
 import dns.resolver
 import dns.reversename
 import maxminddb
@@ -72,6 +73,34 @@ def _recursive_resolver() -> dns.resolver.Resolver:
     resolver.timeout = DNS_QUERY_TIMEOUT
     resolver.lifetime = DNS_QUERY_LIFETIME
     return resolver
+
+
+# The statuses that mean "could not find out". The other two a query can end
+# in, noanswer and nxdomain, are answers: the name has no such record, or does
+# not exist. viewmodel.DNS_FAILURE_TEXT mirrors this set.
+DNS_FAILURES = frozenset({"timeout", "servfail", "error"})
+
+
+def dns_status(exc: BaseException) -> str:
+    """How a DNS query that raised `exc` ended: "noanswer", "nxdomain",
+    "servfail", "timeout" or "error". A query that returned is "ok".
+
+    NoNameservers is what dnspython raises once it has run out of resolvers to
+    ask: each answered SERVFAIL (a broken DNSSEC chain, a dead authoritative
+    server) or REFUSED, or could not be reached -- it folds a resolver's socket
+    error into this too. Anything else -- a name dnspython will not encode, a
+    bug -- is "error", rather than a guess at which server to blame. Both are
+    failures all the same: "could not find out", never "none".
+    """
+    if isinstance(exc, dns.resolver.NXDOMAIN):
+        return "nxdomain"
+    if isinstance(exc, dns.resolver.NoAnswer):
+        return "noanswer"
+    if isinstance(exc, dns.resolver.NoNameservers):
+        return "servfail"
+    if isinstance(exc, dns.exception.Timeout):
+        return "timeout"
+    return "error"
 
 
 def _with_host_ips(rows: list[dict], rdtype: str = "A") -> list[dict]:
@@ -615,24 +644,30 @@ class DomainManager:
             "spf": [],
             "ptr": [],
             "a": [],
+            # Each type's dns_status(), or "ok". An empty list above says only
+            # that nothing came back; this says whether that was the answer
+            # (noanswer, nxdomain) or the query failing (timeout, servfail,
+            # error), which the lists alone used to render identically.
+            "status": {},
         }
+        status = records["status"]
 
-        def fetch_ns() -> list:
+        def fetch_ns() -> tuple[list, str]:
             try:
                 answer = _recursive_resolver().resolve(base_domain, "NS")
-            except Exception:
-                return []
+            except Exception as e:
+                return [], dns_status(e)
             targets = [r.target for r in answer]
             return _with_host_ips(
                 [{"hostname": t.to_text(), "ttl": answer.rrset.ttl} for t in targets]
-            )
+            ), "ok"
 
-        def fetch_a() -> list:
+        def fetch_a() -> tuple[list, str]:
             try:
                 answer = _recursive_resolver().resolve(domain, "A")
-            except Exception:
-                return []
-            return [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer]
+            except Exception as e:
+                return [], dns_status(e)
+            return [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer], "ok"
 
         def mx_answer():
             """The queried name's own MX; failing that, the zone's, and whose."""
@@ -645,11 +680,16 @@ class DomainManager:
                     raise
             return _recursive_resolver().resolve(base_domain, "MX"), base_domain
 
-        def fetch_mx() -> list:
+        def fetch_mx() -> tuple[list, str]:
             try:
                 answer, from_zone = mx_answer()
-            except Exception:
-                return []
+            except Exception as e:
+                # Whichever query raised is the one the row stands on. Once the
+                # name has answered "no MX of my own", the row is the zone's, so
+                # a zone that timed out is a timeout: reporting the name's
+                # noanswer would read as "no mail server", the very misreading
+                # the zone fallback is there to prevent.
+                return [], dns_status(e)
             # Most-preferred first, so when _with_host_ips stops resolving at
             # its limit, the hosts it skipped are the ones mail tries last.
             rows = sorted(answer, key=lambda r: r.preference)
@@ -663,17 +703,17 @@ class DomainManager:
                     }
                     for r in rows
                 ]
-            )
+            ), "ok"
 
-        def fetch_cname():
+        def fetch_cname() -> tuple[dict | None, str]:
             try:
                 answer = _recursive_resolver().resolve(domain, "CNAME")
-            except Exception:
-                return None
+            except Exception as e:
+                return None, dns_status(e)
             return {
                 "cname": answer.rrset[0].target.to_text(),
                 "ttl": answer.rrset.ttl,
-            }
+            }, "ok"
 
         def spf_from(answer) -> list:
             spf = []
@@ -686,11 +726,11 @@ class DomainManager:
                     spf.append({"text": joined, "ttl": answer.rrset.ttl})
             return spf
 
-        def fetch_txt():
+        def fetch_txt() -> tuple[list, list, str]:
             try:
                 answer = _recursive_resolver().resolve(domain, "TXT")
-            except Exception:
-                return [], []
+            except Exception as e:
+                return [], [], dns_status(e)
             txt = [
                 {
                     "text": [s.decode("utf-8", errors="replace") for s in r.strings],
@@ -698,26 +738,37 @@ class DomainManager:
                 }
                 for r in answer
             ]
-            return txt, spf_from(answer)
+            return txt, spf_from(answer), "ok"
 
-        def fetch_base_spf() -> list:
+        def fetch_base_spf() -> tuple[list, str | None]:
             if base_domain == domain:
-                return []
+                return [], None
             try:
                 answer = _recursive_resolver().resolve(base_domain, "TXT")
-            except Exception:
-                return []
-            return spf_from(answer)
+            except Exception as e:
+                return [], dns_status(e)
+            return spf_from(answer), "ok"
 
-        def fetch_ptr(lookup_ip: str) -> list:
+        def spf_status(txt_status: str, base_status: str | None) -> str:
+            """SPF is two queries (the name's TXT and the zone's) filtered to
+            v=spf1. A policy found in either is an answer; with none found, a
+            query that failed means "unknown", not "no SPF"."""
+            if records["spf"]:
+                return "ok"
+            for outcome in (txt_status, base_status):
+                if outcome in DNS_FAILURES:
+                    return outcome
+            return "nxdomain" if txt_status == "nxdomain" else "noanswer"
+
+        def fetch_ptr(lookup_ip: str) -> tuple[list, str]:
             try:
                 answer = _recursive_resolver().resolve(
                     dns.reversename.from_address(lookup_ip), "PTR"
                 )
-            except Exception:
+            except Exception as e:
                 logging.debug("PTR record lookup failed for %s", lookup_ip)
-                return []
-            return [{"hostname": str(r), "ttl": answer.rrset.ttl} for r in answer]
+                return [], dns_status(e)
+            return [{"hostname": str(r), "ttl": answer.rrset.ttl} for r in answer], "ok"
 
         # Every record type is independent, so sweep them at once against the
         # cached public resolvers instead of walking them in series.
@@ -730,20 +781,28 @@ class DomainManager:
             f_base_spf = pool.submit(fetch_base_spf)
             f_ptr = pool.submit(fetch_ptr, ip) if ip else None
 
-            records["ns"] = f_ns.result()
-            records["a"] = f_a.result()
-            records["mx"] = f_mx.result()
-            records["cname"] = f_cname.result()
-            records["txt"], records["spf"] = f_txt.result()
-            for entry in f_base_spf.result():
+            records["ns"], status["ns"] = f_ns.result()
+            records["a"], status["a"] = f_a.result()
+            records["mx"], status["mx"] = f_mx.result()
+            records["cname"], status["cname"] = f_cname.result()
+            records["txt"], records["spf"], status["txt"] = f_txt.result()
+            base_spf, base_spf_status = f_base_spf.result()
+            for entry in base_spf:
                 if not any(s["text"] == entry["text"] for s in records["spf"]):
                     records["spf"].append(entry)
+            status["spf"] = spf_status(status["txt"], base_spf_status)
             if f_ptr is not None:
-                records["ptr"] = f_ptr.result()
+                records["ptr"], status["ptr"] = f_ptr.result()
 
-        # Fallback only when a caller omits ip (all current callers pass it).
-        if not ip and records["a"]:
-            records["ptr"] = fetch_ptr(records["a"][0]["ip"])
+        # Fallback only when a caller omits ip -- which gather() does when its
+        # own A query failed, so the sweep's A answer may still supply one.
+        if not ip:
+            if records["a"]:
+                records["ptr"], status["ptr"] = fetch_ptr(records["a"][0]["ip"])
+            else:
+                # No address, so no PTR question was asked: the row is exactly
+                # as known as the A query that would have supplied one.
+                status["ptr"] = status["a"]
 
         return records
 
