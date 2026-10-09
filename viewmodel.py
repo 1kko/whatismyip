@@ -740,7 +740,7 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
             hint = "lookup failed"
         elif subdomain_data:
             count = subdomain_data.get("count", 0)
-            hint = f"{count} subdomain{'s' if count != 1 else ''} found"
+            hint = f"{count:,} subdomain{'s' if count != 1 else ''} found"
         else:
             hint = "click to lookup"
         accordions.append({"id": "subdomains", "title": "Subdomains", "hint": hint})
