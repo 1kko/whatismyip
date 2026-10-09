@@ -137,7 +137,7 @@ class TestLookupWhoisRouting:
         monkeypatch.setattr(
             lookup.whois,
             "whois",
-            lambda target, quiet=True: {"domain_name": "naver.co.kr"},
+            lambda target, quiet=True, timeout=None: {"domain_name": "naver.co.kr"},
         )
         out = asyncio.run(main.lookup_whois("naver.co.kr"))
         assert out["source"] == "whois"

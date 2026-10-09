@@ -40,11 +40,30 @@ DNS_HOST_RESOLVE_LIMIT = max(int(os.getenv("DNS_HOST_RESOLVE_LIMIT", "10")), 0)
 DNS_HOST_RESOLVE_WORKERS = max(int(os.getenv("DNS_HOST_RESOLVE_WORKERS", "5")), 1)
 
 # RDAP is a single HTTPS GET, so it answers in well under a second when the TLD
-# supports it; give it a tight budget and fall back to port-43 WHOIS otherwise.
+# supports it; give it a tight budget and fall back to port-43 WHOIS otherwise
+# (domains only: an IP gets an error instead, see lookup.lookup_whois).
 # Some registries (naver.com, ibm.com, .pt ...) answer WHOIS in ~11s, so give the
 # slow tail room; the result is cached for 6h and the lookup runs in parallel.
 RDAP_TIMEOUT_SECONDS = float(os.getenv("RDAP_TIMEOUT_SECONDS", "8"))
 WHOIS_TIMEOUT_SECONDS = float(os.getenv("WHOIS_TIMEOUT_SECONDS", "15"))
+# The budgets above are asyncio.wait_for deadlines, and wait_for cannot cancel
+# the worker thread, so these bound the thread itself. whoisit's own defaults
+# are 10s per request and 3 retries with backoff: an unreachable registry kept
+# an abandoned thread retrying it long after the response had gone out. One
+# request (connect + read) now ends inside RDAP_TIMEOUT_SECONDS.
+RDAP_HTTP_TIMEOUT_SECONDS = float(os.getenv("RDAP_HTTP_TIMEOUT_SECONDS", "3.5"))
+RDAP_HTTP_RETRIES = max(int(os.getenv("RDAP_HTTP_RETRIES", "0")), 0)
+# python-whois applies its timeout to each socket operation of each referral hop.
+# The ~11s above was mostly its 10s default spent waiting for a registrar that
+# had already sent its record to close the connection; 5s keeps those answers
+# and keeps a two-hop lookup inside WHOIS_TIMEOUT_SECONDS.
+WHOIS_SOCKET_TIMEOUT_SECONDS = float(os.getenv("WHOIS_SOCKET_TIMEOUT_SECONDS", "5"))
+# Per RDAP host: after this many consecutive failures (no answer, 5xx, 429) the
+# host is skipped for the cooldown, so a registry that is down costs visitors
+# nothing instead of the whole RDAP budget each. One probe is let through when
+# the cooldown ends; an answer closes the breaker, another failure reopens it.
+RDAP_BREAKER_FAILURES = max(int(os.getenv("RDAP_BREAKER_FAILURES", "3")), 1)
+RDAP_BREAKER_COOLDOWN_SECONDS = float(os.getenv("RDAP_BREAKER_COOLDOWN_SECONDS", "600"))
 WHOIS_CACHE_TTL = int(os.getenv("WHOIS_CACHE_TTL", "21600"))  # 6h for a hit
 WHOIS_CACHE_ERROR_TTL = int(os.getenv("WHOIS_CACHE_ERROR_TTL", "300"))  # 5m for a miss
 

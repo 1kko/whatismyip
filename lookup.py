@@ -22,6 +22,7 @@ from config import (
     RDAP_TIMEOUT_SECONDS,
     WHOIS_CACHE_ERROR_TTL,
     WHOIS_CACHE_TTL,
+    WHOIS_SOCKET_TIMEOUT_SECONDS,
     WHOIS_TIMEOUT_SECONDS,
 )
 from managers import (
@@ -31,7 +32,7 @@ from managers import (
     TldNamesManager,
     _recursive_resolver,
 )
-from rdap import lookup_rdap, normalize_whois
+from rdap import RIR_RDAP_UNAVAILABLE, is_ip, lookup_rdap, normalize_whois
 
 
 class PrivateAddressError(Exception):
@@ -193,10 +194,13 @@ def classify_target(target: str) -> str:
 
 async def _whois_fallback(target: str) -> dict:
     """Port-43 WHOIS, normalised into the same shape RDAP produces. Used only for
-    the TLDs RDAP does not cover, or when the RDAP server is unreachable."""
+    domains: the TLDs RDAP does not cover, or when the RDAP server is unreachable.
+    `timeout` bounds the worker thread, which wait_for cannot cancel."""
     try:
         raw = await asyncio.wait_for(
-            asyncio.to_thread(whois.whois, target, quiet=True),
+            asyncio.to_thread(
+                whois.whois, target, quiet=True, timeout=WHOIS_SOCKET_TIMEOUT_SECONDS
+            ),
             timeout=WHOIS_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -212,8 +216,9 @@ async def _whois_fallback(target: str) -> dict:
 
 async def lookup_whois(target: str) -> dict:
     """Registration data for a domain or IP. RDAP first (fast, structured JSON),
-    falling back to port-43 WHOIS for TLDs RDAP does not serve. Both sources are
-    normalised to one shape (see rdap.py) and cached under the same key."""
+    falling back to port-43 WHOIS for TLDs RDAP does not serve; an IP has no
+    fallback. Both sources are normalised to one shape (see rdap.py) and cached
+    under the same key."""
     key = (target or "").strip().lower()
     cached = _whois_cache.get(key)
     if cached is not None:
@@ -226,13 +231,17 @@ async def lookup_whois(target: str) -> dict:
             timeout=RDAP_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        logging.info("RDAP timed out for %s; trying WHOIS", sanitize_log_input(target))
+        logging.info("RDAP timed out for %s", sanitize_log_input(target))
     except Exception:
-        safe = sanitize_log_input(target)
-        logging.exception("RDAP errored for %s; trying WHOIS", safe)
+        logging.exception("RDAP errored for %s", sanitize_log_input(target))
 
     # lookup_rdap returns None when RDAP cannot answer (unsupported TLD, query
-    # error) — only then do we pay for the slow port-43 round-trip.
+    # error, breaker open). Never port-43 for an address: python-whois answers
+    # an IP with the registration of its PTR hostname's domain, the ISP's
+    # domain record presented as the allocation.
+    if result is None and is_ip(target):
+        result = {"error": RIR_RDAP_UNAVAILABLE}
+    # Only for a domain do we pay for the slow port-43 round-trip.
     if result is None:
         result = await _whois_fallback(target)
     if not result:
