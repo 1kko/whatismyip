@@ -1,8 +1,12 @@
 """The public MCP server mounted at /mcp.
 
 Tools are thin shells over lookup.gather(): they reshape its output for an LLM
-context and never raise, because a JSON-RPC transport fault tells the model far
-less than {"error": "..."} does.
+context. They do not raise. The SDK would turn an exception into an isError
+result, not a JSON-RPC fault, but the model would get only its text, or just
+"Error executing tool <name>" for an unexpected one. A call that failed
+outright returns _fail() instead: isError set, and {"error": "..."} as the
+structured content. A call that answered with a gap in it, such as one DNS type
+timing out, is a normal result that carries the gap as data.
 
 Response shaping is the whole point of this module. The HTTP API returns tile
 URLs, projected polylines, and a full certificate dump because a browser paints
@@ -11,12 +15,14 @@ them; none of that helps a model, and all of it costs context.
 
 import asyncio
 import datetime
+import json
 import logging
 from contextvars import ContextVar
 from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult, TextContent
 
 from config import (
     MCP_ALLOWED_HOSTS,
@@ -50,6 +56,38 @@ from viewmodel import (
 )
 
 mcp = MCPServer("whatismyip")
+
+
+def _fail(message: str, **extra: Any) -> CallToolResult:
+    """The whole call failed: nothing usable came back.
+
+    `isError` is the spec's channel for that. With it a client can tell a
+    failure from an answer without reading the payload, and the SDK's OTel
+    middleware tags the call's span `error.type=tool_error` only when it is
+    set. The payload is the {"error": ...} a model already reads, in both
+    structuredContent and the text block, since a client may hand either on.
+
+    Only for a call with no answer in it. A failed leg inside an answer
+    (registration down, one DNS type timed out, port 443 closed in `lookup`),
+    `registered: false` and `stale: true` are data, and stay in a normal
+    result.
+
+    The tools keep their `-> dict[str, Any]` annotation although this is not a
+    dict. The SDK refuses `dict | CallToolResult`, builds the output schema
+    from the annotation, and passes a CallToolResult through without checking
+    it against that schema when `is_error` is set, so the annotation only has
+    to describe a success.
+    """
+    payload = {"error": message, **extra}
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text", text=json.dumps(payload, indent=2, ensure_ascii=False)
+            )
+        ],
+        structured_content=payload,
+        is_error=True,
+    )
 
 
 def _iso(value: Any) -> str | None:
@@ -171,14 +209,14 @@ async def lookup(target: str) -> dict[str, Any]:
     try:
         data = await _bounded_gather(target)
     except PrivateAddressError:
-        return {"error": "Private or reserved addresses are not allowed"}
+        return _fail("Private or reserved addresses are not allowed")
     except InvalidTargetError as exc:
-        return {"error": exc.message}
+        return _fail(exc.message)
     except TimeoutError:
-        return {"error": "Lookup timed out"}
+        return _fail("Lookup timed out")
     except Exception:
         logging.exception("MCP lookup failed for %s", sanitize_log_input(target))
-        return {"error": "Lookup failed"}
+        return _fail("Lookup failed")
 
     loc = data["location"] or {}
     return {
@@ -223,26 +261,24 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
         # "this tool never asked". Reject it and name what is actually queried.
         unsupported = sorted(set(wanted) - set(_RECORD_TYPES))
         if unsupported:
-            return {
-                "error": (
-                    f"unsupported record types: {', '.join(unsupported)} — "
-                    f"this server queries only {', '.join(_RECORD_TYPES)}"
-                )
-            }
+            return _fail(
+                f"unsupported record types: {', '.join(unsupported)} — "
+                f"this server queries only {', '.join(_RECORD_TYPES)}"
+            )
     else:
         wanted = list(_RECORD_TYPES)
 
     try:
         data = await _bounded_gather(domain)
     except PrivateAddressError:
-        return {"error": "Private or reserved addresses are not allowed"}
+        return _fail("Private or reserved addresses are not allowed")
     except InvalidTargetError as exc:
-        return {"error": exc.message}
+        return _fail(exc.message)
     except TimeoutError:
-        return {"error": "Lookup timed out"}
+        return _fail("Lookup timed out")
     except Exception:
         logging.exception("MCP dns_records failed for %s", sanitize_log_input(domain))
-        return {"error": "DNS lookup failed"}
+        return _fail("DNS lookup failed")
 
     records = data["domain"] or {}
     status = records.get("status") or {}
@@ -278,28 +314,28 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
     try:
         data = await _bounded_gather(domain)
     except PrivateAddressError:
-        return {"error": "Private or reserved addresses are not allowed"}
+        return _fail("Private or reserved addresses are not allowed")
     except InvalidTargetError as exc:
-        return {"error": exc.message}
+        return _fail(exc.message)
     except TimeoutError:
-        return {"error": "Lookup timed out"}
+        return _fail("Lookup timed out")
     except Exception:
         logging.exception(
             "MCP ssl_certificate failed for %s", sanitize_log_input(domain)
         )
-        return {"error": "TLS lookup failed"}
+        return _fail("TLS lookup failed")
 
     cert = data["ssl"]
     if not cert:
         # Almost always no handshake was attempted, which is not the same as
         # a host serving no certificate.
         if not data["resolved_ip"]:
-            return {"error": f"TLS not checked for {data['address']}: no A record"}
+            return _fail(f"TLS not checked for {data['address']}: no A record")
         if data["resolved_ip"] == data["address"]:
-            return {"error": "TLS is checked for domain names only, not IP addresses"}
-        return {"error": f"No TLS certificate served by {data['address']} on port 443"}
+            return _fail("TLS is checked for domain names only, not IP addresses")
+        return _fail(f"No TLS certificate served by {data['address']} on port 443")
     if cert.get("error"):
-        return {"error": f"{_tls_failure(cert)} for {data['address']}"}
+        return _fail(f"{_tls_failure(cert)} for {data['address']}")
 
     summary = compact_ssl(cert)
     return {
@@ -326,27 +362,27 @@ async def subdomains(
     github.io) is refused.
     """
     if limit < 1:
-        return {"error": "limit must be at least 1"}
+        return _fail("limit must be at least 1")
     limit = min(limit, SUBDOMAIN_MCP_MAX_LIMIT)
 
     # The same gate the HTTP route applies. get_subdomains() refuses these too,
     # but only as a backstop; neither surface should rely on the other's check.
     reason = invalid_target_reason(domain)
     if reason:
-        return {"domain": domain, "error": reason}
+        return _fail(reason, domain=domain)
 
     try:
         data = await get_subdomains(domain)
     except Exception:
         logging.exception("MCP subdomains failed for %s", sanitize_log_input(domain))
-        return {"error": "Subdomain lookup failed"}
+        return _fail("Subdomain lookup failed")
 
     # An empty list must never stand in for a failure. dns_records rejects a
     # record type this server does not query for the same reason: a model
     # reading {} or [] states it as fact, and "we could not ask" would reach the
     # user as "there are none".
     if data.get("error"):
-        return {"domain": domain, "error": data["error"]}
+        return _fail(data["error"], domain=domain)
 
     names = data.get("names") or []
     shown = names[:limit]
@@ -422,12 +458,12 @@ async def whoami_caller() -> dict[str, Any]:
     """
     ip = _caller_ip.get()
     if ip == "unknown":
-        return {"error": "Caller address unavailable"}
+        return _fail("Caller address unavailable")
     try:
         loc = await lookup_location(ip)
     except Exception:
         logging.exception("MCP whoami_caller failed")
-        return {"error": "Location lookup failed"}
+        return _fail("Location lookup failed")
     return {
         "ip": ip,
         "geo": compact_location(loc),
