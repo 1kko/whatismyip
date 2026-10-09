@@ -192,7 +192,7 @@ def test_messages_name_what_is_wrong(healthy):
     messages = [r["message"] for r in health()["reasons"]]
     assert config.MAXMIND_CITY_EDITION in messages[0]
     assert "public-suffix-list" in messages[1] and "3 times" in messages[1]
-    assert "rdap.afrinic.net" in messages[2]
+    assert re.search(r"\brdap\.afrinic\.net\b", messages[2])
 
 
 def test_build_just_inside_the_limit_is_fine(healthy):
