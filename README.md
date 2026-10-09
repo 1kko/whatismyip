@@ -661,6 +661,12 @@ is unaffected.)
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |
 
+A call that could not answer at all (a private or malformed target, a timeout,
+no TLS handshake, the CT source unavailable) comes back with `isError: true` and
+`{"error": "..."}` as its structured content. A call that answered with a gap in
+it, such as one DNS type timing out, the registration lookup failing inside
+`lookup`, or a stale subdomain list, is a normal result that carries the gap.
+
 ### What `whoami_caller` actually reports
 
 The address that opened the MCP connection — which is **not always yours**, and

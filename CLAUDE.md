@@ -201,6 +201,13 @@ poetry run ruff format .
 - Tool return annotations need `dict[str, Any]`, not a bare `dict` — the SDK
   can't build an output schema from a bare `dict`, so the response never gets
   `structuredContent`.
+- A call that failed outright returns `_fail()`: a `CallToolResult` with
+  `isError` set and `{"error": ...}` as `structuredContent`. The annotation
+  stays `dict[str, Any]` anyway: the SDK refuses `dict | CallToolResult`, and
+  skips output validation for an isError result. A gap inside an answer (one
+  DNS type, the registration leg, `registered: false`, `stale: true`) stays a
+  normal result. The SDK's OTel middleware counts only isError results as
+  `error.type=tool_error`, so this split is what SigNoz's tool error rate sees.
 - `/mcp` is exempt from geo-blocking, the suspicious-path detector, and
   automatic bans — every hosted-AI user shares a few provider egress IPs, so a
   ban would take all of them offline at once. It gets its own rate bucket and
