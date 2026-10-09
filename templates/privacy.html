@@ -43,13 +43,12 @@
         <ul>
             <li>The log file on the server, <code>service.log</code>, starts afresh every day and
                 keeps the last {{ log_retention }} of old files. Older ones are deleted.</li>
-            {# TODO(operator): confirm both retentions, then replace the marked sentence. #}
+            {# Operator: once the SigNoz and container-log retention are confirmed, state them
+               here in days instead of pointing at those systems' own settings. #}
             <li>The same lines also go to the server's console log and, with a trace of each
                 request (method, path and query, so what was looked up, plus status, timing and
-                user-agent), to the operator's SigNoz monitoring.
-                <strong class="doc__todo">[Placeholder, to be confirmed by the operator: SigNoz keeps
-                logs for N days and traces for N days; the hosting platform keeps the console log
-                for N days.]</strong></li>
+                user-agent), to the operator's SigNoz monitoring. How long those keep them is set
+                in the monitoring and hosting systems themselves, not by this service.</li>
             <li>A ban keeps your IP address, the reason and, where they apply, the path and the
                 country until it expires: {{ ban_rate_limit }} for going over the rate limit,
                 {{ ban_suspicious }} for a request shaped like a vulnerability probe. A ban set by

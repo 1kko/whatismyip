@@ -684,7 +684,6 @@ table.records--dns td:nth-child(4) {
 .doc strong { color: var(--text-primary); font-weight: 500; }
 .doc code { font-family: var(--font-mono); font-size: 0.9em; }
 .doc a { color: var(--accent); }
-.doc .doc__todo { color: var(--warning); }
 @media (max-width: 900px) {
   .doc { padding-block: 40px 64px; }
   .doc__title { font-size: 24px; }
