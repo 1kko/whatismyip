@@ -74,7 +74,9 @@ class TestBasic:
         data = response.json()
         assert data["status"] == "ok"
         databases = data["databases"]
-        assert databases["geoip2fast"]["source"] in ("volume", "bundled")
+        # "bundled" while the geoip2fast fallback answers country, "unused"
+        # once GeoLite2-City does.
+        assert databases["geoip2fast"]["source"] in ("unused", "bundled")
         assert set(databases["city_overlay"]) == {"loaded", "build"}
         assert set(databases["asn_overlay"]) == {"loaded", "build"}
 
@@ -96,3 +98,25 @@ class TestRefreshRetry:
         monkeypatch.setattr(main.scheduler, "add_job", lambda *a, **k: added.append(k))
         main._refresh_with_retry(lambda: True, "test-db")()
         assert added == []
+
+
+class TestBootFetch:
+    """GeoLite2-City is where the country comes from, so boot fetches any
+    GeoLite2 database that did not open, not only one whose file is missing: a
+    truncated download left on the volume used to wait out the 3-day interval."""
+
+    def _run(self, monkeypatch, city_reader, asn_reader):
+        fetched = []
+        monkeypatch.setattr(main.geo_ip_manager, "city_reader", city_reader)
+        monkeypatch.setattr(main.geo_ip_manager, "asn_reader", asn_reader)
+        monkeypatch.setattr(main, "refresh_city_db", lambda: fetched.append("city"))
+        monkeypatch.setattr(main, "refresh_asn_db", lambda: fetched.append("asn"))
+        main._fetch_unloaded_geoip_dbs()
+        return fetched
+
+    def test_an_unloaded_database_is_fetched(self, monkeypatch):
+        assert self._run(monkeypatch, None, None) == ["city", "asn"]
+
+    def test_a_loaded_database_is_left_to_the_schedule(self, monkeypatch):
+        assert self._run(monkeypatch, object(), object()) == []
+        assert self._run(monkeypatch, object(), None) == ["asn"]

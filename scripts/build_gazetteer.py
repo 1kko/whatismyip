@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build the coordinate gazetteer from GeoNames.
 
-geoip2fast resolves city NAMES but its latitude/longitude are always null,
-so the map needs its own coordinate source. GeoNames cities15000 gives us
+GeoLite2-City supplies coordinates for most addresses; the map still needs
+its own source for the rest, and for the window before the first GeoLite2
+download, when only a country is known. GeoNames cities15000 gives us
 every city above 15k population; country centroids are derived from the same
 download as a population-weighted mean, so there is only one source to trust.
 

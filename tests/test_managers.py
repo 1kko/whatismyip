@@ -1,10 +1,11 @@
-"""GeoIP database resilience.
+"""GeoIP databases and the public suffix list.
 
-An interrupted download used to leave a truncated .dat.gz that crashed the next
-startup. These pin the two guards: a corrupt file degrades to the bundled DB
-instead of raising, and a failed refresh never disturbs the live instance or
-leaves the live file half-written. No network — the bundled geoip2fast DB is
-used as the fallback.
+GeoLite2-City answers country, city and coordinates and GeoLite2-ASN the
+carrier, both memory-mapped. The tests open MaxMind's small synthetic test
+databases under tests/fixtures, never the repo's data/ files, and need no
+network. The country-only snapshot bundled with geoip2fast stands in only
+while the City database is missing, so a fresh volume still has a country for
+geo-blocking.
 """
 
 import base64
@@ -12,10 +13,8 @@ import gzip
 import io
 import json
 import os
-import shutil
 import tarfile
 
-import maxminddb
 import pytest
 from tld import conf as tld_conf
 from tld.utils import reset_tld_names
@@ -23,127 +22,212 @@ from tld.utils import reset_tld_names
 import managers
 import security
 
-# MaxMind's synthetic test database; see fixtures/LICENSE-MaxMind-DB.txt.
-CITY_TEST_DB = os.path.join(
-    os.path.dirname(__file__), "fixtures", "GeoLite2-City-Test.mmdb"
-)
+# MaxMind's synthetic test databases; see fixtures/LICENSE-MaxMind-DB.txt.
+FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
+CITY_TEST_DB = os.path.join(FIXTURES, "GeoLite2-City-Test.mmdb")
+ASN_TEST_DB = os.path.join(FIXTURES, "GeoLite2-ASN-Test.mmdb")
 
 
-@pytest.fixture(autouse=True)
-def restore_live_geoip():
-    """Rebind geoip2fast's shared state to the real database after every test
-    here.
-
-    GeoIP2Fast instances are not independent: constructing one rebinds the data
-    that every *existing* instance reads from. The tests below deliberately
-    build throwaway managers over corrupt, absent and temporary files, which
-    leaves the app's live manager — a different object, still reporting the
-    volume database in db_info — answering from whichever file was loaded last.
-    On a clean checkout that made 127.0.0.1 come back as United States instead
-    of private, and test_page's `test_private_client_gets_no_map` failed
-    because a private client got a map.
-
-    It only reproduced where the geoip2fast package still holds its pristine
-    country-only database; on a machine where an earlier run had overwritten it
-    with a full city database, the pollution was invisible.
-
-    Constructing one more manager under the real config is enough to put the
-    shared state back; the object itself is discarded.
-    """
-    yield
-    managers.GeoIpManager()
+def _manager(tmp_path, monkeypatch, city=None, asn=None):
+    """A GeoIpManager over the given mmdb files, or none at all, so a test never
+    reads (or, through a refresh, writes) the repo's real data files."""
+    monkeypatch.setattr(
+        managers, "GEOIP_CITY_DB_FILE", city or str(tmp_path / "absent-city.mmdb")
+    )
+    monkeypatch.setattr(
+        managers, "GEOIP_ASN_DB_FILE", asn or str(tmp_path / "absent-asn.mmdb")
+    )
+    return managers.GeoIpManager()
 
 
-class TestGeoIpResilience:
-    def test_corrupt_db_falls_back_to_bundled(self, tmp_path, monkeypatch):
-        bad = tmp_path / "geoip.dat.gz"
-        bad.write_bytes(b"not a valid gzip database")  # a truncated download
-        monkeypatch.setattr(managers, "GEOIP_DATA_FILE", str(bad))
+class _FakeCityReader:
+    """One canned GeoLite2-City record for every address."""
 
-        manager = managers.GeoIpManager()  # must not raise
-        # The bundled DB still answers, so a public IP resolves to a country.
-        assert manager.fetch_location("8.8.8.8")["country_code"]
+    def __init__(self, record, prefix_len=24):
+        self.record, self.prefix_len = record, prefix_len
 
-    def test_missing_db_uses_bundled(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            managers, "GEOIP_DATA_FILE", str(tmp_path / "absent.dat.gz")
+    def get_with_prefix_len(self, ip):
+        return self.record, self.prefix_len
+
+
+class _RecordingReader:
+    """A reader that notes every query and finds nothing. It records rather
+    than raises because the lookup swallows reader errors."""
+
+    def __init__(self):
+        self.queried = []
+
+    def get_with_prefix_len(self, ip):
+        self.queried.append(ip)
+        return None, 0
+
+
+def _blocklist(tmp_path, *countries):
+    rules = tmp_path / "geo_rules.json"
+    rules.write_text(
+        json.dumps(
+            {
+                "mode": "blocklist",
+                "blocked_countries": list(countries),
+                "blocked_regions": [],
+                "allowed_countries": [],
+                "allowed_regions": [],
+                "block_unknown": False,
+                "bypass_ips": [],
+            }
         )
-        manager = managers.GeoIpManager()
-        assert manager.fetch_location("8.8.8.8")["country_code"]
+    )
+    return str(rules)
 
-    def test_update_failure_keeps_the_live_instance_and_file(
+
+class TestGeoLite2Lookup:
+    """GeoLite2-City is the primary source: country, city, coordinates and the
+    matched block, with the carrier from GeoLite2-ASN."""
+
+    def test_city_and_asn_fill_one_record(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB, ASN_TEST_DB)
+        assert manager.fetch_location("89.160.20.112") == {
+            "ip": "89.160.20.112",
+            "country_code": "SE",
+            "country_name": "Sweden",
+            "city_name": "Linköping",
+            "subdivision_name": "Östergötland County",
+            "subdivision_code": "E",
+            "lat": 58.4167,
+            "lon": 15.6167,
+            "accuracy_km": 76,
+            "time_zone": "Europe/Stockholm",
+            "cidr": "89.160.20.112/28",  # ip/prefix -> the City block
+            "asn_name": "Bredband2 AB",
+            "asn_cidr": "89.160.0.0/17",
+            "asn_number": 29518,
+            "is_private": False,
+            "hostname": "",
+        }
+
+    def test_ipv6_addresses_resolve(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB, ASN_TEST_DB)
+        location = manager.fetch_location("2001:218::1")
+        assert location["country_code"] == "JP"
+        assert location["cidr"] == "2001:218::/32"
+
+    def test_the_city_country_is_what_geo_blocking_judges(self, tmp_path, monkeypatch):
+        """The bundled geoip2fast snapshot puts 67.43.156.0/24 in the US; the
+        City database, in Bhutan. With the City database loaded, Bhutan is the
+        country both the page and geo-blocking see."""
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB)
+        location = manager.fetch_location("67.43.156.1")
+        assert (location["country_code"], location["country_name"]) == (
+            "BT",
+            "Bhutan",
+        )
+
+        geo_block = security.GeoBlockManager(
+            manager, config_file=_blocklist(tmp_path, "BT")
+        )
+        verdict = geo_block.check_access("67.43.156.1")
+        assert verdict["country"] == "BT"
+        assert verdict["allowed"] is False
+
+    def test_registered_country_stands_in_for_a_missing_one(
         self, tmp_path, monkeypatch
     ):
-        live = tmp_path / "geoip.dat.gz"
-        live.write_bytes(b"pretend-this-is-the-current-good-db")
-        monkeypatch.setattr(managers, "GEOIP_DATA_FILE", str(live))
+        """Some City records carry only the country the block is registered
+        in. geoip2fast's own builder makes the same substitution, so dropping
+        it would turn those addresses country-less."""
+        manager = _manager(tmp_path, monkeypatch)
+        manager.city_reader = _FakeCityReader(
+            {"registered_country": {"iso_code": "RO", "names": {"en": "Romania"}}}
+        )
+        location = manager.fetch_location("8.8.8.8")
+        assert location["country_code"] == "RO"
+        assert location["country_name"] == "Romania"
 
-        manager = managers.GeoIpManager()  # bundled fallback (live file is fake)
-        before = manager.instance
-
-        def boom(filename, destination, verbose=False):
-            # Simulate a download that dies partway through.
-            open(destination, "wb").write(b"half a file")
-            raise RuntimeError("connection reset")
-
-        monkeypatch.setattr(manager.instance, "update_file", boom)
-        assert manager.update_database() is False  # swallows the error
-
-        assert manager.instance is before  # never swapped in a bad load
-        assert live.read_bytes() == b"pretend-this-is-the-current-good-db"  # untouched
-        # the partial download is cleaned up, whatever the temp file is named
-        assert [p.name for p in tmp_path.iterdir()] == ["geoip.dat.gz"]
-
-    def test_refresh_survives_the_library_extension_check(self, tmp_path, monkeypatch):
-        """update_file() rejects any destination filename that does not end with
-        .dat.gz — with an {'error': ...} result, not an exception, and nothing
-        downloaded. A '<live>.tmp' temp name trips exactly that and silently
-        killed every refresh in production, so the fake below enforces the real
-        library's contract."""
-        live = tmp_path / "geoip2fast.dat.gz"
-        live.write_bytes(b"pretend-old-db")
-        monkeypatch.setattr(managers, "GEOIP_DATA_FILE", str(live))
-        manager = managers.GeoIpManager()  # bundled fallback (live file is fake)
-        before = manager.instance
-        loadable_db = manager.instance.get_database_info()["database_fullpath"]
-
-        def fake_update_file(filename, destination, verbose=False):
-            if not os.path.basename(destination).lower().endswith(".dat.gz"):
-                return {"error": "The destination file extension is invalid."}
-            shutil.copyfile(loadable_db, destination)  # a real, loadable DB
-            return {"error": None}
-
-        monkeypatch.setattr(manager.instance, "update_file", fake_update_file)
-        assert manager.update_database() is True
-
-        assert manager.instance is not before  # the refreshed DB was swapped in
-        assert live.read_bytes() != b"pretend-old-db"  # live file replaced
-        assert manager.db_info["source"] == "volume"  # status reflects the refresh
-        assert [p.name for p in tmp_path.iterdir()] == ["geoip2fast.dat.gz"]
-
-    def test_an_error_result_keeps_the_live_instance_and_file(
+    def test_an_unlisted_address_has_no_country_but_keeps_its_carrier(
         self, tmp_path, monkeypatch
     ):
-        """update_file() reports failures (bad URL, redirect loops, text
-        responses) as an {'error': ...} dict; that must be treated as a failed
-        refresh, not followed by a load attempt on a file that was never
-        written."""
-        live = tmp_path / "geoip2fast.dat.gz"
-        live.write_bytes(b"pretend-old-db")
-        monkeypatch.setattr(managers, "GEOIP_DATA_FILE", str(live))
-        manager = managers.GeoIpManager()
-        before = manager.instance
+        """An address no database lists keeps "--", the country code the JSON
+        API and geo-blocking have always seen for it."""
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB, ASN_TEST_DB)
+        location = manager.fetch_location("1.128.0.1")  # absent from the City DB
+        assert location["country_code"] == "--"
+        assert location["country_name"] is None
+        assert location["cidr"] is None
+        assert location["asn_name"] == "Telstra Pty Ltd"
+        assert location["asn_cidr"] == "1.128.0.0/11"
 
-        monkeypatch.setattr(
-            manager.instance,
-            "update_file",
-            lambda *a, **k: {"error": "Exceeded maximum redirects."},
-        )
-        assert manager.update_database() is False  # swallows the failure
+    @pytest.mark.parametrize(
+        "ip",
+        ["192.168.0.1", "10.1.2.3", "127.0.0.1", "100.64.0.1", "224.0.0.1", "::1"]
+        + ["fe80::1", "fd00::1"],
+    )
+    def test_private_addresses_query_no_database(self, tmp_path, monkeypatch, ip):
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB)
+        manager.city_reader = manager.asn_reader = reader = _RecordingReader()
+        location = manager.fetch_location(ip)
+        assert location["is_private"] is True
+        assert location["country_code"] == "--"
+        assert reader.queried == []
 
-        assert manager.instance is before
-        assert live.read_bytes() == b"pretend-old-db"
-        assert [p.name for p in tmp_path.iterdir()] == ["geoip2fast.dat.gz"]
+    def test_a_non_address_does_not_raise(self, tmp_path, monkeypatch):
+        # TestClient's peer is the string "testclient".
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB, ASN_TEST_DB)
+        location = manager.fetch_location("testclient")
+        assert location["country_code"] == "--"
+        assert location["is_private"] is False
+
+    def test_the_fallback_is_never_loaded_while_the_city_db_serves(
+        self, tmp_path, monkeypatch
+    ):
+        """The whole point: geoip2fast unpickles its database onto the Python
+        heap (about 900 MB for the city build this replaced), where the mmdb
+        readers only map their files."""
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB, ASN_TEST_DB)
+        for ip in ("89.160.20.112", "1.128.0.1", "2001:218::1", "8.8.8.8"):
+            manager.fetch_location(ip)
+        assert manager.fallback is None
+
+
+class TestCountryFallback:
+    """Until the first GeoLite2-City download lands, or while a corrupt one
+    will not open, the country-only snapshot bundled with geoip2fast answers,
+    so geo-blocking always has a country to judge."""
+
+    def test_a_missing_city_db_falls_back_to_the_bundled_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        manager = _manager(tmp_path, monkeypatch)
+        assert manager.fetch_location("8.8.8.8")["country_code"] == "US"
+        # The bundled file covers IPv6 too, not just the package's IPv4 default.
+        assert manager.fetch_location("2001:4860:4860::8888")["country_code"] == "US"
+
+    def test_a_corrupt_city_db_falls_back(self, tmp_path, monkeypatch):
+        bad = tmp_path / "GeoLite2-City.mmdb"
+        bad.write_bytes(b"not a valid mmdb")  # a truncated download
+        manager = _manager(tmp_path, monkeypatch, str(bad))  # must not raise
+        assert manager.city_reader is None
+        assert manager.fetch_location("8.8.8.8")["country_code"] == "US"
+
+    def test_the_fallback_answers_country_alone(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch, asn=ASN_TEST_DB)
+        location = manager.fetch_location("89.160.20.112")
+        assert location["country_code"] == "SE"
+        assert location["city_name"] == ""
+        assert location["lat"] is None
+        assert location["asn_name"] == "Bredband2 AB"  # the ASN DB still answers
+
+    def test_a_city_download_takes_over_from_the_fallback(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch)
+        assert manager.fetch_location("67.43.156.1")["country_code"] == "US"
+        assert manager.database_status()["geoip2fast"]["source"] == "bundled"
+
+        with open(CITY_TEST_DB, "rb") as handle:
+            city_bytes = handle.read()
+        monkeypatch.setattr(managers, "_fetch_mmdb", lambda edition, url: city_bytes)
+        assert manager.update_city_database() is True
+
+        assert manager.fetch_location("67.43.156.1")["country_code"] == "BT"
+        assert manager.database_status()["geoip2fast"]["source"] == "unused"
 
 
 def _make_city_targz(mmdb_bytes, name="GeoLite2-City_20260718/GeoLite2-City.mmdb"):
@@ -306,22 +390,9 @@ class TestCityDatabaseSource:
         assert not target.exists()
 
 
-def _isolated_manager(tmp_path, monkeypatch):
-    """A manager on the bundled geoip2fast DB with no mmdb overlays, so tests
-    can attach fake readers without touching the repo's real data files."""
-    monkeypatch.setattr(managers, "GEOIP_DATA_FILE", str(tmp_path / "absent.dat.gz"))
-    monkeypatch.setattr(
-        managers, "GEOIP_CITY_DB_FILE", str(tmp_path / "absent-city.mmdb")
-    )
-    monkeypatch.setattr(
-        managers, "GEOIP_ASN_DB_FILE", str(tmp_path / "absent-asn.mmdb")
-    )
-    return managers.GeoIpManager()
-
-
 class TestAsnOverlay:
-    """fetch_location prefers the GeoLite2-ASN overlay for carrier data and
-    falls back to geoip2fast's own ASN fields when the overlay is absent."""
+    """Carrier data comes from GeoLite2-ASN alone; the country-only fallback
+    has none to offer."""
 
     class _FakeReader:
         def __init__(self, record, prefix_len=0):
@@ -330,8 +401,8 @@ class TestAsnOverlay:
         def get_with_prefix_len(self, ip):
             return self.record, self.prefix_len
 
-    def test_overlay_wins_over_geoip2fast(self, tmp_path, monkeypatch):
-        manager = _isolated_manager(tmp_path, monkeypatch)
+    def test_the_announced_block_comes_from_the_prefix(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB)
         manager.asn_reader = self._FakeReader(
             {
                 "autonomous_system_organization": "Fake Telecom",
@@ -344,129 +415,38 @@ class TestAsnOverlay:
         assert location["asn_number"] == 65000
         assert location["asn_cidr"] == "168.126.48.0/20"  # ip/prefix -> network
 
-    def test_private_ips_skip_the_overlay(self, tmp_path, monkeypatch):
-        manager = _isolated_manager(tmp_path, monkeypatch)
-
-        class Exploding:
-            def get_with_prefix_len(self, ip):
-                raise AssertionError("must not be queried for private IPs")
-
-        manager.asn_reader = Exploding()
-        location = manager.fetch_location("192.168.0.1")
-        assert location["is_private"] is True
+    def test_no_record_leaves_the_carrier_empty(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB, ASN_TEST_DB)
+        location = manager.fetch_location("8.8.8.8")  # absent from the ASN DB
+        assert location["asn_name"] is None
+        assert location["asn_cidr"] is None
         assert location["asn_number"] is None
-
-    def test_no_record_falls_back_to_geoip2fast(self, tmp_path, monkeypatch):
-        manager = _isolated_manager(tmp_path, monkeypatch)
-        raw = manager.instance.lookup("8.8.8.8").to_dict()
-        manager.asn_reader = self._FakeReader(None)
-        location = manager.fetch_location("8.8.8.8")
-        assert location["asn_name"] == raw.get("asn_name")
-        assert location["asn_cidr"] == raw.get("asn_cidr")
-        assert location["asn_number"] is None
-
-
-class _FakeCityReader:
-    """One canned GeoLite2-City record for every address."""
-
-    def __init__(self, record, prefix_len=24):
-        self.record, self.prefix_len = record, prefix_len
-
-    def get(self, ip):
-        return self.record
-
-    def get_with_prefix_len(self, ip):
-        return self.record, self.prefix_len
-
-
-class TestCityCountry:
-    """Country comes from GeoLite2-City, refreshed every three days, ahead of
-    the geoip2fast release snapshot, which had stalled at its 2026-06-05 build.
-    Geo-blocking reads the same field, so it follows."""
-
-    def _with_city_db(self, tmp_path, monkeypatch):
-        manager = _isolated_manager(tmp_path, monkeypatch)
-        manager.city_reader = maxminddb.open_database(CITY_TEST_DB)
-        return manager
-
-    def test_city_country_wins_over_geoip2fast(self, tmp_path, monkeypatch):
-        manager = self._with_city_db(tmp_path, monkeypatch)
-        # The two disagree about this block: geoip2fast's snapshot says the US,
-        # the City database says Bhutan.
-        assert manager.instance.lookup("67.43.156.1").country_code == "US"
-
-        location = manager.fetch_location("67.43.156.1")
-        assert location["country_code"] == "BT"
-        assert location["country_name"] == "Bhutan"
-
-    def test_registered_country_stands_in_for_a_missing_one(
-        self, tmp_path, monkeypatch
-    ):
-        """Some City records carry only the country the block is registered
-        in. geoip2fast's own builder makes the same substitution, so dropping
-        it would turn those addresses country-less."""
-        manager = _isolated_manager(tmp_path, monkeypatch)
-        manager.city_reader = _FakeCityReader(
-            {"registered_country": {"iso_code": "RO", "names": {"en": "Romania"}}}
-        )
-        location = manager.fetch_location("8.8.8.8")
-        assert location["country_code"] == "RO"
-        assert location["country_name"] == "Romania"
-
-    def test_no_city_record_keeps_the_geoip2fast_country(self, tmp_path, monkeypatch):
-        manager = self._with_city_db(tmp_path, monkeypatch)
-        location = manager.fetch_location("1.128.0.1")  # absent from the test DB
-        assert location["country_code"] == "AU"
-        assert location["country_name"] == "Australia"
-
-    def test_geo_blocking_judges_the_city_country(self, tmp_path, monkeypatch):
-        manager = self._with_city_db(tmp_path, monkeypatch)
-        rules = tmp_path / "geo_rules.json"
-        rules.write_text(
-            json.dumps(
-                {
-                    "mode": "blocklist",
-                    "blocked_countries": ["BT"],
-                    "blocked_regions": [],
-                    "allowed_countries": [],
-                    "allowed_regions": [],
-                    "block_unknown": False,
-                    "bypass_ips": [],
-                }
-            )
-        )
-        geo_block = security.GeoBlockManager(manager, config_file=str(rules))
-
-        verdict = geo_block.check_access("67.43.156.1")
-        assert verdict["country"] == "BT"
-        assert verdict["allowed"] is False
 
 
 class TestDatabaseStatus:
     """database_status() feeds /healthz: a silent fallback to the bundled DB
-    (the failure mode that dropped carrier data in production) must be visible."""
+    (the failure mode that dropped carrier data in production) must be visible.
+    The `geoip2fast` block keeps its key and its meaning: `source` reads
+    "bundled" exactly when the bundled snapshot is answering."""
 
     def test_bundled_fallback_is_visible(self, tmp_path, monkeypatch):
-        status = _isolated_manager(tmp_path, monkeypatch).database_status()
+        status = _manager(tmp_path, monkeypatch).database_status()
         assert status["geoip2fast"]["source"] == "bundled"
-        assert status["geoip2fast"]["content"]
+        assert status["geoip2fast"]["content"] == "Country with IPv4 and IPv6"
+        assert "GeoLite2-Country" in status["geoip2fast"]["build"]
         assert status["city_overlay"] == {"loaded": False, "build": None}
         assert status["asn_overlay"] == {"loaded": False, "build": None}
 
-    def test_volume_db_reports_source_and_build(self, tmp_path, monkeypatch):
-        bundled = managers.GeoIP2Fast().get_database_info()["database_fullpath"]
-        live = tmp_path / "geoip2fast.dat.gz"
-        shutil.copyfile(bundled, live)
-        monkeypatch.setattr(managers, "GEOIP_DATA_FILE", str(live))
-        monkeypatch.setattr(
-            managers, "GEOIP_CITY_DB_FILE", str(tmp_path / "absent-city.mmdb")
-        )
-        monkeypatch.setattr(
-            managers, "GEOIP_ASN_DB_FILE", str(tmp_path / "absent-asn.mmdb")
-        )
-        status = managers.GeoIpManager().database_status()
-        assert status["geoip2fast"]["source"] == "volume"
-        assert status["geoip2fast"]["build"]
+    def test_the_city_db_retires_the_fallback(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB, ASN_TEST_DB)
+        status = manager.database_status()
+        assert status["geoip2fast"] == {
+            "source": "unused",
+            "content": None,
+            "build": None,
+        }
+        assert status["city_overlay"] == {"loaded": True, "build": "2026-02-04"}
+        assert status["asn_overlay"] == {"loaded": True, "build": "2026-02-04"}
 
 
 # ---------------------------------------------------------------------------

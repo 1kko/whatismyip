@@ -83,20 +83,16 @@ GEO_RULES_FILE = os.getenv("GEO_RULES_FILE", "data/geo_rules.json")
 # this file is written by a person, never by the app, so entries carry a name
 # and a description and the loader tolerates a bad one instead of failing.
 IP_RULES_FILE = os.getenv("IP_RULES_FILE", "data/ip_rules.json")
-# GeoIP DB lives in a writable volume; the bundled DB inside the geoip2fast
-# package directory is read-only when the container runs as a non-root user.
+# GeoIP databases live in a writable volume, downloaded at first boot and
+# refreshed on a schedule.
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
-GEOIP_DATA_FILE = os.getenv(
-    "GEOIP_DATA_FILE",
-    os.path.join(_APP_DIR, "data", "geoip2fast.dat.gz"),
-)
 
-# City-level geolocation from a GeoLite2-City mmdb. geoip2fast leaves
-# latitude/longitude null and its country snapshot goes stale; this supplies
-# the country, real coordinates, the precise city, and an accuracy radius, with
-# geoip2fast left to answer what it has no record of. The source URL is
-# configurable, so the free mirror can be swapped for a personal MaxMind
-# licence, DB-IP, or a local file without any code change.
+# GeoLite2-City mmdb: the country (which geo-blocking judges), the precise city,
+# coordinates, an accuracy radius and the matched block. Until it has been
+# downloaded once, the country-only snapshot bundled with geoip2fast answers
+# country alone. The source URL is configurable, so the free mirror can be
+# swapped for a personal MaxMind licence, DB-IP, or a local file without any
+# code change.
 GEOIP_CITY_DB_URL = os.getenv(
     "GEOIP_CITY_DB_URL",
     "https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz",
@@ -107,8 +103,8 @@ GEOIP_CITY_DB_FILE = os.getenv(
 )
 
 # ASN (carrier/org) from a GeoLite2-ASN mmdb, refreshed twice weekly upstream.
-# geoip2fast's own ASN snapshot stays as the fallback, but its release cadence
-# stalls for weeks at a time, so the overlay is what keeps carriers current.
+# It is the only carrier source: until it has been downloaded, carriers are
+# empty.
 GEOIP_ASN_DB_URL = os.getenv(
     "GEOIP_ASN_DB_URL",
     "https://cdn.jsdelivr.net/npm/geolite2-asn/GeoLite2-ASN.mmdb.gz",

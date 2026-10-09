@@ -1,4 +1,4 @@
-"""Data-gathering managers: GeoIP + city overlay, DNS, SSL, and header hygiene.
+"""Data-gathering managers: GeoIP (GeoLite2 City/ASN), DNS, SSL, and header hygiene.
 
 Each is a thin wrapper over one external source. They depend only on config, so
 main.py can import them without an import cycle.
@@ -23,6 +23,7 @@ from typing import Any, Dict
 import dns.exception
 import dns.resolver
 import dns.reversename
+import geoip2fast
 import maxminddb
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -43,7 +44,6 @@ from config import (
     GEOIP_ASN_DB_URL,
     GEOIP_CITY_DB_FILE,
     GEOIP_CITY_DB_URL,
-    GEOIP_DATA_FILE,
     MAXMIND_ACCOUNT_ID,
     MAXMIND_ASN_EDITION,
     MAXMIND_CITY_EDITION,
@@ -207,47 +207,72 @@ def _fetch_mmdb(edition: str, mirror_url: str) -> bytes:
     return gzip.decompress(_download_bytes(mirror_url))
 
 
+# The country-only (IPv4 + IPv6) snapshot that ships inside the geoip2fast
+# package. It answers country only while GeoLite2-City is not loaded (a fresh
+# volume before its first download, or a City file that will not open), so
+# geo-blocking always has a country to judge. Read by absolute path: given a
+# bare file name, GeoIP2Fast looks in the working directory first, and the file
+# is a pickle.
+GEOIP_FALLBACK_FILE = os.path.join(
+    os.path.dirname(geoip2fast.__file__), "geoip2fast-ipv6.dat.gz"
+)
+
+# geoip2fast's country code for a private or unlisted address, kept for every
+# address no database places, so the JSON API and geo-blocking see the value
+# they always have, whichever database answered.
+NO_COUNTRY = "--"
+
+
+def _network(ip: str, prefix_len: int) -> str | None:
+    """The block an mmdb lookup matched: the address masked to its prefix."""
+    try:
+        return str(ipaddress.ip_network(f"{ip}/{prefix_len}", strict=False))
+    except ValueError:
+        return None
+
+
+def _english_name(entry: Dict[str, Any] | None) -> str | None:
+    return ((entry or {}).get("names") or {}).get("en")
+
+
 class GeoIpManager:
+    """GeoIP from the GeoLite2-City and GeoLite2-ASN mmdb files in the data
+    volume, refreshed every three days.
+
+    maxminddb memory-maps both, so they cost page cache the kernel can reclaim
+    rather than Python heap. The geoip2fast city+ASN build this replaced held
+    the same MaxMind data as unpickled Python objects, about 900 MB of RSS, and
+    briefly twice that while a refresh loaded the new copy beside the old."""
+
     def __init__(self):
-        self.instance, source = self._load_instance()
-        self.db_info = self._describe_db(self.instance, source)
         self.city_reader = self._open_mmdb_reader(GEOIP_CITY_DB_FILE)
         self.asn_reader = self._open_mmdb_reader(GEOIP_ASN_DB_FILE)
+        # The fallback costs tens of MB of heap, so it is loaded only when no
+        # City database opened. A City download that lands later takes over at
+        # once but cannot hand that memory back: geoip2fast keeps its data in
+        # module globals, which outlive the instance until the next restart.
+        # (The same globals are why every GeoIP2Fast instance answers from the
+        # file loaded last; loading only this one file keeps that harmless.)
+        self.fallback = (
+            None
+            if self.city_reader
+            else GeoIP2Fast(geoip2fast_data_file=GEOIP_FALLBACK_FILE)
+        )
+        self.fallback_info = self._describe_fallback(self.fallback)
         self._log_db_status()
 
     @staticmethod
-    def _load_instance():
-        """Load the volume database, falling back to the bundled one when the
-        volume file is missing or corrupt. An interrupted download can leave a
-        truncated .dat.gz that GeoIP2Fast raises on; that must degrade the app to
-        the built-in country DB, not crash it at startup. update_database()
-        refreshes a good copy on the next run. Returns (instance, source) so the
-        fallback shows up in logs and the health endpoint."""
-        if os.path.exists(GEOIP_DATA_FILE):
-            try:
-                return GeoIP2Fast(geoip2fast_data_file=GEOIP_DATA_FILE), "volume"
-            except Exception:
-                logging.exception(
-                    "GeoIP DB at %s is unreadable; using the bundled database",
-                    GEOIP_DATA_FILE,
-                )
-        return GeoIP2Fast(), "bundled"
-
-    @staticmethod
-    def _describe_db(instance: GeoIP2Fast, source: str) -> Dict[str, Any]:
-        """A snapshot of what the loaded geoip2fast DB contains, captured at
-        load time — get_database_info() re-reads the file path the instance was
-        loaded from, which is gone once a refreshed temp file has been
-        os.replace()d over the live one."""
-        try:
-            info = instance.get_database_info()
-            return {
-                "source": source,
-                "content": info.get("database_content"),
-                "build": info.get("source_info"),
-            }
-        except Exception:
-            return {"source": source, "content": None, "build": None}
+    def _describe_fallback(instance: GeoIP2Fast | None) -> Dict[str, Any]:
+        """What the fallback holds, from attributes set at load. Not
+        get_database_info(): that decompresses the whole file again just to
+        report its size."""
+        if instance is None:
+            return {"content": None, "build": None}
+        ipv6 = "IPv4 and IPv6" if getattr(instance, "ipv6", False) else "IPv4 only"
+        return {
+            "content": f"Country with {ipv6}",
+            "build": getattr(instance, "source_info", None),
+        }
 
     @staticmethod
     def _open_mmdb_reader(path: str):
@@ -259,21 +284,23 @@ class GeoIpManager:
         return None
 
     def _log_db_status(self):
-        info = self.db_info
         logging.info(
-            "GeoIP DB loaded: source=%s content=%r build=%r "
-            "city_overlay=%s asn_overlay=%s",
-            info["source"],
-            info["content"],
-            info["build"],
+            "GeoIP DB loaded: country=%s city_overlay=%s asn_overlay=%s",
+            "GeoLite2-City" if self.city_reader else "geoip2fast fallback",
             self.city_reader is not None,
             self.asn_reader is not None,
         )
-        if "ASN" not in (info["content"] or "") and self.asn_reader is None:
+        if self.city_reader is None:
             logging.warning(
-                "No ASN data available (geoip2fast DB is %r, no GeoLite2-ASN "
-                "overlay); carrier lookups stay empty until a refresh succeeds",
-                info["content"],
+                "GeoLite2-City not loaded; country comes from the bundled "
+                "geoip2fast snapshot (%s), with no city or coordinates, until a "
+                "refresh succeeds",
+                self.fallback_info["build"],
+            )
+        if self.asn_reader is None:
+            logging.warning(
+                "GeoLite2-ASN not loaded; carrier lookups stay empty until a "
+                "refresh succeeds"
             )
 
     @staticmethod
@@ -290,48 +317,21 @@ class GeoIpManager:
     def database_status(self) -> Dict[str, Any]:
         """What each database serving lookups actually is — for the health
         endpoint, so a silent fallback to the bundled country-only DB is
-        visible from outside."""
+        visible from outside.
+
+        The keys predate GeoLite2-City becoming the primary source and keep
+        their meaning: `geoip2fast.source` reads "bundled" exactly when the
+        bundled snapshot is answering country, as it always has, and "unused"
+        once the City database is (there is no "volume" geoip2fast copy any
+        more); `city_overlay` is that City database."""
         return {
-            "geoip2fast": dict(self.db_info),
+            "geoip2fast": {
+                "source": "bundled" if self.city_reader is None else "unused",
+                **self.fallback_info,
+            },
             "city_overlay": self._mmdb_status(self.city_reader),
             "asn_overlay": self._mmdb_status(self.asn_reader),
         }
-
-    def update_database(self) -> bool:
-        # The temp name must keep the .dat.gz suffix: update_file() refuses any
-        # other extension with an {'error': ...} result instead of raising, and
-        # downloads nothing.
-        tmp = GEOIP_DATA_FILE + ".tmp.dat.gz"
-        try:
-            data_dir = os.path.dirname(GEOIP_DATA_FILE)
-            if data_dir:
-                os.makedirs(data_dir, exist_ok=True)
-            # Download to a temp file and only swap it in once it loads cleanly.
-            # Writing straight to GEOIP_DATA_FILE meant an interrupted download
-            # left a truncated file that crashed the next startup; os.replace is
-            # atomic, so the live file is only ever a complete, loadable DB.
-            if os.path.exists(tmp):
-                os.remove(tmp)
-            update_result = self.instance.update_file(
-                "geoip2fast-city-asn-ipv6.dat.gz", tmp, verbose=False
-            )
-            # update_file reports failures as a result dict, not an exception.
-            if isinstance(update_result, dict) and update_result.get("error"):
-                raise RuntimeError(update_result["error"])
-            new_instance = GeoIP2Fast(geoip2fast_data_file=tmp)  # validates it loads
-            new_info = self._describe_db(new_instance, "volume")  # before the swap
-            os.replace(tmp, GEOIP_DATA_FILE)
-            self.instance = new_instance
-            self.db_info = new_info
-            logging.info(f"{update_result=}")
-            return True
-        except Exception as e:
-            logging.exception(f"Error updating GeoIP2Fast database: {str(e)}")
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            return False
 
     def _update_mmdb(
         self, edition: str, mirror_url: str, path: str, reader_attr: str
@@ -368,114 +368,111 @@ class GeoIpManager:
         )
 
     def fetch_location(self, ip: str) -> Dict[str, Any]:
-        """A single flat location record for the IP: country, precise
-        city/lat/lon/accuracy/time zone from GeoLite2-City, and the AS
-        org/number/announced block from GeoLite2-ASN when loaded. geoip2fast
-        answers whatever those leave empty (country, coarse ASN). Callers add
-        reverse_dns; the response assembly adds the resolved coordinates, the
-        origin_* fields, and distance_km."""
-        raw = self.instance.lookup(ip).to_dict()
-        city = raw.get("city") if isinstance(raw.get("city"), dict) else {}
-        record = self._city_record(ip, raw.get("is_private"))
-        self._overlay_city(record, city)
-        country_code, country_name = self._city_country(record)
-        asn = self._asn_overlay(ip, raw.get("is_private"))
-        return {
-            "ip": raw.get("ip"),
-            "country_code": country_code or raw.get("country_code"),
-            "country_name": country_name or raw.get("country_name"),
-            "city_name": city.get("name") or "",
-            "subdivision_name": city.get("subdivision_name") or "",
-            "subdivision_code": city.get("subdivision_code") or "",
-            "lat": city.get("latitude"),
-            "lon": city.get("longitude"),
-            "accuracy_km": city.get("accuracy_radius"),
-            "time_zone": city.get("time_zone"),
-            "cidr": raw.get("cidr"),
-            "asn_name": asn.get("name") or raw.get("asn_name"),
-            "asn_cidr": asn.get("cidr") or raw.get("asn_cidr"),
-            "asn_number": asn.get("number"),
-            "is_private": raw.get("is_private"),
-            "hostname": raw.get("hostname"),
+        """A single flat location record for the IP: country, city,
+        coordinates, accuracy, time zone and the matched block from
+        GeoLite2-City, and the AS org/number/announced block from GeoLite2-ASN.
+        While the City database is not loaded, the bundled geoip2fast snapshot
+        supplies country and block alone. Callers add reverse_dns; the response
+        assembly adds the resolved coordinates, the origin_* fields, and
+        distance_km."""
+        location: Dict[str, Any] = {
+            "ip": ip,
+            "country_code": NO_COUNTRY,
+            "country_name": None,
+            "city_name": "",
+            "subdivision_name": "",
+            "subdivision_code": "",
+            "lat": None,
+            "lon": None,
+            "accuracy_km": None,
+            "time_zone": None,
+            "cidr": None,
+            "asn_name": None,
+            "asn_cidr": None,
+            "asn_number": None,
+            "is_private": False,
+            "hostname": "",
         }
-
-    def _asn_overlay(self, ip: str, is_private: Any) -> Dict[str, Any]:
-        """AS org/number/announced block from GeoLite2-ASN, which refreshes
-        twice weekly upstream — fresher than geoip2fast's release snapshot.
-        Empty when the reader is absent, the IP is private, or the DB has no
-        record; callers then fall back to geoip2fast's ASN fields."""
-        if not self.asn_reader or is_private:
-            return {}
         try:
-            record, prefix_len = self.asn_reader.get_with_prefix_len(ip)
-        except Exception:
-            return {}
-        if not record:
-            return {}
-        try:
-            network = str(ipaddress.ip_network(f"{ip}/{prefix_len}", strict=False))
+            address = ipaddress.ip_address(ip)
         except ValueError:
-            network = None
-        return {
-            "name": record.get("autonomous_system_organization"),
-            "number": record.get("autonomous_system_number"),
-            "cidr": network,
-        }
+            return location  # not an address at all, e.g. TestClient's peer
+        # is_global follows IANA's special-purpose registry but counts
+        # multicast as global. No database places any of these.
+        if not address.is_global or address.is_multicast:
+            location["is_private"] = True
+            location["country_name"] = "Private network"
+            return location
+        # Read once: a refresh may swap the attribute mid-lookup.
+        city_reader = self.city_reader
+        if city_reader is not None:
+            self._apply_city(city_reader, ip, location)
+        else:
+            self._apply_fallback(ip, location)
+        self._apply_asn(ip, location)
+        return location
 
-    def _city_record(self, ip: str, is_private: Any) -> Dict[str, Any] | None:
-        """The GeoLite2-City record for the IP, or None when the reader is
-        absent, the IP is private, or the DB has no record."""
-        if not self.city_reader or is_private:
-            return None
+    @staticmethod
+    def _apply_city(reader, ip: str, location: Dict[str, Any]) -> None:
+        """Country, city, coordinates, time zone and block from GeoLite2-City.
+
+        Geo-blocking judges the country set here. A record without a located
+        country falls back to the country its block is registered in, the
+        substitution geoip2fast's own builder made, so no address that had a
+        country under geoip2fast loses it."""
         try:
-            return self.city_reader.get(ip)
+            record, prefix_len = reader.get_with_prefix_len(ip)
         except Exception:
-            return None
-
-    @staticmethod
-    def _city_country(
-        record: Dict[str, Any] | None,
-    ) -> tuple[str | None, str | None]:
-        """(iso_code, English name) from a GeoLite2-City record, or (None, None).
-
-        The City database is refreshed every three days, while geoip2fast's
-        release snapshot has stalled for weeks at a time, so its country wins —
-        and geo-blocking, which judges this same field, follows it. A record
-        without a located country falls back to the country the block is
-        registered in, the substitution geoip2fast's own builder makes."""
-        if not record:
-            return None, None
-        for key in ("country", "registered_country"):
-            country = record.get(key) or {}
-            code = country.get("iso_code")
-            if code:
-                return code, (country.get("names") or {}).get("en") or code
-        return None, None
-
-    @staticmethod
-    def _overlay_city(record: Dict[str, Any] | None, city: Dict[str, Any]) -> None:
-        """Overlay the precise city, coordinates, accuracy and time zone from
-        a GeoLite2-City record onto the (still nested) geoip2fast city dict
-        before it is flattened. MaxMind supplies the latitude/longitude
-        geoip2fast always leaves null."""
+            return
         if not record:
             return
+        location["cidr"] = _network(ip, prefix_len)
+        for key in ("country", "registered_country"):
+            country = record.get(key) or {}
+            if country.get("iso_code"):
+                location["country_code"] = country["iso_code"]
+                location["country_name"] = _english_name(country) or country["iso_code"]
+                break
         loc = record.get("location") or {}
         if loc.get("latitude") is not None and loc.get("longitude") is not None:
-            city["latitude"] = loc.get("latitude")
-            city["longitude"] = loc.get("longitude")
-            city["accuracy_radius"] = loc.get("accuracy_radius")
-            city["time_zone"] = loc.get("time_zone")
-        mm_city = ((record.get("city") or {}).get("names") or {}).get("en")
-        if mm_city:
-            city["name"] = mm_city
+            location["lat"] = loc["latitude"]
+            location["lon"] = loc["longitude"]
+            location["accuracy_km"] = loc.get("accuracy_radius")
+            location["time_zone"] = loc.get("time_zone")
+        location["city_name"] = _english_name(record.get("city")) or ""
         subdivisions = record.get("subdivisions") or []
         if subdivisions:
-            names = subdivisions[0].get("names") or {}
-            if names.get("en"):
-                city["subdivision_name"] = names["en"]
-            if subdivisions[0].get("iso_code"):
-                city["subdivision_code"] = subdivisions[0]["iso_code"]
+            location["subdivision_name"] = _english_name(subdivisions[0]) or ""
+            location["subdivision_code"] = subdivisions[0].get("iso_code") or ""
+
+    def _apply_fallback(self, ip: str, location: Dict[str, Any]) -> None:
+        """Country and block from the bundled geoip2fast snapshot, which has
+        no city, coordinates or carrier. Its own markers for an unlisted or
+        malformed address ("--", "") leave the defaults in place."""
+        if self.fallback is None:
+            return
+        result = self.fallback.lookup(ip)
+        if result.country_code and result.country_code != NO_COUNTRY:
+            location["country_code"] = result.country_code
+            location["country_name"] = result.country_name
+            location["cidr"] = result.cidr or None
+
+    def _apply_asn(self, ip: str, location: Dict[str, Any]) -> None:
+        """AS org/number/announced block from GeoLite2-ASN, which refreshes
+        twice weekly upstream. Left empty when the reader is absent or the DB
+        has no record."""
+        reader = self.asn_reader
+        if reader is None:
+            return
+        try:
+            record, prefix_len = reader.get_with_prefix_len(ip)
+        except Exception:
+            return
+        if not record:
+            return
+        location["asn_name"] = record.get("autonomous_system_organization")
+        location["asn_number"] = record.get("autonomous_system_number")
+        location["asn_cidr"] = _network(ip, prefix_len)
 
 
 class TldNamesManager:

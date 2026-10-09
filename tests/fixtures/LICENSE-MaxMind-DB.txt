@@ -1,15 +1,16 @@
-GeoLite2-City-Test.mmdb is a test database from MaxMind's MaxMind-DB
-repository, copied unmodified from
+GeoLite2-City-Test.mmdb and GeoLite2-ASN-Test.mmdb are test databases from
+MaxMind's MaxMind-DB repository, copied unmodified from
 https://github.com/maxmind/MaxMind-DB/tree/6a690a705bc6962c0025a32e94a8f0dc8f86418c/test-data
 
-It holds synthetic records for a handful of networks, written to exercise
-MaxMind DB readers. It is not a GeoLite2 release and carries none of the
+They hold synthetic records for a handful of networks, written to exercise
+MaxMind DB readers. They are not GeoLite2 releases and carry none of the
 GeoLite2 licence terms.
 
 Copyright (c) 2013 - 2026 by MaxMind, Inc.
 
 The MaxMind-DB repository is licensed under the Apache License, Version 2.0 or
-the MIT License, at the user's option. This file is used under the MIT License:
+the MIT License, at the user's option. These files are used under the MIT
+License:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
