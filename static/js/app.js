@@ -1,6 +1,6 @@
 // Search, copy, and lazily booting the JSON tree. CSP forbids inline handlers,
-// so everything is wired with addEventListener from this file.
-const pageData = JSON.parse(document.getElementById("page-data").textContent);
+// so everything is wired with addEventListener from this file. The error page
+// loads it too, for its search box, and has none of the rest.
 
 function normalizeLookupTarget(raw) {
   return raw
@@ -34,6 +34,27 @@ function isLookupTarget(value) {
   return DOMAIN.test(value) && !PROBE_SUFFIX.test(value);
 }
 
+// A router's address is the commonest thing typed in here, and the server
+// refuses it with a 400. These are the ranges a home router, an office
+// network, a VPN or this machine answers on: RFC 1918, loopback, link-local
+// and CGNAT (100.64.0.0/10, carriers and Tailscale). _LOCAL_NETWORKS in
+// main.py is the same list, behind the error page's own explanation.
+function isLocalAddress(value) {
+  const octets = value.match(IPV4);
+  if (!octets) {
+    return false;
+  }
+  const [a, b] = octets.slice(1, 3).map(Number);
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}
+
 function showError(message) {
   error.textContent = message;
   error.hidden = false;
@@ -43,6 +64,18 @@ function showError(message) {
 function clearError() {
   error.hidden = true;
   form.classList.remove("is-invalid");
+}
+
+// Answered here rather than by asking the server, which would only say no.
+// The target is what the visitor typed, so it goes in as text, never markup.
+function showLocalHint(target) {
+  showError(
+    `${target} is a local network address. On the internet you appear as your public IP: `,
+  );
+  const link = document.createElement("a");
+  link.href = "/";
+  link.textContent = "show it";
+  error.appendChild(link);
 }
 
 // The lookup is a full page navigation and the server needs a second or two for
@@ -73,6 +106,10 @@ form.addEventListener("submit", (event) => {
   }
   if (!isLookupTarget(target)) {
     showError(`"${target}" is not a domain or an IP address.`);
+    return;
+  }
+  if (isLocalAddress(target)) {
+    showLocalHint(target);
     return;
   }
   clearError();
@@ -106,7 +143,7 @@ for (const button of document.querySelectorAll(".copy-btn[data-value]")) {
 const rawAccordion = document.getElementById("acc-raw");
 let rawBooted = false;
 
-rawAccordion.addEventListener("toggle", () => {
+rawAccordion?.addEventListener("toggle", () => {
   if (!rawAccordion.open || rawBooted) {
     return;
   }
@@ -127,7 +164,7 @@ rawAccordion.addEventListener("toggle", () => {
       mainMenuBar: false,
       indentation: 2,
     });
-    editor.set(pageData);
+    editor.set(JSON.parse(document.getElementById("page-data").textContent));
     editor.expandAll();
   });
   document.body.appendChild(script);

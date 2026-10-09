@@ -164,6 +164,8 @@ body {
 }
 .search-error { color: var(--danger); }
 .search-status { color: var(--accent); font-family: var(--font-mono); }
+/* The local-address hint ends in a link to "/". */
+.search-error a { color: inherit; font-weight: 600; }
 
 .progress {
   position: fixed;
@@ -586,6 +588,43 @@ table.records--dns td:nth-child(4) {
 
 .mobile-map { display: none; }
 
+/* Error page (error.html): the search box over a short explanation, with no
+   map band. The top padding keeps the heading clear of the search box's own
+   error line, which is absolutely positioned beneath it. */
+.error-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.error-page {
+  flex: 1;
+  padding-block: 56px 96px;
+}
+.error-page .eyebrow { margin: 0; }
+.error-page__title {
+  margin: 10px 0 0;
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.error-page__message {
+  max-width: 60ch;
+  margin: 14px 0 0;
+  color: var(--text-secondary);
+  font-size: 15px;
+}
+.error-page__home {
+  display: inline-block;
+  margin-top: 12px;
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: none;
+}
+.error-page__home:hover,
+.error-page__home:focus-visible { text-decoration: underline; }
+
 /* Fingerprint accordion — caption under the UNIQUE ID row / entropy note */
 .device__note {
   margin: 12px 0 0;
@@ -634,6 +673,8 @@ table.records--dns td:nth-child(4) {
   .footer { gap: 12px; font-size: 11px; }
   .footer .wordmark { display: none; }
   .icon-link { width: 28px; height: 28px; }
+  .error-page { padding-block: 40px 64px; }
+  .error-page__title { font-size: 24px; }
   table.records td:first-child { width: 90px; }
   table.records--dns th:nth-child(1),
   table.records--dns td:nth-child(1) { width: 48px; }
