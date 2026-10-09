@@ -57,6 +57,7 @@ from models import GeoRulesUpdate
 from lookup import (
     InvalidTargetError,
     PrivateAddressError,
+    classify_target,
     domain_manager,
     gather,
     geo_ip_manager,
@@ -68,6 +69,17 @@ from lookup import (
     tld_names_manager,
 )
 from subdomains import get_subdomains, invalid_target_reason
+from textfmt import (
+    InvalidFieldError,
+    block_fields,
+    field_values,
+    legs_for,
+    parse_fields,
+    render_block,
+    render_json,
+    render_lines,
+)
+from textfmt import render_error as render_text_error
 from security import (
     GeoBlockManager,
     IPBanManager,
@@ -1043,6 +1055,88 @@ async def favicon():
     return RedirectResponse("/static/favicon.ico", status_code=301)
 
 
+def _text_error(message: str, status_code: int = 400) -> PlainTextResponse:
+    return PlainTextResponse(render_text_error(message), status_code=status_code)
+
+
+def _invalid_field(exc: InvalidFieldError, fmt: str) -> Response:
+    """The 400 for a bad ?fields=. Every lookup route checks it before any
+    lookup, so a typo costs nothing and reads the same on each of them."""
+    if fmt == "text":
+        return _text_error(exc.message)
+    return JSONResponse(
+        status_code=400, content={"error": exc.message, "code": exc.code}
+    )
+
+
+def _fields_response(
+    data: dict, names: list[str], kind: str, fmt: str, block: bool = False
+) -> Response | dict:
+    """`names` cut from a gather()-shaped dict: text when text was negotiated,
+    JSON otherwise. There is no page to render for a handful of values, so a
+    browser following a ?fields= link gets JSON, as with ?subdomains=only."""
+    values, errors = field_values(data, kind)
+    if fmt == "text":
+        render = render_block if block else render_lines
+        return PlainTextResponse(render(names, values, errors))
+    return render_json(names, values, errors)
+
+
+async def _self_fields(client_ip: str, names: list[str]) -> dict:
+    """get_self_info's lookups, cut down to the legs `names` need and shaped
+    like gather()'s result. Not gather() itself: that refuses a private or
+    IPv6 address, and the visitor's own address is answered whatever it is."""
+    legs = legs_for(names, "ip")
+    # The same rule as the full self lookup: a private address has no public
+    # registration or PTR, so neither is asked for.
+    public_client = is_safe_ip(client_ip)
+    whois_task = (
+        asyncio.create_task(lookup_whois(client_ip))
+        if public_client and "whois" in legs
+        else None
+    )
+    reverse_task = (
+        asyncio.create_task(
+            asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
+        )
+        if public_client and "ptr" in legs
+        else None
+    )
+    location = await lookup_location(client_ip) if "geo" in legs else {}
+    return {
+        "address": client_ip,
+        "resolved_ip": client_ip,
+        "reverse_dns": await reverse_task if reverse_task else None,
+        "location": location,
+        "whois": await whois_task if whois_task else None,
+        "ssl": None,
+    }
+
+
+async def _target_fields(target: str, names: list[str] | None, fmt: str):
+    """/{domain_ip} as text or as ?fields=: only the legs the fields need, and
+    none of the map, the visitor's own location or the subdomain list, which
+    neither answer carries. `names` None is the whole text block."""
+    kind = "domain" if classify_target(target) == "domain" else "ip"
+    block = names is None
+    if block:
+        names = block_fields(kind)
+    try:
+        data = await gather(target, legs=legs_for(names, kind))
+    except InvalidTargetError as exc:
+        if fmt == "text":
+            return _text_error(exc.message)
+        return JSONResponse(
+            status_code=400, content={"error": exc.message, "code": exc.code}
+        )
+    except PrivateAddressError:
+        message = "Private or reserved IP addresses are not allowed"
+        if fmt == "text":
+            return _text_error(message)
+        raise HTTPException(status_code=400, detail=message) from None
+    return _fields_response(data, names, kind, fmt, block=block)
+
+
 @app.head("/")
 @app.head("/{domain_ip}")
 async def head_lookup(request: Request):
@@ -1061,10 +1155,19 @@ async def head_lookup(request: Request):
     against the lookup rate limit. Routing also decides what is a lookup, so
     /healthz, /robots.txt and /mcp keep their own handling.
     """
-    # Same negotiation as GET, so a bad ?format= is the same 400. "text"
-    # answers as JSON for now, as it does on GET.
+    # Same negotiation as GET, so a bad ?format= or ?fields= is the same 400.
     fmt = negotiate(request)
-    response = Response(media_type="text/html" if fmt == "html" else "application/json")
+    try:
+        names = parse_fields(request.query_params.getlist("fields"))
+    except InvalidFieldError as exc:
+        return _invalid_field(exc, fmt)
+    if fmt == "text":
+        media_type = "text/plain"
+    elif fmt == "json" or names is not None:
+        media_type = "application/json"
+    else:
+        media_type = "text/html"
+    response = Response(media_type=media_type)
     # A HEAD response may carry Content-Length only if it equals what GET would
     # send (RFC 9110 8.6). Starlette sets 0 for the empty body, and the real
     # length is unknown without the lookup, so the header goes.
@@ -1074,8 +1177,13 @@ async def head_lookup(request: Request):
 
 @app.get("/", response_model=None)
 async def get_self_info(request: Request):
-    # First, so an unknown ?format= is refused before any lookup starts.
+    # First, so an unknown ?format= or ?fields= is refused before any lookup
+    # starts.
     fmt = negotiate(request)
+    try:
+        names = parse_fields(request.query_params.getlist("fields"))
+    except InvalidFieldError as exc:
+        return _invalid_field(exc, fmt)
     started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
@@ -1084,6 +1192,14 @@ async def get_self_info(request: Request):
     client_ip = get_client_ip(request)
     sanitized_ip = sanitize_log_input(client_ip)
     logging.info("client=%s lookup=%s (self)", sanitized_ip, sanitized_ip)
+
+    if names is not None:
+        data = await _self_fields(client_ip, names)
+        return _fields_response(data, names, "ip", fmt)
+    if fmt == "text":
+        # `curl ip.1kko.com?format=text`: the address is already known, so the
+        # answer is that and nothing else -- no WHOIS, GeoIP or DNS.
+        return PlainTextResponse(client_ip + "\n")
 
     # A private or reserved client address -- a dev server with no proxy in
     # front, or a proxy this server was not told to trust -- has no public
@@ -1146,8 +1262,6 @@ async def get_self_info(request: Request):
     if fmt == "html":
         return render_page(request, response_data, is_self=True)
 
-    # "text" has no plain-text rendering yet and answers as "json" does until
-    # it gets one.
     # FastAPI serialises the dict via jsonable_encoder (datetimes -> ISO-8601)
     # and its default JSONResponse (UTF-8, no ASCII escaping).
     return response_data
@@ -1175,7 +1289,16 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     )
 
     fmt = negotiate(request)
-    mode = _subdomain_mode(subdomains)
+    try:
+        mode = _subdomain_mode(subdomains)
+    except HTTPException as exc:
+        if fmt == "text":
+            return _text_error(exc.detail, exc.status_code)
+        raise
+    try:
+        names = parse_fields(request.query_params.getlist("fields"))
+    except InvalidFieldError as exc:
+        return _invalid_field(exc, fmt)
 
     if mode == "only":
         # Skips gather() entirely: this mode exists so the page's toggle can ask
@@ -1193,6 +1316,11 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
             "address": domain_ip,
             "subdomains": await get_subdomains(domain_ip),
         }
+
+    if fmt == "text" or names is not None:
+        # Neither carries a subdomain list, so ?subdomains=include starts no
+        # crt.sh fetch here; ?subdomains=only above is the way to ask for one.
+        return await _target_fields(domain_ip, names, fmt)
 
     # The visitor's own location only feeds the distance line, so it runs
     # alongside the target lookup rather than after it.
@@ -1254,8 +1382,6 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     if fmt == "html":
         return render_page(request, response_data, is_self=False)
 
-    # "text" has no plain-text rendering yet and answers as "json" does until
-    # it gets one.
     # FastAPI serialises the dict via jsonable_encoder (datetimes -> ISO-8601)
     # and its default JSONResponse (UTF-8, no ASCII escaping).
     return response_data
