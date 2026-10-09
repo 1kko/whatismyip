@@ -462,6 +462,21 @@ if not os.path.exists(GEOIP_ASN_DB_FILE):
 class BrowserDetector:
     @staticmethod
     def is_browser(user_agent: str) -> bool:
+        # Clients that open with "Mozilla/5.0" but want data, not a page:
+        # PowerShell's Invoke-RestMethod and Invoke-WebRequest, as both 5.1
+        # ("WindowsPowerShell/5.1") and 7+ ("PowerShell/7.4") identify. They
+        # send no Accept header by default, so the user-agent is all
+        # negotiate() has, and "Mozilla" below would otherwise hand them HTML.
+        not_browser_patterns = [
+            r"PowerShell/",
+        ]
+        if any(
+            re.search(pattern, user_agent, re.IGNORECASE)
+            for pattern in not_browser_patterns
+        ):
+            return False
+        # Every client that gets the page when neither ?format= nor Accept
+        # says otherwise.
         browser_patterns = [
             r"Mozilla",
             r"Chrome",
@@ -474,6 +489,93 @@ class BrowserDetector:
             re.search(pattern, user_agent, re.IGNORECASE)
             for pattern in browser_patterns
         )
+
+
+# The formats a lookup route answers in, each with the media type an Accept
+# header asks for it by. Order breaks a tie nothing else in Accept settles.
+_FORMAT_MEDIA_TYPES = {
+    "html": "text/html",
+    "json": "application/json",
+    "text": "text/plain",
+}
+
+
+def _accept_preference(accept: str) -> str | None:
+    """The format an Accept header asks for, or None if it asks for none.
+
+    Each format takes the q of the most specific range that matches it, as RFC
+    9110 has it, so "text/*, text/html;q=0" refuses HTML. Only a format reached
+    by its own type or a type/* range counts as asked for. "*/*" matches all
+    three alike, and it is what curl, wget and fetch() send by default, so a
+    header that reaches ours only through it expresses no preference; neither
+    does an image prefetch's "image/webp,*/*". Highest q wins; on a tie, a named
+    type beats a type/* range, and then the range listed first wins.
+    """
+    ranges = []
+    for position, item in enumerate(accept.split(",")):
+        media_range, *params = (part.strip().lower() for part in item.split(";"))
+        q = 1.0
+        for param in params:
+            name, _, value = param.partition("=")
+            if name.strip() == "q":
+                try:
+                    q = float(value)
+                except ValueError:
+                    q = -1.0
+        # A malformed q drops its range rather than failing the request.
+        if media_range and 0.0 <= q <= 1.0:
+            ranges.append((media_range, q, position))
+
+    best, best_key = None, None
+    for fmt, media_type in _FORMAT_MEDIA_TYPES.items():
+        specificity_of = {
+            media_type: 2,
+            media_type.split("/")[0] + "/*": 1,
+        }
+        match = None
+        for media_range, q, position in ranges:
+            specificity = specificity_of.get(media_range)
+            if specificity is not None and (match is None or specificity > match[0]):
+                match = (specificity, q, position)
+        if match is None or match[1] == 0.0:
+            continue
+        specificity, q, position = match
+        key = (q, specificity, -position)
+        if best_key is None or key > best_key:
+            best, best_key = fmt, key
+    return best
+
+
+def negotiate(request: Request) -> str:
+    """Pick the response format for a lookup route: "html", "json" or "text".
+
+    1. `?format=`, because it is the one a link or a shell one-liner can carry.
+       An unknown value is a 400, as with `?subdomains=`: a value the server
+       does not understand must not be answered as though it were understood.
+    2. Accept, when it names one of the formats (see _accept_preference).
+    3. The user-agent, only when Accept is absent or says nothing beyond */*.
+       That is how every client was answered before Accept was read, and what
+       curl, wget and a browser's fetch() still get by default.
+
+    A query parameter rather than a path suffix: the security middleware
+    classifies requests by path, and "/nasa.gov.json" matches its `\\.json$`
+    rule. `request.url.path` never includes the query, so `?format=` leaves
+    rate limiting and the probe detector exactly as they were.
+    """
+    requested = request.query_params.get("format")
+    if requested is not None:
+        fmt = requested.lower()
+        if fmt not in _FORMAT_MEDIA_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"format must be one of: {', '.join(_FORMAT_MEDIA_TYPES)}",
+            )
+        return fmt
+    preferred = _accept_preference(request.headers.get("accept", ""))
+    if preferred is not None:
+        return preferred
+    user_agent = request.headers.get("user-agent", "")
+    return "html" if BrowserDetector.is_browser(user_agent) else "json"
 
 
 # Admin API key authentication dependency
@@ -720,6 +822,16 @@ async def security_headers_middleware(request: Request, call_next):
             "base-uri 'self'; "
             "frame-ancestors 'none'"
         )
+    # The lookup routes answer HTML or JSON from one URL depending on Accept
+    # and the user-agent (negotiate()), and every answer describes the
+    # visitor's own address and request headers: a cache in front must key on
+    # both and keep neither. Matched on the endpoint that handled the request,
+    # errors included, not on the path: /{domain_ip} is a catch-all, so no
+    # path test tells it apart from /healthz.
+    if request.scope.get("endpoint") in (get_self_info, get_ip_info):
+        response.headers.add_vary_header("Accept")
+        response.headers.add_vary_header("User-Agent")
+        response.headers["Cache-Control"] = "no-store"
     # Obscure server fingerprinting.
     response.headers["server"] = "hidden"
     return response
@@ -819,6 +931,8 @@ async def head_lookup(request: Request):
 
 @app.get("/", response_model=None)
 async def get_self_info(request: Request):
+    # First, so an unknown ?format= is refused before any lookup starts.
+    fmt = negotiate(request)
     started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
@@ -886,10 +1000,11 @@ async def get_self_info(request: Request):
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
 
-    user_agent = request.headers.get("user-agent", "")
-    if BrowserDetector.is_browser(user_agent):
+    if fmt == "html":
         return render_page(request, response_data, is_self=True)
 
+    # "text" has no plain-text rendering yet and answers as "json" does until
+    # it gets one.
     # FastAPI serialises the dict via jsonable_encoder (datetimes -> ISO-8601)
     # and its default JSONResponse (UTF-8, no ASCII escaping).
     return response_data
@@ -916,12 +1031,14 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         sanitize_log_input(domain_ip),
     )
 
+    fmt = negotiate(request)
     mode = _subdomain_mode(subdomains)
 
     if mode == "only":
         # Skips gather() entirely: this mode exists so the page's toggle can ask
         # for the list alone rather than re-running DNS, TLS, GeoIP and the map
-        # payload for data it already has.
+        # payload for data it already has. Always JSON, whatever was
+        # negotiated: there is no page to render for a bare list.
         #
         # Not is_valid_domain: that asks only whether the target has a public
         # suffix, and `com` does -- it IS one. The MCP tool asks the same
@@ -989,10 +1106,11 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     if subdomain_task is not None:
         response_data["subdomains"] = await subdomain_task
 
-    user_agent = request.headers.get("user-agent", "")
-    if BrowserDetector.is_browser(user_agent):
+    if fmt == "html":
         return render_page(request, response_data, is_self=False)
 
+    # "text" has no plain-text rendering yet and answers as "json" does until
+    # it gets one.
     # FastAPI serialises the dict via jsonable_encoder (datetimes -> ISO-8601)
     # and its default JSONResponse (UTF-8, no ASCII escaping).
     return response_data
