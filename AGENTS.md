@@ -93,6 +93,15 @@ poetry run ruff format .
   `InvalidTargetError` rather than `HTTPException` so it stays free of FastAPI.
   `gather(legs=)` runs only the named legs; the default (None) runs them all,
   and the page, the full JSON and MCP all use the default.
+- `concurrency.py`: the lookup gate and the slow-leg thread pools. At most
+  `LOOKUP_CONCURRENCY` lookups run at once: `gather()` holds a slot for its
+  legs and the self page for its own. MCP tool calls first take a slot at a
+  smaller gate of their own, so they never hold more than
+  `MCP_LOOKUP_CONCURRENCY` of the global slots. A full gate is `LookupBusy` —
+  a `503` with `Retry-After` over HTTP, never a ban. RDAP/WHOIS
+  (`registration_pool`) and crt.sh (`subdomain_pool`) run on their own pools,
+  not the default executor; GeoIP runs inline. Imports only `config`, so
+  `subdomains.py` may use it.
 - `textfmt.py`: `?format=text` and `?fields=`. The field table (names are
   `mcp_server`'s compact_* shapes, flattened; each field lists the `gather()`
   legs it needs and the target kinds it applies to) and the text/flat-JSON
@@ -205,6 +214,7 @@ whatismyip/
 ├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
 ├── models.py            # Pydantic models (WhoisResponse, GeoRulesUpdate)
 ├── lookup.py            # transport-agnostic lookup pipeline (gather())
+├── concurrency.py       # lookup gate (503 when full) + RDAP/WHOIS and crt.sh pools
 ├── textfmt.py           # ?format=text and ?fields=: field table, rendering (pure)
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
@@ -215,7 +225,7 @@ whatismyip/
 │   └── fetch_fonts.sh      # vendors Inter + JetBrains Mono into static/fonts/
 ├── templates/
 │   ├── browser.html     # server-rendered page (no client-side templating)
-│   ├── error.html       # 400/403/429 page for browsers, same status as the JSON
+│   ├── error.html       # 400/403/429/503 page for browsers, same status as the JSON
 │   └── _search.html     # search box included by both (app.js finds it by id)
 ├── static/
 │   ├── css/whatismyip.css  # design tokens + layout (dark only)

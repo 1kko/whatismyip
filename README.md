@@ -277,7 +277,10 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 
 Timeouts and cache TTLs (`RDAP_TIMEOUT_SECONDS`, `WHOIS_TIMEOUT_SECONDS`,
 `WHOIS_CACHE_TTL`, `DNS_QUERY_TIMEOUT`, …) are tunable through the same
-mechanism — see `config.py`.
+mechanism — see `config.py`. So are the concurrency limits: `LOOKUP_CONCURRENCY`
+(lookups at once, default 16), `LOOKUP_GATE_WAIT_SECONDS`,
+`LOOKUP_BUSY_RETRY_AFTER_SECONDS`, `MCP_LOOKUP_CONCURRENCY`, and
+`REGISTRATION_WORKERS` (threads for RDAP and port-43 WHOIS, default 8).
 
 ## API
 
@@ -665,6 +668,7 @@ or `timed out`. `map` is `null` when the target has no resolvable coordinates, a
 | `413` | `POST /mcp` body over `MCP_MAX_BODY_BYTES` |
 | `421` | `Host` header not in `MCP_ALLOWED_HOSTS` |
 | `429` | rate limit exceeded |
+| `503` | too many lookups running at once (`{"error": "...", "code": "busy"}`); retry after `Retry-After` seconds. Never counts towards a ban |
 
 Every `403` answers with the same body, whichever rule fired:
 
@@ -759,6 +763,7 @@ convention — no registry covers them yet, so treat them as a hint, not a spec.
 | `MCP_RATE_LIMIT_PER_MINUTE` | `120` | MCP's own rate bucket. Over-limit returns `429`; it never bans. |
 | `MCP_RATE_LIMIT_PER_SECOND` | `5` | Burst ceiling for the same bucket. |
 | `MCP_MAX_BODY_BYTES` | `262144` (256 KiB) | Max size of a `POST /mcp` body. Rejected with `413` before it's read into memory. |
+| `MCP_LOOKUP_CONCURRENCY` | `8` | MCP's share of the lookup gate (`LOOKUP_CONCURRENCY`): tool calls never hold more than this many of its slots, so the page keeps the rest. |
 
 `/mcp` is deliberately exempt from geo-blocking, the suspicious-path detector and
 automatic bans: every user of a hosted AI client arrives from a handful of
@@ -855,6 +860,14 @@ Requests pass through the middleware in this order:
 Two surfaces are handled before this chain: `/admin/*` checks bans and rate
 limits but skips geo and suspicious-path filtering, and `/mcp` checks bans and
 body size and applies its own rate bucket, never escalating to a ban.
+
+Past the middleware, every lookup takes a slot at one gate shared by the page,
+the JSON API and `/mcp`: at most `LOOKUP_CONCURRENCY` (16) run at once, and MCP
+tool calls hold at most `MCP_LOOKUP_CONCURRENCY` (8) of those. A lookup that
+finds no slot free within `LOOKUP_GATE_WAIT_SECONDS` (0.5) gets a `503` with
+`Retry-After`, and an MCP tool call an error saying the same. A full server is
+not the visitor's doing, so the `503` never bans. `/?format=text` and `HEAD`
+do no lookup and take no slot.
 
 ### Automatic banning
 

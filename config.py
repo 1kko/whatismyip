@@ -66,6 +66,24 @@ RDAP_BREAKER_FAILURES = max(int(os.getenv("RDAP_BREAKER_FAILURES", "3")), 1)
 RDAP_BREAKER_COOLDOWN_SECONDS = float(os.getenv("RDAP_BREAKER_COOLDOWN_SECONDS", "600"))
 WHOIS_CACHE_TTL = int(os.getenv("WHOIS_CACHE_TTL", "21600"))  # 6h for a hit
 WHOIS_CACHE_ERROR_TTL = int(os.getenv("WHOIS_CACHE_ERROR_TTL", "300"))  # 5m for a miss
+# RDAP and port-43 WHOIS threads run on a pool of their own (concurrency.py),
+# not the event loop's default executor, so a backlog of them queues behind
+# itself instead of in front of every lookup's DNS and TLS legs. The RDAP and
+# WHOIS budgets above include any time spent waiting for a worker.
+REGISTRATION_WORKERS = max(int(os.getenv("REGISTRATION_WORKERS", "8")), 1)
+
+# At most LOOKUP_CONCURRENCY lookups run at once, across the page, the JSON
+# API, ?format=text, ?fields= and the MCP tools (see concurrency.py). One that
+# finds every slot taken waits up to LOOKUP_GATE_WAIT_SECONDS for one, then
+# gets a 503 carrying Retry-After: LOOKUP_BUSY_RETRY_AFTER_SECONDS. A slot is
+# held for one lookup, typically 1-3s, so at saturation one frees every 100ms
+# or so: half a second absorbs a momentary spike, and a sustained overload is
+# still answered within it.
+LOOKUP_CONCURRENCY = max(int(os.getenv("LOOKUP_CONCURRENCY", "16")), 1)
+LOOKUP_GATE_WAIT_SECONDS = max(float(os.getenv("LOOKUP_GATE_WAIT_SECONDS", "0.5")), 0.0)
+LOOKUP_BUSY_RETRY_AFTER_SECONDS = max(
+    int(os.getenv("LOOKUP_BUSY_RETRY_AFTER_SECONDS", "2")), 1
+)
 
 # Rate Limiting Configuration
 RATE_LIMIT_REQUESTS_PER_MINUTE = int(os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "60"))
@@ -228,6 +246,10 @@ MCP_RATE_LIMIT_PER_MINUTE = int(os.getenv("MCP_RATE_LIMIT_PER_MINUTE", "120"))
 # 5, not the browser path's 10: no legitimate agent bursts anywhere near that,
 # and each request can spin up a nested thread pool (see mcp_server._bounded_gather).
 MCP_RATE_LIMIT_PER_SECOND = int(os.getenv("MCP_RATE_LIMIT_PER_SECOND", "5"))
+# MCP's share of LOOKUP_CONCURRENCY: at most this many of the gate's slots are
+# ever held by MCP tool calls, so the page keeps the rest (see
+# mcp_server._bounded_gather).
+MCP_LOOKUP_CONCURRENCY = max(int(os.getenv("MCP_LOOKUP_CONCURRENCY", "8")), 1)
 
 # 256 KiB is generous for a JSON-RPC call — the SDK itself enforces no cap
 # (see security_middleware's /mcp branch, which rejects an oversized or
@@ -255,7 +277,10 @@ SUBDOMAIN_CACHE_TTL = int(os.getenv("SUBDOMAIN_CACHE_TTL", str(7 * 24 * 3600)))
 SUBDOMAIN_ERROR_TTL = int(os.getenv("SUBDOMAIN_ERROR_TTL", "300"))
 SUBDOMAIN_MAX_NAMES = int(os.getenv("SUBDOMAIN_MAX_NAMES", "5000"))
 SUBDOMAIN_MAX_ROWS = int(os.getenv("SUBDOMAIN_MAX_ROWS", "10000"))
-SUBDOMAIN_MAX_CONCURRENT = int(os.getenv("SUBDOMAIN_MAX_CONCURRENT", "4"))
+# Simultaneous crt.sh fetches, and the size of the thread pool they run on: a
+# fetch whose caller was cancelled keeps its thread until urllib times out,
+# and the pool keeps that from pushing the connection count past this.
+SUBDOMAIN_MAX_CONCURRENT = max(int(os.getenv("SUBDOMAIN_MAX_CONCURRENT", "4")), 1)
 # Concurrency caps simultaneous connections, not total volume. An agent sweeping
 # domains inside the 120/min MCP bucket would otherwise drive that many crt.sh
 # fetches, so the budget is counted globally across every surface.

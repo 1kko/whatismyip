@@ -382,14 +382,31 @@ def _handler_sources(*handlers) -> str:
     import inspect
 
     import lookup
+    import main
 
     helpers = (
         lookup.lookup_whois,
         lookup._whois_fallback,
         lookup.lookup_location,
         lookup.gather,
+        lookup._run_legs,
+        main._self_lookup,
     )
     return "\n".join(inspect.getsource(fn) for fn in (*handlers, *helpers))
+
+
+# RDAP and port-43 WHOIS run on a pool of their own (concurrency.py), not the
+# default executor the DNS and TLS legs use. GeoIP is a memory-mapped mmdb read
+# and runs inline, so it is in neither list.
+_REGISTRATION_POOL_CALLS = ("lookup_rdap", "whois.whois")
+
+
+def _assert_on_registration_pool(source: str) -> None:
+    import re as _re
+
+    for target in _REGISTRATION_POOL_CALLS:
+        pattern = rf"run_in\(\s*registration_pool,\s*{_re.escape(target)}"
+        assert _re.search(pattern, source), f"{target} not on the registration pool"
 
 
 class TestAsyncIO:
@@ -400,12 +417,8 @@ class TestAsyncIO:
         from main import get_self_info
 
         source = _handler_sources(get_self_info)
-        for target in (
-            "lookup_rdap",
-            "whois.whois",
-            "geo_ip_manager.fetch_location",
-            "domain_manager.perform_reverse_lookup",
-        ):
+        _assert_on_registration_pool(source)
+        for target in ("domain_manager.perform_reverse_lookup",):
             pattern = rf"asyncio\.to_thread\(\s*{_re.escape(target)}"
             assert _re.search(pattern, source), f"missing to_thread wrap for {target}"
 
@@ -416,12 +429,10 @@ class TestAsyncIO:
         from main import get_ip_info
 
         source = _handler_sources(get_ip_info)
+        _assert_on_registration_pool(source)
         for target in (
-            "lookup_rdap",
-            "whois.whois",
             "_recursive_resolver().resolve",
             "SSLManager.get_ssl_info",
-            "geo_ip_manager.fetch_location",
         ):
             pattern = rf"asyncio\.to_thread\(\s*{_re.escape(target)}"
             assert _re.search(pattern, source), f"missing to_thread wrap for {target}"

@@ -31,6 +31,7 @@ from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
 from rdap import rdap_breaker, refresh_rdap_bootstrap
 from viewmodel import build_view, dns_failure_text, whois_display
+from concurrency import LookupBusy, lookup_gate
 from config import (
     APP_VERSION,
     BAN_DURATION_RATE_LIMIT,
@@ -39,6 +40,7 @@ from config import (
     DESKTOP_CANVAS,
     GEOIP_MAX_BUILD_AGE_DAYS,
     GEOIP_UPDATE_RETRY_SECONDS,
+    LOOKUP_BUSY_RETRY_AFTER_SECONDS,
     MCP_ENABLED,
     MCP_MAX_BODY_BYTES,
     MCP_RATE_LIMIT_PER_MINUTE,
@@ -1212,6 +1214,33 @@ def _invalid_field(exc: InvalidFieldError, fmt: str) -> Response:
     )
 
 
+def _busy(request: Request, fmt: str) -> Response:
+    """The 503 for a lookup the gate turned away (concurrency.LookupBusy), in
+    the format its answer would have had.
+
+    Answered by the route, after the security middleware let the request in,
+    so it reaches no ban, probe or escalation logic: a full server is not the
+    visitor's doing. The request did count against the visitor's rate limit on
+    the way in, as every lookup does; refunding it would let one address send
+    without limit for as long as the gate stays full.
+    """
+    if fmt == "text":
+        response = _text_error(LookupBusy.message, 503)
+    elif fmt == "html":
+        response = render_error(
+            request,
+            503,
+            "Too busy right now",
+            "Too many lookups are running at once. Try again in a few seconds.",
+        )
+    else:
+        response = JSONResponse(
+            status_code=503, content={"error": LookupBusy.message, "code": "busy"}
+        )
+    response.headers["Retry-After"] = str(LOOKUP_BUSY_RETRY_AFTER_SECONDS)
+    return response
+
+
 def _fields_response(
     data: dict, names: list[str], kind: str, fmt: str, block: bool = False
 ) -> Response | dict:
@@ -1228,32 +1257,86 @@ def _fields_response(
 async def _self_fields(client_ip: str, names: list[str]) -> dict:
     """get_self_info's lookups, cut down to the legs `names` need and shaped
     like gather()'s result. Not gather() itself: that refuses a private
-    address, and the visitor's own address is answered whatever it is."""
+    address, and the visitor's own address is answered whatever it is.
+    LookupBusy, as from gather(), when the gate has no slot for it."""
     legs = legs_for(names, "ip")
     # The same rule as the full self lookup: a private address has no public
     # registration or PTR, so neither is asked for.
     public_client = is_safe_ip(client_ip)
-    whois_task = (
-        asyncio.create_task(lookup_whois(client_ip))
-        if public_client and "whois" in legs
-        else None
-    )
-    reverse_task = (
-        asyncio.create_task(
-            asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
+    networked = legs & {"whois", "ptr"} if public_client else frozenset()
+    # Only those two leave the process; GeoIP is a local read. A request for
+    # neither, such as ?fields=ip,country_code, takes no slot at the lookup
+    # gate, any more than ?format=text does.
+    async with lookup_gate.slot() if networked else contextlib.nullcontext():
+        whois_task = (
+            asyncio.create_task(lookup_whois(client_ip))
+            if "whois" in networked
+            else None
         )
-        if public_client and "ptr" in legs
-        else None
-    )
-    location = await lookup_location(client_ip) if "geo" in legs else {}
-    return {
-        "address": client_ip,
-        "resolved_ip": client_ip,
-        "reverse_dns": await reverse_task if reverse_task else None,
-        "location": location,
-        "whois": await whois_task if whois_task else None,
-        "ssl": None,
-    }
+        reverse_task = (
+            asyncio.create_task(
+                asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
+            )
+            if "ptr" in networked
+            else None
+        )
+        location = await lookup_location(client_ip) if "geo" in legs else {}
+        return {
+            "address": client_ip,
+            "resolved_ip": client_ip,
+            "reverse_dns": await reverse_task if reverse_task else None,
+            "location": location,
+            "whois": await whois_task if whois_task else None,
+            "ssl": None,
+        }
+
+
+async def _self_lookup(client_ip: str) -> tuple[dict, dict, dict]:
+    """get_self_info's lookups: the visitor's location (with its PTR name), the
+    record sweep of that name, and the registration of the address. They run
+    while a slot at the lookup gate is held, as gather()'s legs do; LookupBusy
+    when none comes free."""
+    # A private or reserved client address -- a dev server with no proxy in
+    # front, or a proxy this server was not told to trust -- has no public
+    # registration and no PTR a public resolver would know, so neither is
+    # asked for. GeoIP is a local database and still runs.
+    public_client = is_safe_ip(client_ip)
+
+    async with lookup_gate.slot():
+        # WHOIS is the slow one (seconds); it has nothing to do with GeoIP or
+        # the reverse lookup, so none of these wait on each other.
+        whois_task = (
+            asyncio.create_task(lookup_whois(client_ip)) if public_client else None
+        )
+        location_task = asyncio.create_task(lookup_location(client_ip))
+        reverse_task = (
+            asyncio.create_task(
+                asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
+            )
+            if public_client
+            else None
+        )
+
+        ip_data = await location_task
+        reverse_dns_hostname = await reverse_task if reverse_task else None
+        if reverse_dns_hostname:
+            ip_data["reverse_dns"] = reverse_dns_hostname
+
+        domain_records = (
+            await asyncio.to_thread(
+                lambda: domain_manager.get_records(reverse_dns_hostname, ip=client_ip)
+            )
+            if reverse_dns_hostname
+            else {}
+        )
+        # An error, not {} or "not registered": nothing was asked, and the page
+        # should say so rather than pass that off as an answer.
+        whois_data = (
+            await whois_task
+            if whois_task
+            else {"error": "Not looked up: private or reserved address"}
+        )
+    return ip_data, domain_records, whois_data
 
 
 async def _target_fields(target: str, names: list[str] | None, fmt: str):
@@ -1337,50 +1420,22 @@ async def get_self_info(request: Request):
     logging.info("client=%s lookup=%s (self)", sanitized_ip, sanitized_ip)
 
     if names is not None:
-        data = await _self_fields(client_ip, names)
+        try:
+            data = await _self_fields(client_ip, names)
+        except LookupBusy:
+            # In the format the fields would have come in: never the page.
+            return _busy(request, "text" if fmt == "text" else "json")
         return _fields_response(data, names, "ip", fmt)
     if fmt == "text":
         # `curl ip.1kko.com?format=text`: the address is already known, so the
-        # answer is that and nothing else -- no WHOIS, GeoIP or DNS.
+        # answer is that and nothing else -- no WHOIS, GeoIP or DNS, and no
+        # slot at the lookup gate.
         return PlainTextResponse(client_ip + "\n")
 
-    # A private or reserved client address -- a dev server with no proxy in
-    # front, or a proxy this server was not told to trust -- has no public
-    # registration and no PTR a public resolver would know, so neither is
-    # asked for. GeoIP is a local database and still runs.
-    public_client = is_safe_ip(client_ip)
-
-    # WHOIS is the slow one (seconds); it has nothing to do with GeoIP or the
-    # reverse lookup, so none of these wait on each other.
-    whois_task = asyncio.create_task(lookup_whois(client_ip)) if public_client else None
-    location_task = asyncio.create_task(lookup_location(client_ip))
-    reverse_task = (
-        asyncio.create_task(
-            asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
-        )
-        if public_client
-        else None
-    )
-
-    ip_data = await location_task
-    reverse_dns_hostname = await reverse_task if reverse_task else None
-    if reverse_dns_hostname:
-        ip_data["reverse_dns"] = reverse_dns_hostname
-
-    domain_records = (
-        await asyncio.to_thread(
-            lambda: domain_manager.get_records(reverse_dns_hostname, ip=client_ip)
-        )
-        if reverse_dns_hostname
-        else {}
-    )
-    # An error, not {} or "not registered": nothing was asked, and the page
-    # should say so rather than pass that off as an answer.
-    whois_data = (
-        await whois_task
-        if whois_task
-        else {"error": "Not looked up: private or reserved address"}
-    )
+    try:
+        ip_data, domain_records, whois_data = await _self_lookup(client_ip)
+    except LookupBusy:
+        return _busy(request, fmt)
 
     # A self-lookup is never a route: the visitor IS the target, so the
     # distance is 0 km, which build_map_payload collapses to city mode.
@@ -1463,7 +1518,11 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     if fmt == "text" or names is not None:
         # Neither carries a subdomain list, so ?subdomains=include starts no
         # crt.sh fetch here; ?subdomains=only above is the way to ask for one.
-        return await _target_fields(domain_ip, names, fmt)
+        try:
+            return await _target_fields(domain_ip, names, fmt)
+        except LookupBusy:
+            # In the format the answer would have come in: never the page.
+            return _busy(request, "text" if fmt == "text" else "json")
 
     # The visitor's own location only feeds the distance line, so it runs
     # alongside the target lookup rather than after it.
@@ -1497,6 +1556,11 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
             status_code=400,
             detail="Private or reserved IP addresses are not allowed",
         ) from None
+    except LookupBusy:
+        origin_task.cancel()
+        if subdomain_task is not None:
+            subdomain_task.cancel()
+        return _busy(request, fmt)
 
     origin_location = await origin_task
     ip_data = data["location"]
