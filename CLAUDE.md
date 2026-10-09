@@ -190,14 +190,17 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   page left running (`_self_whois_tasks` in `main.py`, which also keeps that
   task alive and its gate slot held) or reads the cache; it starts and gates a
   lookup of its own only when there is neither. JSON/text/`?fields=` on `/`
-  still wait for the record
+  still wait for the record; a registration field in `?fields=` (`_self_fields`)
+  joins, reads the cache and gates the same way
 - `GET /{domain_ip}` - a domain or an IP address (IPv4 or IPv6), through
   `lookup.gather()`
 - `GET /{domain_ip}?subdomains=include|only` - opt-in Certificate Transparency
   subdomain list; see [Subdomain lookup](#subdomain-lookup)
 - `?format=html|json|text` and `?fields=` on both lookup routes
 - `HEAD /`, `HEAD /{domain_ip}` - `main.head_lookup`: `200` with the
-  Content-Type a GET would negotiate, and no lookup
+  Content-Type GET would answer with (JSON for the `?whois=only` and
+  `?subdomains=only` modes, whatever was negotiated), GET's `400` for a bad
+  query parameter, and no lookup
 - `GET /healthz` - `ok` or `degraded` with `reasons` (`main.health_reasons`,
   no network calls), the deployed `version`, and which datasets are loaded
 - `GET /robots.txt`, `GET /favicon.ico` (a `301` to `/static/favicon.ico`),
@@ -373,6 +376,11 @@ Configured at `main` module scope:
 - `StreamableHTTPSessionManager.run()` is once-per-instance; calling it twice
   on the same instance raises. The lifespan rebuilds the MCP app on every
   startup so repeated start/stop cycles (as in tests) each get a fresh one.
+- `initialize` reports `serverInfo.version` as `config.APP_VERSION`, passed as
+  `MCPServer(..., version=)`: the deployed commit, the same value as `/healthz`
+  `version`, or `unknown`. The SDK sends `""` when none is given. It is not
+  `server.json`'s registry version, which is not in the image and is bumped
+  only when the listing changes.
 - Tool return annotations need `dict[str, Any]`, not a bare `dict` — the SDK
   can't build an output schema from a bare `dict`, so the response never gets
   `structuredContent`.

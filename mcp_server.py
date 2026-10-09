@@ -26,6 +26,7 @@ from mcp.types import CallToolResult, TextContent
 
 from concurrency import LookupBusy, LookupGate
 from config import (
+    APP_VERSION,
     MCP_ALLOWED_HOSTS,
     MCP_ALLOWED_ORIGINS,
     MCP_LOOKUP_CONCURRENCY,
@@ -58,7 +59,10 @@ from viewmodel import (
     _cert_validation,
 )
 
-mcp = MCPServer("whatismyip")
+# `version` is initialize's serverInfo.version, "" unless given. The deployed
+# commit, as /healthz reports it, rather than server.json's registry version:
+# server.json is not in the image, and the commit is what finds the build.
+mcp = MCPServer("whatismyip", version=APP_VERSION)
 
 
 def _fail(message: str, **extra: Any) -> CallToolResult:

@@ -330,7 +330,9 @@ the record as the page words it. It joins the lookup the page left running, or
 reads the cache that lookup filled, and asks the registry itself only when
 there is neither. It is a lookup like any other for the rate limit, so a slow
 page view counts twice. JSON, `?format=text` and `?fields=` answers on `/` are
-unchanged: they wait for the record.
+unchanged: they wait for the record. A `?fields=` that needs the registration
+(`registrant`) gets it the same way, joining a running lookup or reading the
+cache before it asks the registry.
 
 ### `GET /{domain_or_ip}`
 
@@ -607,9 +609,10 @@ text included), carries `Link: </privacy>; rel="privacy-policy"` (RFC 6903).
 ### `HEAD`
 
 `HEAD /` and `HEAD /{domain_or_ip}` answer `200` with the Content-Type a `GET`
-would have (`text/plain` for text, `application/json` for `?fields=`) and no
-body, without running any lookup — for uptime monitors and link checkers. A bad
-`?format=` or `?fields=` is the same `400` as on `GET`. They do not tell you
+would have (`text/plain` for text, `application/json` for `?fields=`,
+`/?whois=only` and `?subdomains=only`) and no body, without running any lookup —
+for uptime monitors and link checkers. A bad `?format=`, `?fields=`, `?whois=`
+or `?subdomains=` is the same `400` as on `GET`. They do not tell you
 whether a given target would be rejected: finding that out takes the lookup.
 `/healthz`, `/robots.txt`, `/favicon.ico`, `/privacy` and `/static/` answer `HEAD` as they
 answer `GET`, minus the body. `HEAD` passes through the same bans, geo rules and
