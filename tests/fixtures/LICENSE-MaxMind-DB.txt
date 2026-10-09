@@ -1,0 +1,31 @@
+GeoLite2-City-Test.mmdb and GeoLite2-ASN-Test.mmdb are test databases from
+MaxMind's MaxMind-DB repository, copied unmodified from
+https://github.com/maxmind/MaxMind-DB/tree/6a690a705bc6962c0025a32e94a8f0dc8f86418c/test-data
+
+They hold synthetic records for a handful of networks, written to exercise
+MaxMind DB readers. They are not GeoLite2 releases and carry none of the
+GeoLite2 licence terms.
+
+Copyright (c) 2013 - 2026 by MaxMind, Inc.
+
+The MaxMind-DB repository is licensed under the Apache License, Version 2.0 or
+the MIT License, at the user's option. These files are used under the MIT
+License:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

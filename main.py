@@ -37,8 +37,6 @@ from config import (
     BAN_DURATION_SUSPICIOUS,
     CLEANUP_INTERVAL_SECONDS,
     DESKTOP_CANVAS,
-    GEOIP_ASN_DB_FILE,
-    GEOIP_CITY_DB_FILE,
     GEOIP_UPDATE_RETRY_SECONDS,
     MCP_ENABLED,
     MCP_MAX_BODY_BYTES,
@@ -529,7 +527,6 @@ def _refresh_with_retry(
     return run
 
 
-refresh_geoip_db = _refresh_with_retry(geo_ip_manager.update_database, "geoip2fast")
 refresh_city_db = _refresh_with_retry(
     geo_ip_manager.update_city_database, "GeoLite2-City"
 )
@@ -537,7 +534,6 @@ refresh_asn_db = _refresh_with_retry(geo_ip_manager.update_asn_database, "GeoLit
 refresh_tld_names = _refresh_with_retry(
     tld_names_manager.update, "public-suffix-list", TLD_UPDATE_RETRY_SECONDS
 )
-scheduler.add_job(refresh_geoip_db, "interval", days=3)
 scheduler.add_job(refresh_city_db, "interval", days=3)
 scheduler.add_job(refresh_asn_db, "interval", days=3)
 scheduler.add_job(
@@ -564,15 +560,23 @@ scheduler.add_job(refresh_rdap_bootstrap, "interval", days=1)
 # stamped expired, so it does pull once on first boot.
 scheduler.add_job(refresh_tld_names, "interval", days=1)
 scheduler.start()
-refresh_geoip_db()
 refresh_tld_names()
-# The mmdb overlays are tens of MB, so only fetch them on first boot; the
-# scheduler refreshes them afterwards. Lookups degrade gracefully to geoip2fast
-# until they land.
-if not os.path.exists(GEOIP_CITY_DB_FILE):
-    refresh_city_db()
-if not os.path.exists(GEOIP_ASN_DB_FILE):
-    refresh_asn_db()
+
+
+def _fetch_unloaded_geoip_dbs():
+    """Fetch, at boot, each GeoLite2 database that did not open; the scheduler
+    refreshes them afterwards. They are tens of MB, so one that loaded is left
+    to the schedule. Keyed on the reader, not the file: a truncated download
+    left on the volume exists but will not open, and would otherwise wait out
+    the whole interval with country lookups on the bundled geoip2fast snapshot
+    and carriers empty."""
+    if geo_ip_manager.city_reader is None:
+        refresh_city_db()
+    if geo_ip_manager.asn_reader is None:
+        refresh_asn_db()
+
+
+_fetch_unloaded_geoip_dbs()
 
 
 class BrowserDetector:

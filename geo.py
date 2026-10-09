@@ -1,8 +1,8 @@
 """Coordinate lookup and great-circle distance.
 
-geoip2fast returns city names but its latitude/longitude fields are always
-null, so coordinates come from the local gazetteer built by
-scripts/build_gazetteer.py.
+GeoLite2-City supplies coordinates for most addresses. For the rest, and while
+only the country-only geoip2fast fallback is loaded, coordinates come from the
+local gazetteer built by scripts/build_gazetteer.py.
 """
 
 from __future__ import annotations

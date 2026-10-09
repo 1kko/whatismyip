@@ -81,7 +81,7 @@ poetry run ruff format .
 **Modules:**
 - `config.py`: every environment-driven constant (timeouts, cache TTLs, file paths, rate-limit/ban settings, geo-block defaults, trusted proxies, map canvases). Pure values — imported by everything, imports nothing app-local, which keeps the tree cycle-free.
 - `managers.py` — data-gathering managers, one thin wrapper per source:
-  - `GeoIpManager`: GeoIP database updates (every 3 days via APScheduler, failed refreshes retried hourly) + geoip2fast lookups with GeoLite2-City coordinate and GeoLite2-ASN carrier overlays; `GET /healthz` reports which DBs are actually loaded
+  - `GeoIpManager`: GeoLite2-City (country, city, coordinates) and GeoLite2-ASN (carrier) lookups over memory-mapped mmdb files, refreshed every 3 days via APScheduler (failed refreshes retried hourly), with geoip2fast's bundled country snapshot as the fallback until the first download; `GET /healthz` reports which DBs are actually loaded
   - `DomainManager`: DNS (A, MX, NS, CNAME, TXT), reverse DNS, domain validation
   - `SSLManager`: SSL certificate retrieval for HTTPS endpoints
   - `HeaderManager`: strips proxy/forwarding headers
@@ -136,10 +136,24 @@ poetry run ruff format .
   turned naver.co.kr into co.kr), floored at the registrable domain. Zone MX
   rows carry `from_zone`; the response names `queried_name` and `zone`
 
-**GeoIP Database** (main.py:120-132):
-- Auto-updates from geoip2fast CDN every 3 days via background scheduler
-- Database file: `geoip2fast-city-asn-ipv6.dat.gz`
-- Includes city, ASN, and IPv6 support
+**GeoIP Databases** (`GeoIpManager` in managers.py):
+- `data/GeoLite2-City.mmdb` answers country, city, coordinates and the matched
+  block; `data/GeoLite2-ASN.mmdb` the carrier. Both are memory-mapped by
+  `maxminddb`, fetched at boot when they do not open (missing or truncated), and
+  refreshed every 3 days (MaxMind's licensed endpoint when `MAXMIND_ACCOUNT_ID`
+  and `MAXMIND_LICENSE_KEY` are set, free jsdelivr mirrors otherwise)
+- Geo-blocking judges the City database's `country_code` (falling back to the
+  block's `registered_country`, as geoip2fast's builder did)
+- `geoip2fast` survives only as a fallback: its bundled country-only snapshot
+  (`geoip2fast-ipv6.dat.gz`, a 2024 build inside the package) is loaded only when
+  no City database opened, so a fresh volume still has a country. It is never
+  downloaded or refreshed. Loaded, it costs ~50 MB of heap until the next restart
+  (its data lives in module globals); the city+ASN geoip2fast build it replaced
+  cost ~900 MB, and `/healthz` reports `databases.geoip2fast.source` as
+  `bundled` while it answers, `unused` otherwise. `city_overlay` and
+  `asn_overlay` keep their historical names
+- An address no database places gets `country_code: "--"`, geoip2fast's old
+  marker, so geo-blocking and the JSON API see what they always have
 
 **Error Handling**:
 - WHOIS failures return `{"error": "..."}` in response rather than 500 errors
@@ -249,9 +263,10 @@ whatismyip/
 
 ### Map subsystem
 
-**Coordinates**: geoip2fast returns city names but `latitude`/`longitude` are ALWAYS
-`null`. Coordinates come from `static/geo/cities.json` (GeoNames cities15000), with a
-population-weighted country centroid as fallback. Private IPs get no map.
+**Coordinates**: from GeoLite2-City's `location`. When it has none (or only the
+geoip2fast country fallback is loaded), `static/geo/cities.json` (GeoNames cities15000)
+matches the city name, with a population-weighted country centroid as the last
+resort. Private IPs get no map.
 
 **Projection**: all map math is server-side and unit-tested (`tests/test_mapgeom.py`).
 The server emits tile URLs with pixel offsets plus a projected great-circle polyline for
@@ -332,7 +347,9 @@ read-only volume or a full disk costs the cache, not the request.
 **Core:**
 - FastAPI + uvicorn: Web framework and ASGI server
 - python-whois: WHOIS protocol client
-- geoip2fast: Lightweight GeoIP lookup library
+- maxminddb: memory-mapped GeoLite2 City/ASN readers
+- geoip2fast: only its bundled country snapshot, the fallback before the first
+  GeoLite2 download
 - dnspython: DNS resolution and record queries
 - APScheduler: Background task scheduling for database updates
 

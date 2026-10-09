@@ -55,11 +55,13 @@ RDAP registration data and the full TLS certificate, expanded.
   no WHOIS fallback: when its RIR's RDAP server does not answer, the lookup says
   so instead of showing the registration of the address's reverse-DNS domain.
   An RDAP server that fails three times in a row is skipped for 10 minutes.
-- **GeoIP** — country and ASN from `geoip2fast`, with a GeoLite2-City overlay for
-  real coordinates, the precise city and an accuracy radius, plus a GeoLite2-ASN
-  overlay that keeps carrier names current. `GET /healthz` reports which
-  databases are actually loaded, so a silent fallback to the bundled
-  country-only database is visible from outside.
+- **GeoIP** — country, real coordinates, the precise city and an accuracy radius
+  from GeoLite2-City, and the carrier from GeoLite2-ASN, both memory-mapped and
+  refreshed every 3 days. Until the first download lands, the country-only
+  snapshot bundled with `geoip2fast` answers country alone, so geo-blocking
+  always has one to judge. `GET /healthz` reports which databases are actually
+  loaded, so a silent fallback to the bundled country-only database is visible
+  from outside.
 - **DNS** — A, MX, NS, CNAME, TXT, SPF and PTR, queried concurrently against
   public resolvers with a bounded per-query budget.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
@@ -76,8 +78,8 @@ RDAP registration data and the full TLS certificate, expanded.
 - **Map** — all projection math is server-side and unit-tested. The server emits
   tile URLs with pixel offsets and a projected great-circle polyline for two
   fixed canvases (desktop band and mobile card); the browser only paints them.
-  Coordinates come from a committed GeoNames gazetteer, because `geoip2fast`
-  returns city names but always leaves latitude/longitude `null`.
+  Coordinates come from GeoLite2-City, with a committed GeoNames gazetteer
+  (city name, then country centroid) for addresses it gives none.
 - **Distance** — great-circle kilometres from the visitor to the target, drawn as
   an arc. Pacific crossings wrap the antimeridian correctly instead of running
   the wrong way across Europe.
@@ -136,7 +138,8 @@ RDAP registration data and the full TLS certificate, expanded.
 | `fastapi[all]` + `uvicorn` | web framework and ASGI server |
 | `whoisit` | RDAP lookups (the primary registration source) |
 | `python-whois` | port-43 WHOIS fallback |
-| `geoip2fast` + `maxminddb` | GeoIP country/ASN, plus the GeoLite2 overlays |
+| `maxminddb` | GeoLite2 City/ASN lookups (memory-mapped) |
+| `geoip2fast` | its bundled country snapshot, the fallback before the first GeoLite2 download |
 | `dnspython` | DNS resolution and record queries |
 | `apscheduler` | background GeoIP / suffix-list refresh and cleanup jobs |
 | `mcp` | official MCP SDK (Streamable HTTP transport) |
@@ -199,9 +202,9 @@ self-hosted. Map tiles come from the single allowlisted host
 proxy), which means visitor IPs reach OSM — the footer says so, and
 `© OpenStreetMap contributors` attribution is required.
 
-Coordinates for the map do **not** come from the GeoIP database (`geoip2fast`
-returns city names but never latitude/longitude). They come from the GeoNames
-gazetteer above.
+Coordinates for the map come from GeoLite2-City. The GeoNames gazetteer above
+covers addresses it gives no coordinates for, and the window before the first
+GeoLite2 download, when only a country is known.
 
 ## Running
 
@@ -466,11 +469,7 @@ lookups:
   "status": "ok",
   "version": "08fe93c34e33922e1bdd38be3cd9528ac1342f85",
   "databases": {
-    "geoip2fast": {
-      "source": "volume",
-      "content": "Country + City + ASN with IPv4 and IPv6",
-      "build": "MAXMIND:GeoLite2-CityASN-IPv4IPv6-en-20260605"
-    },
+    "geoip2fast": { "source": "unused", "content": null, "build": null },
     "city_overlay": { "loaded": true, "build": "2026-07-31" },
     "asn_overlay": { "loaded": true, "build": "2026-07-26" }
   },
@@ -482,6 +481,12 @@ lookups:
 (Coolify sets it on every deploy; a plain `docker build` takes it as a build
 arg), or `unknown` when it is unset. The deploy workflow polls it until it reads
 back the commit CI passed.
+
+`databases.geoip2fast.source` is `bundled` while the country-only snapshot
+shipped with `geoip2fast` is answering country — no GeoLite2-City database has
+opened yet — and `unused` once one has; `content` and `build` describe that
+snapshot whenever it has been loaded. `city_overlay` and `asn_overlay` are the
+GeoLite2 databases themselves, under their historical names.
 
 `public_suffix_list.source` is `downloaded` once a refresh has landed, `bundled`
 while still running on the snapshot shipped with the `tld` package, and
@@ -938,8 +943,10 @@ So the list lives in the data volume instead:
 - `data/banned_ips.json` — banned IPs with expiry times
 - `data/geo_rules.json` — geographic blocking configuration
 - `data/ip_rules.json` — per-IP allow/block rules (hand-written)
-- `data/geoip2fast.dat.gz`, `data/GeoLite2-City.mmdb`, `data/GeoLite2-ASN.mmdb` —
-  GeoIP databases, refreshed every 3 days (a failed refresh is retried hourly)
+- `data/GeoLite2-City.mmdb`, `data/GeoLite2-ASN.mmdb` — GeoIP databases,
+  refreshed every 3 days (a failed refresh is retried hourly). A
+  `data/geoip2fast.dat.gz` left by an older version is no longer read and can be
+  deleted.
 - `data/tld/res/effective_tld_names.dat.txt` — the public suffix list above
 
 These survive service restarts, and the directory is a Docker volume mount.

@@ -45,7 +45,7 @@ EXPOSE 8000
 
 # Liveness probe using only the Python stdlib (no extra install).
 # Succeeds when uvicorn is bound to 8000; start-period covers the
-# geoip2fast DB download at boot.
+# first-boot GeoLite2 download.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1', 8000))"
 
