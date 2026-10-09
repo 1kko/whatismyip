@@ -67,9 +67,11 @@ Requests are processed in this order:
    an arbitrary domain and would otherwise trip rules like `\.json$`.
 4. **Rate Limiting** - Prevent abuse through request frequency limits. Static
    assets under `/static/` are exempt, because a single page load fetches about
-   a dozen of them and would otherwise trip the per-second limit. Everything
+   a dozen of them and would otherwise trip the per-second limit, and so are
+   exactly `/robots.txt` and `/favicon.ico`, which are fixed answers. Everything
    else is limited, including `/` and `/{domain-or-ip}` — that is where the DNS,
-   RDAP/WHOIS and TLS work happens.
+   RDAP/WHOIS and TLS work happens. A `HEAD` on those runs no lookup but is
+   counted all the same.
 
 `/admin/*` and `/mcp` are handled ahead of this chain: both check bans, `/admin/*`
 is rate limited on the same bucket, and `/mcp` uses its own looser bucket and
@@ -136,6 +138,8 @@ group is additionally exempt from rate limiting.
 
 Static assets (skip the detector **and** the rate limiter):
 - `/static/*.(css|js|json|png|jpg|jpeg|gif|svg|ico|webmanifest|woff|woff2)`
+- `/robots.txt` and `/favicon.ico` — exact, case-sensitive matches, because
+  `/ROBOTS.TXT` is not those routes and falls through to the lookup surface
 
 Lookup surface (skips the detector **only when the target is a real domain or
 IP**, and is always rate limited):
