@@ -510,6 +510,8 @@ rate limit as `GET`.
 ```json
 {
   "address": "nasa.gov",
+  "resolved_ip": "192.0.66.108",
+  "resolution": "ok",
   "datetime": "2026-08-20T02:16:04.921503+00:00",
   "domain": {
     "a": [{ "ip": "192.0.66.108", "ttl": 454 }],
@@ -518,7 +520,8 @@ rate limit as `GET`.
     "cname": null,
     "txt": [{ "text": ["MS=ms93625004"], "ttl": 364 }],
     "spf": [],
-    "ptr": []
+    "ptr": [],
+    "status": { "a": "ok", "mx": "ok", "ns": "ok", "cname": "noanswer", "txt": "ok", "spf": "noanswer", "ptr": "nxdomain" }
   },
   "location": {
     "ip": "192.0.66.108",
@@ -573,6 +576,13 @@ rate limit as `GET`.
   "elapsed_ms": 237
 }
 ```
+
+`domain.status` says how each record type's query ended: `ok`, `noanswer` (the
+name has none of that type), `nxdomain` (the name does not exist), or a failure
+— `timeout`, `servfail`, `error` — in which case the empty list next to it
+means "could not find out", not "none". `resolved_ip` is the address the target
+resolved to, and `resolution` is how: that A query's status for a name, or
+`literal` when the target is an IP, so a `null` address says why.
 
 `whois.source` is `rdap` or `whois` depending on which source answered, and a
 failed lookup returns `{"error": "..."}` there rather than failing the request.
@@ -630,7 +640,7 @@ is unaffected.)
 | Tool | What it does |
 |---|---|
 | `lookup(target)` | Geolocation, ASN/carrier, registration, and a TLS summary for a domain or IP. Start here. |
-| `dns_records(domain, types?)` | Full A / MX / NS / CNAME / TXT / SPF / PTR sweep. |
+| `dns_records(domain, types?)` | Full A / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining. |
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |
