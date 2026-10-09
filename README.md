@@ -330,7 +330,9 @@ the record as the page words it. It joins the lookup the page left running, or
 reads the cache that lookup filled, and asks the registry itself only when
 there is neither. It is a lookup like any other for the rate limit, so a slow
 page view counts twice. JSON, `?format=text` and `?fields=` answers on `/` are
-unchanged: they wait for the record.
+unchanged: they wait for the record. A `?fields=` that needs the registration
+(`registrant`) gets it the same way, joining a running lookup or reading the
+cache before it asks the registry.
 
 ### `GET /{domain_or_ip}`
 

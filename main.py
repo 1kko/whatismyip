@@ -1404,21 +1404,36 @@ async def _self_fields(client_ip: str, names: list[str]) -> dict:
     """get_self_info's lookups, cut down to the legs `names` need and shaped
     like gather()'s result. Not gather() itself: that refuses a private
     address, and the visitor's own address is answered whatever it is.
-    LookupBusy, as from gather(), when the gate has no slot for it."""
+    LookupBusy, as from gather(), when the gate has no slot for it.
+
+    The registration comes the way /?whois=only gets it (_self_whois_only):
+    the lookup a self page left running is joined, else the answer one left in
+    the cache is read, and only with neither is a lookup started, in
+    _self_whois_tasks so that a page and /?whois=only join it in turn. Joining
+    and reading start nothing outbound, so they take no slot at the lookup
+    gate: a running lookup is counted there already, by the slot of whoever
+    started it. A lookup this request starts, the registration or the PTR,
+    takes a slot, held until the answer is complete."""
     legs = legs_for(names, "ip")
     # The same rule as the full self lookup: a private address has no public
     # registration or PTR, so neither is asked for.
     public_client = is_safe_ip(client_ip)
     networked = legs & {"whois", "ptr"} if public_client else frozenset()
+    whois_task = whois_data = None
+    if "whois" in networked:
+        whois_task = _self_whois_tasks.get(client_ip)
+        if whois_task is None:
+            whois_data = cached_whois(client_ip)
+        if whois_task is not None or whois_data is not None:
+            networked -= {"whois"}
     # Only those two leave the process; GeoIP is a local read. A request for
     # neither, such as ?fields=ip,country_code, takes no slot at the lookup
     # gate, any more than ?format=text does.
     async with lookup_gate.slot() if networked else contextlib.nullcontext():
-        whois_task = (
-            asyncio.create_task(lookup_whois(client_ip))
-            if "whois" in networked
-            else None
-        )
+        if "whois" in networked:
+            # Or joins one another request started while this one waited for
+            # its slot.
+            whois_task, _ = _self_whois_task(client_ip)
         reverse_task = (
             asyncio.create_task(
                 asyncio.to_thread(domain_manager.perform_reverse_lookup, client_ip)
@@ -1432,7 +1447,9 @@ async def _self_fields(client_ip: str, names: list[str]) -> dict:
             "resolved_ip": client_ip,
             "reverse_dns": await reverse_task if reverse_task else None,
             "location": location,
-            "whois": await whois_task if whois_task else None,
+            # Shielded, as wherever a shared lookup is awaited: a client
+            # hanging up must not cancel the one another request waits on.
+            "whois": await asyncio.shield(whois_task) if whois_task else whois_data,
             "ssl": None,
             "reputation": ip_reputation(client_ip, location or None)
             if "reputation" in legs
@@ -1443,8 +1460,8 @@ async def _self_fields(client_ip: str, names: list[str]) -> dict:
 # The registration lookups of visitors' own addresses that are still running,
 # one per address. A browser's self page can go out before its lookup has
 # answered (see _self_lookup); the lookup carries on and fills the cache, and
-# until it ends /?whois=only and a reload join it here instead of asking the
-# registry again. This is also the task's strong reference. The event loop
+# until it ends /?whois=only, ?fields= and a reload join it here instead of
+# asking the registry again. This is also the task's strong reference. The event loop
 # keeps only a weak one, so a task nothing else refers to can be collected
 # before it finishes ("Task was destroyed but it is pending"). An entry is
 # dropped as its task finishes, and lookup_whois gives an address at most

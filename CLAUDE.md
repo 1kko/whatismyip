@@ -190,7 +190,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   page left running (`_self_whois_tasks` in `main.py`, which also keeps that
   task alive and its gate slot held) or reads the cache; it starts and gates a
   lookup of its own only when there is neither. JSON/text/`?fields=` on `/`
-  still wait for the record
+  still wait for the record; a registration field in `?fields=` (`_self_fields`)
+  joins, reads the cache and gates the same way
 - `GET /{domain_ip}` - a domain or an IP address (IPv4 or IPv6), through
   `lookup.gather()`
 - `GET /{domain_ip}?subdomains=include|only` - opt-in Certificate Transparency
