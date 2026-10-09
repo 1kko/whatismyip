@@ -14,6 +14,7 @@ assume are the ones OpenSSL actually reports.
 
 import datetime
 import logging
+import re
 import socket
 import ssl
 import threading
@@ -643,7 +644,8 @@ class TestPage:
             '<td colspan="3" class="tone-danger">not valid for example.com</td>'
             in section
         )
-        assert "other.example.net" in section  # the SANs it does cover
+        # the SANs it does cover
+        assert re.search(r"\bother\.example\.net\b", section)
 
     @pytest.mark.parametrize(
         "cert_name, code, message, label",
