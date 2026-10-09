@@ -51,6 +51,8 @@ from config import (
     SITE_DOMAIN_FALLBACK,
     SUBDOMAIN_ENABLED,
     TLD_UPDATE_RETRY_SECONDS,
+    WEBRTC_STUN_HOST,
+    WEBRTC_STUN_URL,
 )
 from managers import HeaderManager
 from mcp_server import McpBarePathRoute, McpDisabled, build_mcp, mcp_dispatch
@@ -387,6 +389,8 @@ def render_page(request: Request, response_data: dict, is_self: bool):
             "view": view,
             "view_map": map_data is not None,
             "subdomains_enabled": SUBDOMAIN_ENABLED,
+            "stun_url": WEBRTC_STUN_URL,
+            "stun_host": WEBRTC_STUN_HOST,
             "api_base": public_base_url(request),
             "site_domain": site_domain(request),
             "dns_rows": _dns_rows(response_data),
@@ -1003,6 +1007,10 @@ async def security_headers_middleware(request: Request, call_next):
     # A bare startswith("/mcp") would also catch "/mcpfoo.com" — a syntactically
     # valid domain, and a reachable HTML page via the /{domain_ip} catch-all —
     # silently stripping CSP from a real browser response.
+    #
+    # The WebRTC leak test's STUN request is not a fetch: neither default-src
+    # nor connect-src covers it, so nothing here was widened for it, and the
+    # page footer names the STUN server instead.
     _path = request.url.path
     if not (_path == "/mcp" or _path.startswith("/mcp/")):
         response.headers["Content-Security-Policy"] = (

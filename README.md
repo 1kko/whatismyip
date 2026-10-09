@@ -85,9 +85,15 @@ RDAP registration data and the full TLS certificate, expanded.
   the wrong way across Europe.
 - **Fingerprint panel** (self view only) — around 27 browser signals plus an
   entropy estimate, computed in the browser and never sent to the server.
+- **WebRTC leak test** (in the fingerprint panel, opt-in) — asks one STUN server
+  (`WEBRTC_STUN_URL`, Cloudflare's by default) which public address the
+  browser's WebRTC traffic uses, and compares it with the address the page saw,
+  per address family, so a dual-stack visitor is not reported as leaking. The
+  comparison happens in the browser; nothing is sent to this server.
 - Self-hosted fonts and a `default-src 'self'` Content-Security-Policy with a
   per-request nonce. The single allowlisted remote origin is
-  `tile.openstreetmap.org` in `img-src`.
+  `tile.openstreetmap.org` in `img-src`. STUN is not a fetch and no CSP
+  directive covers it, so the footer names the STUN server instead.
 
 ### Machine interfaces
 
@@ -256,6 +262,9 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # Canonical public URL, so the copyable curl example on the page, its canonical
 # link and its link-preview URLs (og:url, og:image) say https:// and this host
 # PUBLIC_BASE_URL=https://ip.1kko.com
+
+# STUN server for the opt-in WebRTC leak test; empty removes the test
+# WEBRTC_STUN_URL=stun:stun.cloudflare.com:3478
 
 # Geographic blocking (optional)
 # GEO_MODE=disabled                  # disabled, allowlist, or blocklist
