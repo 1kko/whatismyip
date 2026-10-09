@@ -415,6 +415,22 @@ if SUBDOMAIN_ENABLED:
     mcp.tool()(subdomains)
 
 
+def registered_tool_names() -> list[str]:
+    """The registered tools' names, in the order tools/list returns them.
+
+    The page's mcp-tools meta tag and its MCP note are rendered from this,
+    so neither can list a tool tools/list does not return, such as subdomains
+    under SUBDOMAIN_ENABLED=false. Both used to be typed out by hand, and had
+    drifted apart.
+
+    Reads the SDK's private `_tool_manager` because `MCPServer.list_tools()`,
+    the public form, is a coroutine and the page renders synchronously.
+    tests/test_mcp_registry.py compares the two, so an SDK change shows up
+    there.
+    """
+    return [tool.name for tool in mcp._tool_manager.list_tools()]
+
+
 _caller_ip: ContextVar[str] = ContextVar("mcp_caller_ip", default="unknown")
 
 
