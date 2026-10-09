@@ -99,7 +99,7 @@ RDAP registration data and the full TLS certificate, expanded.
 - Self-hosted fonts and a `default-src 'self'` Content-Security-Policy with a
   per-request nonce. The single allowlisted remote origin is
   `tile.openstreetmap.org` in `img-src`. STUN is not a fetch and no CSP
-  directive covers it, so the footer and `/privacy` name the STUN server
+  directive covers it, so the test itself and `/privacy` name the STUN server
   instead.
 - **`/privacy`** — what is logged, for how long, and which third parties the
   server and the browser contact; linked from every footer.

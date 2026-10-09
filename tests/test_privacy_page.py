@@ -288,6 +288,16 @@ class TestFooter:
         footer = _footer(client.get(path, headers=CHROME).text)
         assert '<a href="/privacy">' in footer
 
+    @pytest.mark.parametrize("path", ["/", "/nasa.gov", "/192.168.0.1", "/privacy"])
+    def test_it_sits_with_the_source_link(self, path):
+        """One group at the end of the footer row, not a line of its own."""
+        footer = _footer(client.get(path, headers=CHROME).text)
+        group = re.search(r'<span class="footer__links">(.*?)</span>', footer, re.S)
+        assert group, footer
+        assert '<a href="/privacy">' in group.group(1)
+        assert re.search(r'href="https://github\.com/1kko/whatismyip"', group.group(1))
+        assert "footer__note" not in footer
+
 
 class TestFingerprintPanel:
     def _panel(self, **patches):
