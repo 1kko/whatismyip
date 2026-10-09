@@ -85,6 +85,13 @@
             <li><strong>{{ subdomain_host }}</strong>: the domain, and only when you ask for its
                 subdomains.</li>
             {% endif %}
+            {% if abuseipdb_enabled %}
+            <li><strong>api.abuseipdb.com</strong> (AbuseIPDB, in the United States): an IP address
+                you look up directly, to read how often it has been reported for abuse. Never
+                your own address on the home page, and never the address a domain resolves to.
+                Each answer is kept in memory for {{ abuseipdb_cache }}, so an address is asked
+                about at most once in that time.</li>
+            {% endif %}
         </ul>
         <p>The server also downloads files that carry nothing about you: the GeoLite2 databases
             (from {{ geoip_hosts | join(", ") }}), the Public Suffix List ({{ psl_host }}) and

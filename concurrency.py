@@ -9,12 +9,13 @@ LOOKUP_GATE_WAIT_SECONDS for one, then gets LookupBusy, which main.py answers
 with a 503 and mcp_server.py with {"error": ...}.
 
 The pools. asyncio.to_thread runs on the event loop's default executor,
-min(32, cpus + 4) threads shared by every leg. RDAP, port-43 WHOIS and crt.sh
-are the slow ones, seconds to tens of seconds, and the wait_for that gives up on
-one cannot stop its thread, so a pile-up of them filled that executor and
-queued the DNS and TLS legs of every other lookup behind them. They now run on
-pools of their own: a backlog of slow legs waits behind itself, and the default
-executor is left to the DNS and TLS legs, each bounded by its own timeout.
+min(32, cpus + 4) threads shared by every leg. RDAP, port-43 WHOIS, crt.sh and
+AbuseIPDB are the slow ones, seconds to tens of seconds, and the wait_for that
+gives up on one cannot stop its thread, so a pile-up of them filled that
+executor and queued the DNS and TLS legs of every other lookup behind them.
+They now run on pools of their own: a backlog of slow legs waits behind itself,
+and the default executor is left to the DNS and TLS legs, each bounded by its
+own timeout.
 
 subdomains.py uses the crt.sh pool, and must not import lookup or main, so this
 module imports nothing app-local but config.
@@ -28,6 +29,7 @@ import logging
 from concurrent.futures import Executor, ThreadPoolExecutor
 
 from config import (
+    ABUSEIPDB_WORKERS,
     LOOKUP_CONCURRENCY,
     LOOKUP_GATE_WAIT_SECONDS,
     REGISTRATION_WORKERS,
@@ -45,6 +47,11 @@ registration_pool = ThreadPoolExecutor(
 # SUBDOMAIN_TIMEOUT_SECONDS; the pool still caps the connections.
 subdomain_pool = ThreadPoolExecutor(
     max_workers=SUBDOMAIN_MAX_CONCURRENT, thread_name_prefix="crtsh"
+)
+# AbuseIPDB checks (abuseipdb.py): one HTTPS request each, bounded by
+# ABUSEIPDB_TIMEOUT_SECONDS, made only for an address looked up directly.
+abuseipdb_pool = ThreadPoolExecutor(
+    max_workers=ABUSEIPDB_WORKERS, thread_name_prefix="abuseipdb"
 )
 
 

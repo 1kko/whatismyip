@@ -307,7 +307,7 @@
                     <table class="records">
                         <tbody>
                         {% for row in view.reputation.rows %}
-                        <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{{ row.value }}</td></tr>
+                        <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{{ row.value }}{% if row.href %} · <a href="{{ row.href }}" rel="noopener noreferrer">reports</a>{% endif %}</td></tr>
                         {% endfor %}
                         </tbody>
                     </table>

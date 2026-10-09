@@ -22,6 +22,10 @@ os.environ["BACKGROUND_REFRESH_ENABLED"] = "false"
 # are exactly what they were before the feature; test_reputation.py builds
 # enabled managers over synthetic lists of its own.
 os.environ["REPUTATION_ENABLED"] = "false"
+# A developer's .env may hold a real AbuseIPDB key, and load_dotenv() never
+# overrides a variable already set: empty, no test spends its quota.
+# test_abuseipdb.py builds enabled clients over a fake transport.
+os.environ["ABUSEIPDB_API_KEY"] = ""
 
 import sys  # noqa: E402  (must follow the env vars above)
 

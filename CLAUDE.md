@@ -121,8 +121,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   so it stays free of FastAPI. `gather(legs=)` runs only the named legs
   (`LEGS`); the default (None) runs them all, and the page, the full JSON and
   MCP all use the default. Builds the manager singletons (`geo_ip_manager`,
-  `tld_names_manager`, `domain_manager`, `reputation_manager`) at import, which
-  reads `data/` but makes no network call. The self page (`GET /`) does not use
+  `tld_names_manager`, `domain_manager`, `reputation_manager`,
+  `abuseipdb_client`) at import, which reads `data/` but makes no network call.
+  `abuse_report` asks AbuseIPDB, from `_run_legs` and only for an IP target. The self page (`GET /`) does not use
   `gather()`: `main._self_lookup` runs its legs.
 - `concurrency.py`: the lookup gate and the slow-leg thread pools. At most
   `LOOKUP_CONCURRENCY` lookups run at once: `gather()` holds a slot for its
@@ -130,8 +131,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   smaller gate of their own, so they never hold more than
   `MCP_LOOKUP_CONCURRENCY` of the global slots. A full gate is `LookupBusy` —
   a `503` with `Retry-After` over HTTP, never a ban. RDAP/WHOIS
-  (`registration_pool`) and crt.sh (`subdomain_pool`) run on their own pools,
-  not the default executor; GeoIP runs inline. Imports only `config`, so
+  (`registration_pool`), crt.sh (`subdomain_pool`) and AbuseIPDB
+  (`abuseipdb_pool`) run on their own pools, not the default executor; GeoIP
+  runs inline. Imports only `config`, so
   `subdomains.py` may use it.
 - `textfmt.py`: `?format=text` and `?fields=`. The field table (names are
   `mcp_server`'s compact_* shapes, flattened; each field lists the `gather()`
@@ -152,6 +154,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `data/reputation/` (gitignored) the way `TldNamesManager` keeps the suffix
   list, and answers `check(ip, asn)` from sorted intervals in memory. Imports
   only `config` and the standard library; `lookup.py` builds the singleton.
+- `abuseipdb.py`: AbuseIPDB's abuse confidence score and report counts for an
+  address, the one reputation source asked per lookup (`AbuseIPDBClient`, with
+  a per-address cache and the daily quota), and `merge()`, which adds its
+  answer to a `check()` result. Off without `ABUSEIPDB_API_KEY`. Imports
+  `config`, `reputation` and the standard library; `lookup.py` builds the
+  client.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
   Streamable HTTP, stateless). Five tools: `lookup`, `dns_records` and
   `ssl_certificate` over `lookup.gather()`, `subdomains` over
@@ -223,7 +231,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 4. **Data Gathering** (`lookup._run_legs`, holding a `lookup_gate` slot): the
    registration lookup runs alongside everything else; a domain's DNS sweep and
    TLS handshake run concurrently; an IP gets its PTR, then a sweep of the PTR
-   name. GeoIP is read inline, and reputation from the lists in memory
+   name. GeoIP is read inline, and reputation from the lists in memory; an IP
+   target is also sent to AbuseIPDB, alongside the rest
 5. **Response Assembly**: `main.get_ip_info` builds a plain dict (`address`,
    `resolved_ip`, `resolution`, `datetime`, `domain`, `location`, `whois`,
    `ssl`, `headers`, `map`, `distance_km`, `origin`, `elapsed_ms`, plus
@@ -433,6 +442,7 @@ whatismyip/
 ├── subdomains.py        # crt.sh adapter, normalization, cache-fill orchestration
 ├── subdomain_store.py   # SQLite cache for subdomains.py (data/subdomains.sqlite3)
 ├── reputation.py        # IP reputation lists (data/reputation/), bisect lookups
+├── abuseipdb.py         # AbuseIPDB score for a directly looked-up IP: cache, daily quota
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
@@ -588,6 +598,22 @@ test sees the responses it always did. `tests/test_reputation.py` builds enabled
 managers over synthetic lists and monkeypatches `lookup.reputation_manager` (and
 `main.reputation_manager` for `/healthz`).
 
+**AbuseIPDB is the exception: a request per address.** With
+`ABUSEIPDB_API_KEY` set, `lookup._run_legs` sends an IP target to AbuseIPDB
+(`abuseipdb.py`) alongside the other legs. Only a target given as an IP: never
+the address a domain resolves to, and never the visitor's own (`_self_lookup`
+and `whoami_caller` call `ip_reputation()`, which has no AbuseIPDB part), since
+that would hand every visitor's address to a third party unasked. Keep it that
+way. The free plan allows 1,000 checks a UTC day, so an answer is cached a day
+per address and no request goes out past `ABUSEIPDB_DAILY_LIMIT` or after
+AbuseIPDB reports the quota spent (`X-RateLimit-Remaining: 0`, `429`) until its
+reset. Never ask for `verbose`: the reports' comments are other users' free
+text. The score is the signal's weight, so it grades on the same bands as the
+lists; a score of 0 is `checked`, not a signal, and a failure is in
+`unavailable`. `tests/conftest.py` empties `ABUSEIPDB_API_KEY`, so a key in a
+developer's `.env` never reaches a test; `tests/test_abuseipdb.py` builds
+enabled clients over a fake transport.
+
 ### Dependencies
 
 **Runtime** (`pyproject.toml`):
@@ -645,8 +671,9 @@ Every test runs on FastAPI's `TestClient`; most use one module-level client,
 which never runs the lifespan, and the MCP tests use `with TestClient(app)`,
 which does. `tests/conftest.py` sets the environment before any test module
 imports `main`: `BACKGROUND_REFRESH_ENABLED=false` (no lifespan starts the
-scheduler or downloads anything), `REPUTATION_ENABLED=false`, the admin key, the
-trusted proxies, and ban/geo-rule files under `/tmp`. Its `reset_security_state`
+scheduler or downloads anything), `REPUTATION_ENABLED=false`, an empty
+`ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo-rule files
+under `/tmp`. Its `reset_security_state`
 fixture (autouse) clears the rate limiter and ban list around every test.
 
 The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
@@ -707,7 +734,8 @@ Test files:
   (RDAP/WHOIS cost, no port-43 for an IP), `test_concurrency_gate.py` (gate
   503s, what takes no slot, pool isolation), `test_subdomain_targets.py`
   (which targets may reach crt.sh), `test_reputation.py` (list parsers,
-  intervals, grade, download guard, surfaces)
+  intervals, grade, download guard, surfaces), `test_abuseipdb.py` (cache,
+  quota, failures, which lookups ask, surfaces)
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding
   guards, the admin key, bans, rate limiting, geo-blocking, the probe detector
   and whitelist, per-IP rules, response headers, log injection), `test_ssrf.py`
