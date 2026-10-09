@@ -828,7 +828,7 @@ async def security_headers_middleware(request: Request, call_next):
     # both and keep neither. Matched on the endpoint that handled the request,
     # errors included, not on the path: /{domain_ip} is a catch-all, so no
     # path test tells it apart from /healthz.
-    if request.scope.get("endpoint") in (get_self_info, get_ip_info):
+    if request.scope.get("endpoint") in (get_self_info, get_ip_info, head_lookup):
         response.headers.add_vary_header("Accept")
         response.headers.add_vary_header("User-Agent")
         response.headers["Cache-Control"] = "no-store"
@@ -910,9 +910,9 @@ async def head_lookup(request: Request):
     HEAD is what uptime monitors and link checkers send, and it only asks
     whether the page is there. Running WHOIS, DNS and TLS for a body that is
     then thrown away would make the cheapest request the most expensive one.
-    So the answer is 200 with the Content-Type GET would pick for this
-    user-agent; whether this particular target would get a 400 is not checked,
-    since finding out takes the lookup this exists to skip.
+    So the answer is 200 with the Content-Type GET would negotiate; whether
+    this particular target would get a 400 is not checked, since finding out
+    takes the lookup this exists to skip.
 
     This is a route, not a middleware, so it runs after the security
     middleware like everything else: a banned or geo-blocked address still
@@ -920,8 +920,10 @@ async def head_lookup(request: Request):
     against the lookup rate limit. Routing also decides what is a lookup, so
     /healthz, /robots.txt and /mcp keep their own handling.
     """
-    is_browser = BrowserDetector.is_browser(request.headers.get("user-agent", ""))
-    response = Response(media_type="text/html" if is_browser else "application/json")
+    # Same negotiation as GET, so a bad ?format= is the same 400. "text"
+    # answers as JSON for now, as it does on GET.
+    fmt = negotiate(request)
+    response = Response(media_type="text/html" if fmt == "html" else "application/json")
     # A HEAD response may carry Content-Length only if it equals what GET would
     # send (RFC 9110 8.6). Starlette sets 0 for the empty body, and the real
     # length is unknown without the lookup, so the header goes.

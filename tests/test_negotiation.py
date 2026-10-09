@@ -344,6 +344,21 @@ class TestCacheHeaders:
             )
         assert response.headers["cache-control"] == "no-store"
 
+    @pytest.mark.parametrize("path", ROUTES)
+    def test_head_negotiates_like_get_and_carries_them(self, path):
+        """HEAD skips the lookup but must still describe what GET would send."""
+        with mocked_lookups() as mocks:
+            response = client.head(
+                path, headers={"user-agent": CHROME, "accept": "application/json"}
+            )
+            bad = client.head(f"{path}?format=xml", headers={"user-agent": CURL})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/json")
+        assert {"accept", "user-agent"} <= _vary(response)
+        assert response.headers["cache-control"] == "no-store"
+        assert bad.status_code == 400
+        assert all(not m.called for m in mocks.values())
+
     def test_other_routes_are_left_alone(self):
         """Matched on the route, not a path prefix: /healthz is not a lookup."""
         response = client.get("/healthz", headers={"user-agent": CURL})
