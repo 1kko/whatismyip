@@ -100,7 +100,7 @@
 
         <section class="facts">
             {% for column in view.facts %}
-            <div class="facts__col">
+            <div class="facts__col"{% if column.id %} id="facts-{{ column.id }}"{% endif %}>
                 <h2 class="facts__title">{{ column.title }}</h2>
                 {% for row in column.rows %}
                 <div class="kv">
@@ -288,6 +288,16 @@
                         {% endfor %}
                         </tbody>
                     </table>
+                    {% elif item.id == 'whois' and view.whois_pending %}
+                    {# The page went out before the registry answered. static/js/app.js
+                       replaces this with the record from /?whois=only; without
+                       JavaScript, a reload a few seconds on finds it cached. #}
+                    <div id="whois-pending">
+                        <p class="api-note" id="whois-status" role="status">Waiting for the registry to answer…</p>
+                        <noscript>
+                            <p class="api-note">The lookup carries on after the page is sent. <a href="/">Reload</a> in a few seconds to see it.</p>
+                        </noscript>
+                    </div>
                     {% else %}
                     <table class="records">
                         <tbody>

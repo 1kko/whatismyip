@@ -30,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
 from rdap import rdap_breaker, refresh_rdap_bootstrap
-from viewmodel import build_view, dns_failure_text, whois_display
+from viewmodel import build_view, dns_failure_text, whois_display, whois_fill
 from concurrency import LookupBusy, lookup_gate
 from config import (
     APP_VERSION,
@@ -53,6 +53,7 @@ from config import (
     PUBLIC_BASE_URL,
     PUBLIC_RESOLVERS,
     RATE_LIMIT_CLEANUP_INTERVAL,
+    SELF_WHOIS_SOFT_DEADLINE_SECONDS,
     SITE_DOMAIN_FALLBACK,
     SUBDOMAIN_CACHE_TTL,
     SUBDOMAIN_ENABLED,
@@ -75,6 +76,7 @@ from models import GeoRulesUpdate
 from lookup import (
     InvalidTargetError,
     PrivateAddressError,
+    cached_whois,
     classify_target,
     domain_manager,
     gather,
@@ -1375,23 +1377,86 @@ async def _self_fields(client_ip: str, names: list[str]) -> dict:
         }
 
 
-async def _self_lookup(client_ip: str) -> tuple[dict, dict, dict]:
+# The registration lookups of visitors' own addresses that are still running,
+# one per address. A browser's self page can go out before its lookup has
+# answered (see _self_lookup); the lookup carries on and fills the cache, and
+# until it ends /?whois=only and a reload join it here instead of asking the
+# registry again. This is also the task's strong reference. The event loop
+# keeps only a weak one, so a task nothing else refers to can be collected
+# before it finishes ("Task was destroyed but it is pending"). An entry is
+# dropped as its task finishes, and lookup_whois gives an address at most
+# RDAP_TIMEOUT_SECONDS, so the dict never holds more than the addresses with a
+# lookup in flight.
+_self_whois_tasks: dict[str, asyncio.Task] = {}
+
+# The registration of a private or reserved visitor address: an error, not {}
+# or "not registered". Nothing was asked, and the page should say so rather
+# than pass that off as an answer.
+_SELF_WHOIS_NOT_ASKED = "Not looked up: private or reserved address"
+
+
+async def _self_registration(client_ip: str, slot: contextlib.AsyncExitStack) -> dict:
+    """lookup_whois, as _self_whois_task runs it. `slot` starts empty. A page
+    that goes out before this answers moves its slot at the lookup gate in
+    here, so the slot comes back when the lookup ends, not when the page did."""
+    try:
+        return await lookup_whois(client_ip)
+    finally:
+        await slot.aclose()
+
+
+def _self_whois_task(
+    client_ip: str,
+) -> tuple[asyncio.Task, contextlib.AsyncExitStack | None]:
+    """The registration lookup of the visitor's own address: the one already in
+    flight for it, or a new one. A new one comes with the stack its starter can
+    hand a gate slot to (see _self_registration). A caller that joins one gets
+    None: whoever started the lookup accounts for it at the gate."""
+    task = _self_whois_tasks.get(client_ip)
+    if task is not None:
+        return task, None
+    slot = contextlib.AsyncExitStack()
+    task = asyncio.create_task(_self_registration(client_ip, slot))
+    _self_whois_tasks[client_ip] = task
+
+    def forget(done: asyncio.Task) -> None:
+        if _self_whois_tasks.get(client_ip) is done:
+            del _self_whois_tasks[client_ip]
+
+    task.add_done_callback(forget)
+    return task, slot
+
+
+async def _self_lookup(
+    client_ip: str, whois_deadline: float | None = None
+) -> tuple[dict, dict, dict | None]:
     """get_self_info's lookups: the visitor's location (with its PTR name), the
     record sweep of that name, and the registration of the address. They run
     while a slot at the lookup gate is held, as gather()'s legs do; LookupBusy
-    when none comes free."""
+    when none comes free.
+
+    The registration is waited for unless `whois_deadline` is given. Then it
+    gets that many seconds from its start, and if it has not answered by the
+    time everything else has, the registration comes back None and the lookup
+    is left running (see _self_whois_tasks). It keeps this lookup's gate slot
+    until it ends: the gate counts lookups, not responses, so a burst of slow
+    self pages is admitted exactly as it was when each one waited.
+    """
     # A private or reserved client address -- a dev server with no proxy in
     # front, or a proxy this server was not told to trust -- has no public
     # registration and no PTR a public resolver would know, so neither is
     # asked for. GeoIP is a local database and still runs.
     public_client = is_safe_ip(client_ip)
 
-    async with lookup_gate.slot():
+    async with contextlib.AsyncExitStack() as held:
+        await held.enter_async_context(lookup_gate.slot())
         # WHOIS is the slow one (seconds); it has nothing to do with GeoIP or
         # the reverse lookup, so none of these wait on each other.
-        whois_task = (
-            asyncio.create_task(lookup_whois(client_ip)) if public_client else None
+        whois_task, whois_slot = (
+            _self_whois_task(client_ip) if public_client else (None, None)
         )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         location_task = asyncio.create_task(lookup_location(client_ip))
         reverse_task = (
             asyncio.create_task(
@@ -1413,14 +1478,49 @@ async def _self_lookup(client_ip: str) -> tuple[dict, dict, dict]:
             if reverse_dns_hostname
             else {}
         )
-        # An error, not {} or "not registered": nothing was asked, and the page
-        # should say so rather than pass that off as an answer.
-        whois_data = (
-            await whois_task
-            if whois_task
-            else {"error": "Not looked up: private or reserved address"}
-        )
+        if whois_task is None:
+            whois_data = {"error": _SELF_WHOIS_NOT_ASKED}
+        elif whois_deadline is None:
+            # Shielded, here and wherever else it is awaited: the lookup may be
+            # shared, and a client hanging up must not cancel the one another
+            # request is still waiting on.
+            whois_data = await asyncio.shield(whois_task)
+        else:
+            remaining = started + whois_deadline - loop.time()
+            await asyncio.wait({whois_task}, timeout=max(remaining, 0.0))
+            if whois_task.done():
+                whois_data = whois_task.result()
+            else:
+                whois_data = None
+                # No await between the done() check and this, so the task has
+                # not reached its `finally` and will close what it is handed.
+                if whois_slot is not None:
+                    whois_slot.push_async_exit(held.pop_all())
     return ip_data, domain_records, whois_data
+
+
+async def _self_whois_only(client_ip: str) -> dict:
+    """/?whois=only: the registration of the visitor's own address, which a self
+    page sent before it had one fills itself in from (static/js/app.js).
+
+    It joins the lookup that page left running, or reads the cache that lookup
+    filled. Neither starts any outbound work, so neither takes a slot at the
+    lookup gate: the running lookup is already counted there, by the slot the
+    page handed it. Only with neither to go on -- the cached answer expired, or
+    a client asked without loading the page -- does it start a lookup of its
+    own, and that takes a slot like any other; LookupBusy when none comes free.
+    """
+    if not is_safe_ip(client_ip):
+        return {"error": _SELF_WHOIS_NOT_ASKED}
+    task = _self_whois_tasks.get(client_ip)
+    if task is not None:
+        return await asyncio.shield(task)
+    cached = cached_whois(client_ip)
+    if cached is not None:
+        return cached
+    async with lookup_gate.slot():
+        task, _ = _self_whois_task(client_ip)
+        return await asyncio.shield(task)
 
 
 async def _target_fields(target: str, names: list[str] | None, fmt: str):
@@ -1494,6 +1594,13 @@ async def get_self_info(request: Request):
         names = parse_fields(request.query_params.getlist("fields"))
     except InvalidFieldError as exc:
         return _invalid_field(exc, fmt)
+    # As with ?subdomains=, a value the server does not understand is refused
+    # rather than answered as though it were understood.
+    whois_only = request.query_params.get("whois")
+    if whois_only is not None and whois_only.lower() != "only":
+        if fmt == "text":
+            return _text_error("whois must be: only")
+        raise HTTPException(status_code=400, detail="whois must be: only")
     started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
@@ -1501,8 +1608,27 @@ async def get_self_info(request: Request):
     )
     client_ip = get_client_ip(request)
     sanitized_ip = sanitize_log_input(client_ip)
-    logging.info("client=%s lookup=%s (self)", sanitized_ip, sanitized_ip)
+    logging.info(
+        "client=%s lookup=%s (%s)",
+        sanitized_ip,
+        sanitized_ip,
+        "self, whois only" if whois_only is not None else "self",
+    )
 
+    if whois_only is not None:
+        # The page's fill-in for a registration it went out without. Always
+        # JSON, whatever was negotiated, like ?subdomains=only: there is no
+        # page to render for it. `display` is the same record as the page
+        # words it, so app.js only places text.
+        try:
+            whois_data = await _self_whois_only(client_ip)
+        except LookupBusy:
+            return _busy(request, "json")
+        return {
+            "address": client_ip,
+            "whois": whois_data,
+            "display": whois_fill(whois_data),
+        }
     if names is not None:
         try:
             data = await _self_fields(client_ip, names)
@@ -1517,7 +1643,13 @@ async def get_self_info(request: Request):
         return PlainTextResponse(client_ip + "\n")
 
     try:
-        ip_data, domain_records, whois_data = await _self_lookup(client_ip)
+        ip_data, domain_records, whois_data = await _self_lookup(
+            client_ip,
+            # Only the page goes out without the registration: it can fill the
+            # rest in. A JSON client reads the answer once, so it gets all of
+            # it, as it always has.
+            whois_deadline=SELF_WHOIS_SOFT_DEADLINE_SECONDS if fmt == "html" else None,
+        )
     except LookupBusy:
         return _busy(request, fmt)
 
@@ -1532,7 +1664,9 @@ async def get_self_info(request: Request):
         "datetime": datetime.datetime.now(tz=datetime.timezone.utc),
         "domain": domain_records,
         "location": ip_data,
-        "whois": whois_data,
+        # None only for the page, which renders it loading (see whois_pending
+        # in viewmodel.py) and fills it in from /?whois=only.
+        "whois": whois_data if whois_data is not None else {"pending": True},
         "ssl": None,
         "headers": request_headers,
         "map": map_payload,

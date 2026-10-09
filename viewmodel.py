@@ -20,6 +20,11 @@ from config import SUBDOMAIN_ENABLED
 NOT_REGISTERED = "not registered"
 
 DASH = "—"
+# The self page's registration while it is still being looked up: main.py
+# sends the page before a slow RDAP answer and app.js fills it in from
+# /?whois=only. It is neither an answer nor a failure, so it reads as neither.
+LOADING = "loading…"
+PENDING_VALUE = "…"
 
 # The self page describes whoever opens it, so its <title> and link-preview
 # text are fixed. A preview card is built from the <head>, and a shared link to
@@ -431,11 +436,34 @@ def _reverse_column(location: dict, domain: dict, address: str) -> dict:
     }
 
 
+_WHOIS_COLUMN_ROWS = (
+    ("network", "Network"),
+    ("rir", "RIR"),
+    ("abuse_email", "Abuse"),
+    ("updated", "Updated"),
+)
+
+
+def whois_pending(whois_data: dict | None) -> bool:
+    """Whether the page went out before its registration lookup answered (see
+    _self_lookup in main.py)."""
+    return bool(whois_data) and whois_data.get("pending") is True
+
+
 def _whois_column(whois_data: dict | None) -> dict:
     # Registration data only. This takes no GeoIP `location` on purpose: the
     # column used to fill Netblock and Country from GeoIP, which made a column
     # titled WHOIS disagree with the WHOIS accordion below it. GeoIP values
     # live in the NETWORK column and the GeoIP accordion.
+    #
+    # The id is how app.js finds the column to fill a pending one.
+    if whois_pending(whois_data):
+        rows = [{"label": "Status", "value": LOADING, "tone": "muted"}]
+        rows += [
+            {"label": label, "value": PENDING_VALUE, "tone": "muted"}
+            for _, label in _WHOIS_COLUMN_ROWS
+        ]
+        return {"title": "WHOIS", "id": "whois", "rows": rows}
     whois_data = whois_data or {}
     error = whois_data.get("error")
     # Three states, not two. "not registered" is an answer -- the registry was
@@ -451,12 +479,7 @@ def _whois_column(whois_data: dict | None) -> dict:
     # usable record to draw values from, and there isn't in either failing case.
     no_record = bool(error) or not whois_data
     rows = [{"label": "Status", "value": status, "tone": tone}]
-    for key, label in (
-        ("network", "Network"),
-        ("rir", "RIR"),
-        ("abuse_email", "Abuse"),
-        ("updated", "Updated"),
-    ):
+    for key, label in _WHOIS_COLUMN_ROWS:
         # Same renderer as the accordion, so a value reads identically in both.
         value = DASH if no_record else _whois_value(key, whois_data.get(key))
         rows.append(
@@ -466,7 +489,7 @@ def _whois_column(whois_data: dict | None) -> dict:
                 "tone": "muted" if value == DASH else "default",
             }
         )
-    return {"title": "WHOIS", "rows": rows}
+    return {"title": "WHOIS", "id": "whois", "rows": rows}
 
 
 def _certificate_column(ssl_data: dict | None) -> dict:
@@ -680,26 +703,43 @@ def geoip_rows(location: dict | None) -> list[dict]:
     ]
 
 
+def _whois_hint(whois_data: dict | None) -> str:
+    whois_data = whois_data or {}
+    if whois_pending(whois_data):
+        return LOADING
+    whois_error = whois_data.get("error")
+    if whois_error == NOT_REGISTERED:
+        return "not registered"
+    if whois_error or not whois_data:
+        return "lookup failed"
+    who = whois_data.get("registrar") or whois_data.get("registrant") or "registry data"
+    created = _year(whois_data.get("created"))
+    expires = _year(whois_data.get("expires"))
+    span = f" · {created} → {expires}" if created and expires else ""
+    return f"{who}{span}"
+
+
+def whois_fill(whois_data: dict | None) -> dict:
+    """What a self page sent with its registration still loading needs in
+    order to show it: the WHOIS accordion's hint, the WHOIS column's rows and
+    the accordion's rows, worded exactly as a page that waited has them.
+    /?whois=only carries this beside the record, so app.js only writes text
+    into the page and never words a registration itself."""
+    return {
+        "hint": _whois_hint(whois_data),
+        "column": _whois_column(whois_data)["rows"],
+        "rows": [
+            {"label": label, "value": value}
+            for label, value in whois_display(whois_data).items()
+        ],
+    }
+
+
 def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
-    whois_data = response.get("whois") or {}
     domain = response.get("domain") or {}
     headers = response.get("headers") or {}
 
-    whois_error = whois_data.get("error")
-    if whois_error == NOT_REGISTERED:
-        whois_hint = "not registered"
-    elif whois_error or not whois_data:
-        whois_hint = "lookup failed"
-    else:
-        who = (
-            whois_data.get("registrar")
-            or whois_data.get("registrant")
-            or "registry data"
-        )
-        created = _year(whois_data.get("created"))
-        expires = _year(whois_data.get("expires"))
-        span = f" · {created} → {expires}" if created and expires else ""
-        whois_hint = f"{who}{span}"
+    whois_hint = _whois_hint(response.get("whois"))
 
     dns_hint = (
         "does not resolve"
@@ -828,6 +868,7 @@ def build_view(
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
         "dns_banner": dns_banner(domain),
+        "whois_pending": whois_pending(response.get("whois")),
         "accordions": _accordions(response, subdomains_enabled),
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         "geoip_rows": geoip_rows(location),

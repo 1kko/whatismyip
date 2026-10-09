@@ -288,8 +288,9 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 ```
 
 Timeouts and cache TTLs (`RDAP_TIMEOUT_SECONDS`, `WHOIS_TIMEOUT_SECONDS`,
-`WHOIS_CACHE_TTL`, `DNS_QUERY_TIMEOUT`, …) are tunable through the same
-mechanism — see `config.py`. So are the concurrency limits: `LOOKUP_CONCURRENCY`
+`SELF_WHOIS_SOFT_DEADLINE_SECONDS`, `WHOIS_CACHE_TTL`, `DNS_QUERY_TIMEOUT`, …)
+are tunable through the same mechanism — see `config.py`. So are the
+concurrency limits: `LOOKUP_CONCURRENCY`
 (lookups at once, default 16), `LOOKUP_GATE_WAIT_SECONDS`,
 `LOOKUP_BUSY_RETRY_AFTER_SECONDS`, `MCP_LOOKUP_CONCURRENCY`, and
 `REGISTRATION_WORKERS` (threads for RDAP and port-43 WHOIS, default 8).
@@ -305,6 +306,17 @@ Information about the caller's own IP address, as HTML or JSON (see
 [Response format](#response-format)). When the caller's address is private or
 reserved (a development server with no proxy in front), RDAP/WHOIS and reverse
 DNS are not queried; `whois` carries an `error` saying so.
+
+The page does not wait for a slow registry. A browser gets it once the
+registration lookup has answered or `SELF_WHOIS_SOFT_DEADLINE_SECONDS` (1.5)
+have passed, whichever is first; in the second case the WHOIS column and panel
+say "loading…" and the page fills them in from `GET /?whois=only`. That answers
+JSON whatever the client, `{"address", "whois", "display"}`, where `display` is
+the record as the page words it. It joins the lookup the page left running, or
+reads the cache that lookup filled, and asks the registry itself only when
+there is neither. It is a lookup like any other for the rate limit, so a slow
+page view counts twice. JSON, `?format=text` and `?fields=` answers on `/` are
+unchanged: they wait for the record.
 
 ### `GET /{domain_or_ip}`
 
