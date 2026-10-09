@@ -25,7 +25,7 @@ import dns.reversename
 import maxminddb
 from geoip2fast import GeoIP2Fast
 from tld import exceptions as tld_exceptions
-from tld import get_tld
+from tld import get_fld, get_tld
 
 from tld import defaults as tld_defaults
 from tld.conf import set_setting as set_tld_setting
@@ -560,16 +560,54 @@ class DomainManager:
         except (tld_exceptions.TldDomainNotFound, tld_exceptions.TldBadUrl):
             return False
 
-    def remove_subdomains(self, domain: str) -> str:
-        # remove subdomains
-        return ".".join(domain.split(".")[-2:])
+    def zone_apex(self, domain: str) -> str:
+        """The apex of the DNS zone that serves `domain`: where its NS live, and
+        the MX and SPF it falls back to.
+
+        Counting labels cannot find it -- keeping the last two turned
+        naver.co.kr into co.kr, whose NS are the registry's and whose MX is
+        empty, which reads as "this domain has no mail server". DNS knows: one
+        SOA query usually answers, because a name below an apex comes back with
+        the apex's SOA in the authority section. The walk up the labels gets
+        one query's budget in total, not one per label.
+
+        The registrable domain is a floor. A name that does not exist comes back
+        NXDOMAIN with the registry's SOA, which is true of the DNS tree but
+        would list co.kr's nameservers as the name's own. It is also the
+        fallback when DNS cannot answer. ICANN suffixes only: a private one
+        (github.io) is a real operator's zone, not a registry's.
+        """
+        floor = (
+            get_fld(domain, fail_silently=True, fix_protocol=True, search_private=False)
+            or domain
+        )
+        try:
+            zone = dns.resolver.zone_for_name(
+                domain, resolver=_recursive_resolver(), lifetime=DNS_QUERY_LIFETIME
+            )
+        except Exception as e:
+            # %r: the name may be user input, and repr escapes control chars.
+            logging.debug("Zone lookup failed for %r: %s", domain, e)
+            return floor
+        zone = zone.to_text(omit_final_dot=True).lower()
+        if zone == floor or zone.endswith("." + floor):
+            return zone
+        return floor
 
     def get_records(
         self, domain: str, ns_servers: list | None = None, ip: str | None = None
     ) -> dict:
         # ns_servers is kept for signature compatibility but unused: every query
         # now goes to the cached public resolvers (see _recursive_resolver).
+        # A PTR target arrives as DNS text, trailing dot and all ('dns.google.').
+        domain = domain.rstrip(".").lower()
+        # NS, the MX fallback and the zone's SPF all hang off the zone, so it
+        # is found once, up front. Running it alongside the sweep would not end
+        # it any sooner: the NS chain (zone, NS, host A) is the long pole anyway.
+        base_domain = self.zone_apex(domain)
         records = {
+            "queried_name": domain,
+            "zone": base_domain,
             "mx": [],
             "ns": [],
             "cname": None,
@@ -578,7 +616,6 @@ class DomainManager:
             "ptr": [],
             "a": [],
         }
-        base_domain = self.remove_subdomains(domain)
 
         def fetch_ns() -> list:
             try:
@@ -597,18 +634,32 @@ class DomainManager:
                 return []
             return [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer]
 
+        def mx_answer():
+            """The queried name's own MX; failing that, the zone's, and whose."""
+            try:
+                return _recursive_resolver().resolve(domain, "MX"), None
+            except dns.resolver.NoAnswer:
+                # The name exists but has no MX of its own, so mail looks to the
+                # zone -- labelled, so it is never read as this name's own.
+                if base_domain == domain:
+                    raise
+            return _recursive_resolver().resolve(base_domain, "MX"), base_domain
+
         def fetch_mx() -> list:
             try:
-                answer = _recursive_resolver().resolve(base_domain, "MX")
+                answer, from_zone = mx_answer()
             except Exception:
                 return []
-            rows = list(answer)
+            # Most-preferred first, so when _with_host_ips stops resolving at
+            # its limit, the hosts it skipped are the ones mail tries last.
+            rows = sorted(answer, key=lambda r: r.preference)
             return _with_host_ips(
                 [
                     {
                         "preference": r.preference,
                         "hostname": r.exchange.to_text(),
                         "ttl": answer.rrset.ttl,
+                        **({"from_zone": from_zone} if from_zone else {}),
                     }
                     for r in rows
                 ]
