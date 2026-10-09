@@ -149,7 +149,7 @@ poetry run ruff format .
   `(timed out)`-style text and an NXDOMAIN banner; MCP `dns_records` returns
   `{"error": status}` for a failed type. The MX status is the zone's when the
   name fell back to the zone's MX
-- SSL certificate failures return `None` without breaking response
+- An untrusted TLS certificate is still returned, with `trusted: false` and `verify_error`; an unreachable port 443 or failed handshake is `{"error", "reason"}`; `None` only when no handshake was attempted
 
 **Logging** (main.py:32-51):
 - Console and file logging (service.log)

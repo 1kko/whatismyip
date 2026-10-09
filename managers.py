@@ -24,6 +24,8 @@ import dns.exception
 import dns.resolver
 import dns.reversename
 import maxminddb
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 from geoip2fast import GeoIP2Fast
 from tld import exceptions as tld_exceptions
 from tld import get_fld, get_tld
@@ -826,44 +828,266 @@ class DomainManager:
             return None
 
 
+# X509_V_ERR_* codes as OpenSSL reports them on SSLCertVerificationError,
+# folded into the reasons a reader actually asks about. Any other code keeps
+# its number and OpenSSL's message under "other".
+_VERIFY_REASONS = {
+    2: "chain_incomplete",  # unable to get issuer certificate
+    9: "not_yet_valid",
+    10: "expired",
+    18: "self_signed",
+    19: "untrusted_root",  # self-signed certificate in certificate chain
+    # "unable to get local issuer certificate": the server left an intermediate
+    # out (kaia.org), or its root is a private CA it never sends.
+    20: "chain_incomplete",
+    21: "chain_incomplete",  # unable to verify the first certificate
+    62: "hostname_mismatch",
+}
+
+# getpeercert() keys subject and issuer attributes by OpenSSL's long names.
+_NAME_KEYS = {
+    NameOID.COUNTRY_NAME: "countryName",
+    NameOID.STATE_OR_PROVINCE_NAME: "stateOrProvinceName",
+    NameOID.LOCALITY_NAME: "localityName",
+    NameOID.ORGANIZATION_NAME: "organizationName",
+    NameOID.ORGANIZATIONAL_UNIT_NAME: "organizationalUnitName",
+    NameOID.COMMON_NAME: "commonName",
+    NameOID.SERIAL_NUMBER: "serialNumber",
+    NameOID.BUSINESS_CATEGORY: "businessCategory",
+    NameOID.JURISDICTION_COUNTRY_NAME: "jurisdictionCountryName",
+    NameOID.EMAIL_ADDRESS: "emailAddress",
+}
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def _asn1_time(when: datetime) -> str:
+    # OpenSSL's print form, "Nov  9 23:22:58 2026 GMT". The month is spelled
+    # out here because strftime's %b follows the process locale.
+    return f"{_MONTHS[when.month - 1]} {when.day:2d} {when:%H:%M:%S} {when.year} GMT"
+
+
+def _rdns(name: x509.Name) -> tuple:
+    return tuple(
+        tuple(
+            (_NAME_KEYS.get(attr.oid, attr.oid.dotted_string), str(attr.value))
+            for attr in rdn
+        )
+        for rdn in name.rdns
+    )
+
+
+def _peercert_from_der(der: bytes) -> dict:
+    """getpeercert()'s dict, rebuilt from a DER certificate.
+
+    getpeercert() decodes only a certificate that verified; after a CERT_NONE
+    handshake it returns {}. Rebuilding the same shape keeps every reader
+    downstream (viewmodel, mcp_server) unaware of which handshake it came from.
+    """
+    cert = x509.load_der_x509_certificate(der)
+    serial = f"{cert.serial_number:X}"
+    peercert = {
+        "subject": _rdns(cert.subject),
+        "issuer": _rdns(cert.issuer),
+        "version": cert.version.value + 1,
+        # Whole bytes, upper case: how OpenSSL prints an ASN.1 INTEGER.
+        "serialNumber": serial.zfill(len(serial) + len(serial) % 2),
+        "notBefore": _asn1_time(cert.not_valid_before_utc),
+        "notAfter": _asn1_time(cert.not_valid_after_utc),
+    }
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+    except (x509.ExtensionNotFound, ValueError):  # ValueError: malformed extensions
+        return peercert
+    names = []
+    for entry in san.value:
+        if isinstance(entry, x509.DNSName):
+            names.append(("DNS", entry.value))
+        elif isinstance(entry, x509.IPAddress):
+            names.append(("IP Address", str(entry.value)))
+    if names:
+        peercert["subjectAltName"] = tuple(names)
+    return peercert
+
+
+def _hostname_matches(peercert: dict, hostname: str) -> bool:
+    """RFC 6125: whether the certificate names `hostname`. A wildcard covers
+    exactly one left-most label, and the CN counts only when there is no DNS
+    SAN, as in OpenSSL's own check. viewmodel._host_covered does the same for
+    display; restated rather than imported, since managers depend only on
+    config."""
+    host = hostname.lower().rstrip(".")
+    names = [v for kind, v in peercert.get("subjectAltName", ()) if kind == "DNS"]
+    if not names:
+        names = [
+            v
+            for rdn in peercert.get("subject", ())
+            for k, v in rdn
+            if k == "commonName"
+        ]
+    for name in (n.lower().rstrip(".") for n in names):
+        if name == host:
+            return True
+        if name.startswith("*."):
+            suffix = name[1:]  # ".example.com"
+            label = host[: -len(suffix)]
+            if host.endswith(suffix) and label and "." not in label:
+                return True
+    return False
+
+
+def _failure_reason(exc: OSError) -> str:
+    """A short phrase for why a connect or a handshake failed."""
+    if isinstance(exc, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(exc, TimeoutError):
+        return "timed out"
+    if isinstance(exc, ssl.SSLError) and exc.reason:
+        return exc.reason.lower().replace("_", " ")  # WRONG_VERSION_NUMBER
+    return str(exc.strerror or exc).lower()
+
+
 class SSLManager:
     @staticmethod
     def get_ssl_info(hostname: str, verified_ip: str | None = None) -> dict | None:
+        """The certificate `hostname` serves on port 443, and whether it is
+        trusted.
+
+        None only when no handshake was attempted. A certificate that fails
+        verification still comes back, parsed, with trusted=False and
+        verify_error saying why; a port that never answers, or a handshake
+        that never completes, comes back as {"error", "reason"}. All of these
+        used to be None, which the page and MCP could only call "no
+        certificate".
+        """
         # Connect only to the caller-verified IP. Falling back to hostname
         # would re-resolve DNS and reopen the rebinding window between an
         # earlier is_safe_ip() check and this socket connection.
         if not verified_ip:
             logging.debug("SSL lookup skipped for %s: no verified IP", str(hostname))
             return None
-        cert = None
         try:
-            ctx = ssl.create_default_context()
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-            sock = socket.socket()
-            sock.settimeout(TIMEOUT_SECONDS)
-            sock.connect((verified_ip, 443))
+            sock = SSLManager._connect(verified_ip)
+        except OSError as exc:
+            reason = _failure_reason(exc)
+            logging.info(
+                "TLS lookup for %s: port 443 unreachable: %s", hostname, reason
+            )
+            return {"error": "port 443 unreachable", "reason": reason}
+        try:
+            ctx = SSLManager._context(verify=True)
             with ctx.wrap_socket(sock, server_hostname=hostname) as s:
                 cert = s.getpeercert()
                 if not cert:
                     return None
-                # Enrich with connection-level details ("SSL type"): the
-                # negotiated TLS protocol and cipher. Must be read inside the
-                # with-block, before the socket closes.
-                cert = dict(cert)
-                cert["protocol"] = s.version()
-                negotiated = s.cipher()
-                if negotiated:
-                    cert["cipher"] = {
-                        "name": negotiated[0],
-                        "protocol": negotiated[1],
-                        "bits": negotiated[2],
-                    }
-            return cert
+                cert = {**cert, **SSLManager._session(s)}
+            return {
+                **cert,
+                "trusted": True,
+                "verify_error": None,
+                "hostname_match": True,
+            }
+        except ssl.SSLCertVerificationError as exc:
+            # The site's certificate is broken; nothing here is. INFO, not
+            # ERROR: kaia.org's missing intermediate used to log as an error.
+            logging.info(
+                "TLS lookup for %s: certificate not trusted: %s",
+                hostname,
+                exc.verify_message,
+            )
+            return SSLManager._untrusted(hostname, verified_ip, exc)
+        except OSError as exc:
+            # Port 443 answered but no TLS session came of it: plain HTTP on
+            # 443, nothing newer than TLS 1.1, a reset, a stalled handshake.
+            reason = _failure_reason(exc)
+            logging.info("TLS lookup for %s: handshake failed: %s", hostname, reason)
+            return {"error": "TLS handshake failed", "reason": reason}
         except Exception:
             logging.exception(
                 f"Error performing SSL certificate lookup for hostname: {str(hostname)}"
             )
-            return None
+            return {"error": "TLS lookup failed"}
+
+    @staticmethod
+    def _connect(verified_ip: str) -> socket.socket:
+        sock = socket.socket()
+        sock.settimeout(TIMEOUT_SECONDS)
+        try:
+            sock.connect((verified_ip, 443))
+        except OSError:
+            sock.close()
+            raise
+        return sock
+
+    @staticmethod
+    def _context(verify: bool) -> ssl.SSLContext:
+        ctx = ssl.create_default_context()
+        if not verify:
+            # In this order: verify_mode cannot drop to CERT_NONE while
+            # check_hostname is still on.
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        return ctx
+
+    @staticmethod
+    def _session(s: ssl.SSLSocket) -> dict:
+        # Connection-level details ("SSL type"): the negotiated TLS protocol
+        # and cipher. Must be read inside the with-block, before the socket
+        # closes.
+        session = {"protocol": s.version()}
+        negotiated = s.cipher()
+        if negotiated:
+            session["cipher"] = {
+                "name": negotiated[0],
+                "protocol": negotiated[1],
+                "bits": negotiated[2],
+            }
+        return session
+
+    @staticmethod
+    def _untrusted(
+        hostname: str, verified_ip: str, exc: ssl.SSLCertVerificationError
+    ) -> dict:
+        """Re-read a certificate the verifying handshake rejected.
+
+        A second handshake with verification off, to the same verified IP:
+        never the hostname, so there is no second DNS lookup and no new SSRF
+        surface. The hostname rides along only as SNI, so the server picks the
+        certificate it served the first time.
+        """
+        reason = _VERIFY_REASONS.get(exc.verify_code, "other")
+        verdict = {
+            "trusted": False,
+            "verify_error": {
+                "code": exc.verify_code,
+                "message": exc.verify_message,
+                "reason": reason,
+            },
+            # OpenSSL stops at the first failure and checks the chain before
+            # the name, so only a mismatch is known yet; any other failure
+            # leaves the name to be checked against the certificate below.
+            "hostname_match": False if reason == "hostname_mismatch" else None,
+        }
+        try:
+            sock = SSLManager._connect(verified_ip)
+            ctx = SSLManager._context(verify=False)
+            with ctx.wrap_socket(sock, server_hostname=hostname) as s:
+                der = s.getpeercert(binary_form=True)
+                session = SSLManager._session(s)
+            cert = _peercert_from_der(der) if der else None
+        except (OSError, ValueError) as reread:
+            logging.info(
+                "TLS lookup for %s: untrusted certificate not re-read: %s",
+                hostname,
+                reread,
+            )
+            cert = None
+        if cert is None:
+            # The verdict is still the answer, certificate or not.
+            return verdict
+        if verdict["hostname_match"] is None:
+            verdict["hostname_match"] = _hostname_matches(cert, hostname)
+        return {**cert, **session, **verdict}
 
 
 class HeaderManager:

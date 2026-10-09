@@ -770,6 +770,9 @@ apply to the address:
    hostname only for SNI/cert validation. If no verified IP is
    available the SSL lookup is skipped. This closes the TOCTOU
    rebinding window between the safety check and the TCP connect.
+   A certificate that fails verification is re-read with a second,
+   unverified handshake to that same IP, never the hostname, so
+   reporting why it failed adds no DNS lookup and no new target.
 
 ## Reverse Proxy Trust (`TRUSTED_PROXIES`)
 

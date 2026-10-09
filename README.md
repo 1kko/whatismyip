@@ -63,7 +63,9 @@ RDAP registration data and the full TLS certificate, expanded.
 - **DNS** — A, MX, NS, CNAME, TXT, SPF and PTR, queried concurrently against
   public resolvers with a bounded per-query budget.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
-  match, protocol and cipher.
+  match, protocol and cipher, and whether the certificate is trusted. An
+  expired, self-signed, wrong-host or chain-incomplete certificate is still
+  shown, with the reason it fails.
 - **Reverse DNS** for IP addresses.
 - Every independent leg runs concurrently; the response reports its own
   `elapsed_ms`.
@@ -567,7 +569,10 @@ rate limit as `GET`.
     "notAfter": "Nov  9 23:22:58 2026 GMT",
     "subjectAltName": [["DNS", "nasa.gov"], ["DNS", "www.nasa.gov"]],
     "protocol": "TLSv1.3",
-    "cipher": { "name": "TLS_AES_128_GCM_SHA256", "protocol": "TLSv1.3", "bits": 128 }
+    "cipher": { "name": "TLS_AES_128_GCM_SHA256", "protocol": "TLSv1.3", "bits": 128 },
+    "trusted": true,
+    "verify_error": null,
+    "hostname_match": true
   },
   "headers": { "user-agent": "curl/8.7.1", "accept": "*/*" },
   "map": { "desktop": { "...": "tiles, pin and polyline in canvas pixels" }, "mobile": { "...": "" } },
@@ -586,8 +591,14 @@ resolved to, and `resolution` is how: that A query's status for a name, or
 
 `whois.source` is `rdap` or `whois` depending on which source answered, and a
 failed lookup returns `{"error": "..."}` there rather than failing the request.
-`ssl` is `null` for IP lookups and for hosts that do not complete a TLS
-handshake. `map` is `null` when the target has no resolvable coordinates, and
+`ssl` is `null` for IP lookups and for domains with no A record. A certificate
+that fails verification still comes back in full, with `trusted: false` and
+`verify_error: {"code", "message", "reason"}`: OpenSSL's verify code and message,
+and a `reason` of `expired`, `not_yet_valid`, `self_signed`, `untrusted_root`,
+`chain_incomplete`, `hostname_mismatch` or `other`. When no certificate could be
+read at all, `ssl` is `{"error": "port 443 unreachable"}` or
+`{"error": "TLS handshake failed"}`, with a `reason` such as `connection refused`
+or `timed out`. `map` is `null` when the target has no resolvable coordinates, and
 `distance_km`/`origin` are `null` whenever there is no route to draw — including
 `GET /`, where the visitor *is* the target.
 
@@ -641,7 +652,7 @@ is unaffected.)
 |---|---|
 | `lookup(target)` | Geolocation, ASN/carrier, registration, and a TLS summary for a domain or IP. Start here. |
 | `dns_records(domain, types?)` | Full A / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
-| `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining. |
+| `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |
 

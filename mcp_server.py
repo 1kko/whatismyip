@@ -110,10 +110,19 @@ def compact_registration(whois: dict | None) -> dict:
     }
 
 
+def _tls_failure(ssl_data: dict) -> str:
+    """'port 443 unreachable (connection refused)': no certificate was read."""
+    reason = ssl_data.get("reason")
+    return f"{ssl_data['error']} ({reason})" if reason else ssl_data["error"]
+
+
 def compact_ssl(ssl_data: dict | None) -> dict | None:
-    """Issuer plus the expiry clock — the two things anyone actually asks."""
+    """Issuer plus the expiry clock — the two things anyone actually asks —
+    and whether the certificate is trusted at all."""
     if not ssl_data:
         return None
+    if ssl_data.get("error"):
+        return {"error": _tls_failure(ssl_data)}
     expires, days_left = _cert_expiry(ssl_data)
     return {
         "issuer": _cert_issuer(ssl_data),
@@ -121,6 +130,11 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
         "expires": expires,
         "days_remaining": days_left,
         "protocol": ssl_data.get("protocol"),
+        # An untrusted certificate is still an answer, and a model told only
+        # the issuer and expiry would vouch for an expired or self-signed one.
+        "trusted": ssl_data.get("trusted"),
+        "hostname_match": ssl_data.get("hostname_match"),
+        "verify_error": ssl_data.get("verify_error"),
     }
 
 
@@ -256,7 +270,10 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
     """The TLS certificate a domain serves on port 443: issuer, subject,
     every SAN, the validity window, and how many days remain before it
     expires. Use this for "when does this certificate expire?" and "does this
-    certificate cover this hostname?".
+    certificate cover this hostname?". A certificate that fails verification
+    (expired, self-signed, wrong host, incomplete chain) is still returned,
+    with `trusted: false` and `verify_error` saying why; `error` means no
+    certificate could be read at all, such as port 443 being unreachable.
     """
     try:
         data = await _bounded_gather(domain)
@@ -274,7 +291,15 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
 
     cert = data["ssl"]
     if not cert:
+        # Almost always no handshake was attempted, which is not the same as
+        # a host serving no certificate.
+        if not data["resolved_ip"]:
+            return {"error": f"TLS not checked for {data['address']}: no A record"}
+        if data["resolved_ip"] == data["address"]:
+            return {"error": "TLS is checked for domain names only, not IP addresses"}
         return {"error": f"No TLS certificate served by {data['address']} on port 443"}
+    if cert.get("error"):
+        return {"error": f"{_tls_failure(cert)} for {data['address']}"}
 
     summary = compact_ssl(cert)
     return {
