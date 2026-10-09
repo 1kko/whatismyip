@@ -19,6 +19,10 @@ open https://ip.1kko.com/nasa.gov
 # Any non-browser user-agent -> JSON on the same URL
 curl https://ip.1kko.com/nasa.gov
 
+# A shell -> just your address, or just the values you name
+curl 'https://ip.1kko.com?format=text'
+curl 'https://ip.1kko.com/nasa.gov?fields=registrar,cert_expires&format=text'
+
 # AI agent -> MCP over Streamable HTTP
 claude mcp add --transport http whatismyip https://ip.1kko.com/mcp
 ```
@@ -83,6 +87,9 @@ RDAP registration data and the full TLS certificate, expanded.
 - JSON from the same URL for any non-browser user-agent, or for any client that
   asks with `Accept: application/json` or `?format=json` — no key, no separate
   API host (see [Response format](#response-format)).
+- Plain text for a shell with `?format=text`, and `?fields=` to ask for single
+  values without paying for the rest of the lookup (see
+  [Plain text and `?fields=`](#plain-text-and-fields)).
 - An MCP server at `/mcp` with five tools (see [MCP](#mcp-model-context-protocol)).
 - Discovery metadata in `<head>`, so an agent that lands on the page can find the
   machine interface without scraping the body.
@@ -292,15 +299,15 @@ IPv6 addresses are not supported yet and get a `400` with
 
 ### Response format
 
-`/` and `/{domain_or_ip}` answer HTML or JSON from the same URL. The first of
-these that expresses a choice decides:
+`/` and `/{domain_or_ip}` answer HTML, JSON or plain text from the same URL. The
+first of these that expresses a choice decides:
 
-1. `?format=html` or `?format=json`. Any value other than `html`, `json` or
-   `text` is rejected with `400`. (`text` is reserved for a plain-text format and
-   answers JSON for now.)
-2. An `Accept` header naming `text/html` or `application/json`, with q-values
-   honoured: a browser's `fetch()` sending `Accept: application/json` gets JSON,
-   and `curl -H 'Accept: text/html'` gets the page.
+1. `?format=html`, `?format=json` or `?format=text`. Any other value is rejected
+   with `400`.
+2. An `Accept` header naming `text/html`, `application/json` or `text/plain`,
+   with q-values honoured: a browser's `fetch()` sending
+   `Accept: application/json` gets JSON, and `curl -H 'Accept: text/html'` gets
+   the page.
 3. The user-agent, when `Accept` is absent or only `*/*` — the default for curl,
    wget and `fetch()`. Browsers get HTML; everything else gets JSON, PowerShell's
    `Invoke-RestMethod` included even though its user-agent starts with
@@ -309,6 +316,115 @@ these that expresses a choice decides:
 Both routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, so a
 cache in front can neither serve one format in place of the other nor keep a
 response that describes the visitor's own address.
+
+> **Ask for a format with `?format=`, never with a suffix in the path.**
+> `/nasa.gov.json` is not a lookup of nasa.gov: `.json` (like `.xml`) is one of
+> the security middleware's probe patterns, and a path that matches one is
+> treated as a probe unless it names a domain under a public suffix, which
+> `nasa.gov.json` does not. The requesting IP is banned for 24 hours. Use
+> `/nasa.gov?format=json`.
+
+### Plain text and `?fields=`
+
+`?format=text` (or `Accept: text/plain`) answers in plain text, for a shell.
+`GET /` in text is the caller's address and a newline, and nothing else runs —
+no RDAP/WHOIS, GeoIP or DNS:
+
+```console
+$ curl 'https://ip.1kko.com?format=text'
+203.0.113.7
+```
+
+Quote the URL: zsh treats an unquoted `?` as a glob.
+
+`GET /{domain_or_ip}` in text is a `key: value` block of the fields below that
+apply to the target, in the table's order. It skips what it does not show: the
+DNS record sweep, the map, the distance from you, and crt.sh
+(`?subdomains=include` has no effect here; `?subdomains=only` still answers its
+JSON list).
+
+```console
+$ curl 'https://ip.1kko.com/nasa.gov?format=text'
+target: nasa.gov
+ip: 192.0.66.108
+country_code: US
+country_name: United States
+city: San Francisco
+asn_number: 2635
+asn_name: AUTOMATTIC
+cidr: 192.0.64.0/18
+registrar: get.gov
+registrant: National Aeronautics and Space Administration
+domain_expires: 2027-07-31
+cert_issuer: Let's Encrypt
+cert_expires: 2026-11-09
+cert_days_remaining: 31
+```
+
+`?fields=` names the values you want, comma-separated, on either route, and runs
+only the lookups those fields need: `country_code` is a domain's A query and a
+read of the local GeoIP database (on `/`, just the read), and `registrar` is one
+RDAP/WHOIS query that does not even resolve the domain. In text the answer is
+the bare values, one per line in the order asked, even for a single field.
+Otherwise it is a flat JSON object of just those fields — a browser gets JSON
+too, as there is no page for a handful of values.
+
+```console
+$ curl 'https://ip.1kko.com?fields=country_code&format=text'
+KR
+$ curl 'https://ip.1kko.com/nasa.gov?fields=registrar,cert_days_remaining&format=text'
+get.gov
+31
+$ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
+{"asn_number":15169,"asn_name":"GOOGLE"}
+```
+
+| Field | Value | Lookup it runs | Applies to |
+| --- | --- | --- | --- |
+| `target` | the target, after a pasted URL is cut to its host | none | both |
+| `ip` | the address a domain resolves to; an IP itself; on `/`, yours | A query (domains) | both |
+| `reverse_dns` | PTR name | reverse DNS | IP |
+| `country_code` | ISO 3166-1 alpha-2 | GeoIP (local) | both |
+| `country_name` | | GeoIP (local) | both |
+| `city` | | GeoIP (local) | both |
+| `asn_number` | integer in JSON | GeoIP (local) | both |
+| `asn_name` | | GeoIP (local) | both |
+| `cidr` | the ASN's prefix, else the GeoIP network | GeoIP (local) | both |
+| `registrar` | | RDAP/WHOIS | domain |
+| `registrant` | the registrant, or for an IP the network's holder | RDAP/WHOIS | both |
+| `domain_expires` | registration expiry, `YYYY-MM-DD` | RDAP/WHOIS | domain |
+| `cert_issuer` | the issuing CA's organisation | TLS handshake on 443 | domain |
+| `cert_expires` | `YYYY-MM-DD` | TLS handshake on 443 | domain |
+| `cert_days_remaining` | days left, negative once expired; integer in JSON | TLS handshake on 443 | domain |
+
+The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
+is `cert_expires` here, and its `registration.expires` is `domain_expires`.
+Every field that touches the address resolves a domain first, so a domain that resolves to a private
+address is still refused with `400`. On `/`, the fields for an IP apply to your
+own address; `cert_*` and the domain-only fields are `-`.
+
+A value is never left blank:
+
+- `-` is an answer: there is no such value, or the field does not apply to the
+  target (an IP's `registrar`, which costs no lookup). JSON has `null`.
+- `?` means the lookup behind the value failed, so whether there is one is
+  unknown. JSON has `null` and adds the reason under `errors`, which appears only
+  then: `{"registrar": null, "errors": {"registrar": "WHOIS lookup timed out"}}`.
+  For now only a failed RDAP/WHOIS lookup is told apart this way; an A query or
+  TLS handshake that fails still reads `-`.
+
+An unknown field is refused with `400` before any lookup runs:
+
+```json
+{"error": "unknown field: bogus; valid fields: target, ip, …", "code": "invalid_field"}
+```
+
+A text client gets each of the route's `400`s — `invalid_field`,
+`invalid_target`, `ipv6_not_supported`, a private address, a bad `?subdomains=`
+— as one line with the same status code, e.g.
+`error: not a domain name or IP address`. `?format=text` and `?fields=` are
+query parameters, so they pass through the same bans, geo rules and rate limit as
+any other lookup.
 
 ### Subdomains (opt-in)
 
@@ -373,11 +489,13 @@ neither counts against the rate limit.
 ### `HEAD`
 
 `HEAD /` and `HEAD /{domain_or_ip}` answer `200` with the Content-Type a `GET`
-would have and no body, without running any lookup — for uptime monitors and
-link checkers. They do not tell you whether a given target would be rejected:
-finding that out takes the lookup. `/healthz`, `/robots.txt`, `/favicon.ico`
-and `/static/` answer `HEAD` as they answer `GET`, minus the body. `HEAD`
-passes through the same bans, geo rules and rate limit as `GET`.
+would have (`text/plain` for text, `application/json` for `?fields=`) and no
+body, without running any lookup — for uptime monitors and link checkers. A bad
+`?format=` or `?fields=` is the same `400` as on `GET`. They do not tell you
+whether a given target would be rejected: finding that out takes the lookup.
+`/healthz`, `/robots.txt`, `/favicon.ico` and `/static/` answer `HEAD` as they
+answer `GET`, minus the body. `HEAD` passes through the same bans, geo rules and
+rate limit as `GET`.
 
 ### Response example
 
@@ -462,7 +580,7 @@ handshake. `map` is `null` when the target has no resolvable coordinates, and
 | Code | Meaning |
 | --- | --- |
 | `200` | success |
-| `400` | private or reserved address, not a domain name or IP address, an IPv6 address, or an invalid `subdomains` parameter |
+| `400` | private or reserved address, not a domain name or IP address, an IPv6 address, or an invalid `format`, `fields` or `subdomains` parameter |
 | `403` | banned IP, geo-blocked, or suspicious request |
 | `404` | unknown endpoint — also the answer to a wrong admin API key |
 | `413` | `POST /mcp` body over `MCP_MAX_BODY_BYTES` |

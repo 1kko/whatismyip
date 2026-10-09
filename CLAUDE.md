@@ -91,6 +91,13 @@ poetry run ruff format .
 - `lookup.py`: transport-agnostic lookup pipeline (`gather()`), shared by the
   HTTP routes and the MCP tools. Raises `PrivateAddressError` and
   `InvalidTargetError` rather than `HTTPException` so it stays free of FastAPI.
+  `gather(legs=)` runs only the named legs; the default (None) runs them all,
+  and the page, the full JSON and MCP all use the default.
+- `textfmt.py`: `?format=text` and `?fields=`. The field table (names are
+  `mcp_server`'s compact_* shapes, flattened; each field lists the `gather()`
+  legs it needs and the target kinds it applies to) and the text/flat-JSON
+  rendering. Pure: `main.py` runs the lookup. `-` is "no value", `?` is "the
+  lookup failed".
 - `subdomains.py`: subdomain discovery from Certificate Transparency (crt.sh),
   opt-in per request. Owns normalization, single-flight, and a global outbound
   budget. Must not import `lookup` or `main` — importing `lookup` builds the
@@ -113,7 +120,7 @@ poetry run ruff format .
 
 ### Response Flow
 
-1. **Format Negotiation**: `negotiate()` picks the response format: `?format=html|json|text` first (unknown value -> 400), then an `Accept` header that names `text/html`/`application/json`/`text/plain` (q-values honoured), and only when `Accept` is absent or `*/*` the user-agent (`BrowserDetector`: browsers get HTML; PowerShell, despite its `Mozilla/5.0`, gets JSON). `text` answers as JSON until a plain-text rendering exists. Both lookup routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, errors included
+1. **Format Negotiation**: `negotiate()` picks the response format: `?format=html|json|text` first (unknown value -> 400), then an `Accept` header that names `text/html`/`application/json`/`text/plain` (q-values honoured), and only when `Accept` is absent or `*/*` the user-agent (`BrowserDetector`: browsers get HTML; PowerShell, despite its `Mozilla/5.0`, gets JSON). `text` is `textfmt.py`'s: the bare client IP on `/`, a `key: value` block on `/{domain_ip}`; `?fields=` (either route; JSON unless text was negotiated) runs only the `gather(legs=)` the named fields need. Both lookup routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, errors included
 2. **IP Resolution**: Domains are resolved to IP addresses via DNS A records
 3. **Data Gathering**: Parallel collection of WHOIS, GeoIP, DNS records, and SSL certificate data
 4. **Response Assembly**: All data combined into unified response structure (WhoisResponse model)
@@ -185,6 +192,7 @@ whatismyip/
 ├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
 ├── models.py            # Pydantic models (WhoisResponse, GeoRulesUpdate)
 ├── lookup.py            # transport-agnostic lookup pipeline (gather())
+├── textfmt.py           # ?format=text and ?fields=: field table, rendering (pure)
 ├── subdomains.py        # crt.sh adapter, normalization, cache-fill orchestration
 ├── subdomain_store.py   # SQLite cache for subdomains.py (data/subdomains.sqlite3)
 ├── mcp_server.py        # public MCP server mounted at /mcp
