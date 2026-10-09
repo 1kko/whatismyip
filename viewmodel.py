@@ -195,22 +195,60 @@ def _format_cert_date(raw: str | None) -> str:
         return raw
 
 
+# managers.SSLManager's verify_error["reason"], in the words a reader expects.
+# Mirrored rather than imported, like NOT_REGISTERED: managers loads dnspython,
+# maxminddb and geoip2fast, and this module stays light.
+_VERIFY_LABELS = {
+    "expired": "expired",
+    "not_yet_valid": "not yet valid",
+    "self_signed": "self-signed",
+    "untrusted_root": "untrusted root",
+    "chain_incomplete": "chain incomplete",
+    "hostname_mismatch": "hostname mismatch",
+}
+
+
+def _ssl_problem(ssl_data: dict) -> str | None:
+    """Why the served certificate fails, in a word or two; None if it doesn't.
+    Expiry is read off the certificate, so it shows even when OpenSSL stopped
+    at an earlier failure (an expired self-signed cert reports "self-signed")."""
+    _, days_left = _cert_expiry(ssl_data)
+    if days_left is not None and days_left < 0:
+        return "expired"
+    if ssl_data.get("trusted") is False:
+        reason = (ssl_data.get("verify_error") or {}).get("reason")
+        return _VERIFY_LABELS.get(reason, "not trusted")
+    return None
+
+
 def _ssl_status(ssl_data: dict) -> tuple[str, str]:
+    problem = _ssl_problem(ssl_data)
+    if problem:
+        return problem, "danger"
     _, days_left = _cert_expiry(ssl_data)
     if days_left is None:
         return DASH, "muted"
-    if days_left < 0:
-        return "expired", "danger"
     if days_left < 14:
         return f"valid · {days_left}d left", "warning"
     return f"valid · {days_left}d left", "success"
 
 
 def ssl_rows(ssl_data: dict | None, address: str | None = None) -> list[dict]:
-    """Detailed certificate rows for the SSL accordion. Empty when there is no
-    certificate (IP lookups, private/reserved targets, or an unreachable host)."""
+    """Detailed certificate rows for the SSL accordion. Empty when no handshake
+    was attempted (IP lookups, private/reserved targets, no A record)."""
     if not ssl_data:
         return []
+    if ssl_data.get("error"):
+        # Port 443 never answered, or no TLS session came of it. That is not
+        # "no certificate": there was nothing to read one from.
+        return [
+            {"label": "Status", "value": ssl_data["error"], "tone": "warning"},
+            {
+                "label": "Reason",
+                "value": ssl_data.get("reason") or DASH,
+                "tone": "default",
+            },
+        ]
     status, tone = _ssl_status(ssl_data)
     cipher = ssl_data.get("cipher") or {}
     cipher_text = f"{cipher.get('name')} ({cipher.get('bits')}-bit)" if cipher else DASH
@@ -218,10 +256,25 @@ def ssl_rows(ssl_data: dict | None, address: str | None = None) -> list[dict]:
     rows = [
         {"label": "Status", "value": status, "tone": tone},
     ]
+    verify_error = ssl_data.get("verify_error")
+    if verify_error:
+        rows.append(
+            {
+                "label": "Verification",
+                "value": f"{verify_error.get('message')} "
+                f"(code {verify_error.get('code')})",
+                "tone": "danger",
+            }
+        )
     # Does the served cert actually cover the name the visitor looked up? The
     # cert is fetched with SNI = that name, so a mismatch means a misconfigured
     # host (or a shared cert that forgot to list it) — worth flagging loudly.
-    covered = _host_covered(ssl_data, address)
+    # SSLManager's own verdict wins when there is one (None: it never got to
+    # read the certificate); the SAN check is for a dict without it.
+    if "hostname_match" in ssl_data:
+        covered = ssl_data["hostname_match"]
+    else:
+        covered = _host_covered(ssl_data, address)
     if covered is not None:
         rows.append(
             {
@@ -404,26 +457,26 @@ def _whois_column(whois_data: dict | None) -> dict:
 
 
 def _certificate_column(ssl_data: dict | None) -> dict:
-    if not ssl_data:
+    if not ssl_data or ssl_data.get("error"):
+        # No handshake attempted ("none"), or one that failed before any
+        # certificate arrived ("port 443 unreachable").
+        failure = (ssl_data or {}).get("error")
         return {
             "title": "CERTIFICATE",
             "rows": [
-                {"label": "Status", "value": "none", "tone": "muted"},
+                {
+                    "label": "Status",
+                    "value": failure or "none",
+                    "tone": "warning" if failure else "muted",
+                },
                 {"label": "Issuer", "value": DASH, "tone": "muted"},
                 {"label": "SAN", "value": DASH, "tone": "muted"},
                 {"label": "Expires", "value": DASH, "tone": "muted"},
             ],
         }
 
-    expires, days_left = _cert_expiry(ssl_data)
-    if days_left is None:
-        status, tone = DASH, "muted"
-    elif days_left < 0:
-        status, tone = "expired", "danger"
-    elif days_left < 14:
-        status, tone = f"valid · {days_left}d left", "warning"
-    else:
-        status, tone = f"valid · {days_left}d left", "success"
+    expires, _ = _cert_expiry(ssl_data)
+    status, tone = _ssl_status(ssl_data)
 
     san = ssl_data.get("subjectAltName") or ()
     return {
@@ -453,7 +506,13 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
     first_a = next(iter(domain.get("a") or []), None)
     if first_a:
         tags.append({"text": f"A → {first_a['ip']}", "tone": "default"})
-    if response.get("ssl"):
+    # "TLS valid" only for a certificate that verified: any certificate at all
+    # used to earn it, and a broken one now comes back rather than None.
+    ssl_data = response.get("ssl") or {}
+    problem = _ssl_problem(ssl_data)
+    if problem:
+        tags.append({"text": f"TLS {problem}", "tone": "danger"})
+    elif ssl_data.get("trusted"):
         tags.append({"text": "TLS valid", "tone": "success"})
     return tags
 
@@ -637,10 +696,16 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
     ssl_data = response.get("ssl")
     if not ssl_data:
         ssl_hint = "no certificate"
+    elif ssl_data.get("error"):
+        ssl_hint = ssl_data["error"]
     else:
         issuer = _cert_issuer(ssl_data)
         _, days_left = _cert_expiry(ssl_data)
-        ssl_hint = issuer if days_left is None else f"{issuer} · {days_left}d left"
+        problem = _ssl_problem(ssl_data)
+        if problem:
+            ssl_hint = f"{issuer} · {problem}"
+        else:
+            ssl_hint = issuer if days_left is None else f"{issuer} · {days_left}d left"
 
     location = response.get("location") or {}
     geo_city = location.get("city_name")

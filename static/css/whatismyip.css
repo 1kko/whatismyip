@@ -270,6 +270,11 @@ body {
   background: #FBBF241F;
   color: var(--warning);
 }
+.tag.tone-danger {
+  border-color: transparent;
+  background: #FB71851F;
+  color: var(--danger);
+}
 .origin {
   display: flex;
   flex-direction: column;
