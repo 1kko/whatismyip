@@ -713,7 +713,7 @@ class TestPrivacy:
     def test_named_when_on(self, abuse):
         abuse()
         text = page_text(web.get("/privacy", headers=CHROME).text)
-        assert "api.abuseipdb.com" in text
+        assert re.search(r"(?<![\w.])api\.abuseipdb\.com(?!\w)", text)
         assert "Never your own address on the home page" in text
         assert "kept in memory for 24 hours" in text
 
