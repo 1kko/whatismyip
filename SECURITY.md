@@ -530,6 +530,11 @@ Knowing which rule fired only helps whoever is probing for the edge of it. The
 reason, the country and the matched path stay in the log line for that branch,
 which is where an operator can use them.
 
+A browser gets the same `403` as a page (`templates/error.html`) whose only
+message is that same sentence, so the page cannot say more than the JSON does.
+A blocked address is refused on `/static` too, so the page arrives without its
+stylesheet and is kept readable as plain markup.
+
 ## Per-IP Rules
 
 `data/ip_rules.json` (`IP_RULES_FILE`) is a hand-written list that runs before

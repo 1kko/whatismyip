@@ -180,7 +180,9 @@ whatismyip/
 │   ├── build_gazetteer.py  # regenerates static/geo/*.json from GeoNames
 │   └── fetch_fonts.sh      # vendors Inter + JetBrains Mono into static/fonts/
 ├── templates/
-│   └── browser.html     # server-rendered page (no client-side templating)
+│   ├── browser.html     # server-rendered page (no client-side templating)
+│   ├── error.html       # 400/403/429 page for browsers, same status as the JSON
+│   └── _search.html     # search box included by both (app.js finds it by id)
 ├── static/
 │   ├── css/whatismyip.css  # design tokens + layout (dark only)
 │   ├── js/app.js           # search, copy, accordions, lazy JSONEditor
