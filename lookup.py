@@ -35,6 +35,7 @@ from managers import (
     dns_status,
 )
 from rdap import RIR_RDAP_UNAVAILABLE, is_ip, lookup_rdap, normalize_whois
+from reputation import ReputationManager
 
 
 class PrivateAddressError(Exception):
@@ -181,6 +182,9 @@ geo_ip_manager = GeoIpManager()
 # first get_tld call happened to find.
 tld_names_manager = TldNamesManager()
 domain_manager = DomainManager()
+# Loads the copies of the reputation lists a previous run left in the data
+# volume; main.py's scheduler keeps them current.
+reputation_manager = ReputationManager()
 
 # One hostname label in its ASCII (xn--) form: letters, digits, hyphens, and
 # the underscore that service names such as _dmarc carry.
@@ -312,10 +316,30 @@ async def lookup_location(ip: str) -> dict:
     return data
 
 
+def ip_reputation(ip: str, location: dict | None = None) -> dict | None:
+    """Which public lists `ip` is on (reputation.py), or None when the
+    feature is off. A read of lists held in memory, so it runs inline and
+    sends nothing anywhere.
+
+    ASN-DROP is matched on the AS number GeoLite2-ASN gives the address:
+    taken from `location` when the caller already has it, otherwise read here,
+    which is as local as the lists themselves."""
+    if not reputation_manager.enabled:
+        return None
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if location is None:
+        location = geo_ip_manager.fetch_location(ip)
+    return reputation_manager.check(ip, location.get("asn_number"))
+
+
 # The parts of gather() a caller can ask for by name. "resolve" is a domain's A
 # query; "ptr" and "dns" are an IP's reverse lookup and the record sweep (of the
-# domain, or of an IP's PTR name); "geo", "tls" and "whois" are what they say.
-LEGS = frozenset({"resolve", "geo", "ptr", "dns", "tls", "whois"})
+# domain, or of an IP's PTR name); "geo", "tls" and "whois" are what they say;
+# "reputation" is the address checked against the lists in memory.
+LEGS = frozenset({"resolve", "geo", "ptr", "dns", "tls", "whois", "reputation"})
 
 
 async def _skipped() -> None:
@@ -480,6 +504,13 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
             ip_data["reverse_dns"] = reverse_dns_hostname
     else:
         ip_data = {}
+    # A domain is judged by the address it resolved to, as the map and the
+    # GeoIP fields are.
+    reputation = (
+        ip_reputation(resolved_ip, ip_data if "geo" in want else None)
+        if resolved_ip and "reputation" in want
+        else None
+    )
 
     return {
         "address": target,
@@ -490,4 +521,5 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
         "resolved_ip": resolved_ip,
         "resolution": resolution,
         "reverse_dns": reverse_dns_hostname,
+        "reputation": reputation,
     }

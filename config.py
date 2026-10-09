@@ -171,6 +171,75 @@ TLD_LIST_URL = os.getenv(
 TLD_MAX_AGE_DAYS = int(os.getenv("TLD_MAX_AGE_DAYS", "14"))
 TLD_UPDATE_RETRY_SECONDS = int(os.getenv("TLD_UPDATE_RETRY_SECONDS", "3600"))
 
+# IP reputation (reputation.py): which public lists an address is on, and a
+# grade from them. Key-free lists only. Each is downloaded into REPUTATION_DIR
+# by the scheduler and looked up in memory, so a lookup never asks any of these
+# servers anything. REPUTATION_ENABLED=false drops the `reputation` key, the
+# page card and the downloads.
+REPUTATION_ENABLED = os.getenv("REPUTATION_ENABLED", "true").lower() != "false"
+REPUTATION_DIR = os.getenv(
+    "REPUTATION_DIR", os.path.join(_APP_DIR, "data", "reputation")
+)
+# Spamhaus DROP and ASN-DROP. Free, with two conditions: credit The Spamhaus
+# Project, and download no more than once a day. The second is enforced in
+# reputation.py whatever REPUTATION_REFRESH_HOURS says.
+REPUTATION_SPAMHAUS_DROP_V4_URL = os.getenv(
+    "REPUTATION_SPAMHAUS_DROP_V4_URL", "https://www.spamhaus.org/drop/drop_v4.json"
+)
+REPUTATION_SPAMHAUS_DROP_V6_URL = os.getenv(
+    "REPUTATION_SPAMHAUS_DROP_V6_URL", "https://www.spamhaus.org/drop/drop_v6.json"
+)
+REPUTATION_SPAMHAUS_ASNDROP_URL = os.getenv(
+    "REPUTATION_SPAMHAUS_ASNDROP_URL", "https://www.spamhaus.org/drop/asndrop.json"
+)
+# The Tor Project's exit addresses. IPv4 only, so an IPv6 address is reported
+# as not checked against it rather than as not an exit.
+REPUTATION_TOR_EXIT_URL = os.getenv(
+    "REPUTATION_TOR_EXIT_URL", "https://check.torproject.org/torbulkexitlist"
+)
+# X4BNet lists_vpn (MIT). Built mostly from ASNs, so it misses some VPNs; its
+# datacenter list includes the VPN networks as well.
+_X4B = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output"
+REPUTATION_VPN_V4_URL = os.getenv("REPUTATION_VPN_V4_URL", f"{_X4B}/vpn/ipv4.txt")
+REPUTATION_VPN_V6_URL = os.getenv("REPUTATION_VPN_V6_URL", f"{_X4B}/vpn/ipv6.txt")
+REPUTATION_DATACENTER_V4_URL = os.getenv(
+    "REPUTATION_DATACENTER_V4_URL", f"{_X4B}/datacenter/ipv4.txt"
+)
+REPUTATION_DATACENTER_V6_URL = os.getenv(
+    "REPUTATION_DATACENTER_V6_URL", f"{_X4B}/datacenter/ipv6.txt"
+)
+REPUTATION_USER_AGENT = os.getenv(
+    "REPUTATION_USER_AGENT", "whatismyip/0.2 (+https://ip.1kko.com)"
+)
+# A copy this old is replaced on the next scheduler tick.
+REPUTATION_REFRESH_HOURS = max(float(os.getenv("REPUTATION_REFRESH_HOURS", "24")), 1.0)
+# Past this age a list no longer answers: lookups report it as "could not
+# check" and /healthz as degraded. Three missed daily refreshes, the last of
+# which Spamhaus only allows a day after the one before.
+REPUTATION_MAX_AGE_HOURS = float(os.getenv("REPUTATION_MAX_AGE_HOURS", "72"))
+# How soon a failed download is tried again (Spamhaus: a day, see above).
+REPUTATION_RETRY_SECONDS = int(os.getenv("REPUTATION_RETRY_SECONDS", "3600"))
+# How often the scheduler checks which lists are due. A check reads no file
+# and makes no request unless a list is due, so it can run often; it bounds
+# how late a refresh or a retry runs.
+REPUTATION_CHECK_INTERVAL_SECONDS = int(
+    os.getenv("REPUTATION_CHECK_INTERVAL_SECONDS", "600")
+)
+# The grade (none/low/medium/high) is the band the summed weights of the
+# signals found fall in. The defaults give the rule: on Spamhaus DROP or
+# ASN-DROP is high; a Tor exit is medium (anonymity, not malice); a VPN low; a
+# datacenter is shown but changes nothing.
+REPUTATION_WEIGHTS = {
+    "spamhaus_drop": int(os.getenv("REPUTATION_WEIGHT_SPAMHAUS_DROP", "100")),
+    "spamhaus_asndrop": int(os.getenv("REPUTATION_WEIGHT_SPAMHAUS_ASNDROP", "100")),
+    "tor_exit": int(os.getenv("REPUTATION_WEIGHT_TOR_EXIT", "50")),
+    "vpn": int(os.getenv("REPUTATION_WEIGHT_VPN", "20")),
+    "datacenter": int(os.getenv("REPUTATION_WEIGHT_DATACENTER", "0")),
+}
+REPUTATION_LEVEL_HIGH = max(int(os.getenv("REPUTATION_LEVEL_HIGH", "80")), 1)
+REPUTATION_LEVEL_MEDIUM = max(int(os.getenv("REPUTATION_LEVEL_MEDIUM", "40")), 1)
+REPUTATION_LEVEL_LOW = max(int(os.getenv("REPUTATION_LEVEL_LOW", "10")), 1)
+
 # Background Job Intervals (seconds)
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "300"))
 RATE_LIMIT_CLEANUP_INTERVAL = int(os.getenv("RATE_LIMIT_CLEANUP_INTERVAL", "60"))

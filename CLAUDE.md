@@ -114,6 +114,11 @@ poetry run ruff format .
 - `subdomain_store.py`: SQLite cache for the above, at `data/subdomains.sqlite3`
   (gitignored, along with its WAL sidecars). No network; every operation
   degrades to a miss rather than raising.
+- `reputation.py`: IP reputation from key-free public lists (Spamhaus DROP and
+  ASN-DROP, Tor exits, X4BNet VPN/datacenter). `ReputationManager` keeps them in
+  `data/reputation/` (gitignored) the way `TldNamesManager` keeps the suffix
+  list, and answers `check(ip, asn)` from sorted intervals in memory. Imports
+  only `config` and the standard library; `lookup.py` builds the singleton.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
   Streamable HTTP). Five tools, all thin shells over `lookup.gather()` (or, for
   `subdomains`, over `subdomains.get_subdomains()`) that reshape output for an
@@ -259,6 +264,7 @@ whatismyip/
 ├── textfmt.py           # ?format=text and ?fields=: field table, rendering (pure)
 ├── subdomains.py        # crt.sh adapter, normalization, cache-fill orchestration
 ├── subdomain_store.py   # SQLite cache for subdomains.py (data/subdomains.sqlite3)
+├── reputation.py        # IP reputation lists (data/reputation/), bisect lookups
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
@@ -283,6 +289,7 @@ whatismyip/
 │   ├── test_rdap.py     # RDAP/WHOIS normalisation + fallback routing (unit)
 │   ├── test_subdomains.py       # crt.sh adapter, normalization, single-flight (unit)
 │   ├── test_subdomain_store.py  # SQLite cache, degrades to a miss on failure (unit)
+│   ├── test_reputation.py       # list parsers, intervals, grade, download guard, surfaces
 │   ├── test_page.py     # API + HTML via TestClient
 │   ├── test_basic.py    # endpoint smoke tests via TestClient (mocked I/O)
 │   ├── test_concurrency_gate.py # gate 503s, what takes no slot, pool isolation
@@ -374,6 +381,33 @@ touches subdomain code. `subdomain_store.py` owns durability (SQLite at
 nothing about crt.sh; `subdomains.py` owns the source and knows nothing about
 SQL. Every store operation degrades to a miss rather than raising, so a
 read-only volume or a full disk costs the cache, not the request.
+
+### IP reputation
+
+**Downloaded by the scheduler, read from memory.** The `refresh-reputation` job
+fetches each list into `data/reputation/` once its copy is a day old (at boot
+only what is missing or stale); `check()` is a bisect over merged integer
+ranges, so a lookup makes no outbound request and adds no SSRF surface.
+`lookup.ip_reputation()` is the one entry point for `gather()`, the self page
+and `whoami_caller`; it takes the AS number for ASN-DROP from GeoLite2-ASN.
+
+**Spamhaus allows one download a day, and that is enforced in code.** Each
+file's request time is written to `<file>.requested` before the request is sent,
+so a failed request and a restart both count. Do not make that gap
+configurable. Spamhaus also asks for credit: its notice travels in
+`reputation.attribution`, the page card and `/privacy`.
+
+**"None" is not "safe".** `level` is null when no list could be checked; a
+stale (over `REPUTATION_MAX_AGE_HOURS`), missing or family-mismatched list is in
+`unavailable` with its reason, never silently dropped. The page, the MCP tool
+descriptions and `?fields=risk_level` (which stays out of the text block) all
+keep that distinction. The service's own ban list is never a signal.
+
+**Tests.** `tests/conftest.py` sets `REPUTATION_ENABLED=false`, so importing
+`main` schedules no download and every other test sees the responses it always
+did. `tests/test_reputation.py` builds enabled managers over synthetic lists and
+monkeypatches `lookup.reputation_manager` (and `main.reputation_manager` for
+`/healthz`).
 
 ### Dependencies
 

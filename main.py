@@ -53,6 +53,8 @@ from config import (
     PUBLIC_BASE_URL,
     PUBLIC_RESOLVERS,
     RATE_LIMIT_CLEANUP_INTERVAL,
+    REPUTATION_CHECK_INTERVAL_SECONDS,
+    REPUTATION_MAX_AGE_HOURS,
     SELF_WHOIS_SOFT_DEADLINE_SECONDS,
     SITE_DOMAIN_FALLBACK,
     SUBDOMAIN_CACHE_TTL,
@@ -81,10 +83,12 @@ from lookup import (
     domain_manager,
     gather,
     geo_ip_manager,
+    ip_reputation,
     is_safe_ip,
     lookup_location,
     lookup_whois,
     normalize_lookup_target,
+    reputation_manager,
     sanitize_log_input,
     tld_names_manager,
 )
@@ -593,6 +597,21 @@ scheduler.add_job(refresh_rdap_bootstrap, "interval", days=1)
 # re-download. A fresh container seeds from the bundled snapshot, which is
 # stamped expired, so it does pull once on first boot.
 scheduler.add_job(refresh_tld_names, "interval", days=1)
+# IP reputation lists (reputation.py). Each list is downloaded once its copy is
+# REPUTATION_REFRESH_HOURS old, so the lists refresh daily; the job only checks
+# more often than that to bound how late a refresh or a retry runs, and a check
+# that finds nothing due touches no file and no network. The first run is at
+# boot, in the background, and fetches only what is missing or stale, so a
+# restart re-downloads nothing. Retries are not _refresh_with_retry's timer: a
+# list's last request time is kept on disk, so Spamhaus's once-a-day limit
+# holds across restarts too.
+scheduler.add_job(
+    reputation_manager.refresh,
+    "interval",
+    seconds=REPUTATION_CHECK_INTERVAL_SECONDS,
+    next_run_time=datetime.datetime.now(),
+    id="refresh-reputation",
+)
 scheduler.start()
 refresh_tld_names()
 
@@ -1175,6 +1194,8 @@ def health_reasons() -> list[dict[str, str]]:
                     f"{name} refresh has failed {failures} times in a row",
                 )
             )
+    for message in reputation_manager.stale_lists():
+        reasons.append(_reason("reputation_list_stale", message))
     open_hosts = rdap_breaker.open_hosts()
     if open_hosts:
         reasons.append(
@@ -1211,6 +1232,7 @@ async def healthz():
         "reasons": reasons,
         "databases": geo_ip_manager.database_status(),
         "public_suffix_list": tld_names_manager.status(),
+        "reputation": reputation_manager.status(),
     }
 
 
@@ -1280,6 +1302,12 @@ async def privacy(request: Request):
             "subdomain_cache": _span(SUBDOMAIN_CACHE_TTL),
             "geoip_hosts": list(dict.fromkeys(geoip_hosts)),
             "psl_host": _host(TLD_LIST_URL),
+            # Read per request rather than at import, like the rest of this
+            # context, so the page follows the manager the lookups use.
+            "reputation_hosts": (
+                reputation_manager.hosts() if reputation_manager.enabled else []
+            ),
+            "reputation_max_age": _span(int(REPUTATION_MAX_AGE_HOURS * 3600)),
             "stun_url": WEBRTC_STUN_URL,
             "stun_host": WEBRTC_STUN_HOST,
         },
@@ -1374,6 +1402,9 @@ async def _self_fields(client_ip: str, names: list[str]) -> dict:
             "location": location,
             "whois": await whois_task if whois_task else None,
             "ssl": None,
+            "reputation": ip_reputation(client_ip, location or None)
+            if "reputation" in legs
+            else None,
         }
 
 
@@ -1674,6 +1705,11 @@ async def get_self_info(request: Request):
         "origin": origin,
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
+    # Which public lists the visitor's address is on: a read of lists held in
+    # memory, after the lookups rather than among them, since it takes none.
+    reputation = ip_reputation(client_ip, ip_data)
+    if reputation is not None:
+        response_data["reputation"] = reputation
 
     if fmt == "html":
         return render_page(request, response_data, is_self=True)
@@ -1805,6 +1841,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
 
+    if data.get("reputation") is not None:
+        response_data["reputation"] = data["reputation"]
     if subdomain_task is not None:
         response_data["subdomains"] = await subdomain_task
 

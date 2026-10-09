@@ -300,7 +300,9 @@ class TestBrowserPage:
         note = head.split('name="mcp-note" content="')[1].split('"')[0]
         assert "own machine" in note  # local client
         assert "datacenter" in note  # hosted client
-        assert "cannot tell" in note
+        # A datacenter-list hit is only "likely hosted"; nothing is certain.
+        assert "likely a hosted client" in note
+        assert "cannot be sure" in note
 
     def test_footer_no_longer_carries_the_mcp_link(self):
         # A bare "MCP server" link told a visitor nothing and left the site to

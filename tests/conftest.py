@@ -12,6 +12,11 @@ os.environ["ADMIN_API_KEY"] = "test-secret-key"
 os.environ["TRUSTED_PROXIES"] = "127.0.0.1,10.0.0.1"
 os.environ["BANNED_IPS_FILE"] = "/tmp/test_banned_ips.json"
 os.environ["GEO_RULES_FILE"] = "/tmp/test_geo_rules.json"
+# Importing main schedules the IP reputation download at boot, and Spamhaus
+# allows one download a day: no test run may make it. Off, the lookup
+# responses are exactly what they were before the feature; test_reputation.py
+# builds enabled managers over synthetic lists of its own.
+os.environ["REPUTATION_ENABLED"] = "false"
 
 import sys  # noqa: E402  (must follow the env vars above)
 
