@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 from typing import Any
+from urllib.parse import quote
 
 from config import SUBDOMAIN_ENABLED
 
@@ -19,6 +20,16 @@ from config import SUBDOMAIN_ENABLED
 NOT_REGISTERED = "not registered"
 
 DASH = "—"
+
+# The self page describes whoever opens it, so its <title> and link-preview
+# text are fixed. A preview card is built from the <head>, and a shared link to
+# `/` must not carry the IP of whoever -- or whichever bot -- fetched it. The
+# visitor's address is the <h1> and nowhere in the <head>.
+SELF_TITLE = "What is my IP address? — WhatIsMyIP"
+SITE_DESCRIPTION = (
+    "WHOIS, GeoIP, DNS and TLS certificate details for any IP address or domain. "
+    "Also an MCP server, so AI agents can run the same lookups."
+)
 
 
 def country_flag(country_code: str | None) -> str:
@@ -413,6 +424,21 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
     return tags
 
 
+def _summary(response: dict, address: str, is_ip: bool) -> str:
+    """'nasa.gov · AS2635 Automattic, Inc · United States · TLS valid': the
+    one line a link preview shows under the title. A part nobody knows is left
+    out rather than shown as a dash, which reads as noise in a chat."""
+    location = response.get("location") or {}
+    org = _asn_org(location)
+    parts = [address, "" if org == DASH else org, location.get("country_name") or ""]
+    # Read off the hero's tags, so the preview never says more about the
+    # certificate than the page itself does.
+    parts += [
+        tag["text"] for tag in _tags(response, is_ip) if tag["text"].startswith("TLS")
+    ]
+    return " · ".join(part for part in parts if part)
+
+
 # The canonical registration record (see rdap.py) rendered as an ordered set of
 # labelled rows. Empty fields are dropped, so an IP result simply omits the
 # domain-only rows (registrar, name servers, expiry) and vice versa.
@@ -658,6 +684,14 @@ def build_view(
         "is_self": is_self,
         "eyebrow": "YOUR IP ADDRESS" if is_self else "LOOKUP",
         "target": address,
+        "title": SELF_TITLE if is_self else f"{address} — WhatIsMyIP",
+        "description": (
+            SITE_DESCRIPTION if is_self else _summary(response, address, is_ip)
+        ),
+        # The page's path under the public base URL, for og:url and the
+        # canonical link. Hostnames are case-insensitive, and gather() keeps
+        # the case it was given, so /NASA.gov and /nasa.gov are one page.
+        "canonical_path": "" if is_self else quote(address.lower(), safe=""),
         "tags": _tags(response, is_ip),
         "flag": country_flag(location.get("country_code")),
         "country_name": location.get("country_name") or "",

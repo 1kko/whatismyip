@@ -3,8 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ view.target }} — WhatIsMyIP</title>
-    <meta name="description" content="WHOIS, GeoIP, DNS and TLS certificate details for any IP address or domain. Also an MCP server, so AI agents can run the same lookups.">
+    <title>{{ view.title }}</title>
+    <meta name="description" content="{{ view.description }}">
+    {%- set page_url = api_base ~ view.canonical_path %}
+    <link rel="canonical" href="{{ page_url }}">
+
+    <!-- Link previews. KakaoTalk, Slack, Telegram and the rest build a shared
+         link's card from these. On the self page they describe the site, never
+         the address of whoever fetched it; that is only ever in the <h1>.
+         og:image must be an absolute URL, hence api_base. -->
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="WhatIsMyIP">
+    <meta property="og:title" content="{{ view.title }}">
+    <meta property="og:description" content="{{ view.description }}">
+    <meta property="og:url" content="{{ page_url }}">
+    <meta property="og:image" content="{{ api_base }}static/image/logo.png">
+    <meta property="og:image:width" content="512">
+    <meta property="og:image:height" content="512">
+    <meta name="twitter:card" content="summary">
 
     <!-- Agent discovery. The service answers JSON to any non-browser client and
          speaks MCP at the endpoint below, so an agent that lands on this page

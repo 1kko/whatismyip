@@ -157,6 +157,8 @@ TRUSTED_PROXIES = [
 # Canonical public URL, e.g. https://ip.1kko.com. Set this when the reverse proxy
 # does not forward x-forwarded-proto: without it the copyable curl command would
 # say http://, the proxy would answer 302, and curl would just print "Found".
+# It is also the base of the page's canonical link and og:url / og:image, which
+# otherwise follow the Host header the request arrived with.
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 
 # The domain shown as the footer wordmark when the visitor's host is missing or

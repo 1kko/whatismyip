@@ -580,7 +580,11 @@ class BrowserDetector:
         ):
             return False
         # Every client that gets the page when neither ?format= nor Accept
-        # says otherwise.
+        # says otherwise. That includes the bots that expand a shared link
+        # into a preview card: the card is built from the page's og: tags,
+        # and most of them never say "Mozilla", so they used to get JSON and
+        # the preview came out blank. Discord's and LinkedIn's do say it;
+        # they are listed so the intent does not rest on that.
         browser_patterns = [
             r"Mozilla",
             r"Chrome",
@@ -588,6 +592,14 @@ class BrowserDetector:
             r"Firefox",
             r"Edge",
             r"Opera",
+            r"facebookexternalhit",
+            r"kakaotalk-scrap",
+            r"Slackbot",
+            r"Twitterbot",
+            r"TelegramBot",
+            r"WhatsApp",
+            r"Discordbot",
+            r"LinkedInBot",
         ]
         return any(
             re.search(pattern, user_agent, re.IGNORECASE)
