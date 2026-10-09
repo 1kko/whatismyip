@@ -329,7 +329,8 @@ class TestMcp:
     ):
         async with holding(GATE):
             result = await getattr(mcp_server, tool)(**{argument: "example.com"})
-        assert result == {"error": BUSY_MESSAGE}
+        assert result.is_error
+        assert result.structured_content == {"error": BUSY_MESSAGE}
         assert _ran(legs) == set()
 
     async def test_mcp_has_a_share_of_the_gate_not_all_of_it(self, legs):
@@ -340,7 +341,8 @@ class TestMcp:
         async with _client() as client, holding(MCP_GATE):
             result = await mcp_server.lookup("example.com")
             page = await client.get("/example.com", headers=CURL)
-        assert result == {"error": BUSY_MESSAGE}
+        assert result.is_error
+        assert result.structured_content == {"error": BUSY_MESSAGE}
         assert page.status_code == 200
 
 
