@@ -51,7 +51,10 @@ RDAP registration data and the full TLS certificate, expanded.
 
 - **Registration** — RDAP first (structured JSON, sub-second), falling back to
   port-43 WHOIS for the TLDs RDAP does not serve. Both sources are normalised to
-  one shape and cached for 6 hours (5 minutes for a failure).
+  one shape and cached for 6 hours (5 minutes for a failure). An IP address has
+  no WHOIS fallback: when its RIR's RDAP server does not answer, the lookup says
+  so instead of showing the registration of the address's reverse-DNS domain.
+  An RDAP server that fails three times in a row is skipped for 10 minutes.
 - **GeoIP** — country and ASN from `geoip2fast`, with a GeoLite2-City overlay for
   real coordinates, the precise city and an accuracy radius, plus a GeoLite2-ASN
   overlay that keeps carrier names current. `GET /healthz` reports which
