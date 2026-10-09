@@ -511,14 +511,17 @@ def test_mcp_lookup_no_longer_says_ipv6_is_unsupported():
 
 
 async def test_mcp_ssl_certificate_says_why_an_ipv6_literal_has_none(offline):
-    payload = await mcp_server.ssl_certificate(V6)
-    assert payload == {
+    result = await mcp_server.ssl_certificate(V6)
+    assert result.is_error
+    assert result.structured_content == {
         "error": "TLS is checked for domain names only, not IP addresses"
     }
 
 
 async def test_mcp_ssl_certificate_says_tls_was_skipped_for_an_ipv6_only_name(offline):
-    payload = await mcp_server.ssl_certificate("v6only.example.com")
+    result = await mcp_server.ssl_certificate("v6only.example.com")
+    assert result.is_error
+    payload = result.structured_content
     assert "TLS not checked" in payload["error"]
     assert "IPv6" in payload["error"]
     assert "No TLS certificate served" not in payload["error"]
