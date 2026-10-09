@@ -69,6 +69,12 @@ RDAP registration data and the full TLS certificate, expanded.
   expired, self-signed, wrong-host or chain-incomplete certificate is still
   shown, with the reason it fails.
 - **Reverse DNS** for IP addresses.
+- **Reputation** — which public lists an address is on: Spamhaus DROP and
+  ASN-DROP, Tor exits, and X4BNet's VPN and datacenter ranges, each with its
+  source and the date of the copy read, and a level (none/low/medium/high)
+  computed from those alone. The lists are downloaded once a day and read in
+  memory, so a lookup asks no one about the address (see
+  [IP reputation](#ip-reputation)).
 - Every independent leg runs concurrently; the response reports its own
   `elapsed_ms`.
 
@@ -285,6 +291,14 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # TLD_LIST_URL=https://publicsuffix.org/list/public_suffix_list.dat
 # TLD_NAMES_DIR=./data/tld
 # TLD_MAX_AGE_DAYS=14
+
+# IP reputation lists (see "IP reputation" below); false drops the feature
+# REPUTATION_ENABLED=true
+# REPUTATION_DIR=./data/reputation
+# REPUTATION_REFRESH_HOURS=24        # Spamhaus is never fetched more than once a day
+# REPUTATION_MAX_AGE_HOURS=72        # older lists are "could not check" + degraded
+# REPUTATION_WEIGHT_TOR_EXIT=50      # and _SPAMHAUS_DROP, _SPAMHAUS_ASNDROP, _VPN, _DATACENTER
+# REPUTATION_LEVEL_HIGH=80           # and _MEDIUM (40), _LOW (10)
 ```
 
 Timeouts and cache TTLs (`RDAP_TIMEOUT_SECONDS`, `WHOIS_TIMEOUT_SECONDS`,
@@ -441,9 +455,14 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `cert_issuer` | the issuing CA's organisation | TLS handshake on 443 | domain |
 | `cert_expires` | `YYYY-MM-DD` | TLS handshake on 443 | domain |
 | `cert_days_remaining` | days left, negative once expired; integer in JSON | TLS handshake on 443 | domain |
+| `risk_level` | `none`, `low`, `medium` or `high` (see [IP reputation](#ip-reputation)); `?` when no list could be checked | the lists in memory (an A query for a domain) | both |
+| `risk_signals` | the ids of the lists the address is on, comma-separated, e.g. `tor_exit,datacenter` | the lists in memory (an A query for a domain) | both |
 
 The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
 is `cert_expires` here, and its `registration.expires` is `domain_expires`.
+`risk_level` and `risk_signals` are answered only when asked for by name; the
+text block leaves them out, because a bare `risk_level: none` among the other
+lines would read as a clean bill of health the lists cannot give.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
 own address; `cert_*` and the domain-only fields are `-`.
@@ -508,7 +527,14 @@ GeoIP databases are actually serving lookups:
     "city_overlay": { "loaded": true, "build": "2026-07-31" },
     "asn_overlay": { "loaded": true, "build": "2026-07-26" }
   },
-  "public_suffix_list": { "source": "downloaded", "age_days": 0.0, "stale": false }
+  "public_suffix_list": { "source": "downloaded", "age_days": 0.0, "stale": false },
+  "reputation": {
+    "enabled": true,
+    "lists": {
+      "tor_exit": { "label": "Tor exit", "age_hours": 3.2, "entries": 1217, "stale": false },
+      "...": "spamhaus_drop, spamhaus_asndrop, vpn, datacenter"
+    }
+  }
 }
 ```
 
@@ -527,6 +553,7 @@ is a stable `code` plus a `message` naming what is wrong:
 | `scheduler_stopped` | the background scheduler is not running, or its jobs are over 5 minutes overdue |
 | `refresh_failing` | a dataset refresh (GeoLite2, suffix list) has failed twice in a row, i.e. its hourly retry failed too |
 | `rdap_breaker_open` | RDAP servers currently skipped after repeated failures, so lookups routed to them fail fast |
+| `reputation_list_stale` | a reputation list was never downloaded, or is older than `REPUTATION_MAX_AGE_HOURS` (72), so lookups report it as not checked; one reason per list |
 
 None of these checks makes a network call, so the endpoint stays cheap to poll.
 
@@ -690,6 +717,64 @@ or `timed out`. `map` is `null` when the target has no resolvable coordinates, a
 `distance_km`/`origin` are `null` whenever there is no route to draw — including
 `GET /`, where the visitor *is* the target.
 
+### IP reputation
+
+An IP lookup, the self lookup, and a domain's resolved address carry a
+`reputation` object (absent with `REPUTATION_ENABLED=false`, or for a domain
+with no address):
+
+```json
+"reputation": {
+  "level": "medium",
+  "signals": [
+    { "id": "tor_exit", "label": "Tor exit", "source": "Tor Project", "as_of": "2026-10-09T06:13:20Z", "weight": 50 },
+    { "id": "datacenter", "label": "Datacenter", "source": "X4BNet lists_vpn", "as_of": "2026-10-09T06:13:21Z", "weight": 0 }
+  ],
+  "checked": [
+    { "id": "spamhaus_drop", "label": "Spamhaus DROP", "source": "Spamhaus", "as_of": "2026-10-09T06:13:19Z" },
+    "... every list read, listed or not"
+  ],
+  "unavailable": [
+    { "id": "spamhaus_asndrop", "label": "Spamhaus ASN-DROP", "source": "Spamhaus", "reason": "no AS number is known for this address" }
+  ],
+  "attribution": [
+    "Spamhaus DROP and ASN-DROP: (c) 2026 The Spamhaus Project SLU, https://www.spamhaus.org/drop/terms/",
+    "..."
+  ]
+}
+```
+
+| List | `id` | Weight | Notes |
+| --- | --- | --- | --- |
+| [Spamhaus DROP](https://www.spamhaus.org/blocklists/do-not-route-or-peer/) (IPv4, IPv6) | `spamhaus_drop` | 100 | networks Spamhaus advises not to route |
+| Spamhaus ASN-DROP | `spamhaus_asndrop` | 100 | matched on the AS number GeoLite2-ASN gives the address |
+| [Tor exit list](https://check.torproject.org/torbulkexitlist) | `tor_exit` | 50 | IPv4 only, so an IPv6 address is reported as not checked against it |
+| [X4BNet lists_vpn](https://github.com/X4BNet/lists_vpn) VPN (IPv4, IPv6) | `vpn` | 20 | built mostly from ASNs, so it misses some VPNs |
+| X4BNet lists_vpn datacenter (IPv4, IPv6) | `datacenter` | 0 | informational; includes the VPN networks |
+
+`level` is the band the summed weights of `signals` fall in: `high` from 80,
+`medium` from 40, `low` from 10, `none` below that. With the defaults, a
+Spamhaus listing is high, a Tor exit medium (anonymity, not malice), a VPN low,
+and a datacenter changes nothing. Weights and bands are `REPUTATION_WEIGHT_*`
+and `REPUTATION_LEVEL_*`.
+
+`none` means the address is on none of the lists in `checked`, not that it is
+safe. A list that has not been downloaded, is older than
+`REPUTATION_MAX_AGE_HOURS`, or does not cover the address's family is in
+`unavailable` with the reason, and when nothing could be checked `level` is
+`null`. `as_of` is when this server took its copy of the list.
+
+The lists are downloaded into `data/reputation/` by the scheduler, never by a
+lookup: at boot only what is missing or stale, then each once its copy is a day
+old. A lookup is a binary search over ranges held in memory (microseconds, no
+outbound request). Spamhaus allows one download a day and asks for credit: each
+request's time is kept on disk, so neither a failed request nor a restart can
+make a second one within 24 hours, and its notice is in `attribution`, on the
+page and on `/privacy`. This service's own ban list is never a signal.
+FireHOL level1 is not used: it merges DShield, whose CC BY-NC-SA licence
+restricts commercial use and requires anything derived to carry the same
+licence, and Spamhaus DROP, which is read here directly under its own terms.
+
 ### Response codes
 
 | Code | Meaning |
@@ -739,7 +824,7 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | Geolocation, ASN/carrier, registration, and a TLS summary for a domain or IP. Start here. |
+| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. The tool description tells the model that a level of `none` is not "safe". |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |
@@ -763,8 +848,10 @@ the difference is easy to get wrong:
 
 Local clients run on your computer, so the connection genuinely originates with
 you. Hosted clients do not, and no remote MCP server can see past them. The tool
-cannot tell which case it is in, so it reports the connection's origin and says
-so. **When it matters, open <https://ip.1kko.com> in a browser.**
+usually cannot tell which case it is in, so it reports the connection's origin
+and says so. When the address is on the datacenter list, its note says the
+caller is likely a hosted client (or a local one behind a VPN or cloud proxy).
+**When it matters, open <https://ip.1kko.com> in a browser.**
 
 ### Discovery from the HTML
 

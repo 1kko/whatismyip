@@ -387,6 +387,20 @@ Automated maintenance tasks run via APScheduler:
 1. **GeoIP Database Update** - Every 3 days
 2. **Ban Cleanup** - Every 5 minutes (removes expired bans)
 3. **Rate Limit Cleanup** - Every 1 minute (prevents memory leaks)
+4. **IP Reputation Lists** - Checked every 10 minutes, each list downloaded
+   once its copy in `data/reputation/` is a day old (and at boot only when
+   missing or stale). The URLs are operator config, never request input, so the
+   feature adds no SSRF surface, and a lookup reads the lists from memory
+   without any outbound request. A download is parsed and checked against a
+   minimum entry count before `os.replace` installs it, so an error page or a
+   truncated file never replaces a working list. Spamhaus allows one download
+   a day: the time of every request is written to disk before it is sent, so
+   neither a failed request nor a restart can cause a second one within 24
+   hours.
+
+The ban list is never used as a reputation signal: showing it would reveal
+which rule a `403` answered with, and would mark everyone sharing a CGNAT or
+office address with a banned visitor.
 
 ## Security Best Practices
 

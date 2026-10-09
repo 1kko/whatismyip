@@ -107,6 +107,11 @@ poetry run ruff format .
   legs it needs and the target kinds it applies to) and the text/flat-JSON
   rendering. Pure: `main.py` runs the lookup. `-` is "no value", `?` is "the
   lookup failed".
+- `reputation.py`: IP reputation from key-free public lists (Spamhaus DROP and
+  ASN-DROP, Tor exits, X4BNet VPN/datacenter). `ReputationManager` keeps them in
+  `data/reputation/` (gitignored) the way `TldNamesManager` keeps the suffix
+  list, and answers `check(ip, asn)` from sorted intervals in memory. Imports
+  only `config` and the standard library; `lookup.py` builds the singleton.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
   Streamable HTTP). Four tools, all thin shells over `lookup.gather()` that
   reshape its output for an LLM context.
