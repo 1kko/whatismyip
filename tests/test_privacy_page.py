@@ -189,6 +189,12 @@ def _privacy_text(**patches):
         return _text(client.get("/privacy", headers=CHROME).text)
 
 
+def _mentions(text: str, name: str) -> bool:
+    """Whether the page names `name` as a word. A regex rather than `in`:
+    CodeQL reads a hostname literal tested with `in` as a URL check."""
+    return re.search(rf"(?<![\w.]){re.escape(name)}(?![\w])", text) is not None
+
+
 class TestContent:
     def test_says_what_a_lookup_logs(self):
         text = _privacy_text()
@@ -214,15 +220,15 @@ class TestContent:
     def test_names_the_other_servers_the_server_contacts(self):
         text = _privacy_text()
         for party in ("RDAP", "IANA", "WHOIS", "crt.sh", "port 443"):
-            assert party in text, party
+            assert _mentions(text, party), party
 
     def test_crt_sh_is_not_listed_when_subdomains_are_off(self):
-        assert "crt.sh" not in _privacy_text(SUBDOMAIN_ENABLED=False)
+        assert not _mentions(_privacy_text(SUBDOMAIN_ENABLED=False), "crt.sh")
 
     def test_names_what_the_browser_contacts(self):
         text = _privacy_text()
-        assert "tile.openstreetmap.org" in text
-        assert config.WEBRTC_STUN_HOST in text
+        assert _mentions(text, "tile.openstreetmap.org")
+        assert _mentions(text, config.WEBRTC_STUN_HOST)
 
     def test_no_stun_server_when_the_test_is_off(self):
         text = _privacy_text(WEBRTC_STUN_URL="", WEBRTC_STUN_HOST="")
