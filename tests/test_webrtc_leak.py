@@ -126,11 +126,10 @@ class TestSelfPage:
         test = re.search(r'<div class="webrtc".*?</div>', html, re.S).group(0)
         assert config.WEBRTC_STUN_HOST in test
 
-    def test_footer_discloses_the_stun_server(self):
-        """Like the map tiles, the one other host the browser may contact is
-        named on the page itself."""
-        footer = _footer(_page().text)
-        assert config.WEBRTC_STUN_HOST in footer
+    def test_the_footer_leaves_the_stun_server_to_the_test(self):
+        """The test names its STUN server before anything is sent (above), and
+        /privacy lists it; a footer line repeating it on every page was noise."""
+        assert config.WEBRTC_STUN_HOST not in _footer(_page().text)
 
     def test_loads_the_script_with_the_nonce(self):
         html = _page().text

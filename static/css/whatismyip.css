@@ -485,9 +485,9 @@ table.records--dns td:nth-child(4) {
 }
 .footer a { color: var(--text-secondary); text-decoration: none; }
 .footer a:hover { color: var(--accent); }
-/* A full-width line of its own under the footer row, so the row itself still
-   fits one line on a phone. */
-.footer__note { flex-basis: 100%; margin: 0; }
+/* The privacy page and the source link, together at the end of the row, and
+   still at the right edge when a phone wraps them under the timing line. */
+.footer__links { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
 .icon-link {
   display: inline-flex;
   align-items: center;
