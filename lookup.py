@@ -18,6 +18,7 @@ from typing import Any
 
 import whois
 
+from concurrency import lookup_gate, registration_pool, run_in
 from config import (
     RDAP_TIMEOUT_SECONDS,
     WHOIS_CACHE_ERROR_TTL,
@@ -235,8 +236,12 @@ async def _whois_fallback(target: str) -> dict:
     `timeout` bounds the worker thread, which wait_for cannot cancel."""
     try:
         raw = await asyncio.wait_for(
-            asyncio.to_thread(
-                whois.whois, target, quiet=True, timeout=WHOIS_SOCKET_TIMEOUT_SECONDS
+            run_in(
+                registration_pool,
+                whois.whois,
+                target,
+                quiet=True,
+                timeout=WHOIS_SOCKET_TIMEOUT_SECONDS,
             ),
             timeout=WHOIS_TIMEOUT_SECONDS,
         )
@@ -264,7 +269,7 @@ async def lookup_whois(target: str) -> dict:
     result = None
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(lookup_rdap, target),
+            run_in(registration_pool, lookup_rdap, target),
             timeout=RDAP_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -290,7 +295,10 @@ async def lookup_whois(target: str) -> dict:
 
 
 async def lookup_location(ip: str) -> dict:
-    data = await asyncio.to_thread(geo_ip_manager.fetch_location, ip)
+    # Inline: a read of a memory-mapped mmdb takes microseconds, less than the
+    # hop to a thread, and on the default executor it queued behind every
+    # slower leg there. The security middleware's geo check reads it inline too.
+    data = geo_ip_manager.fetch_location(ip)
     data.pop("elapsed_time", None)
     return data
 
@@ -319,6 +327,10 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
     "location"). Every leg but "whois" touches the address, so a domain is still
     resolved and its address still refused if it is private before any of them
     runs, whichever were asked for.
+
+    The legs run while a slot at the lookup gate is held (concurrency.py),
+    shared with the self page and the MCP tools; concurrency.LookupBusy when
+    none comes free in time.
     """
     want = LEGS if legs is None else frozenset(legs)
     if not want <= LEGS:
@@ -343,6 +355,15 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
         if not is_safe_ip(target):
             raise PrivateAddressError(target)
 
+    # Only after the checks above, so a refused target costs no slot and is
+    # still refused, not turned away as busy, while the gate is full.
+    async with lookup_gate.slot():
+        return await _run_legs(target, kind, want)
+
+
+async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
+    """gather()'s legs for a target it has accepted, run while it holds a slot
+    at the lookup gate."""
     # WHOIS takes seconds and depends on nothing else here, so it runs
     # alongside the DNS/SSL work instead of in front of it.
     whois_task = asyncio.create_task(lookup_whois(target)) if "whois" in want else None

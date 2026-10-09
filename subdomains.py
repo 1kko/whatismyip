@@ -29,6 +29,7 @@ import urllib.request
 from tld import exceptions as tld_exceptions
 from tld import get_tld
 
+from concurrency import run_in, subdomain_pool
 from config import (
     SUBDOMAIN_CACHE_TTL,
     SUBDOMAIN_ERROR_TTL,
@@ -207,12 +208,14 @@ def _fetch_sync(domain: str) -> object:
 async def fetch_from_source(domain: str) -> tuple[list[str], int]:
     """One crt.sh round trip, normalized. Raises SubdomainError on any failure.
 
-    urllib blocks, so it runs in a thread — the same shape lookup.py uses for
-    RDAP and WHOIS. A 200 carrying an error object is not a failure: it is a
-    successful exchange that contained nothing, and extract_names says so.
+    urllib blocks, so it runs on a thread of the crt.sh pool (concurrency.py),
+    never the default executor the lookup's DNS and TLS legs share — the same
+    shape lookup.py uses for RDAP and WHOIS on theirs. A 200 carrying an error
+    object is not a failure: it is a successful exchange that contained
+    nothing, and extract_names says so.
     """
     try:
-        payload = await asyncio.to_thread(_fetch_sync, domain)
+        payload = await run_in(subdomain_pool, _fetch_sync, domain)
     except Exception as exc:
         # Some exceptions carry no message (bare TimeoutError() from a stdlib
         # timeout has an empty str()) — fall back to the class name so a

@@ -24,9 +24,11 @@ from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
 
+from concurrency import LookupBusy, LookupGate
 from config import (
     MCP_ALLOWED_HOSTS,
     MCP_ALLOWED_ORIGINS,
+    MCP_LOOKUP_CONCURRENCY,
     RDAP_TIMEOUT_SECONDS,
     SUBDOMAIN_ENABLED,
     SUBDOMAIN_MCP_DEFAULT_LIMIT,
@@ -176,24 +178,28 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
     }
 
 
-# Every MCP tool call runs gather()'s full pipeline on the same executor the
-# HTML site uses, and /mcp has no auto-ban escalation (see main.py's
-# security_middleware) to shed a sustained attacker the way the browser path
-# does. Two amplifiers make an unbounded call here worse than the equivalent
-# GET /{domain}: `_whois_fallback` (lookup.py) documents that `wait_for`
-# cannot actually cancel its worker thread on timeout, so a blackholing WHOIS
-# server holds a thread for the OS TCP timeout (~2 min) rather than the 15s
-# budget; and `DomainManager.get_records()` (managers.py) opens nested thread
-# pools of its own — no longer sized by the zone's record count, but still up
-# to 8 + 2 x DNS_HOST_RESOLVE_WORKERS threads per call. A semaphore
-# caps how many gather() calls run at once; wait_for gives the whole call a
-# hard wall-clock ceiling so a stuck one can't hold its slot forever.
-_GATHER_CONCURRENCY = asyncio.Semaphore(8)
+# gather() takes a slot at the lookup gate (concurrency.py) that the page and
+# the JSON API share. MCP also has a gate of its own, its share of that one: at
+# most MCP_LOOKUP_CONCURRENCY of the global slots are ever held by tool calls,
+# and the page keeps the rest. /mcp has no auto-ban escalation (see main.py's
+# security_middleware), because every user of a hosted AI client shares a few
+# egress IPs, so a sustained burst here cannot be shed the way one on the page
+# is; without a share of its own it could take every slot. The share is taken
+# first, so a call waiting for a global slot holds one of MCP's, never one of
+# the page's. A full share is LookupBusy, as a full gate is, after the same
+# short wait.
+#
+# wait_for gives the whole call a wall-clock ceiling, so a stuck lookup cannot
+# hold its slots forever. The threads behind it are bounded at the source now:
+# RDAP makes one 3.5s request, python-whois has a 5s socket timeout, and both
+# run on a pool of their own; `DomainManager.get_records()` (managers.py)
+# still opens up to 8 + 2 x DNS_HOST_RESOLVE_WORKERS threads per sweep.
+_GATHER_CONCURRENCY = LookupGate("MCP", MCP_LOOKUP_CONCURRENCY)
 _GATHER_TIMEOUT_SECONDS = RDAP_TIMEOUT_SECONDS + WHOIS_TIMEOUT_SECONDS + 5
 
 
 async def _bounded_gather(target: str) -> dict:
-    async with _GATHER_CONCURRENCY:
+    async with _GATHER_CONCURRENCY.slot():
         return await asyncio.wait_for(gather(target), timeout=_GATHER_TIMEOUT_SECONDS)
 
 
@@ -213,6 +219,8 @@ async def lookup(target: str) -> dict[str, Any]:
         return _fail(exc.message)
     except TimeoutError:
         return _fail("Lookup timed out")
+    except LookupBusy as exc:
+        return _fail(str(exc))
     except Exception:
         logging.exception("MCP lookup failed for %s", sanitize_log_input(target))
         return _fail("Lookup failed")
@@ -275,6 +283,8 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
         return _fail(exc.message)
     except TimeoutError:
         return _fail("Lookup timed out")
+    except LookupBusy as exc:
+        return _fail(str(exc))
     except Exception:
         logging.exception("MCP dns_records failed for %s", sanitize_log_input(domain))
         return _fail("DNS lookup failed")
@@ -318,6 +328,8 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
         return _fail(exc.message)
     except TimeoutError:
         return _fail("Lookup timed out")
+    except LookupBusy as exc:
+        return _fail(str(exc))
     except Exception:
         logging.exception(
             "MCP ssl_certificate failed for %s", sanitize_log_input(domain)
