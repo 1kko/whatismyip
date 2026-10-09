@@ -1618,9 +1618,10 @@ async def head_lookup(request: Request):
     HEAD is what uptime monitors and link checkers send, and it only asks
     whether the page is there. Running WHOIS, DNS and TLS for a body that is
     then thrown away would make the cheapest request the most expensive one.
-    So the answer is 200 with the Content-Type GET would negotiate; whether
-    this particular target would get a 400 is not checked, since finding out
-    takes the lookup this exists to skip.
+    So the answer is 200 with the Content-Type GET would answer with, or GET's
+    400 for a query parameter it refuses; whether this particular target would
+    get a 400 is not checked, since finding out takes the lookup this exists
+    to skip.
 
     This is a route, not a middleware, so it runs after the security
     middleware like everything else: a banned or geo-blocked address still
@@ -1634,7 +1635,28 @@ async def head_lookup(request: Request):
         names = parse_fields(request.query_params.getlist("fields"))
     except InvalidFieldError as exc:
         return _invalid_field(exc, fmt)
-    if fmt == "text":
+    # The modes GET answers in JSON whatever was negotiated, having no page to
+    # render: the registration alone on the self route (?whois=only), the
+    # subdomain list alone on a target (?subdomains=only). Each route reads
+    # only its own, and a value GET refuses is the same 400 here.
+    if "domain_ip" in request.path_params:
+        try:
+            mode = _subdomain_mode(request.query_params.get("subdomains"))
+        except HTTPException as exc:
+            if fmt == "text":
+                return _text_error(exc.detail, exc.status_code)
+            raise
+        json_only = mode == "only"
+    else:
+        whois_only = request.query_params.get("whois")
+        if whois_only is not None and whois_only.lower() != "only":
+            if fmt == "text":
+                return _text_error("whois must be: only")
+            raise HTTPException(status_code=400, detail="whois must be: only")
+        json_only = whois_only is not None
+    if json_only:
+        media_type = "application/json"
+    elif fmt == "text":
         media_type = "text/plain"
     elif fmt == "json" or names is not None:
         media_type = "application/json"

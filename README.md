@@ -607,9 +607,10 @@ text included), carries `Link: </privacy>; rel="privacy-policy"` (RFC 6903).
 ### `HEAD`
 
 `HEAD /` and `HEAD /{domain_or_ip}` answer `200` with the Content-Type a `GET`
-would have (`text/plain` for text, `application/json` for `?fields=`) and no
-body, without running any lookup — for uptime monitors and link checkers. A bad
-`?format=` or `?fields=` is the same `400` as on `GET`. They do not tell you
+would have (`text/plain` for text, `application/json` for `?fields=`,
+`/?whois=only` and `?subdomains=only`) and no body, without running any lookup —
+for uptime monitors and link checkers. A bad `?format=`, `?fields=`, `?whois=`
+or `?subdomains=` is the same `400` as on `GET`. They do not tell you
 whether a given target would be rejected: finding that out takes the lookup.
 `/healthz`, `/robots.txt`, `/favicon.ico`, `/privacy` and `/static/` answer `HEAD` as they
 answer `GET`, minus the body. `HEAD` passes through the same bans, geo rules and

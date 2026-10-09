@@ -197,7 +197,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   subdomain list; see [Subdomain lookup](#subdomain-lookup)
 - `?format=html|json|text` and `?fields=` on both lookup routes
 - `HEAD /`, `HEAD /{domain_ip}` - `main.head_lookup`: `200` with the
-  Content-Type a GET would negotiate, and no lookup
+  Content-Type GET would answer with (JSON for the `?whois=only` and
+  `?subdomains=only` modes, whatever was negotiated), GET's `400` for a bad
+  query parameter, and no lookup
 - `GET /healthz` - `ok` or `degraded` with `reasons` (`main.health_reasons`,
   no network calls), the deployed `version`, and which datasets are loaded
 - `GET /robots.txt`, `GET /favicon.ico` (a `301` to `/static/favicon.ico`),

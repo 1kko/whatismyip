@@ -3,11 +3,16 @@
 1. gather()'s gating A query logged every miss at WARNING, an IPv6-only name's
    NoAnswer included, though the AAAA fallback then resolved it.
 2. MCP initialize reported serverInfo.version as "", the SDK's default.
+3. HEAD advertised text/html for /?whois=only and /{target}?subdomains=only,
+   which GET always answers in JSON, and 200 for a ?whois= or ?subdomains=
+   value GET refuses with a 400.
 
 Every outbound lookup is faked; nothing here touches the network.
 """
 
+import contextlib
 import logging
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import dns.resolver
 import pytest
@@ -147,3 +152,105 @@ def test_mcp_initialize_reports_the_deployed_version():
     assert server_info["name"] == "whatismyip"
     assert server_info["version"] == config.APP_VERSION
     assert server_info["version"]
+
+
+# --- 3. HEAD carries the Content-Type and status GET answers with ------------------
+
+# A public peer address, so the self route treats it as an ordinary visitor.
+client = TestClient(main.app, client=("8.8.8.8", 41234))
+
+CURL = {"user-agent": "curl/8.7.1"}
+BROWSER = {
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+    )
+}
+# What gather() returns when nothing resolves, so a GET renders normally.
+EMPTY_LOOKUP = {
+    "address": "nasa.gov",
+    "domain": {},
+    "location": {},
+    "whois": {"error": "mocked"},
+    "ssl": None,
+    "resolved_ip": None,
+    "resolution": "nxdomain",
+    "reverse_dns": None,
+}
+
+
+@pytest.fixture
+def offline_routes():
+    """Every lookup GET would make, answered locally. HEAD makes none."""
+    with contextlib.ExitStack() as stack:
+        for name, mock in {
+            "main.gather": AsyncMock(return_value=dict(EMPTY_LOOKUP)),
+            "main.lookup_whois": AsyncMock(return_value={"error": "mocked"}),
+            "main.lookup_location": AsyncMock(return_value={}),
+            "main.get_subdomains": AsyncMock(return_value=[]),
+            "lookup.lookup_rdap": MagicMock(return_value=None),
+            "lookup.whois.whois": MagicMock(return_value={}),
+        }.items():
+            stack.enter_context(patch(name, mock))
+        stack.enter_context(
+            patch.object(
+                main.domain_manager,
+                "perform_reverse_lookup",
+                MagicMock(return_value=None),
+            )
+        )
+        yield
+
+
+@pytest.mark.parametrize(
+    "path, headers, status, media_type",
+    [
+        # The self route.
+        ("/", BROWSER, 200, "text/html"),
+        ("/", CURL, 200, "application/json"),
+        ("/?format=text", CURL, 200, "text/plain"),
+        # The registration alone is JSON whatever was negotiated.
+        ("/?whois=only", BROWSER, 200, "application/json"),
+        ("/?whois=only", CURL, 200, "application/json"),
+        ("/?whois=ONLY", BROWSER, 200, "application/json"),
+        ("/?whois=only&format=text", CURL, 200, "application/json"),
+        ("/?whois=only&format=html", BROWSER, 200, "application/json"),
+        ("/?whois=all", BROWSER, 400, "application/json"),
+        ("/?whois=", BROWSER, 400, "application/json"),
+        ("/?whois=all&format=text", CURL, 400, "text/plain"),
+        ("/?fields=ip", BROWSER, 200, "application/json"),
+        ("/?fields=ip&format=text", BROWSER, 200, "text/plain"),
+        ("/?fields=nope", BROWSER, 400, "application/json"),
+        ("/?fields=nope&format=text", CURL, 400, "text/plain"),
+        ("/?format=nope", BROWSER, 400, "application/json"),
+        # The self route has no subdomain list: the parameter is not read.
+        ("/?subdomains=only", BROWSER, 200, "text/html"),
+        ("/?subdomains=nope", BROWSER, 200, "text/html"),
+        # A target.
+        ("/nasa.gov", BROWSER, 200, "text/html"),
+        ("/nasa.gov", CURL, 200, "application/json"),
+        ("/nasa.gov?format=text", CURL, 200, "text/plain"),
+        # The subdomain list alone is JSON whatever was negotiated.
+        ("/nasa.gov?subdomains=only", BROWSER, 200, "application/json"),
+        ("/nasa.gov?subdomains=only", CURL, 200, "application/json"),
+        ("/nasa.gov?subdomains=only&format=text", CURL, 200, "application/json"),
+        ("/nasa.gov?subdomains=include", BROWSER, 200, "text/html"),
+        ("/nasa.gov?subdomains=exclude", CURL, 200, "application/json"),
+        ("/nasa.gov?subdomains=nope", BROWSER, 400, "application/json"),
+        ("/nasa.gov?subdomains=nope&format=text", CURL, 400, "text/plain"),
+        ("/nasa.gov?fields=ip", BROWSER, 200, "application/json"),
+        ("/nasa.gov?fields=ip&format=text", BROWSER, 200, "text/plain"),
+        ("/nasa.gov?fields=nope", BROWSER, 400, "application/json"),
+        # A target has no registration-only mode: the parameter is not read.
+        ("/nasa.gov?whois=only", BROWSER, 200, "text/html"),
+        ("/nasa.gov?whois=nope", CURL, 200, "application/json"),
+    ],
+)
+def test_head_answers_as_get_would(offline_routes, path, headers, status, media_type):
+    get = client.get(path, headers=headers)
+    head = client.head(path, headers=headers)
+    assert get.status_code == status
+    assert get.headers["content-type"].split(";")[0] == media_type
+    assert head.status_code == get.status_code
+    assert head.headers["content-type"] == get.headers["content-type"]
+    assert head.content == b""
