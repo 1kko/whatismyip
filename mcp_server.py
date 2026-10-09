@@ -185,7 +185,7 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
 # server holds a thread for the OS TCP timeout (~2 min) rather than the 15s
 # budget; and `DomainManager.get_records()` (managers.py) opens nested thread
 # pools of its own — no longer sized by the zone's record count, but still up
-# to 7 + 2 x DNS_HOST_RESOLVE_WORKERS threads per call. A semaphore
+# to 8 + 2 x DNS_HOST_RESOLVE_WORKERS threads per call. A semaphore
 # caps how many gather() calls run at once; wait_for gives the whole call a
 # hard wall-clock ceiling so a stuck one can't hold its slot forever.
 _GATHER_CONCURRENCY = asyncio.Semaphore(8)
@@ -201,10 +201,9 @@ async def _bounded_gather(target: str) -> dict:
 async def lookup(target: str) -> dict[str, Any]:
     """Look up everything known about a domain name or IP address: its
     geolocation, network/ASN owner, registration (RDAP/WHOIS) details, and a
-    summary of its TLS certificate. Accepts "example.com", "8.8.8.8", or a
-    pasted URL. Use this first; the other tools go deeper on one aspect.
-    Private and reserved addresses are refused, and IPv6 addresses are not
-    supported yet.
+    summary of its TLS certificate. Accepts "example.com", "8.8.8.8",
+    "2001:4860:4860::8888", or a pasted URL. Use this first; the other tools
+    go deeper on one aspect. Private and reserved addresses are refused.
     """
     try:
         data = await _bounded_gather(target)
@@ -230,16 +229,16 @@ async def lookup(target: str) -> dict[str, Any]:
     }
 
 
-# No AAAA: DomainManager.get_records() never queries it, so advertising it here
-# would return {} for a domain that does have IPv6 — indistinguishable, to a
-# model relaying the answer, from "this domain has no AAAA records".
-_RECORD_TYPES = ("a", "mx", "ns", "cname", "txt", "spf", "ptr")
+# Exactly the types DomainManager.get_records() queries. A type missing from
+# its sweep must not be listed here: it would come back {} for a domain that
+# has it, which a model relays as "this domain has none".
+_RECORD_TYPES = ("a", "aaaa", "mx", "ns", "cname", "txt", "spf", "ptr")
 
 
 @mcp.tool()
 async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, Any]:
-    """DNS records for a domain: A, MX, NS, CNAME, TXT, SPF, PTR — the exact
-    set this server queries. Pass `types` (lowercase, a subset of those) to
+    """DNS records for a domain: A, AAAA, MX, NS, CNAME, TXT, SPF, PTR — the
+    exact set this server queries. Pass `types` (lowercase, a subset of those) to
     narrow the sweep; omit it for everything. Use this for mail-routing and
     SPF/DMARC questions, where the summary from `lookup` is not enough.
     NS come from `zone`, the DNS zone serving the name. MX rows marked
@@ -247,8 +246,8 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     A type whose query failed is {"error": "timeout" | "servfail" | "error"}:
     unknown, not empty. An empty list means the name has none of that type.
     `resolution` is how the name reached `resolved_ip`: "ok", "nxdomain" (the
-    name does not exist), "noanswer" (no A record), "timeout", "servfail" or
-    "error"; "literal" when the target is itself an IP.
+    name does not exist), "noanswer" (no A or AAAA record), "timeout",
+    "servfail" or "error"; "literal" when the target is itself an IP.
     """
     # `is not None`, not truthiness: types=[] means "narrow to nothing", which is
     # a different request from omitting the argument, and must not silently

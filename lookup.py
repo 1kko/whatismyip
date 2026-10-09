@@ -51,9 +51,6 @@ class InvalidTargetError(Exception):
     Same contract as PrivateAddressError. `code` is the stable, machine-readable
     half of the answer and `message` the human one; main.py returns both with a
     400, mcp_server.py returns the message as {"error": ...}.
-
-    An IPv6 literal raises this too, under its own code, for as long as gather()
-    has no IPv6 branch to run.
     """
 
     def __init__(
@@ -110,10 +107,31 @@ def normalize_lookup_target(raw: str) -> str:
     everything from the first '/', '?' or '#' onwards. Without this, is_valid_domain
     (which parses URLs via get_tld) would accept "https://host/path" but the raw
     string would then be handed to DNS/WHOIS/SSL, which cannot resolve it.
+
+    A URL writes an IPv6 host in brackets, with any port after them
+    ("[2001:db8::1]:8443"), so the brackets and the port go too.
     """
     target = (raw or "").strip()
     target = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", target)
-    return re.split(r"[/?#]", target, maxsplit=1)[0]
+    target = re.split(r"[/?#]", target, maxsplit=1)[0]
+    # "[host]" or "[host]:port", parsed by hand: CodeQL flags the regex for
+    # this (an unanchored reading of it backtracks on a run of "[").
+    if target.startswith("["):
+        host, closed, rest = target[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") else None
+        if closed and (rest == "" or port == "" or (port or "").isdigit()):
+            return host
+    return target
+
+
+# NAT64's well-known prefix (RFC 6052): the last 32 bits are an IPv4 address.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _is_public_unicast(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if not ip.is_global or ip.is_multicast or ip.is_reserved:
+        return False
+    return not (ip.version == 6 and ip.is_site_local)
 
 
 def is_safe_ip(ip_str: str) -> bool:
@@ -127,18 +145,33 @@ def is_safe_ip(ip_str: str) -> bool:
 
     is_global follows IANA's special-purpose registry but still counts three
     kinds of address as global, so they are refused by hand: multicast; IPv6's
-    unassigned blocks (is_reserved), whose ::/8 holds the NAT64 prefix
-    64:ff9b::/96 embedding an IPv4 address; and fec0::/10, IPv6's deprecated
+    unassigned blocks (is_reserved); and fec0::/10, IPv6's deprecated
     site-local space. The registry's own exceptions, such as 192.0.0.9 and
     192.0.0.10, are public anycast services and pass on purpose.
+
+    Three kinds of IPv6 address carry an IPv4 one, and are decided here rather
+    than left to the registry. An IPv4-mapped address (::ffff:a.b.c.d) is that
+    IPv4 address written as IPv6 -- a dual-stack socket connecting to it
+    reaches the IPv4 host -- so it is judged as the IPv4 address and nothing
+    else. 6to4 (2002::/16) and NAT64 (64:ff9b::/96) are refused whatever they
+    carry: around a private address they reach it through a relay or a
+    translator, and around a public one they are a transition mechanism's
+    address rather than a host's, with no registration or PTR of their own --
+    the IPv4 address inside can be looked up as itself. Today is_global happens
+    to refuse both (6to4 is on the stdlib's private list; 64:ff9b::/96, which
+    IANA calls globally reachable, falls to is_reserved), but this rule does
+    not depend on it.
     """
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
-    if not ip.is_global or ip.is_multicast or ip.is_reserved:
-        return False
-    return not (ip.version == 6 and ip.is_site_local)
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return _is_public_unicast(ip.ipv4_mapped)
+        if ip.sixtofour is not None or ip in _NAT64:
+            return False
+    return _is_public_unicast(ip)
 
 
 geo_ip_manager = GeoIpManager()
@@ -178,7 +211,8 @@ def classify_target(target: str) -> str:
     query verbatim, CR/LF included.
 
     "ipv4" and "ipv6" say nothing about whether the address is public;
-    is_safe_ip answers that.
+    is_safe_ip answers that. An IPv6 address with a zone ("fe80::1%eth0") is
+    invalid: the zone names an interface on the machine that typed it.
     """
     if not target or any(unicodedata.category(ch) == "Cc" for ch in target):
         return "invalid"
@@ -187,7 +221,9 @@ def classify_target(target: str) -> str:
     except ValueError:
         pass
     else:
-        return "ipv4" if ip.version == 4 else "ipv6"
+        if ip.version == 4:
+            return "ipv4"
+        return "invalid" if ip.scope_id else "ipv6"
     if _is_hostname(target) and domain_manager.is_valid_domain(target):
         return "domain"
     return "invalid"
@@ -295,16 +331,17 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
     kind = classify_target(target)
     if kind == "invalid":
         raise InvalidTargetError(target)
-    if kind == "ipv6":
-        # There is no IPv6 branch below: an IPv6 literal got RDAP alone and a
-        # normal-looking answer with GeoIP, ASN, PTR and the map all empty.
-        raise InvalidTargetError(
-            target,
-            code="ipv6_not_supported",
-            message="IPv6 addresses are not supported yet",
-        )
-    if kind == "ipv4" and not is_safe_ip(target):
-        raise PrivateAddressError(target)
+    if kind != "domain":
+        # One spelling per address, ipaddress's (RFC 5952 for IPv6), so the
+        # WHOIS cache, the log and the page see one address however it was
+        # typed. An IPv4-mapped address is the IPv4 address it carries, and is
+        # looked up as that: no registry or PTR zone answers for ::ffff:0:0/96.
+        address = ipaddress.ip_address(target)
+        if address.version == 6 and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        target = str(address)
+        if not is_safe_ip(target):
+            raise PrivateAddressError(target)
 
     # WHOIS takes seconds and depends on nothing else here, so it runs
     # alongside the DNS/SSL work instead of in front of it.
@@ -333,6 +370,23 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
             except Exception as e:
                 resolution = dns_status(e)
                 logging.warning("No A record for %s: %s", sanitize_log_input(target), e)
+            if resolution == "noanswer":
+                # The name exists but has no A record: an IPv6-only host. Its
+                # address still has a location, an owner and a PTR, all asked
+                # over IPv4; only the TLS leg needs an IPv6 route, and
+                # SSLManager says it has none.
+                try:
+                    aaaa_records = await asyncio.to_thread(
+                        _recursive_resolver().resolve, target, "AAAA"
+                    )
+                    resolved_ip = str(aaaa_records[0])
+                    resolution = "ok"
+                except Exception as e:
+                    logging.debug(
+                        "No AAAA record for %s either: %s",
+                        sanitize_log_input(target),
+                        e,
+                    )
             if resolved_ip and not is_safe_ip(resolved_ip):
                 raise PrivateAddressError(target)
 
@@ -365,7 +419,7 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
                     exc_info=ssl_data,
                 )
                 ssl_data = None
-        elif kind == "ipv4":
+        elif kind != "domain":
             logging.debug("ip=%s", sanitize_log_input(target))
             # The sweep is of the PTR name, so it needs the PTR too.
             if want & {"ptr", "dns"}:

@@ -737,7 +737,8 @@ write it, CR/LF included, into its port-43 query. Two defenses then
 apply to the address:
 
 1. **Public-address allowlist** (`is_safe_ip`). An IP given as the
-   target, and the A record a domain resolves to, must be globally
+   target, and the A record a domain resolves to (or its AAAA record,
+   when it has no A record), must be globally
    reachable unicast; anything else is rejected with HTTP 400 (an
    `error` result from the MCP tools) before anything connects to it.
    The rule is Python's `ipaddress` `is_global`, which follows IANA's
@@ -755,10 +756,29 @@ apply to the address:
 
    Three kinds of address that `is_global` still counts as global are
    refused on top of it: multicast (`224.0.0.0/4`, `ff00::/8`), IPv6's
-   unassigned blocks (`is_reserved`; `::/8` among them holds the NAT64
-   prefix `64:ff9b::/96`), and IPv6's deprecated site-local
+   unassigned blocks (`is_reserved`), and IPv6's deprecated site-local
    `fec0::/10`. The registry's own exceptions pass on purpose: `192.0.0.9`
    and `192.0.0.10` are public anycast services, not internal space.
+
+   Three kinds of IPv6 address carry an IPv4 address inside them, and
+   `is_safe_ip` decides them itself rather than trusting the registry's
+   verdict on the wrapper:
+
+   | Range | Rule |
+   | --- | --- |
+   | `::ffff:0:0/96` (IPv4-mapped) | judged as the IPv4 address it carries: `::ffff:10.0.0.1` is refused, `::ffff:8.8.8.8` is looked up as `8.8.8.8` |
+   | `2002::/16` (6to4) | refused, whatever it carries |
+   | `64:ff9b::/96` (NAT64) | refused, whatever it carries |
+
+   A mapped address is the IPv4 address in IPv6 notation; a dual-stack
+   socket connecting to it reaches the IPv4 host. A 6to4 or NAT64
+   address around a private IPv4 one reaches it through a relay or a
+   translator, and around a public one it is a transition mechanism's
+   address with no registration or PTR of its own, so it is refused too;
+   the IPv4 address inside can be looked up as itself. `is_global`
+   happens to refuse both today (6to4 is on the stdlib's private list,
+   and NAT64, which IANA calls globally reachable, falls to
+   `is_reserved`), but the rule above does not depend on that.
 
    This used to be a denylist of RFC1918, loopback, link-local and
    reserved ranges, which let everything it did not name through: a
@@ -770,6 +790,8 @@ apply to the address:
    hostname only for SNI/cert validation. If no verified IP is
    available the SSL lookup is skipped. This closes the TOCTOU
    rebinding window between the safety check and the TCP connect.
+   An IPv6 address gets no handshake at all: production has no IPv6
+   route out, so `ssl` reports `TLS not checked` instead.
    A certificate that fails verification is re-read with a second,
    unverified handshake to that same IP, never the hostname, so
    reporting why it failed adds no DNS lookup and no new target.

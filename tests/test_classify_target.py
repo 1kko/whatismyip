@@ -21,10 +21,6 @@ API_UA = {"user-agent": "curl/8"}
 BROWSER_UA = {"user-agent": "Mozilla/5.0 Chrome/120"}
 
 INVALID_BODY = {"error": "not a domain name or IP address", "code": "invalid_target"}
-IPV6_BODY = {
-    "error": "IPv6 addresses are not supported yet",
-    "code": "ipv6_not_supported",
-}
 
 client = TestClient(app, client=("8.8.8.8", 41234))
 
@@ -158,16 +154,6 @@ async def test_gather_refuses_an_invalid_target_before_any_lookup(target):
     _assert_nothing_went_out(mocks)
 
 
-async def test_gather_refuses_ipv6_as_not_supported_yet():
-    # gather() has no IPv6 branch: an IPv6 literal used to get RDAP alone and
-    # a normal-looking answer with GeoIP, ASN, PTR and the map all empty.
-    with _legs() as mocks:
-        with pytest.raises(lookup.InvalidTargetError) as raised:
-            await lookup.gather("2001:4860:4860::8888")
-    assert raised.value.code == "ipv6_not_supported"
-    _assert_nothing_went_out(mocks)
-
-
 # --- HTTP ---------------------------------------------------------------------
 
 
@@ -208,12 +194,16 @@ def test_invalid_target_with_subdomains_include_contacts_nothing():
     mocks["subdomains"].assert_not_called()
 
 
-@pytest.mark.parametrize("path", ["/2001:4860:4860::8888", "/::1"])
-def test_ipv6_target_is_a_400_saying_not_supported_yet(path):
+@pytest.mark.parametrize("path", ["/::1", "/fe80::1"])
+def test_a_private_ipv6_target_is_a_400_with_no_outbound_call(path):
+    # IPv6 is looked up now (tests/test_ipv6.py), so a private one gets the
+    # private-address 400 an IPv4 one does, before anything goes out.
     with _legs() as mocks:
         response = client.get(path, headers=API_UA)
     assert response.status_code == 400
-    assert response.json() == IPV6_BODY
+    assert response.json() == {
+        "detail": "Private or reserved IP addresses are not allowed"
+    }
     _assert_nothing_went_out(mocks)
 
 
@@ -336,13 +326,4 @@ def test_mcp_tools_report_an_invalid_target_as_an_error(tool, argument):
         mcp_client.post("/mcp", json=MCP_INIT, headers=MCP_HEADERS)
         payload = _call_tool(mcp_client, tool, {argument: "foo\r\nbar.com"})
     assert payload == {"error": "not a domain name or IP address"}
-    _assert_nothing_went_out(mocks)
-
-
-def test_mcp_lookup_reports_ipv6_as_not_supported_yet():
-    main.mcp_rate_limiter.request_history.clear()
-    with TestClient(app) as mcp_client, _legs() as mocks:
-        mcp_client.post("/mcp", json=MCP_INIT, headers=MCP_HEADERS)
-        payload = _call_tool(mcp_client, "lookup", {"target": "2001:4860:4860::8888"})
-    assert payload == {"error": "IPv6 addresses are not supported yet"}
     _assert_nothing_went_out(mocks)

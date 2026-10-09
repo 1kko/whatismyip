@@ -174,8 +174,7 @@ class TestIpNeverFallsBackToWhois:
         assert port43 == []
 
     def test_ipv6_follows_the_same_rule(self, monkeypatch, port43):
-        # gather() refuses IPv6, but the self page looks up the visitor's own
-        # address, which can be one.
+        # An IPv6 target, or the visitor's own address on the self page.
         monkeypatch.setattr(lookup, "lookup_rdap", lambda target: None)
 
         out = asyncio.run(lookup.lookup_whois("2001:db8::1"))

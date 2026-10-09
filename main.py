@@ -246,14 +246,14 @@ def _apply_resolved_target(location: dict, target: dict | None) -> None:
 def _record_value(kind: str, record) -> str:
     """The part of a record a human reads, not its Python repr.
 
-    DomainManager returns each type with its own shape: A is {ip, ttl}, MX is
-    {preference, hostname, ttl, ip}, NS is {hostname, ttl, ip} and TXT is
-    {text: [...], ttl}. CNAME is a single {cname, ttl}, not a list.
+    DomainManager returns each type with its own shape: A and AAAA are
+    {ip, ttl}, MX is {preference, hostname, ttl, ip}, NS is {hostname, ttl, ip}
+    and TXT is {text: [...], ttl}. CNAME is a single {cname, ttl}, not a list.
     """
     if not isinstance(record, dict):
         return str(record)
 
-    if kind == "A":
+    if kind in ("A", "AAAA"):
         return str(record.get("ip", ""))
     if kind == "MX":
         preference = record.get("preference")
@@ -288,7 +288,13 @@ def _dns_rows(response_data: dict) -> list[dict]:
         ]
 
     rows = []
-    for kind, key in (("A", "a"), ("MX", "mx"), ("NS", "ns"), ("TXT", "txt")):
+    for kind, key in (
+        ("A", "a"),
+        ("AAAA", "aaaa"),
+        ("MX", "mx"),
+        ("NS", "ns"),
+        ("TXT", "txt"),
+    ):
         for record in domain.get(key) or []:
             rows.append(
                 {
@@ -415,7 +421,8 @@ def render_error(request: Request, status_code: int, title: str, message: str = 
 
 # Where a home router, an office network, a VPN or the visitor's own machine
 # answers: RFC 1918, loopback, link-local, and CGNAT (RFC 6598), which carriers
-# and Tailscale hand out. static/js/app.js keeps the same list, for the hint
+# and Tailscale hand out, and IPv6's loopback, link-local and unique local
+# (fc00::/7, its RFC 1918). static/js/app.js keeps the same list, for the hint
 # it shows in the search box before any request is made.
 _LOCAL_NETWORKS = tuple(
     ipaddress.ip_network(cidr)
@@ -426,6 +433,9 @@ _LOCAL_NETWORKS = tuple(
         "127.0.0.0/8",
         "169.254.0.0/16",
         "100.64.0.0/10",
+        "::1/128",
+        "fe80::/10",
+        "fc00::/7",
     )
 )
 
@@ -441,19 +451,12 @@ def render_refused_target(
     path would otherwise let a link put words on this page.
     """
     if isinstance(exc, InvalidTargetError):
-        if exc.code == "ipv6_not_supported":
-            return render_error(
-                request,
-                400,
-                "IPv6 addresses are not supported yet",
-                "Look up a domain name or an IPv4 address instead.",
-            )
         return render_error(
             request,
             400,
             "Not a domain name or IP address",
-            "Enter a domain name such as example.com, or an IPv4 address such as "
-            "8.8.8.8.",
+            "Enter a domain name such as example.com, or an IP address such as "
+            "8.8.8.8 or 2001:4860:4860::8888.",
         )
     try:
         address = ipaddress.ip_address(target)
@@ -1224,8 +1227,8 @@ def _fields_response(
 
 async def _self_fields(client_ip: str, names: list[str]) -> dict:
     """get_self_info's lookups, cut down to the legs `names` need and shaped
-    like gather()'s result. Not gather() itself: that refuses a private or
-    IPv6 address, and the visitor's own address is answered whatever it is."""
+    like gather()'s result. Not gather() itself: that refuses a private
+    address, and the visitor's own address is answered whatever it is."""
     legs = legs_for(names, "ip")
     # The same rule as the full self lookup: a private address has no public
     # registration or PTR, so neither is asked for.
@@ -1485,8 +1488,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         if fmt == "html":
             return render_refused_target(request, domain_ip, exc)
         if isinstance(exc, InvalidTargetError):
-            # `code` lets a client tell "not a target at all" from "a target
-            # this server does not handle yet" without parsing the message.
+            # `code` lets a client tell "not a target at all" from the other
+            # 400s (a bad ?fields=, say) without parsing the message.
             return JSONResponse(
                 status_code=400, content={"error": exc.message, "code": exc.code}
             )

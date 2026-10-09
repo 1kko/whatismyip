@@ -3,10 +3,13 @@
 // loads it too, for its search box, and has none of the rest.
 
 function normalizeLookupTarget(raw) {
-  return raw
+  const target = raw
     .trim()
     .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "")
     .split(/[/?#]/)[0];
+  // A URL writes an IPv6 host in brackets, with any port after them.
+  const bracketed = target.match(/^\[([^\]]*)\](?::\d*)?$/);
+  return bracketed ? bracketed[1] : target;
 }
 
 const form = document.getElementById("lookup-form");
@@ -26,10 +29,29 @@ const DOMAIN = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}
 // (dotfiles, /wp-, nested paths) can't be produced by a single-segment target.
 const PROBE_SUFFIX = /\.(php|aspx?|json|xml|sql|bak|conf|config|ini|log)$/i;
 
+// An IPv6 address as the URL parser writes it (lower case, the longest run of
+// zero groups as "::"), or null when `value` is not one. The parser accepts
+// the same forms the server's ipaddress does; the character check in front
+// keeps it to a bare address, so "x]@[::1" is not the "::1" inside it, and a
+// zone ("fe80::1%eth0") names an interface on this machine, not an address.
+function ipv6Host(value) {
+  if (!value.includes(":") || !/^[0-9a-f:.]+$/i.test(value)) {
+    return null;
+  }
+  try {
+    return new URL(`http://[${value}]/`).hostname.slice(1, -1);
+  } catch {
+    return null;
+  }
+}
+
 function isLookupTarget(value) {
   const octets = value.match(IPV4);
   if (octets) {
     return octets.slice(1).every((part) => Number(part) <= 255);
+  }
+  if (ipv6Host(value) !== null) {
+    return true;
   }
   return DOMAIN.test(value) && !PROBE_SUFFIX.test(value);
 }
@@ -37,9 +59,20 @@ function isLookupTarget(value) {
 // A router's address is the commonest thing typed in here, and the server
 // refuses it with a 400. These are the ranges a home router, an office
 // network, a VPN or this machine answers on: RFC 1918, loopback, link-local
-// and CGNAT (100.64.0.0/10, carriers and Tailscale). _LOCAL_NETWORKS in
-// main.py is the same list, behind the error page's own explanation.
+// and CGNAT (100.64.0.0/10, carriers and Tailscale), and IPv6's loopback,
+// link-local and unique local (fc00::/7). _LOCAL_NETWORKS in main.py is the
+// same list, behind the error page's own explanation.
 function isLocalAddress(value) {
+  const host = ipv6Host(value);
+  if (host !== null) {
+    // The parser writes the first group out unless the address starts "::".
+    const first = host.startsWith(":") ? 0 : parseInt(host, 16);
+    return (
+      host === "::1" ||
+      (first & 0xffc0) === 0xfe80 ||
+      (first & 0xfe00) === 0xfc00
+    );
+  }
   const octets = value.match(IPV4);
   if (!octets) {
     return false;

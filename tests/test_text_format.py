@@ -290,8 +290,8 @@ class TestTargetText:
         ("path", "line"),
         [
             ("/localhost", "error: not a domain name or IP address\n"),
-            ("/2001:4860:4860::8888", "error: IPv6 addresses are not supported yet\n"),
             ("/10.0.0.1", "error: Private or reserved IP addresses are not allowed\n"),
+            ("/::1", "error: Private or reserved IP addresses are not allowed\n"),
         ],
     )
     def test_errors_are_one_line_of_text_with_the_same_status(self, path, line):

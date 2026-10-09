@@ -165,6 +165,7 @@ def test_every_record_type_reports_ok_alongside_unchanged_keys(fake_dns):
 
     assert records["status"] == {
         "a": "ok",
+        "aaaa": "noanswer",
         "mx": "ok",
         "ns": "ok",
         "cname": "noanswer",
@@ -191,7 +192,10 @@ def test_each_failure_reaches_its_own_type_only(fake_dns, outcome, rdtype, key, 
 
     assert records["status"][key] == outcome
     assert records[key] == empty
-    others = {k: v for k, v in records["status"].items() if k not in (key, "cname")}
+    # example.com has no CNAME or AAAA here, so those two answer noanswer.
+    others = {
+        k: v for k, v in records["status"].items() if k not in (key, "cname", "aaaa")
+    }
     assert set(others.values()) == {"ok"}
 
 

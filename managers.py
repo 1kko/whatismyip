@@ -695,6 +695,7 @@ class DomainManager:
             "spf": [],
             "ptr": [],
             "a": [],
+            "aaaa": [],
             # Each type's dns_status(), or "ok". An empty list above says only
             # that nothing came back; this says whether that was the answer
             # (noanswer, nxdomain) or the query failing (timeout, servfail,
@@ -716,6 +717,15 @@ class DomainManager:
         def fetch_a() -> tuple[list, str]:
             try:
                 answer = _recursive_resolver().resolve(domain, "A")
+            except Exception as e:
+                return [], dns_status(e)
+            return [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer], "ok"
+
+        def fetch_aaaa() -> tuple[list, str]:
+            # Asked over IPv4 like every other type: the public resolvers are
+            # IPv4 addresses, and this server has no IPv6 route to use anyway.
+            try:
+                answer = _recursive_resolver().resolve(domain, "AAAA")
             except Exception as e:
                 return [], dns_status(e)
             return [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer], "ok"
@@ -823,9 +833,10 @@ class DomainManager:
 
         # Every record type is independent, so sweep them at once against the
         # cached public resolvers instead of walking them in series.
-        with ThreadPoolExecutor(max_workers=7) as pool:
+        with ThreadPoolExecutor(max_workers=8) as pool:
             f_ns = pool.submit(fetch_ns)
             f_a = pool.submit(fetch_a)
+            f_aaaa = pool.submit(fetch_aaaa)
             f_mx = pool.submit(fetch_mx)
             f_cname = pool.submit(fetch_cname)
             f_txt = pool.submit(fetch_txt)
@@ -834,6 +845,7 @@ class DomainManager:
 
             records["ns"], status["ns"] = f_ns.result()
             records["a"], status["a"] = f_a.result()
+            records["aaaa"], status["aaaa"] = f_aaaa.result()
             records["mx"], status["mx"] = f_mx.result()
             records["cname"], status["cname"] = f_cname.result()
             records["txt"], records["spf"], status["txt"] = f_txt.result()
@@ -846,10 +858,12 @@ class DomainManager:
                 records["ptr"], status["ptr"] = f_ptr.result()
 
         # Fallback only when a caller omits ip -- which gather() does when its
-        # own A query failed, so the sweep's A answer may still supply one.
+        # own A and AAAA queries failed, so the sweep's answers may still
+        # supply one.
         if not ip:
-            if records["a"]:
-                records["ptr"], status["ptr"] = fetch_ptr(records["a"][0]["ip"])
+            address = next(iter(records["a"] or records["aaaa"]), None)
+            if address:
+                records["ptr"], status["ptr"] = fetch_ptr(address["ip"])
             else:
                 # No address, so no PTR question was asked: the row is exactly
                 # as known as the A query that would have supplied one.
@@ -995,16 +1009,27 @@ def _failure_reason(exc: OSError) -> str:
     return str(exc.strerror or exc).lower()
 
 
+# What get_ssl_info answers for an IPv6 address instead of a handshake.
+# Production has no IPv6 route out, and _connect's socket is IPv4 only, so the
+# connect could only fail and read as "port 443 unreachable", the host's fault.
+# gather() passes an IPv6 address only for a name that has no A record.
+TLS_SKIPPED_IPV6 = {
+    "error": "TLS not checked",
+    "reason": "IPv6-only host; this server has no IPv6 connectivity",
+}
+
+
 class SSLManager:
     @staticmethod
     def get_ssl_info(hostname: str, verified_ip: str | None = None) -> dict | None:
         """The certificate `hostname` serves on port 443, and whether it is
         trusted.
 
-        None only when no handshake was attempted. A certificate that fails
-        verification still comes back, parsed, with trusted=False and
+        None only when there was no address to connect to. A certificate that
+        fails verification still comes back, parsed, with trusted=False and
         verify_error saying why; a port that never answers, or a handshake
-        that never completes, comes back as {"error", "reason"}. All of these
+        that never completes, comes back as {"error", "reason"}, and so does an
+        IPv6 address, which is never tried (TLS_SKIPPED_IPV6). All of these
         used to be None, which the page and MCP could only call "no
         certificate".
         """
@@ -1014,6 +1039,8 @@ class SSLManager:
         if not verified_ip:
             logging.debug("SSL lookup skipped for %s: no verified IP", str(hostname))
             return None
+        if ipaddress.ip_address(verified_ip).version == 6:
+            return dict(TLS_SKIPPED_IPV6)
         try:
             sock = SSLManager._connect(verified_ip)
         except OSError as exc:

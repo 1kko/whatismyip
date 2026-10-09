@@ -91,6 +91,15 @@ def _is_ip(address: str) -> bool:
         return False
 
 
+def _ip_version(address: str) -> int:
+    """4 or 6. An IPv4-mapped address (::ffff:a.b.c.d, what a dual-stack
+    socket reports for an IPv4 peer) is the IPv4 address it carries."""
+    ip = ipaddress.ip_address(address)
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return 4
+    return ip.version
+
+
 def _first(value: Any) -> Any:
     """python-whois returns some fields (dates, especially) as lists."""
     if isinstance(value, (list, tuple)):
@@ -388,6 +397,7 @@ def _dns_column(domain: dict) -> dict:
         "title": "DNS",
         "rows": [
             _dns_count_row("A", domain, "a"),
+            _dns_count_row("AAAA", domain, "aaaa"),
             _dns_count_row("MX", domain, "mx"),
             _dns_count_row("NS", domain, "ns"),
             _dns_count_row("TXT", domain, "txt"),
@@ -395,10 +405,13 @@ def _dns_column(domain: dict) -> dict:
     }
 
 
-def _reverse_column(location: dict, domain: dict) -> dict:
+def _reverse_column(location: dict, domain: dict, address: str) -> dict:
     domain = domain or {}
     reverse = location.get("reverse_dns")
-    ttl = next(iter(domain.get("a") or []), {}).get("ttl")
+    # The PTR name's own addresses of the looked-up address's family: the
+    # ones that would confirm the PTR points back.
+    label, key = ("AAAA", "aaaa") if _ip_version(address) == 6 else ("A", "a")
+    ttl = next(iter(domain.get(key) or []), {}).get("ttl")
     return {
         "title": "REVERSE DNS",
         "rows": [
@@ -407,7 +420,7 @@ def _reverse_column(location: dict, domain: dict) -> dict:
                 "value": reverse or DASH,
                 "tone": "default" if reverse else "muted",
             },
-            _dns_count_row("A", domain, "a"),
+            _dns_count_row(label, domain, key),
             _dns_count_row("NS", domain, "ns"),
             {
                 "label": "TTL",
@@ -495,7 +508,7 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
     domain = response.get("domain") or {}
     if is_ip:
         return [
-            {"text": "IPv4", "tone": "default"},
+            {"text": f"IPv{_ip_version(response['address'])}", "tone": "default"},
             {
                 "text": "PRIVATE" if location.get("is_private") else "PUBLIC",
                 "tone": "warning" if location.get("is_private") else "default",
@@ -504,8 +517,12 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
 
     tags = [{"text": "DOMAIN", "tone": "default"}]
     first_a = next(iter(domain.get("a") or []), None)
+    first_aaaa = next(iter(domain.get("aaaa") or []), None)
     if first_a:
         tags.append({"text": f"A → {first_a['ip']}", "tone": "default"})
+    elif first_aaaa:
+        # An IPv6-only name: its address, rather than no address at all.
+        tags.append({"text": f"AAAA → {first_aaaa['ip']}", "tone": "default"})
     # "TLS valid" only for a certificate that verified: any certificate at all
     # used to earn it, and a broken one now comes back rather than None.
     ssl_data = response.get("ssl") or {}
@@ -689,7 +706,13 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
         if dns_banner(domain)
         else " · ".join(
             f"{label} {dns_failure_text(domain, key) or len(domain.get(key) or [])}"
-            for label, key in (("A", "a"), ("MX", "mx"), ("NS", "ns"), ("TXT", "txt"))
+            for label, key in (
+                ("A", "a"),
+                ("AAAA", "aaaa"),
+                ("MX", "mx"),
+                ("NS", "ns"),
+                ("TXT", "txt"),
+            )
         )
     )
 
@@ -773,7 +796,7 @@ def build_view(
     if is_ip:
         facts = [
             _network_column(location, address),
-            _reverse_column(location, domain),
+            _reverse_column(location, domain, address),
             _whois_column(response.get("whois")),
         ]
     else:
