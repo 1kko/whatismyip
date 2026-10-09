@@ -82,7 +82,7 @@ poetry run ruff format .
 - `config.py`: every environment-driven constant (timeouts, cache TTLs, file paths, rate-limit/ban settings, geo-block defaults, trusted proxies, map canvases). Pure values — imported by everything, imports nothing app-local, which keeps the tree cycle-free.
 - `managers.py` — data-gathering managers, one thin wrapper per source:
   - `GeoIpManager`: GeoLite2-City (country, city, coordinates) and GeoLite2-ASN (carrier) lookups over memory-mapped mmdb files, refreshed every 3 days via APScheduler, with geoip2fast's bundled country snapshot as the fallback until the first download
-  - `DomainManager`: DNS (A, MX, NS, CNAME, TXT), reverse DNS, domain validation
+  - `DomainManager`: DNS (A, AAAA, MX, NS, CNAME, TXT), reverse DNS, domain validation
   - `SSLManager`: SSL certificate retrieval for HTTPS endpoints
   - `HeaderManager`: strips proxy/forwarding headers
 - `security.py` — request-security subsystem: `IPBanManager`, `RateLimiter`, `SuspiciousPatternDetector`, `WhitelistManager`, `GeoBlockManager`

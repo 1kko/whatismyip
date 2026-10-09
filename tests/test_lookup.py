@@ -21,6 +21,8 @@ def test_normalize_lookup_target_is_idempotent():
         "  example.com  ",
         "8.8.8.8",
         "google.com/foo",
+        "http://[2001:db8::1]:8443/path",
+        "[[2001:db8::1]",
         "",
     ):
         once = lookup.normalize_lookup_target(raw)

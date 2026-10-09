@@ -62,7 +62,7 @@ RDAP registration data and the full TLS certificate, expanded.
   always has one to judge. `GET /healthz` reports which databases are actually
   loaded, and turns `degraded` when one is missing or its build has gone stale,
   so a silent fallback or a frozen feed is visible from outside.
-- **DNS** — A, MX, NS, CNAME, TXT, SPF and PTR, queried concurrently against
+- **DNS** — A, AAAA, MX, NS, CNAME, TXT, SPF and PTR, queried concurrently against
   public resolvers with a bounded per-query budget.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
   match, protocol and cipher, and whether the certificate is trusted. An
@@ -304,8 +304,14 @@ is rejected with `400` before any lookup runs:
 {"error": "not a domain name or IP address", "code": "invalid_target"}
 ```
 
-IPv6 addresses are not supported yet and get a `400` with
-`"code": "ipv6_not_supported"`.
+An IPv6 address gets the same GeoIP, registration and PTR answer an IPv4 one
+does, and `address` comes back in its RFC 5952 spelling. A bracketed URL host
+(`[2001:db8::1]:8443`) is accepted, and an IPv4-mapped address
+(`::ffff:8.8.8.8`) is looked up as the IPv4 address it carries. 6to4
+(`2002::/16`) and NAT64 (`64:ff9b::/96`) addresses are refused like private
+ones. A name with no A record resolves through its AAAA record instead; this
+server has no IPv6 route out, so such a name gets no TLS handshake, and `ssl`
+says so (see below).
 
 ### Response format
 
@@ -432,7 +438,7 @@ An unknown field is refused with `400` before any lookup runs:
 ```
 
 A text client gets each of the route's `400`s — `invalid_field`,
-`invalid_target`, `ipv6_not_supported`, a private address, a bad `?subdomains=`
+`invalid_target`, a private address, a bad `?subdomains=`
 — as one line with the same status code, e.g.
 `error: not a domain name or IP address`. `?format=text` and `?fields=` are
 query parameters, so they pass through the same bans, geo rules and rate limit as
@@ -558,13 +564,14 @@ rate limit as `GET`.
   "datetime": "2026-08-20T02:16:04.921503+00:00",
   "domain": {
     "a": [{ "ip": "192.0.66.108", "ttl": 454 }],
+    "aaaa": [{ "ip": "2a04:fa87:fffd::c000:426c", "ttl": 102 }],
     "mx": [{ "preference": 0, "hostname": "nasa-gov.mail.protection.outlook.com.", "ttl": 600, "ip": "52.101.8.50" }],
     "ns": [{ "hostname": "a12-64.akam.net.", "ttl": 600, "ip": "184.26.160.64" }],
     "cname": null,
     "txt": [{ "text": ["MS=ms93625004"], "ttl": 364 }],
     "spf": [],
     "ptr": [],
-    "status": { "a": "ok", "mx": "ok", "ns": "ok", "cname": "noanswer", "txt": "ok", "spf": "noanswer", "ptr": "nxdomain" }
+    "status": { "a": "ok", "aaaa": "ok", "mx": "ok", "ns": "ok", "cname": "noanswer", "txt": "ok", "spf": "noanswer", "ptr": "nxdomain" }
   },
   "location": {
     "ip": "192.0.66.108",
@@ -627,12 +634,16 @@ rate limit as `GET`.
 name has none of that type), `nxdomain` (the name does not exist), or a failure
 — `timeout`, `servfail`, `error` — in which case the empty list next to it
 means "could not find out", not "none". `resolved_ip` is the address the target
-resolved to, and `resolution` is how: that A query's status for a name, or
-`literal` when the target is an IP, so a `null` address says why.
+resolved to, and `resolution` is how: that A query's status for a name (`ok`
+too when a name with no A record resolved through AAAA), or `literal` when the
+target is an IP, so a `null` address says why.
 
 `whois.source` is `rdap` or `whois` depending on which source answered, and a
 failed lookup returns `{"error": "..."}` there rather than failing the request.
-`ssl` is `null` for IP lookups and for domains with no A record. A certificate
+`ssl` is `null` for IP lookups and for domains with no address. A domain whose
+only address is IPv6 gets `{"error": "TLS not checked", "reason": "IPv6-only
+host; this server has no IPv6 connectivity"}`: no handshake was attempted, so
+nothing is known about its certificate. A certificate
 that fails verification still comes back in full, with `trusted: false` and
 `verify_error: {"code", "message", "reason"}`: OpenSSL's verify code and message,
 and a `reason` of `expired`, `not_yet_valid`, `self_signed`, `untrusted_root`,
@@ -648,7 +659,7 @@ or `timed out`. `map` is `null` when the target has no resolvable coordinates, a
 | Code | Meaning |
 | --- | --- |
 | `200` | success |
-| `400` | private or reserved address, not a domain name or IP address, an IPv6 address, or an invalid `format`, `fields` or `subdomains` parameter |
+| `400` | private or reserved address, not a domain name or IP address, or an invalid `format`, `fields` or `subdomains` parameter |
 | `403` | banned IP, geo-blocked, or suspicious request |
 | `404` | unknown endpoint — also the answer to a wrong admin API key |
 | `413` | `POST /mcp` body over `MCP_MAX_BODY_BYTES` |
@@ -692,7 +703,7 @@ is unaffected.)
 | Tool | What it does |
 |---|---|
 | `lookup(target)` | Geolocation, ASN/carrier, registration, and a TLS summary for a domain or IP. Start here. |
-| `dns_records(domain, types?)` | Full A / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
+| `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |

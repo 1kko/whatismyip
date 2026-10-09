@@ -46,9 +46,6 @@ CURL = {"user-agent": "curl/8.7.1", "accept": "*/*"}
 
 PRIVATE_BYTES = b'{"detail":"Private or reserved IP addresses are not allowed"}'
 INVALID_BYTES = b'{"error":"not a domain name or IP address","code":"invalid_target"}'
-IPV6_BYTES = (
-    b'{"error":"IPv6 addresses are not supported yet","code":"ipv6_not_supported"}'
-)
 DENIED_BYTES = b'{"error":"Access denied due to the policy"}'
 TOO_MANY_BYTES = b'{"error":"Too many requests"}'
 
@@ -221,18 +218,6 @@ class TestInvalidTarget:
         response = client.get("/%7Btarget%7D", headers=CURL)
         assert response.status_code == 400
         assert response.content == INVALID_BYTES
-
-    def test_ipv6_gets_its_own_page(self):
-        response = client.get("/2001:4860:4860::8888", headers=CHROME)
-        assert response.status_code == 400
-        assert _is_html(response)
-        assert _has_search_box(response.text)
-        assert "IPv6 addresses are not supported yet" in _visible_text(response.text)
-
-    def test_ipv6_api_json_is_unchanged(self):
-        response = client.get("/2001:4860:4860::8888", headers=CURL)
-        assert response.status_code == 400
-        assert response.content == IPV6_BYTES
 
     def test_format_json_from_a_browser_gets_json(self):
         response = client.get("/%7Btarget%7D?format=json", headers=CHROME)
@@ -468,11 +453,14 @@ def _js_is_local(addresses):
     """Run app.js's isLocalAddress() in node over `addresses`."""
     source = APP_JS.read_text(encoding="utf-8")
     ipv4 = re.search(r"^const IPV4 = .*;$", source, re.M).group(0)
+    ipv6 = re.search(
+        r"^function ipv6Host\(value\) \{.*?^\}$", source, re.M | re.S
+    ).group(0)
     func = re.search(
         r"^function isLocalAddress\(value\) \{.*?^\}$", source, re.M | re.S
     ).group(0)
     script = (
-        f"{ipv4}\n{func}\n"
+        f"{ipv4}\n{ipv6}\n{func}\n"
         f"console.log(JSON.stringify({json.dumps(addresses)}.map(isLocalAddress)));"
     )
     # The script is app.js's own source plus a fixed list of addresses.

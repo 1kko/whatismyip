@@ -412,9 +412,9 @@ def test_dns_records_reports_private_targets_as_an_error():
 
 
 def test_dns_records_rejects_a_type_it_never_queries():
-    """types=["aaaa"] must not come back as {} — indistinguishable from a
+    """types=["caa"] must not come back as {} — indistinguishable from a
     genuinely empty answer, and a confident false negative if relayed to a
-    user asking "does this domain support IPv6?"."""
+    user asking "which CAs may issue for this domain?"."""
     with TestClient(app) as client:
         client.post("/mcp", json=INIT, headers=MCP_HEADERS)
         response = _rpc(
@@ -422,12 +422,12 @@ def test_dns_records_rejects_a_type_it_never_queries():
             "tools/call",
             {
                 "name": "dns_records",
-                "arguments": {"domain": "example.com", "types": ["aaaa"]},
+                "arguments": {"domain": "example.com", "types": ["caa"]},
             },
         )
         payload = response.json()["result"]["structuredContent"]
         assert "error" in payload
-        assert "aaaa" in payload["error"]
+        assert "caa" in payload["error"]
 
 
 def test_lookup_tool_reports_a_timeout():

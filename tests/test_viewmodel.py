@@ -161,7 +161,7 @@ class TestAccordions:
             for i in build_view(DOMAIN_RESPONSE, is_self=False)["accordions"]
         }
         assert "MarkMonitor" in items["whois"]
-        assert items["dns"] == "A 1 · MX 1 · NS 4 · TXT 12"
+        assert items["dns"] == "A 1 · AAAA 0 · MX 1 · NS 4 · TXT 12"
 
     def test_list_valued_whois_dates_are_flattened(self):
         # python-whois hands back lists for some domains; normalize_whois folds
