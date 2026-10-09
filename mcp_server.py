@@ -30,7 +30,7 @@ from config import (
 from lookup import PrivateAddressError, gather, lookup_location, sanitize_log_input
 from rdap import NOT_REGISTERED
 from security import client_ip_from_scope
-from subdomains import get_subdomains
+from subdomains import get_subdomains, invalid_target_reason
 
 # Certificate parsing already exists in viewmodel.py, which is pure and
 # stdlib-only, so there is no cycle and no reason to restate it here.
@@ -268,11 +268,19 @@ async def subdomains(
     domain itself, and it finds only names that appear in a published
     certificate, so it is evidence of existence and never a complete inventory.
     Use it for "what else is under this domain?". `limit` caps how many names
-    come back; `count` always reports the true total.
+    come back; `count` always reports the true total. Pass a registered domain
+    or a name under one: an IP address or a bare public suffix (com, co.uk,
+    github.io) is refused.
     """
     if limit < 1:
         return {"error": "limit must be at least 1"}
     limit = min(limit, SUBDOMAIN_MCP_MAX_LIMIT)
+
+    # The same gate the HTTP route applies. get_subdomains() refuses these too,
+    # but only as a backstop; neither surface should rely on the other's check.
+    reason = invalid_target_reason(domain)
+    if reason:
+        return {"domain": domain, "error": reason}
 
     try:
         data = await get_subdomains(domain)

@@ -177,7 +177,7 @@ class TestGetSubdomains:
         """A model or a page reading names=[] would state as fact that the
         domain has no subdomains. Failure must be distinguishable."""
         with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
-            result = await subdomains.get_subdomains("cold.example")
+            result = await subdomains.get_subdomains("cold.example.com")
         assert result["error"]
         assert result["names"] == []
         assert result["count"] == 0
@@ -185,8 +185,8 @@ class TestGetSubdomains:
     @pytest.mark.asyncio
     async def test_a_failure_is_not_written_to_the_durable_store(self):
         with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
-            await subdomains.get_subdomains("cold.example")
-        assert subdomains._store.get("cold.example") is None
+            await subdomains.get_subdomains("cold.example.com")
+        assert subdomains._store.get("cold.example.com") is None
 
     @pytest.mark.asyncio
     async def test_concurrent_cold_requests_make_one_outbound_fetch(self):
@@ -228,7 +228,7 @@ class TestGetSubdomains:
     async def test_the_outbound_budget_refuses_a_cold_fetch_once_exhausted(self):
         with patch.object(subdomains, "_budget", subdomains._MinuteBudget(0)):
             with patch.object(subdomains, "_fetch_sync", side_effect=AssertionError):
-                result = await subdomains.get_subdomains("cold.example")
+                result = await subdomains.get_subdomains("cold.example.com")
         assert result["error"]
         assert result["names"] == []
 
@@ -243,9 +243,9 @@ class TestGetSubdomains:
         """
         with patch.object(subdomains, "_budget", subdomains._MinuteBudget(0)):
             with patch.object(subdomains, "_fetch_sync", side_effect=AssertionError):
-                exhausted = await subdomains.get_subdomains("exhausted.example")
+                exhausted = await subdomains.get_subdomains("exhausted.example.com")
         assert exhausted["error"]
-        assert "exhausted.example" not in subdomains._failures
+        assert "exhausted.example.com" not in subdomains._failures
 
         # The budget has refilled (the patch above is out of scope, so the
         # real _budget from the `isolated` fixture is back in effect). A
@@ -253,7 +253,7 @@ class TestGetSubdomains:
         # "lookup failed recently" from a negative-cache entry that was
         # never a real source failure.
         with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS) as f:
-            result = await subdomains.get_subdomains("different.example")
+            result = await subdomains.get_subdomains("different.example.com")
         assert f.call_count == 1
         assert result["error"] is None
 
@@ -378,15 +378,17 @@ class TestGetSubdomains:
         Recording a new failure must sweep out old ones instead.
         """
         with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
-            await subdomains.get_subdomains("old.example")
-        assert "old.example" in subdomains._failures
+            await subdomains.get_subdomains("old.example.com")
+        # .get(), not `in`: CodeQL reads a hostname literal on the left of `in`
+        # as a URL substring check (py/incomplete-url-substring-sanitization).
+        assert subdomains._failures.get("old.example.com") is not None
         # Backdate it past the error TTL, as if it had sat there for a while.
-        subdomains._failures["old.example"] = (
+        subdomains._failures["old.example.com"] = (
             time.time() - subdomains.SUBDOMAIN_ERROR_TTL - 1
         )
 
         with patch.object(subdomains, "_fetch_sync", side_effect=TimeoutError):
-            await subdomains.get_subdomains("new.example")
+            await subdomains.get_subdomains("new.example.com")
 
-        assert "old.example" not in subdomains._failures
-        assert "new.example" in subdomains._failures
+        assert subdomains._failures.get("old.example.com") is None
+        assert subdomains._failures.get("new.example.com") is not None
