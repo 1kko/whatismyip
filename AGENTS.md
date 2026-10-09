@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-A FastAPI-based web service that provides WHOIS, GeoIP, DNS records, and SSL certificate information for IP addresses and domain names. The service features automatic GeoIP database updates and supports both browser (HTML) and API (JSON) responses based on user-agent detection.
+A FastAPI-based web service that provides WHOIS, GeoIP, DNS records, and SSL certificate information for IP addresses and domain names. The service features automatic GeoIP database updates and serves browser (HTML) and API (JSON) responses from the same URL, chosen by `?format=`, the `Accept` header, or failing both the user-agent.
 
 ## Development Commands
 
@@ -94,7 +94,7 @@ poetry run ruff format .
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
   Streamable HTTP). Four tools, all thin shells over `lookup.gather()` that
   reshape its output for an LLM context.
-- `main.py`: FastAPI app + middleware + routes + page rendering; wires the managers/security singletons and the scheduler. `BrowserDetector` (HTML-vs-JSON by user-agent) lives here.
+- `main.py`: FastAPI app + middleware + routes + page rendering; wires the managers/security singletons and the scheduler. `negotiate()` (HTML-vs-JSON: `?format=`, then `Accept`, then the user-agent via `BrowserDetector`) lives here.
 
 **API Endpoints**:
 - `GET /` - Returns client's own IP information (detects client IP from x-real-ip header or request.client.host)
@@ -102,7 +102,7 @@ poetry run ruff format .
 
 ### Response Flow
 
-1. **Client Detection**: User-agent determines response format (HTML template for browsers, JSON for API clients)
+1. **Format Negotiation**: `negotiate()` picks the response format: `?format=html|json|text` first (unknown value -> 400), then an `Accept` header that names `text/html`/`application/json`/`text/plain` (q-values honoured), and only when `Accept` is absent or `*/*` the user-agent (`BrowserDetector`: browsers get HTML; PowerShell, despite its `Mozilla/5.0`, gets JSON). `text` answers as JSON until a plain-text rendering exists. Both lookup routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, errors included
 2. **IP Resolution**: Domains are resolved to IP addresses via DNS A records
 3. **Data Gathering**: Parallel collection of WHOIS, GeoIP, DNS records, and SSL certificate data
 4. **Response Assembly**: All data combined into unified response structure (WhoisResponse model)

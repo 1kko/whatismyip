@@ -80,8 +80,9 @@ RDAP registration data and the full TLS certificate, expanded.
 
 ### Machine interfaces
 
-- JSON from the same URL for any non-browser user-agent — no key, no separate
-  API host.
+- JSON from the same URL for any non-browser user-agent, or for any client that
+  asks with `Accept: application/json` or `?format=json` — no key, no separate
+  API host (see [Response format](#response-format)).
 - An MCP server at `/mcp` with five tools (see [MCP](#mcp-model-context-protocol)).
 - Discovery metadata in `<head>`, so an agent that lands on the page can find the
   machine interface without scraping the body.
@@ -268,10 +269,10 @@ small enough to document here.
 
 ### `GET /`
 
-Information about the caller's own IP address. HTML for a browser user-agent,
-JSON for anything else. When the caller's address is private or reserved (a
-development server with no proxy in front), RDAP/WHOIS and reverse DNS are not
-queried; `whois` carries an `error` saying so.
+Information about the caller's own IP address, as HTML or JSON (see
+[Response format](#response-format)). When the caller's address is private or
+reserved (a development server with no proxy in front), RDAP/WHOIS and reverse
+DNS are not queried; `whois` carries an `error` saying so.
 
 ### `GET /{domain_or_ip}`
 
@@ -288,6 +289,26 @@ is rejected with `400` before any lookup runs:
 
 IPv6 addresses are not supported yet and get a `400` with
 `"code": "ipv6_not_supported"`.
+
+### Response format
+
+`/` and `/{domain_or_ip}` answer HTML or JSON from the same URL. The first of
+these that expresses a choice decides:
+
+1. `?format=html` or `?format=json`. Any value other than `html`, `json` or
+   `text` is rejected with `400`. (`text` is reserved for a plain-text format and
+   answers JSON for now.)
+2. An `Accept` header naming `text/html` or `application/json`, with q-values
+   honoured: a browser's `fetch()` sending `Accept: application/json` gets JSON,
+   and `curl -H 'Accept: text/html'` gets the page.
+3. The user-agent, when `Accept` is absent or only `*/*` — the default for curl,
+   wget and `fetch()`. Browsers get HTML; everything else gets JSON, PowerShell's
+   `Invoke-RestMethod` included even though its user-agent starts with
+   `Mozilla/5.0`.
+
+Both routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, so a
+cache in front can neither serve one format in place of the other nor keep a
+response that describes the visitor's own address.
 
 ### Subdomains (opt-in)
 
