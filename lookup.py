@@ -114,8 +114,14 @@ def normalize_lookup_target(raw: str) -> str:
     target = (raw or "").strip()
     target = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", target)
     target = re.split(r"[/?#]", target, maxsplit=1)[0]
-    bracketed = re.fullmatch(r"\[([^\]]*)\](?::\d*)?", target)
-    return bracketed.group(1) if bracketed else target
+    # "[host]" or "[host]:port", parsed by hand: CodeQL flags the regex for
+    # this (an unanchored reading of it backtracks on a run of "[").
+    if target.startswith("["):
+        host, closed, rest = target[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") else None
+        if closed and (rest == "" or port == "" or (port or "").isdigit()):
+            return host
+    return target
 
 
 # NAT64's well-known prefix (RFC 6052): the last 32 bits are an IPv4 address.
