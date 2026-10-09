@@ -55,9 +55,9 @@ RDAP registration data and the full TLS certificate, expanded.
   no WHOIS fallback: when its RIR's RDAP server does not answer, the lookup says
   so instead of showing the registration of the address's reverse-DNS domain.
   An RDAP server that fails three times in a row is skipped for 10 minutes.
-- **GeoIP** — country and ASN from `geoip2fast`, with a GeoLite2-City overlay for
-  real coordinates, the precise city and an accuracy radius, plus a GeoLite2-ASN
-  overlay that keeps carrier names current. `GET /healthz` reports which
+- **GeoIP** — country, real coordinates, the precise city and an accuracy radius
+  from a GeoLite2-City overlay, with `geoip2fast` answering for addresses it has
+  no record of, plus a GeoLite2-ASN overlay that keeps carrier names current. `GET /healthz` reports which
   databases are actually loaded, so a silent fallback to the bundled
   country-only database is visible from outside.
 - **DNS** — A, MX, NS, CNAME, TXT, SPF and PTR, queried concurrently against

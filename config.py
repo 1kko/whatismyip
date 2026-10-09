@@ -91,11 +91,12 @@ GEOIP_DATA_FILE = os.getenv(
     os.path.join(_APP_DIR, "data", "geoip2fast.dat.gz"),
 )
 
-# City-level geolocation from a GeoLite2-City mmdb. geoip2fast supplies country
-# and ASN but leaves latitude/longitude null; this overlays real coordinates,
-# the precise city, and an accuracy radius. The source URL is configurable, so
-# the free mirror can be swapped for a personal MaxMind licence, DB-IP, or a
-# local file without any code change.
+# City-level geolocation from a GeoLite2-City mmdb. geoip2fast leaves
+# latitude/longitude null and its country snapshot goes stale; this supplies
+# the country, real coordinates, the precise city, and an accuracy radius, with
+# geoip2fast left to answer what it has no record of. The source URL is
+# configurable, so the free mirror can be swapped for a personal MaxMind
+# licence, DB-IP, or a local file without any code change.
 GEOIP_CITY_DB_URL = os.getenv(
     "GEOIP_CITY_DB_URL",
     "https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz",

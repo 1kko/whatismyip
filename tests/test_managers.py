@@ -10,15 +10,23 @@ used as the fallback.
 import base64
 import gzip
 import io
+import json
 import os
 import shutil
 import tarfile
 
+import maxminddb
 import pytest
 from tld import conf as tld_conf
 from tld.utils import reset_tld_names
 
 import managers
+import security
+
+# MaxMind's synthetic test database; see fixtures/LICENSE-MaxMind-DB.txt.
+CITY_TEST_DB = os.path.join(
+    os.path.dirname(__file__), "fixtures", "GeoLite2-City-Test.mmdb"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -356,6 +364,82 @@ class TestAsnOverlay:
         assert location["asn_name"] == raw.get("asn_name")
         assert location["asn_cidr"] == raw.get("asn_cidr")
         assert location["asn_number"] is None
+
+
+class _FakeCityReader:
+    """One canned GeoLite2-City record for every address."""
+
+    def __init__(self, record, prefix_len=24):
+        self.record, self.prefix_len = record, prefix_len
+
+    def get(self, ip):
+        return self.record
+
+    def get_with_prefix_len(self, ip):
+        return self.record, self.prefix_len
+
+
+class TestCityCountry:
+    """Country comes from GeoLite2-City, refreshed every three days, ahead of
+    the geoip2fast release snapshot, which had stalled at its 2026-06-05 build.
+    Geo-blocking reads the same field, so it follows."""
+
+    def _with_city_db(self, tmp_path, monkeypatch):
+        manager = _isolated_manager(tmp_path, monkeypatch)
+        manager.city_reader = maxminddb.open_database(CITY_TEST_DB)
+        return manager
+
+    def test_city_country_wins_over_geoip2fast(self, tmp_path, monkeypatch):
+        manager = self._with_city_db(tmp_path, monkeypatch)
+        # The two disagree about this block: geoip2fast's snapshot says the US,
+        # the City database says Bhutan.
+        assert manager.instance.lookup("67.43.156.1").country_code == "US"
+
+        location = manager.fetch_location("67.43.156.1")
+        assert location["country_code"] == "BT"
+        assert location["country_name"] == "Bhutan"
+
+    def test_registered_country_stands_in_for_a_missing_one(
+        self, tmp_path, monkeypatch
+    ):
+        """Some City records carry only the country the block is registered
+        in. geoip2fast's own builder makes the same substitution, so dropping
+        it would turn those addresses country-less."""
+        manager = _isolated_manager(tmp_path, monkeypatch)
+        manager.city_reader = _FakeCityReader(
+            {"registered_country": {"iso_code": "RO", "names": {"en": "Romania"}}}
+        )
+        location = manager.fetch_location("8.8.8.8")
+        assert location["country_code"] == "RO"
+        assert location["country_name"] == "Romania"
+
+    def test_no_city_record_keeps_the_geoip2fast_country(self, tmp_path, monkeypatch):
+        manager = self._with_city_db(tmp_path, monkeypatch)
+        location = manager.fetch_location("1.128.0.1")  # absent from the test DB
+        assert location["country_code"] == "AU"
+        assert location["country_name"] == "Australia"
+
+    def test_geo_blocking_judges_the_city_country(self, tmp_path, monkeypatch):
+        manager = self._with_city_db(tmp_path, monkeypatch)
+        rules = tmp_path / "geo_rules.json"
+        rules.write_text(
+            json.dumps(
+                {
+                    "mode": "blocklist",
+                    "blocked_countries": ["BT"],
+                    "blocked_regions": [],
+                    "allowed_countries": [],
+                    "allowed_regions": [],
+                    "block_unknown": False,
+                    "bypass_ips": [],
+                }
+            )
+        )
+        geo_block = security.GeoBlockManager(manager, config_file=str(rules))
+
+        verdict = geo_block.check_access("67.43.156.1")
+        assert verdict["country"] == "BT"
+        assert verdict["allowed"] is False
 
 
 class TestDatabaseStatus:

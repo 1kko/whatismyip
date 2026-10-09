@@ -368,20 +368,22 @@ class GeoIpManager:
         )
 
     def fetch_location(self, ip: str) -> Dict[str, Any]:
-        """A single flat location record for the IP: country (plus coarse ASN
-        fallback) from geoip2fast, precise city/lat/lon/accuracy/time zone
-        overlaid from GeoLite2-City, and the AS org/number/announced block
-        overlaid from GeoLite2-ASN when loaded. Callers add reverse_dns; the
-        response assembly adds the resolved coordinates, the origin_* fields,
-        and distance_km."""
+        """A single flat location record for the IP: country, precise
+        city/lat/lon/accuracy/time zone from GeoLite2-City, and the AS
+        org/number/announced block from GeoLite2-ASN when loaded. geoip2fast
+        answers whatever those leave empty (country, coarse ASN). Callers add
+        reverse_dns; the response assembly adds the resolved coordinates, the
+        origin_* fields, and distance_km."""
         raw = self.instance.lookup(ip).to_dict()
         city = raw.get("city") if isinstance(raw.get("city"), dict) else {}
-        self._overlay_city(ip, raw.get("is_private"), city)
+        record = self._city_record(ip, raw.get("is_private"))
+        self._overlay_city(record, city)
+        country_code, country_name = self._city_country(record)
         asn = self._asn_overlay(ip, raw.get("is_private"))
         return {
             "ip": raw.get("ip"),
-            "country_code": raw.get("country_code"),
-            "country_name": raw.get("country_name"),
+            "country_code": country_code or raw.get("country_code"),
+            "country_name": country_name or raw.get("country_name"),
             "city_name": city.get("name") or "",
             "subdivision_name": city.get("subdivision_name") or "",
             "subdivision_code": city.get("subdivision_code") or "",
@@ -420,17 +422,42 @@ class GeoIpManager:
             "cidr": network,
         }
 
-    def _overlay_city(self, ip: str, is_private: Any, city: Dict[str, Any]) -> None:
-        """Overlay the precise city, coordinates, accuracy and time zone from
-        GeoLite2-City onto the (still nested) geoip2fast city dict before it is
-        flattened. geoip2fast keeps country/ASN duty; MaxMind supplies the
-        latitude/longitude geoip2fast always leaves null."""
+    def _city_record(self, ip: str, is_private: Any) -> Dict[str, Any] | None:
+        """The GeoLite2-City record for the IP, or None when the reader is
+        absent, the IP is private, or the DB has no record."""
         if not self.city_reader or is_private:
-            return
+            return None
         try:
-            record = self.city_reader.get(ip)
+            return self.city_reader.get(ip)
         except Exception:
-            record = None
+            return None
+
+    @staticmethod
+    def _city_country(
+        record: Dict[str, Any] | None,
+    ) -> tuple[str | None, str | None]:
+        """(iso_code, English name) from a GeoLite2-City record, or (None, None).
+
+        The City database is refreshed every three days, while geoip2fast's
+        release snapshot has stalled for weeks at a time, so its country wins —
+        and geo-blocking, which judges this same field, follows it. A record
+        without a located country falls back to the country the block is
+        registered in, the substitution geoip2fast's own builder makes."""
+        if not record:
+            return None, None
+        for key in ("country", "registered_country"):
+            country = record.get(key) or {}
+            code = country.get("iso_code")
+            if code:
+                return code, (country.get("names") or {}).get("en") or code
+        return None, None
+
+    @staticmethod
+    def _overlay_city(record: Dict[str, Any] | None, city: Dict[str, Any]) -> None:
+        """Overlay the precise city, coordinates, accuracy and time zone from
+        a GeoLite2-City record onto the (still nested) geoip2fast city dict
+        before it is flattened. MaxMind supplies the latitude/longitude
+        geoip2fast always leaves null."""
         if not record:
             return
         loc = record.get("location") or {}
