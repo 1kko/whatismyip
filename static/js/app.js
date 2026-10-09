@@ -121,22 +121,32 @@ form.addEventListener("submit", (event) => {
 // spinner — so the page would look like it is still loading.
 window.addEventListener("pageshow", resetPending);
 
+// Not from inside another text field (the subdomain filter), where "/" is
+// something being typed.
 document.addEventListener("keydown", (event) => {
-  if (event.key === "/" && document.activeElement !== input) {
+  if (event.key === "/" && !event.target.closest?.("input, textarea")) {
     event.preventDefault();
     input.focus();
   }
 });
 
-for (const button of document.querySelectorAll(".copy-btn[data-value]")) {
-  button.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(button.dataset.value);
-    const original = button.textContent;
+// The resting label is read once, into data-label: a second click inside the
+// 1.5 s window would otherwise capture "Copied" as the label to restore.
+async function copyWithFeedback(button, text) {
+  button.dataset.label ??= button.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
     button.textContent = "Copied";
-    setTimeout(() => {
-      button.textContent = original;
-    }, 1500);
-  });
+  } catch (err) {
+    button.textContent = "Copy failed";
+  }
+  setTimeout(() => {
+    button.textContent = button.dataset.label;
+  }, 1500);
+}
+
+for (const button of document.querySelectorAll(".copy-btn[data-value]")) {
+  button.addEventListener("click", () => copyWithFeedback(button, button.dataset.value));
 }
 
 // JSONEditor is 200KB+; only pay for it if Raw JSON is actually opened.
@@ -188,18 +198,222 @@ function setSubdomainHint(text) {
   }
 }
 
-function subdomainFailed(message) {
-  subdomainSlot.textContent = message;
+// The lookup loads up to 5,000 names (SUBDOMAIN_MAX_NAMES), far more links
+// than anyone scrolls through, so at most this many are drawn. The filter and
+// Copy all work on every loaded name, and the full list is a link away.
+const SUBDOMAIN_RENDER_CAP = 100;
+
+function filterSubdomains(names, query) {
+  const needle = query.trim().toLowerCase();
+  return needle ? names.filter((name) => name.includes(needle)) : names;
+}
+
+// Counts are grouped the English way to match the rest of the page's text,
+// whatever the visitor's locale.
+function formatCount(n) {
+  return n.toLocaleString("en-US");
+}
+
+// fetched_at is UTC ISO 8601. "As of" means the visitor's own clock, so it is
+// shown in their locale and time zone: undefined for both picks the browser's,
+// and the tests pass fixed ones.
+function subdomainNotes(data, locale, timeZone) {
+  const notes = [];
+  const fetched = data.fetched_at ? new Date(data.fetched_at) : null;
+  if (fetched && !Number.isNaN(fetched.getTime())) {
+    const when = fetched.toLocaleString(locale, {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone,
+    });
+    notes.push(`as of ${when}`);
+  }
+  if (data.stale) {
+    notes.push("refreshing");
+  }
+  // names is crt.sh's answer cut at SUBDOMAIN_MAX_NAMES; count is how many
+  // there were before the cut.
+  if (data.truncated) {
+    notes.push(`truncated at ${formatCount((data.names || []).length)}`);
+  }
+  return notes;
+}
+
+// Never empty, unlike the server's line, which only appears for a capped list:
+// this is the live region's text, and the finished lookup is announced through
+// it, so a list that fits still says "Showing 57 of 57." Unfiltered, the total
+// is what crt.sh saw (data.count), which for a truncated list is more than was
+// loaded; the notes line says where it was cut.
+function subdomainCountText(shown, matched, total, filtering) {
+  if (filtering) {
+    if (!matched) {
+      return "No names match the filter.";
+    }
+    const unit = matched === 1 ? "match" : "matches";
+    return `Showing ${formatCount(shown)} of ${formatCount(matched)} ${unit}.`;
+  }
+  if (!total) {
+    return "No subdomains found.";
+  }
+  return `Showing ${formatCount(shown)} of ${formatCount(total)}.`;
+}
+
+// The same wording _accordions in viewmodel.py renders on the server path.
+function subdomainHintText(count) {
+  return `${formatCount(count)} subdomain${count === 1 ? "" : "s"} found`;
+}
+
+function elapsedLabel(ms) {
+  return `${Math.max(0, Math.floor(ms / 1000))}s`;
+}
+
+// ?subdomains=only answers JSON even to a browser navigation, so this opens
+// the whole loaded list in the browser's own JSON viewer.
+function fullListHref(target) {
+  return `/${encodeURIComponent(target)}?subdomains=only`;
+}
+
+// The panel's live region: it announces the wait, the result, and each filter
+// change. It must be in the document before anything is written to it; screen
+// readers often skip a region that arrives already filled.
+function subdomainStatusLine() {
+  const line = document.createElement("p");
+  line.className = "subdomains__meta";
+  const status = document.createElement("span");
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  line.appendChild(status);
+  return line;
+}
+
+// Fills `body` with the notes, the filter, Copy all and the list, and keeps
+// `line` (from subdomainStatusLine) saying how much of it is shown.
+function renderSubdomainPanel(body, line, data, target) {
+  const names = data.names || [];
+  const status = line.querySelector('[role="status"]');
+  body.textContent = "";
+
+  const notes = subdomainNotes(data);
+  if (notes.length) {
+    const meta = document.createElement("p");
+    meta.className = "subdomains__meta";
+    meta.textContent = notes.join(" · ");
+    body.appendChild(meta);
+  }
+
+  const filter = document.createElement("input");
+  if (names.length) {
+    const tools = document.createElement("div");
+    tools.className = "subdomains__tools";
+    filter.type = "search";
+    filter.className = "subdomains__filter";
+    filter.placeholder = "Filter";
+    filter.spellcheck = false;
+    filter.autocomplete = "off";
+    filter.setAttribute("aria-label", "Filter subdomains");
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "copy-btn";
+    copy.textContent = "Copy all";
+    copy.title = "Copy every name that matches the filter, not only those shown";
+    // Every loaded name that matches, one per line -- not the rendered rows,
+    // which stop at SUBDOMAIN_RENDER_CAP.
+    copy.addEventListener("click", () =>
+      copyWithFeedback(copy, filterSubdomains(names, filter.value).join("\n")),
+    );
+    tools.append(filter, copy);
+    body.appendChild(tools);
+  }
+
+  const list = document.createElement("ul");
+  list.className = "subdomains__list";
+  body.appendChild(list);
+
+  if (names.length > SUBDOMAIN_RENDER_CAP) {
+    const link = document.createElement("a");
+    link.href = fullListHref(target);
+    link.textContent = "Full list as JSON";
+    line.append(" ", link);
+  }
+
+  const draw = () => {
+    const matches = filterSubdomains(names, filter.value);
+    const shown = matches.slice(0, SUBDOMAIN_RENDER_CAP);
+    list.textContent = "";
+    // textContent, never innerHTML: these names come from third-party
+    // certificates and are not ours to trust as markup. The href is built
+    // with encodeURIComponent for the same reason -- normalization already
+    // restricts names to [a-z0-9._-], but nothing here should depend on
+    // that rule staying narrow.
+    for (const name of shown) {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = `/${encodeURIComponent(name)}`;
+      link.textContent = name;
+      item.appendChild(link);
+      list.appendChild(item);
+    }
+    status.textContent = subdomainCountText(
+      shown.length,
+      matches.length,
+      data.count ?? names.length,
+      filter.value.trim() !== "",
+    );
+  };
+  filter.addEventListener("input", draw);
+  draw();
+}
+
+function subdomainFailed(line, message) {
+  line.querySelector('[role="status"]').textContent = message;
+  line.classList.add("subdomains__error");
   setSubdomainHint("lookup failed");
 }
 
+// ?subdomains=include draws the panel on the server, so it works without
+// JavaScript. With it, the panel is rebuilt from the page's own data, which
+// holds every loaded name, so it gets the same filter and Copy all as the lazy
+// path below.
+const renderedSubdomains = document.getElementById("subdomains-rendered");
+const pageDataScript = document.getElementById("page-data");
+if (renderedSubdomains && pageDataScript) {
+  const data = JSON.parse(pageDataScript.textContent).subdomains;
+  if (data && Array.isArray(data.names)) {
+    const line = subdomainStatusLine();
+    renderedSubdomains.after(line);
+    renderSubdomainPanel(renderedSubdomains, line, data, renderedSubdomains.dataset.target);
+  }
+}
+
 if (subdomainAccordion && subdomainSlot) {
+  // Both made now, while the panel is still closed, so the live region exists
+  // well before the lookup writes to it.
+  const subdomainBody = document.createElement("div");
+  const subdomainLine = subdomainStatusLine();
+  subdomainSlot.append(subdomainBody, subdomainLine);
+
   subdomainAccordion.addEventListener("toggle", async () => {
     if (!subdomainAccordion.open || subdomainsBooted) {
       return;
     }
     subdomainsBooted = true;
-    subdomainSlot.textContent = "Loading…";
+
+    // crt.sh takes anywhere from 3 to 20 seconds, and a static loading line
+    // looks hung by about the fifth. The counter is aria-hidden so the live
+    // region announces the wait once, not once a second.
+    const elapsed = document.createElement("span");
+    elapsed.className = "subdomains__elapsed";
+    elapsed.setAttribute("aria-hidden", "true");
+    subdomainLine.querySelector('[role="status"]').textContent = "Querying crt.sh…";
+    subdomainLine.appendChild(elapsed);
+    subdomainBody.setAttribute("aria-busy", "true");
+    setSubdomainHint("searching…");
+    const started = Date.now();
+    const tick = () => {
+      elapsed.textContent = elapsedLabel(Date.now() - started);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
 
     try {
       const target = subdomainSlot.dataset.target;
@@ -213,63 +427,31 @@ if (subdomainAccordion && subdomainSlot) {
       // so both bail out with an explicit failure rather than falling
       // through to an empty {} that renders "undefined found".
       if (!response.ok) {
-        subdomainFailed("Lookup failed.");
+        subdomainFailed(subdomainLine, "Lookup failed.");
         return;
       }
       const payload = await response.json();
       const data = payload.subdomains;
       if (!data) {
-        subdomainFailed("Lookup failed.");
+        subdomainFailed(subdomainLine, "Lookup failed.");
         return;
       }
 
       if (data.error) {
-        subdomainFailed(`Lookup failed: ${data.error}`);
+        subdomainFailed(subdomainLine, `Lookup failed: ${data.error}`);
         return;
       }
 
-      const names = data.names || [];
-      const shown = names.slice(0, 100);
-      subdomainSlot.textContent = "";
-      setSubdomainHint(
-        `${data.count} subdomain${data.count === 1 ? "" : "s"} found`,
-      );
-
-      // The count lives in the summary hint (set above), so this line carries
-      // only what the hint cannot -- currently just the refreshing state.
-      if (data.stale) {
-        const meta = document.createElement("p");
-        meta.className = "subdomains__meta";
-        meta.textContent = "refreshing";
-        subdomainSlot.appendChild(meta);
-      }
-
-      const list = document.createElement("ul");
-      list.className = "subdomains__list";
-      // textContent, never innerHTML: these names come from third-party
-      // certificates and are not ours to trust as markup. The href is built
-      // with encodeURIComponent for the same reason -- normalization already
-      // restricts names to [a-z0-9._-], but nothing here should depend on
-      // that rule staying narrow.
-      for (const name of shown) {
-        const item = document.createElement("li");
-        const link = document.createElement("a");
-        link.href = `/${encodeURIComponent(name)}`;
-        link.textContent = name;
-        item.appendChild(link);
-        list.appendChild(item);
-      }
-      subdomainSlot.appendChild(list);
-
-      if (names.length > shown.length) {
-        const more = document.createElement("p");
-        more.className = "subdomains__meta";
-        more.textContent =
-          `Showing ${shown.length} of ${data.count}. The full list is in the JSON response.`;
-        subdomainSlot.appendChild(more);
-      }
+      setSubdomainHint(subdomainHintText(data.count));
+      renderSubdomainPanel(subdomainBody, subdomainLine, data, target);
     } catch (err) {
-      subdomainFailed("Lookup failed.");
+      subdomainFailed(subdomainLine, "Lookup failed.");
+    } finally {
+      // Every way out -- a result, an error response, a network failure, an
+      // aborted fetch -- stops the counter and lifts the busy state.
+      clearInterval(timer);
+      elapsed.remove();
+      subdomainBody.removeAttribute("aria-busy");
     }
   });
 }

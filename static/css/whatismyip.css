@@ -744,6 +744,37 @@ table.records--dns td:nth-child(4) {
   margin: 0.5rem 0;
 }
 
+/* Filter and Copy all, built by static/js/app.js above the list. */
+.subdomains__tools {
+  display: flex;
+  gap: 8px;
+  margin: 0.5rem 0;
+}
+
+.subdomains__filter {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font: 500 12.5px/1.4 var(--font-mono);
+}
+
+.subdomains__filter::placeholder { color: var(--text-muted); font-family: var(--font-sans); }
+.subdomains__filter:focus { outline: none; border-color: var(--accent); }
+
+/* "Full list as JSON": the browser's default link blue is near-invisible here. */
+.subdomains__meta a { color: var(--accent); }
+
+/* The seconds counter beside "Querying crt.sh…"; tabular so it doesn't jitter. */
+.subdomains__elapsed {
+  margin-left: 0.5ch;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
 /* The crt.sh attribution is the first link to appear inside .api-note, and no
    link colour is defined for it — the browser default is near-invisible on this
    background. Attribution is mandatory, so it has to be readable. */

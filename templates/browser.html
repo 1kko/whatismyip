@@ -181,11 +181,23 @@
                       {% if view.subdomains.error %}
                       <p class="subdomains__error">Lookup failed: {{ view.subdomains.error }}</p>
                       {% else %}
+                      {% set s = view.subdomains %}
+                      {# The no-JavaScript panel. static/js/app.js rebuilds it from
+                         #page-data, which carries every loaded name rather than the
+                         100 drawn here, so the filter and Copy all see the whole list. #}
+                      <div id="subdomains-rendered" data-target="{{ view.target }}">
                       {# The count lives in the summary hint above; repeating it
                          here would just say the same thing twice. This line is
-                         only for what the hint cannot show. #}
-                      {% if view.subdomains.stale %}
-                      <p class="subdomains__meta">refreshing</p>
+                         only for what the hint cannot show. fetched_at is always
+                         UTC ISO 8601 (subdomains._result), so its first 16
+                         characters are the minute; app.js rewrites the text in
+                         the visitor's locale from the datetime attribute. #}
+                      {% if s.fetched_at or s.stale or s.truncated %}
+                      <p class="subdomains__meta">
+                          {%- if s.fetched_at %}as of <time datetime="{{ s.fetched_at }}">{{ s.fetched_at[:16]|replace("T", " ") }} UTC</time>{% endif %}
+                          {%- if s.stale %}{% if s.fetched_at %} · {% endif %}refreshing{% endif %}
+                          {%- if s.truncated %}{% if s.fetched_at or s.stale %} · {% endif %}truncated at {{ "{:,}".format(s.names|length) }}{% endif -%}
+                      </p>
                       {% endif %}
                       <ul class="subdomains__list" id="subdomains-list">
                           {# Each name links to its own lookup. Safe as an href without
@@ -194,12 +206,16 @@
                              quote. urlencode is belt-and-braces if that rule ever widens. #}
                           {% for name in view.subdomains_shown %}<li><a href="/{{ name|urlencode }}">{{ name }}</a></li>{% endfor %}
                       </ul>
-                      {% if view.subdomains.count > view.subdomains_shown|length %}
+                      {# ?subdomains=only answers JSON even to a browser navigation,
+                         so this opens the whole loaded list in the browser's own
+                         JSON viewer. #}
+                      {% if s.count > view.subdomains_shown|length %}
                       <p class="subdomains__meta">
-                          Showing {{ view.subdomains_shown|length }} of {{ view.subdomains.count }}.
-                          The full list is in the JSON response.
+                          Showing {{ "{:,}".format(view.subdomains_shown|length) }} of {{ "{:,}".format(s.count) }}.
+                          {% if s.names|length > view.subdomains_shown|length %}<a href="/{{ view.target|urlencode }}?subdomains=only">Full list as JSON</a>{% endif %}
                       </p>
                       {% endif %}
+                      </div>
                       {% endif %}
                     {% else %}
                       <div id="subdomains-slot" data-target="{{ view.target }}">
