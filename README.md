@@ -245,7 +245,8 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # Unset means "private and loopback peers only" (fail-closed).
 # TRUSTED_PROXIES=10.0.0.1
 
-# Canonical public URL, so the copyable curl example on the page says https://
+# Canonical public URL, so the copyable curl example on the page, its canonical
+# link and its link-preview URLs (og:url, og:image) say https:// and this host
 # PUBLIC_BASE_URL=https://ip.1kko.com
 
 # Geographic blocking (optional)
@@ -309,9 +310,11 @@ first of these that expresses a choice decides:
    `Accept: application/json` gets JSON, and `curl -H 'Accept: text/html'` gets
    the page.
 3. The user-agent, when `Accept` is absent or only `*/*` — the default for curl,
-   wget and `fetch()`. Browsers get HTML; everything else gets JSON, PowerShell's
-   `Invoke-RestMethod` included even though its user-agent starts with
-   `Mozilla/5.0`.
+   wget and `fetch()`. Browsers get HTML, and so do the bots that build link
+   previews (Slack, KakaoTalk, X, Facebook, Telegram, WhatsApp, Discord,
+   LinkedIn), since a preview is read from the page's Open Graph tags.
+   Everything else gets JSON, PowerShell's `Invoke-RestMethod` included even
+   though its user-agent starts with `Mozilla/5.0`.
 
 Both routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, so a
 cache in front can neither serve one format in place of the other nor keep a

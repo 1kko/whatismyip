@@ -151,6 +151,19 @@ poetry run ruff format .
 - TimedRotatingFileHandler: Daily rotation, 7-day retention
 - Request format: `client={client_ip} lookup={target}`
 
+**Link previews** (`templates/browser.html` `<head>`, `build_view()` `title` /
+`description` / `canonical_path`):
+- og:/twitter: tags and `<link rel=canonical>` hang off `public_base_url()`, so
+  `PUBLIC_BASE_URL` sets their host and scheme. og:image is the existing
+  512×512 `static/image/logo.png`.
+- The self page's `<title>` and og: tags are fixed text. A shared link to `/`
+  is expanded by a bot whose own IP would otherwise land in someone else's
+  chat, so the visitor's address is the `<h1>` and never anywhere in `<head>`.
+- Preview bots (Slackbot, Twitterbot, facebookexternalhit, kakaotalk-scrap,
+  TelegramBot, WhatsApp, Discordbot, LinkedInBot) are in
+  `BrowserDetector.browser_patterns`, i.e. only negotiate()'s user-agent step:
+  `?format=` and `Accept` still win.
+
 **MCP endpoint** (`mcp_server.py`):
 - Mounted at `/mcp` **before** the `/{domain_ip}` catch-all, which would
   otherwise swallow it — the same ordering constraint as `/healthz`.
