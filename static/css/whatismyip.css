@@ -473,10 +473,11 @@ table.records--dns td:nth-child(4) {
 
 /* Footer */
 .footer {
-  display: flex;
-  flex-wrap: wrap;
+  /* Equal side columns keep the timing line centred whatever the two ends
+     hold; space-between only spaces the three items evenly. */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   padding-block: 20px;
   border-top: 1px solid var(--border);
@@ -485,9 +486,16 @@ table.records--dns td:nth-child(4) {
 }
 .footer a { color: var(--text-secondary); text-decoration: none; }
 .footer a:hover { color: var(--accent); }
-/* The privacy page and the source link, together at the end of the row, and
-   still at the right edge when a phone wraps them under the timing line. */
-.footer__links { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.footer .wordmark { grid-column: 1; justify-self: start; }
+.footer .mono { grid-column: 2; text-align: center; }
+/* The privacy page and the source link, together at the end of the row. */
+.footer__links {
+  grid-column: 3;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 .icon-link {
   display: inline-flex;
   align-items: center;
@@ -839,4 +847,12 @@ table.records--dns td:nth-child(4) {
    background. Attribution is mandatory, so it has to be readable. */
 .api-note a {
   color: var(--accent);
+}
+
+/* Too narrow to keep the timing line centred between the ends: stack it over
+   the links, both centred. */
+@media (max-width: 520px) {
+  .footer { grid-template-columns: 1fr; justify-items: center; row-gap: 8px; }
+  .footer .mono,
+  .footer__links { grid-column: 1; justify-self: center; }
 }
