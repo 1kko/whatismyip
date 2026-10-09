@@ -256,12 +256,21 @@ async def _whois_fallback(target: str) -> dict:
     return normalize_whois(raw, target)
 
 
+def _whois_key(target: str) -> str:
+    return (target or "").strip().lower()
+
+
+def cached_whois(target: str) -> dict | None:
+    """lookup_whois's cached answer for `target`, or None. Never a lookup."""
+    return _whois_cache.get(_whois_key(target))
+
+
 async def lookup_whois(target: str) -> dict:
     """Registration data for a domain or IP. RDAP first (fast, structured JSON),
     falling back to port-43 WHOIS for TLDs RDAP does not serve; an IP has no
     fallback. Both sources are normalised to one shape (see rdap.py) and cached
     under the same key."""
-    key = (target or "").strip().lower()
+    key = _whois_key(target)
     cached = _whois_cache.get(key)
     if cached is not None:
         return cached

@@ -185,6 +185,9 @@ for (const button of document.querySelectorAll(".copy-btn[data-value]")) {
 // JSONEditor is 200KB+; only pay for it if Raw JSON is actually opened.
 const rawAccordion = document.getElementById("acc-raw");
 let rawBooted = false;
+// Kept so a registration filled in after the page loaded (below) reaches a
+// tree that was already open.
+let rawEditor = null;
 
 rawAccordion?.addEventListener("toggle", () => {
   if (!rawAccordion.open || rawBooted) {
@@ -200,18 +203,155 @@ rawAccordion?.addEventListener("toggle", () => {
   const script = document.createElement("script");
   script.src = "/static/js/jsoneditor.min.js";
   script.addEventListener("load", () => {
-    const editor = new JSONEditor(document.getElementById("raw-json"), {
+    rawEditor = new JSONEditor(document.getElementById("raw-json"), {
       mode: "view",
       search: false,
       navigationBar: false,
       mainMenuBar: false,
       indentation: 2,
     });
-    editor.set(JSON.parse(document.getElementById("page-data").textContent));
-    editor.expandAll();
+    rawEditor.set(JSON.parse(document.getElementById("page-data").textContent));
+    rawEditor.expandAll();
   });
   document.body.appendChild(script);
 });
+
+// The self page goes out before a slow registration lookup has answered (see
+// _self_lookup in main.py), with the WHOIS column and panel saying "loading".
+// They are filled from ?whois=only, which joins the lookup the page left
+// running instead of asking the registry again. The rows arrive worded by the
+// server (whois_fill in viewmodel.py), so a page filled in reads the same as
+// one that waited. textContent throughout: a registry record is third-party
+// text, not markup.
+const whoisPending = document.getElementById("whois-pending");
+
+// The payload's display rows, or null when it has none: a 200 without them is
+// as much a failure as an error status, and must not render as an empty record.
+function whoisDisplay(payload) {
+  const display = payload && payload.display;
+  if (
+    !display ||
+    typeof display.hint !== "string" ||
+    !Array.isArray(display.column) ||
+    !Array.isArray(display.rows)
+  ) {
+    return null;
+  }
+  return display;
+}
+
+// One label/value row of the facts strip, as browser.html draws it.
+function factRow(row) {
+  const line = document.createElement("div");
+  line.className = "kv";
+  const label = document.createElement("span");
+  label.className = "kv-label";
+  label.textContent = row.label;
+  const value = document.createElement("span");
+  value.className = `kv-value tone-${row.tone}`;
+  value.textContent = row.value;
+  line.append(label, value);
+  return line;
+}
+
+// The WHOIS panel's table, as browser.html draws it.
+function whoisTable(rows) {
+  const table = document.createElement("table");
+  table.className = "records";
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    const label = document.createElement("td");
+    label.textContent = row.label;
+    const value = document.createElement("td");
+    value.colSpan = 3;
+    value.textContent = row.value;
+    tr.append(label, value);
+    body.appendChild(tr);
+  }
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    const empty = document.createElement("td");
+    empty.colSpan = 4;
+    empty.className = "tone-muted";
+    empty.textContent = "No WHOIS data";
+    tr.appendChild(empty);
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  return table;
+}
+
+function setWhoisHint(text) {
+  const hint = document.getElementById("hint-whois");
+  if (hint) {
+    hint.textContent = text;
+  }
+}
+
+function fillWhois(display, whois) {
+  setWhoisHint(display.hint);
+  const column = document.getElementById("facts-whois");
+  if (column) {
+    for (const row of column.querySelectorAll(".kv")) {
+      row.remove();
+    }
+    column.append(...display.column.map(factRow));
+  }
+  whoisPending.replaceWith(whoisTable(display.rows));
+  // Raw JSON is "the full response", so it gets the record too.
+  const pageData = document.getElementById("page-data");
+  if (pageData) {
+    const data = JSON.parse(pageData.textContent);
+    data.whois = whois;
+    pageData.textContent = JSON.stringify(data);
+    if (rawEditor) {
+      rawEditor.set(data);
+      rawEditor.expandAll();
+    }
+  }
+}
+
+// Could not ask, which is not the same as no record: the same words the server
+// uses for a lookup that failed, and a way to try again.
+function whoisFailed() {
+  setWhoisHint("lookup failed");
+  const column = document.getElementById("facts-whois");
+  if (column) {
+    column.querySelectorAll(".kv").forEach((row, index) => {
+      const value = row.querySelector(".kv-value");
+      value.textContent = index === 0 ? "unavailable" : "—";
+      value.className = `kv-value tone-${index === 0 ? "warning" : "muted"}`;
+    });
+  }
+  const line = document.getElementById("whois-status");
+  if (line) {
+    line.textContent = "Could not load the registration data. ";
+    const reload = document.createElement("a");
+    reload.href = "/";
+    reload.textContent = "Reload";
+    line.append(reload);
+  }
+}
+
+if (whoisPending) {
+  (async () => {
+    try {
+      const response = await fetch("/?whois=only", {
+        headers: { Accept: "application/json" },
+      });
+      const payload = response.ok ? await response.json() : null;
+      const display = whoisDisplay(payload);
+      if (display) {
+        fillWhois(display, payload.whois);
+      } else {
+        whoisFailed();
+      }
+    } catch (err) {
+      whoisFailed();
+    }
+  })();
+}
 
 // Opening the accordion is the opt-in: nothing is requested until then, so an
 // ordinary lookup never causes an outbound crt.sh fetch.

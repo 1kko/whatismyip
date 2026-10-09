@@ -114,6 +114,13 @@ poetry run ruff format .
 
 **API Endpoints**:
 - `GET /` - Returns client's own IP information (detects client IP from x-real-ip header or request.client.host)
+- `GET /?whois=only` - the caller's own registration, JSON only: the self page
+  waits `SELF_WHOIS_SOFT_DEADLINE_SECONDS` (1.5) for WHOIS, then goes out with
+  the panel loading, and `app.js` fills it from here. It joins the lookup the
+  page left running (`_self_whois_tasks` in `main.py`, which also keeps that
+  task alive and its gate slot held) or reads the cache; it starts and gates a
+  lookup of its own only when there is neither. JSON/text/`?fields=` on `/`
+  still wait for the record
 - `GET /{domain_ip}` - Returns information for specified domain or IP address
 
 ### Response Flow

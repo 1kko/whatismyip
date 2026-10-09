@@ -64,6 +64,15 @@ WHOIS_SOCKET_TIMEOUT_SECONDS = float(os.getenv("WHOIS_SOCKET_TIMEOUT_SECONDS", "
 # the cooldown ends; an answer closes the breaker, another failure reopens it.
 RDAP_BREAKER_FAILURES = max(int(os.getenv("RDAP_BREAKER_FAILURES", "3")), 1)
 RDAP_BREAKER_COOLDOWN_SECONDS = float(os.getenv("RDAP_BREAKER_COOLDOWN_SECONDS", "600"))
+# A browser's self page (GET /) waits this long for the visitor's own
+# registration lookup, then goes out with the WHOIS panel loading for app.js to
+# fill from /?whois=only. The rest of that page is GeoIP, a local read, and
+# DNS, with its own short budget, so RDAP alone decided when it was sent: the
+# whole RDAP_TIMEOUT_SECONDS when an RIR stalled. JSON, ?format=text and
+# ?fields= answers still wait for the record, as they always have.
+SELF_WHOIS_SOFT_DEADLINE_SECONDS = max(
+    float(os.getenv("SELF_WHOIS_SOFT_DEADLINE_SECONDS", "1.5")), 0.0
+)
 WHOIS_CACHE_TTL = int(os.getenv("WHOIS_CACHE_TTL", "21600"))  # 6h for a hit
 WHOIS_CACHE_ERROR_TTL = int(os.getenv("WHOIS_CACHE_ERROR_TTL", "300"))  # 5m for a miss
 # RDAP and port-43 WHOIS threads run on a pool of their own (concurrency.py),
