@@ -298,6 +298,23 @@
                             <p class="api-note">The lookup carries on after the page is sent. <a href="/">Reload</a> in a few seconds to see it.</p>
                         </noscript>
                     </div>
+                    {% elif item.id == 'reputation' %}
+                    {# viewmodel.reputation_view: each list the address is on, is not
+                       on, or could not be checked, with its source and when the copy
+                       was taken. The credits are the lists' own terms: Spamhaus asks
+                       for its notice wherever its data is shown. #}
+                    <p class="api-note">{{ view.reputation.summary }}</p>
+                    <table class="records">
+                        <tbody>
+                        {% for row in view.reputation.rows %}
+                        <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{{ row.value }}</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    <p class="api-note tone-muted">{{ view.reputation.note }}</p>
+                    {% for line in view.reputation.attribution %}
+                    <p class="api-note tone-muted">{{ line }}</p>
+                    {% endfor %}
                     {% else %}
                     <table class="records">
                         <tbody>

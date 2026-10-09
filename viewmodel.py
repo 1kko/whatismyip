@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 from config import SUBDOMAIN_ENABLED
+from reputation import grade
 
 # Mirrors rdap.NOT_REGISTERED rather than importing it: `rdap` pulls in whoisit,
 # which costs ~400ms of import time -- twelve times this whole module's -- and
@@ -526,6 +527,25 @@ def _certificate_column(ssl_data: dict | None) -> dict:
     }
 
 
+# A reputation signal's tag, and the card's level, take the colour of the
+# grade it carries on its own: a Spamhaus listing is red, Tor and VPN amber, a
+# datacenter (weight 0, informational) plain.
+_LEVEL_TONES = {"high": "danger", "medium": "warning", "low": "warning"}
+
+
+def _reputation_tags(response: dict, informational: bool) -> list[dict]:
+    """A tag per list the address is on, named for the list ("Tor exit"),
+    never for a verdict. An informational signal is left off a domain's hero:
+    nearly every website is hosted in a datacenter, so that tag would be on
+    every domain page and say nothing there."""
+    signals = (response.get("reputation") or {}).get("signals") or []
+    return [
+        {"text": signal["label"], "tone": _LEVEL_TONES.get(grade([signal]), "default")}
+        for signal in signals
+        if informational or signal["weight"] > 0
+    ]
+
+
 def _tags(response: dict, is_ip: bool) -> list[dict]:
     location = response.get("location") or {}
     domain = response.get("domain") or {}
@@ -536,6 +556,7 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
                 "text": "PRIVATE" if location.get("is_private") else "PUBLIC",
                 "tone": "warning" if location.get("is_private") else "default",
             },
+            *_reputation_tags(response, informational=True),
         ]
 
     tags = [{"text": "DOMAIN", "tone": "default"}]
@@ -554,7 +575,7 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
         tags.append({"text": f"TLS {problem}", "tone": "danger"})
     elif ssl_data.get("trusted"):
         tags.append({"text": "TLS valid", "tone": "success"})
-    return tags
+    return tags + _reputation_tags(response, informational=False)
 
 
 def _summary(response: dict, address: str, is_ip: bool) -> str:
@@ -735,6 +756,93 @@ def whois_fill(whois_data: dict | None) -> dict:
     }
 
 
+def _as_of(value: str | None) -> str:
+    """'2026-10-09T06:13:20Z' -> '2026-10-09 06:13 UTC'."""
+    return f"{value[:16].replace('T', ' ')} UTC" if value else DASH
+
+
+def _lists_checked(count: int) -> str:
+    return f"{count} list{'' if count == 1 else 's'} checked"
+
+
+def reputation_view(reputation: dict | None) -> dict | None:
+    """The Reputation card. Evidence before the grade: each list the address
+    is on, each list it is not on, and each list that could not be checked,
+    with its source and when the copy was taken. Worded as what a list says
+    ("Listed on Tor exit"), never as a verdict on the address, and "on none of
+    them" says how many were read rather than reading as "safe"."""
+    if not reputation:
+        return None
+    level = reputation.get("level")
+    signals = reputation.get("signals") or []
+    checked = reputation.get("checked") or []
+    unavailable = reputation.get("unavailable") or []
+    listed = {signal["id"] for signal in signals}
+
+    if level is None:
+        summary = "No list could be checked, so there is no level: unknown."
+    elif signals:
+        summary = f"Listed on {len(signals)} of the {_lists_checked(len(checked))}."
+    else:
+        summary = f"Not on any of the {_lists_checked(len(checked))}."
+    if unavailable:
+        summary += f" {len(unavailable)} could not be checked."
+
+    rows = [
+        {
+            "label": "Level",
+            "value": (level or "unknown").capitalize(),
+            "tone": _LEVEL_TONES.get(level, "default" if level else "muted"),
+        }
+    ]
+    for signal in signals:
+        effect = "" if signal["weight"] else " · informational, no effect on the level"
+        rows.append(
+            {
+                "label": signal["source"],
+                "value": f"Listed on {signal['label']} "
+                f"(as of {_as_of(signal['as_of'])}){effect}",
+                "tone": _LEVEL_TONES.get(grade([signal]), "default"),
+            }
+        )
+    for entry in checked:
+        if entry["id"] not in listed:
+            rows.append(
+                {
+                    "label": entry["source"],
+                    "value": f"Not listed on {entry['label']} "
+                    f"(as of {_as_of(entry['as_of'])})",
+                    "tone": "muted",
+                }
+            )
+    for entry in unavailable:
+        rows.append(
+            {
+                "label": entry["source"],
+                "value": f"Could not check {entry['label']}: {entry['reason']}",
+                "tone": "warning",
+            }
+        )
+
+    if level is None:
+        hint = "could not check"
+    elif signals:
+        hint = f"{level} · {', '.join(signal['label'] for signal in signals)}"
+    else:
+        hint = f"not on {_lists_checked(len(checked))}"
+    return {
+        "hint": hint,
+        "summary": summary,
+        "rows": rows,
+        "note": (
+            "A list records what its maintainer has seen of an address or its "
+            "network, not what the address will do; being on none of them is "
+            "no guarantee either."
+        ),
+        "attribution": reputation.get("attribution") or [],
+    }
+
+
 def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
     domain = response.get("domain") or {}
     headers = response.get("headers") or {}
@@ -782,6 +890,11 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
         {"id": "ssl", "title": "SSL certificate", "hint": ssl_hint},
         {"id": "geoip", "title": "GeoIP", "hint": geoip_hint},
     ]
+    reputation = reputation_view(response.get("reputation"))
+    if reputation:
+        accordions.append(
+            {"id": "reputation", "title": "Reputation", "hint": reputation["hint"]}
+        )
 
     # Only for a domain. An IP address has no subdomains, so offering the panel
     # would invite a request that can only fail. `domain` truthiness alone
@@ -872,6 +985,7 @@ def build_view(
         "accordions": _accordions(response, subdomains_enabled),
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         "geoip_rows": geoip_rows(location),
+        "reputation": reputation_view(response.get("reputation")),
         "subdomains": response.get("subdomains"),
         "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],
     }

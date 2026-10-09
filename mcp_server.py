@@ -39,6 +39,7 @@ from lookup import (
     InvalidTargetError,
     PrivateAddressError,
     gather,
+    ip_reputation,
     lookup_location,
     sanitize_log_input,
 )
@@ -178,6 +179,50 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
     }
 
 
+# Said wherever a reputation answer has no signal in it. A model relays "no
+# signals" as "this address is safe" unless told otherwise, and the lists
+# checked know nothing about most addresses that do harm.
+_NOT_SAFE = (
+    "Not on any list checked. That is not a statement that the address is safe "
+    "or trustworthy: these lists cover a few kinds of network, not behaviour."
+)
+
+
+def compact_reputation(reputation: dict | None) -> dict | None:
+    """The lists an address is on, the ones it is not on, and the ones that
+    could not be checked, with the grade from the first. None when the feature
+    is off or there was no address to check."""
+    if not reputation:
+        return None
+    listed = {signal["id"] for signal in reputation.get("signals") or []}
+    out: dict[str, Any] = {
+        # none/low/medium/high, or null when no list could be checked at all.
+        "level": reputation.get("level"),
+        "signals": [
+            {
+                "id": signal["id"],
+                "list": signal["label"],
+                "source": signal["source"],
+                "as_of": signal["as_of"],
+            }
+            for signal in reputation.get("signals") or []
+        ],
+        "not_listed_on": [
+            entry["label"]
+            for entry in reputation.get("checked") or []
+            if entry["id"] not in listed
+        ],
+        "could_not_check": [
+            {"list": entry["label"], "reason": entry["reason"]}
+            for entry in reputation.get("unavailable") or []
+        ],
+        "attribution": reputation.get("attribution") or [],
+    }
+    if not listed:
+        out["note"] = _NOT_SAFE
+    return out
+
+
 # gather() takes a slot at the lookup gate (concurrency.py) that the page and
 # the JSON API share. MCP also has a gate of its own, its share of that one: at
 # most MCP_LOOKUP_CONCURRENCY of the global slots are ever held by tool calls,
@@ -210,6 +255,15 @@ async def lookup(target: str) -> dict[str, Any]:
     summary of its TLS certificate. Accepts "example.com", "8.8.8.8",
     "2001:4860:4860::8888", or a pasted URL. Use this first; the other tools
     go deeper on one aspect. Private and reserved addresses are refused.
+
+    `reputation` (for a domain, of the address it resolves to) names the
+    public lists the address is on: Spamhaus DROP/ASN-DROP, Tor exits, VPN and
+    datacenter ranges, each with its source and the date of the copy read, and
+    a `level` (none/low/medium/high) computed from those alone. Report it as
+    "listed on X as of <date>", not as a verdict. A level of "none" means only
+    that it is on none of the lists checked: never report that as safe, clean
+    or trustworthy. Lists under `could_not_check` were not consulted, and a
+    null level means none could be.
     """
     try:
         data = await _bounded_gather(target)
@@ -226,7 +280,7 @@ async def lookup(target: str) -> dict[str, Any]:
         return _fail("Lookup failed")
 
     loc = data["location"] or {}
-    return {
+    result = {
         "target": data["address"],
         "ip": data["resolved_ip"],
         "reverse_dns": data["reverse_dns"] or loc.get("reverse_dns"),
@@ -235,6 +289,9 @@ async def lookup(target: str) -> dict[str, Any]:
         "registration": compact_registration(data["whois"]),
         "tls": compact_ssl(data["ssl"]),
     }
+    if data.get("reputation"):
+        result["reputation"] = compact_reputation(data["reputation"])
+    return result
 
 
 # Exactly the types DomainManager.get_records() queries. A type missing from
@@ -480,8 +537,10 @@ async def whoami_caller() -> dict[str, Any]:
     datacenter and tells you nothing about the user.
 
     Either way, report it as the origin of this connection rather than as "your
-    IP address" — you cannot tell from here which case you are in. If the user
-    needs certainty, have them open https://ip.1kko.com in a browser.
+    IP address". Usually you cannot tell from here which case you are in; when
+    the address is on a datacenter list, the note says it is likely a hosted
+    client. If the user needs certainty, have them open https://ip.1kko.com in
+    a browser. `reputation` is as in `lookup`: "none" is never "safe".
     """
     ip = _caller_ip.get()
     if ip == "unknown":
@@ -491,19 +550,44 @@ async def whoami_caller() -> dict[str, Any]:
     except Exception:
         logging.exception("MCP whoami_caller failed")
         return _fail("Location lookup failed")
-    return {
-        "ip": ip,
-        "geo": compact_location(loc),
-        "network": compact_network(loc),
-        "note": (
+    reputation = ip_reputation(ip, loc)
+    datacenter = next(
+        (
+            signal
+            for signal in (reputation or {}).get("signals") or []
+            if signal["id"] == "datacenter"
+        ),
+        None,
+    )
+    if datacenter:
+        # X4BNet's datacenter list includes VPN networks, hence the second case.
+        note = (
+            "This is the address that opened this MCP connection. It is on a "
+            f"datacenter list ({datacenter['source']}, as of "
+            f"{datacenter['as_of'][:10]}), so this is likely a hosted client "
+            "(claude.ai, ChatGPT) connecting from its provider's servers, or a "
+            "local client behind a VPN or cloud proxy: either way, probably not "
+            "the user's own connection. Open https://ip.1kko.com in a browser to "
+            "be certain."
+        )
+    else:
+        note = (
             "This is the address that opened this MCP connection. Where that is "
             "depends on the client: a local one (Claude Code, Cursor, Claude "
             "Desktop) connects from the user's own machine, so this is their "
             "address; a hosted one (claude.ai, ChatGPT) connects from the "
             "provider's servers, so this is a datacenter. This server cannot "
             "tell which. Open https://ip.1kko.com in a browser to be certain."
-        ),
+        )
+    payload = {
+        "ip": ip,
+        "geo": compact_location(loc),
+        "network": compact_network(loc),
+        "note": note,
     }
+    if reputation:
+        payload["reputation"] = compact_reputation(reputation)
+    return payload
 
 
 def build_mcp():

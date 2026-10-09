@@ -17,6 +17,7 @@ from mcp_server import (
     compact_location,
     compact_network,
     compact_registration,
+    compact_reputation,
     compact_ssl,
 )
 from viewmodel import DASH
@@ -46,7 +47,15 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "cert_issuer": (frozenset({"tls"}), _DOMAIN),
     "cert_expires": (frozenset({"tls"}), _DOMAIN),
     "cert_days_remaining": (frozenset({"tls"}), _DOMAIN),
+    "risk_level": (frozenset({"reputation"}), _BOTH),
+    "risk_signals": (frozenset({"reputation"}), _BOTH),
 }
+
+# Asked for by name only, never in the text block. A bare "risk_level: none"
+# among the other lines reads as a clean bill, which the lists cannot give; a
+# script that asks for it knows what it asked for. With REPUTATION_ENABLED=false
+# both read "-".
+_NOT_IN_BLOCK = frozenset({"risk_level", "risk_signals"})
 
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires")
 
@@ -100,7 +109,11 @@ def parse_fields(values: list[str]) -> list[str] | None:
 
 def block_fields(kind: str) -> list[str]:
     """The keys of the text block for a target of `kind` ("domain" or "ip")."""
-    return [name for name, (_, kinds) in FIELDS.items() if kind in kinds]
+    return [
+        name
+        for name, (_, kinds) in FIELDS.items()
+        if kind in kinds and name not in _NOT_IN_BLOCK
+    ]
 
 
 def legs_for(names: list[str], kind: str) -> frozenset[str]:
@@ -134,6 +147,7 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     geo = {**compact_location(location), **compact_network(location)}
     registration = compact_registration(data.get("whois"))
     tls = compact_ssl(data.get("ssl")) or {}
+    reputation = compact_reputation(data.get("reputation")) or {}
     values = {
         "target": data.get("address"),
         "ip": data.get("resolved_ip"),
@@ -150,6 +164,9 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "cert_issuer": tls.get("issuer"),
         "cert_expires": tls.get("expires"),
         "cert_days_remaining": tls.get("days_remaining"),
+        "risk_level": reputation.get("level"),
+        # The ids, comma-separated: one value per field is the format.
+        "risk_signals": ",".join(s["id"] for s in reputation.get("signals") or []),
     }
     # The certificate helpers answer the page, which shows an em dash for "none".
     values = {
@@ -165,6 +182,10 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         for name in _REGISTRATION_FIELDS
         if error and kind in FIELDS[name][1]
     }
+    # No list could be read: the level is unknown, not "none".
+    if reputation and reputation.get("level") is None:
+        for name in _NOT_IN_BLOCK:
+            errors[name] = "no reputation list could be checked"
     return values, errors
 
 

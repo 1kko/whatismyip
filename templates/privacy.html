@@ -90,6 +90,17 @@
             (from {{ geoip_hosts | join(", ") }}), the Public Suffix List ({{ psl_host }}) and
             IANA's RDAP bootstrap files. Finding an address on the map uses those databases on
             this server; nobody else is asked.</p>
+        {% if reputation_hosts %}
+        <p>It also downloads the public lists a lookup's Reputation card checks an address
+            against, once a day each and never for a particular lookup: Spamhaus DROP and
+            ASN-DROP, the Tor Project's exit list, and X4BNet's VPN and datacenter lists (from
+            {{ reputation_hosts | join(", ") }}). Checking an address reads this server's copies,
+            so none of those servers learns what was looked up. A copy older than
+            {{ reputation_max_age }} is reported as not checked rather than used. Spamhaus DROP
+            and ASN-DROP data are © The Spamhaus Project SLU, used under
+            <a href="https://www.spamhaus.org/drop/terms/" rel="noopener noreferrer">its DROP
+            terms</a>.</p>
+        {% endif %}
 
         <h2>Who else your browser contacts</h2>
         <ul>
