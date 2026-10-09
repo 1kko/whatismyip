@@ -34,6 +34,7 @@ from viewmodel import build_view, dns_failure_text, whois_display, whois_fill
 from concurrency import LookupBusy, lookup_gate
 from config import (
     APP_VERSION,
+    BACKGROUND_REFRESH_ENABLED,
     BAN_DURATION_RATE_LIMIT,
     BAN_DURATION_SUSPICIOUS,
     CLEANUP_INTERVAL_SECONDS,
@@ -118,24 +119,43 @@ from security import (
 # Load environment variables from .env file
 load_dotenv()
 
-if MCP_ENABLED:
 
-    @contextlib.asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        # A mounted sub-application's lifespan never runs, so the session
-        # manager has to be started here. Without this the first /mcp request
-        # fails with "RuntimeError: Task group is not initialized". build_mcp()
-        # is called fresh on every start (see mcp_dispatch's docstring in
-        # mcp_server.py) rather than once at import time, so the session
-        # manager it hands back is always one that hasn't been run() yet.
-        asgi_app, mcp_instance = build_mcp()
-        mcp_dispatch.asgi_app = asgi_app
-        async with mcp_instance.session_manager.run():
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Boot work, run once per process before uvicorn binds the port.
+
+    The scheduler and the boot fetches (start_background_work, below) used to
+    run at import, so every test module that imported main started a scheduler
+    and downloaded whatever data/ lacked. Here they run only when the app is
+    served, and the suite turns them off (BACKGROUND_REFRESH_ENABLED).
+    """
+    try:
+        if BACKGROUND_REFRESH_ENABLED:
+            # Blocking on purpose: the first request should find the GeoLite2
+            # databases a fresh volume lacked, as it did when this ran at
+            # import. A thread keeps the event loop free meanwhile.
+            await asyncio.to_thread(start_background_work)
+        if MCP_ENABLED:
+            # A mounted sub-application's lifespan never runs, so the session
+            # manager has to be started here. Without this the first /mcp
+            # request fails with "RuntimeError: Task group is not initialized".
+            # build_mcp() is called fresh on every start (see mcp_dispatch's
+            # docstring in mcp_server.py) rather than once at import time, so
+            # the session manager it hands back is always one that hasn't been
+            # run() yet.
+            asgi_app, mcp_instance = build_mcp()
+            mcp_dispatch.asgi_app = asgi_app
+            async with mcp_instance.session_manager.run():
+                yield
+            mcp_dispatch.asgi_app = None
+        else:
             yield
-        mcp_dispatch.asgi_app = None
+    finally:
+        # Not waiting for a refresh in flight: each one writes a temp file and
+        # os.replace()s it, so one cut short leaves the previous copy in place.
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
 
-else:
-    lifespan = None
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -610,10 +630,13 @@ scheduler.add_job(
     "interval",
     seconds=REPUTATION_CHECK_INTERVAL_SECONDS,
     next_run_time=datetime.datetime.now(),
+    # That first run is due now, at import, but the scheduler starts later, in
+    # the lifespan. APScheduler skips a run more than misfire_grace_time late
+    # (1 s by default), which would put the first download off a whole
+    # interval; a late check is as good as a timely one.
+    misfire_grace_time=None,
     id="refresh-reputation",
 )
-scheduler.start()
-refresh_tld_names()
 
 
 def _fetch_unloaded_geoip_dbs():
@@ -629,7 +652,16 @@ def _fetch_unloaded_geoip_dbs():
         refresh_asn_db()
 
 
-_fetch_unloaded_geoip_dbs()
+def start_background_work():
+    """Start the scheduler, then fetch what the data volume lacks: the public
+    suffix list once it has aged out (a fresh volume holds only the bundled
+    seed, stamped expired) and each GeoLite2 database that did not open. Called
+    from the lifespan, never at import. The scheduler goes first, so the
+    reputation check due at start runs in its thread while these fetches
+    hold up startup."""
+    scheduler.start()
+    refresh_tld_names()
+    _fetch_unloaded_geoip_dbs()
 
 
 class BrowserDetector:

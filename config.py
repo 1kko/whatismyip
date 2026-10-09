@@ -240,6 +240,15 @@ REPUTATION_LEVEL_HIGH = max(int(os.getenv("REPUTATION_LEVEL_HIGH", "80")), 1)
 REPUTATION_LEVEL_MEDIUM = max(int(os.getenv("REPUTATION_LEVEL_MEDIUM", "40")), 1)
 REPUTATION_LEVEL_LOW = max(int(os.getenv("REPUTATION_LEVEL_LOW", "10")), 1)
 
+# Whether the app lifespan starts the background scheduler and, at boot,
+# fetches what the data volume lacks (GeoLite2, the public suffix list). Only
+# the test suite turns it off (tests/conftest.py): every `with TestClient(app)`
+# runs the lifespan and would otherwise download them. Off in production,
+# nothing is ever refreshed and /healthz reports scheduler_stopped.
+BACKGROUND_REFRESH_ENABLED = (
+    os.getenv("BACKGROUND_REFRESH_ENABLED", "true").lower() != "false"
+)
+
 # Background Job Intervals (seconds)
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "300"))
 RATE_LIMIT_CLEANUP_INTERVAL = int(os.getenv("RATE_LIMIT_CLEANUP_INTERVAL", "60"))
