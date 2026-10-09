@@ -479,6 +479,13 @@ Which rule it was — a ban, the country filter, a probe pattern — only helps
 whoever is probing for the edge of it. The reason, the country and the matched
 path all stay in the log line. See [Getting unbanned](#getting-unbanned).
 
+The bodies above are what every client that is not answered as a browser gets
+(see [Response format](#response-format)). A browser gets the same status as a
+small page with the search box instead: the `403` page says only the sentence
+above, the `429` page adds "Try again later", and a private address such as
+`192.168.0.1` gets an explanation of local network addresses and a link to `/`.
+`/mcp` always answers JSON.
+
 ## MCP (Model Context Protocol)
 
 The service is also an MCP server, so AI agents can run these lookups directly.
@@ -836,7 +843,7 @@ whatismyip/
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
 ├── scripts/             # gazetteer rebuild, font vendoring
-├── templates/           # browser.html (server-rendered page)
+├── templates/           # browser.html, error.html (server-rendered pages)
 ├── static/              # css, js, self-hosted fonts, generated geo JSON
 ├── tests/               # 308 tests, all offline
 ├── data/                # persistent volume: GeoIP DBs, bans, geo rules

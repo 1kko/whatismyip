@@ -370,6 +370,98 @@ def render_page(request: Request, response_data: dict, is_self: bool):
     )
 
 
+def render_error(request: Request, status_code: int, title: str, message: str = ""):
+    """Render error.html: what went wrong, the search box, and a link to /.
+
+    Only for a client negotiate() would hand the page. Every other client gets
+    the JSON its caller builds, exactly as before: that JSON is the API.
+    """
+    return templates.TemplateResponse(
+        request,
+        "error.html",
+        {
+            "status_code": status_code,
+            "title": title,
+            "message": message,
+            "site_domain": site_domain(request),
+            "nonce": getattr(request.state, "csp_nonce", ""),
+        },
+        status_code=status_code,
+    )
+
+
+# Where a home router, an office network, a VPN or the visitor's own machine
+# answers: RFC 1918, loopback, link-local, and CGNAT (RFC 6598), which carriers
+# and Tailscale hand out. static/js/app.js keeps the same list, for the hint
+# it shows in the search box before any request is made.
+_LOCAL_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "100.64.0.0/10",
+    )
+)
+
+
+def render_refused_target(
+    request: Request, target: str, exc: PrivateAddressError | InvalidTargetError
+):
+    """The error page for a target gather() refused, all of them 400s.
+
+    The commonest is a router's address typed into the search box, so a local
+    address gets an explanation rather than "not allowed". The target is shown
+    only once it is known to be an address or a hostname: free text in the
+    path would otherwise let a link put words on this page.
+    """
+    if isinstance(exc, InvalidTargetError):
+        if exc.code == "ipv6_not_supported":
+            return render_error(
+                request,
+                400,
+                "IPv6 addresses are not supported yet",
+                "Look up a domain name or an IPv4 address instead.",
+            )
+        return render_error(
+            request,
+            400,
+            "Not a domain name or IP address",
+            "Enter a domain name such as example.com, or an IPv4 address such as "
+            "8.8.8.8.",
+        )
+    try:
+        address = ipaddress.ip_address(target)
+    except ValueError:
+        # A hostname, refused for the address its A record points at.
+        return render_error(
+            request,
+            400,
+            "Not a public address",
+            f"{target} resolves to a private or reserved IP address, so there is "
+            "nothing public to look up.",
+        )
+    if any(address in network for network in _LOCAL_NETWORKS):
+        return render_error(
+            request,
+            400,
+            f"{address} is a local network address",
+            "Addresses like this one only mean something inside a local network, "
+            "such as your home, your office, a VPN or this computer, so there is "
+            "no public record to look up. From the internet, you appear as your "
+            "public IP address.",
+        )
+    return render_error(
+        request,
+        400,
+        "Not a public address",
+        f"{address} is a reserved IP address, not one in use on the public "
+        "internet, so there is nothing to look up.",
+    )
+
+
 # Initialize security managers
 ip_ban_manager = IPBanManager()
 rate_limiter = RateLimiter()
@@ -571,11 +663,29 @@ def negotiate(request: Request) -> str:
                 detail=f"format must be one of: {', '.join(_FORMAT_MEDIA_TYPES)}",
             )
         return fmt
+    return _negotiate_by_headers(request)
+
+
+def _negotiate_by_headers(request: Request) -> str:
+    """Steps 2 and 3 of negotiate(): Accept, then the user-agent."""
     preferred = _accept_preference(request.headers.get("accept", ""))
     if preferred is not None:
         return preferred
     user_agent = request.headers.get("user-agent", "")
     return "html" if BrowserDetector.is_browser(user_agent) else "json"
+
+
+def wants_page(request: Request) -> bool:
+    """Whether to answer an error with the error page: negotiate() says "html".
+
+    An unknown ?format= is itself a 400 from negotiate(), and a 403 or 429 must
+    not turn into that, so here the parameter is passed over and the headers
+    decide, as they would have without it.
+    """
+    try:
+        return negotiate(request) == "html"
+    except HTTPException:
+        return _negotiate_by_headers(request) == "html"
 
 
 # Admin API key authentication dependency
@@ -594,6 +704,40 @@ def verify_admin_key(api_key: str = Header(None, alias="api-key")):
 # it. The reason, the country and the matched path all stay in the log line
 # next to each branch, which is where an operator can actually use them.
 ACCESS_DENIED = {"error": "Access denied due to the policy"}
+
+
+def _refusal(
+    request: Request, status_code: int, content: dict, message: str = ""
+) -> Response:
+    """A security-middleware refusal: the error page for a client negotiate()
+    would hand the page, and `content` as JSON, exactly as before, for any other.
+
+    The page's heading is content["error"] itself, so the page never says more
+    than the JSON does; for a 403 that is the point (see ACCESS_DENIED). /mcp
+    gets JSON whatever asked: it is a JSON-RPC surface, and its responses go
+    out without the CSP a page relies on.
+    """
+    path = request.url.path
+    if path == "/mcp" or path.startswith("/mcp/"):
+        return JSONResponse(status_code=status_code, content=content)
+    if wants_page(request):
+        response = render_error(request, status_code, content["error"], message)
+    else:
+        response = JSONResponse(status_code=status_code, content=content)
+    # Answered before routing, so security_headers_middleware cannot tell this
+    # is a lookup; but the body now depends on both headers wherever it is.
+    response.headers.add_vary_header("Accept")
+    response.headers.add_vary_header("User-Agent")
+    return response
+
+
+def _access_denied(request: Request) -> Response:
+    return _refusal(request, 403, ACCESS_DENIED)
+
+
+def _too_many_requests(request: Request) -> Response:
+    # When to come back, not how long the ban that came with it lasts.
+    return _refusal(request, 429, {"error": "Too many requests"}, "Try again later.")
 
 
 def _suspicious_path_is_ordinary(request_path: str) -> bool:
@@ -641,7 +785,7 @@ async def security_middleware(request: Request, call_next):
             sanitize_log_input(client_ip),
             rule.label,
         )
-        return JSONResponse(status_code=403, content=ACCESS_DENIED)
+        return _access_denied(request)
     trusted = rule is not None and not rule.block
     rate_limited = rule.ratelimit if trusted else True
 
@@ -652,7 +796,7 @@ async def security_middleware(request: Request, call_next):
                 "SECURITY: Blocked banned IP %s on admin endpoint",
                 client_ip,
             )
-            return JSONResponse(status_code=403, content=ACCESS_DENIED)
+            return _access_denied(request)
         if rate_limited and not rate_limiter.allow_request(client_ip):
             if not trusted:
                 ip_ban_manager.ban_ip(
@@ -660,7 +804,7 @@ async def security_middleware(request: Request, call_next):
                     reason="rate_limit_admin",
                     duration=BAN_DURATION_RATE_LIMIT,
                 )
-            return JSONResponse(status_code=429, content={"error": "Too many requests"})
+            return _too_many_requests(request)
         return await call_next(request)
 
     # MCP endpoint: a manual ban still applies, but nothing here escalates.
@@ -721,10 +865,7 @@ async def security_middleware(request: Request, call_next):
     # 1. Check if IP is banned (highest priority)
     if not trusted and ip_ban_manager.is_banned(client_ip):
         logging.warning(f"SECURITY: Blocked banned IP {client_ip}")
-        return JSONResponse(
-            status_code=403,
-            content=ACCESS_DENIED,
-        )
+        return _access_denied(request)
 
     # 2. Check geographic restrictions
     geo_check = geo_block_manager.check_access(client_ip)
@@ -733,7 +874,7 @@ async def security_middleware(request: Request, call_next):
             f"SECURITY: Blocked {client_ip} from {geo_check['country']} "
             f"({geo_check['region']}) - {geo_check['reason']}"
         )
-        return JSONResponse(status_code=403, content=ACCESS_DENIED)
+        return _access_denied(request)
 
     # 3. Check for suspicious patterns, unless the request is ordinary traffic.
     # The whitelist used to return early here, which also skipped the rate
@@ -756,7 +897,7 @@ async def security_middleware(request: Request, call_next):
             f"SECURITY: Banned {client_ip} ({geo_check['country']}) "
             f"for suspicious request: {request_path}"
         )
-        return JSONResponse(status_code=403, content=ACCESS_DENIED)
+        return _access_denied(request)
 
     # 4. Rate limit check. Static assets are exempt — a single page load fetches
     # a dozen of them, which would trip the per-second limit and ban a
@@ -779,7 +920,7 @@ async def security_middleware(request: Request, call_next):
             f"SECURITY: Banned {client_ip} ({geo_check['country']}) "
             f"for rate limit violation"
         )
-        return JSONResponse(status_code=429, content={"error": "Too many requests"})
+        return _too_many_requests(request)
 
     return await call_next(request)
 
@@ -1073,6 +1214,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         origin_task.cancel()
         if subdomain_task is not None:
             subdomain_task.cancel()
+        if fmt == "html":
+            return render_refused_target(request, domain_ip, exc)
         if isinstance(exc, InvalidTargetError):
             # `code` lets a client tell "not a target at all" from "a target
             # this server does not handle yet" without parsing the message.
