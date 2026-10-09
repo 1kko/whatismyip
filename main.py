@@ -76,10 +76,10 @@ from textfmt import (
     legs_for,
     parse_fields,
     render_block,
-    render_error,
     render_json,
     render_lines,
 )
+from textfmt import render_error as render_text_error
 from security import (
     GeoBlockManager,
     IPBanManager,
@@ -1056,7 +1056,7 @@ async def favicon():
 
 
 def _text_error(message: str, status_code: int = 400) -> PlainTextResponse:
-    return PlainTextResponse(render_error(message), status_code=status_code)
+    return PlainTextResponse(render_text_error(message), status_code=status_code)
 
 
 def _invalid_field(exc: InvalidFieldError, fmt: str) -> Response:
