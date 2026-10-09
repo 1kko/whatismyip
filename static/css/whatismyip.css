@@ -474,6 +474,7 @@ table.records--dns td:nth-child(4) {
 /* Footer */
 .footer {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -484,6 +485,9 @@ table.records--dns td:nth-child(4) {
 }
 .footer a { color: var(--text-secondary); text-decoration: none; }
 .footer a:hover { color: var(--accent); }
+/* A full-width line of its own under the footer row, so the row itself still
+   fits one line on a phone. */
+.footer__note { flex-basis: 100%; margin: 0; }
 .icon-link {
   display: inline-flex;
   align-items: center;
@@ -642,12 +646,67 @@ table.records--dns td:nth-child(4) {
 .error-page__home:hover,
 .error-page__home:focus-visible { text-decoration: underline; }
 
+/* /privacy (privacy.html): the error page's frame around a plain document. The
+   column stays the full inset width so its left edge lines up with the search
+   box and footer; only the text measure is capped. */
+.doc-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.doc {
+  flex: 1;
+  padding-block: 56px 96px;
+  color: var(--text-secondary);
+  font-size: 15px;
+}
+.doc > * { max-width: 70ch; }
+.doc .eyebrow { margin: 0; }
+.doc__title {
+  margin: 10px 0 0;
+  color: var(--text-primary);
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  line-height: 1.25;
+}
+.doc h2 {
+  margin: 40px 0 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+}
+.doc p { margin: 0 0 12px; }
+.doc ul { margin: 0 0 12px; padding-left: 1.2em; }
+.doc li { margin-bottom: 10px; }
+.doc strong { color: var(--text-primary); font-weight: 500; }
+.doc code { font-family: var(--font-mono); font-size: 0.9em; }
+.doc a { color: var(--accent); }
+@media (max-width: 900px) {
+  .doc { padding-block: 40px 64px; }
+  .doc__title { font-size: 24px; }
+}
+
 /* Fingerprint accordion — caption under the UNIQUE ID row / entropy note */
 .device__note {
   margin: 12px 0 0;
   font-size: 12px;
   color: var(--text-muted);
 }
+
+/* WebRTC leak test, between the entropy note and the signal table */
+.webrtc {
+  margin: 18px 0;
+  padding-block: 16px;
+  border-block: 1px solid var(--border);
+}
+.webrtc .facts__title { margin-bottom: 0; }
+.webrtc__run { margin-top: 12px; }
+.webrtc__run:disabled { cursor: progress; opacity: 0.6; }
+.webrtc__verdict { margin: 12px 0 0; font-size: 13px; }
+.webrtc__verdict:empty { display: none; }
 
 @media (max-width: 900px) {
   .topbar { padding-block: 14px; }

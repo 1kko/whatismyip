@@ -1,5 +1,7 @@
 // Client-side browser fingerprint for the self page. Everything is computed
-// here and shown here — nothing is sent to the server (CSP forbids it anyway).
+// here and shown here — nothing is sent to the server, and the page and
+// /privacy both promise so. Only this file keeps that promise: the CSP's
+// default-src 'self' would allow a same-origin fetch, so do not add one.
 // No dependencies, no storage. Mirrors the map.js pattern: server renders empty
 // placeholders, this paints them. Two phases so the first frame is never blocked.
 (function () {

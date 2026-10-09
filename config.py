@@ -214,6 +214,13 @@ SITE_DOMAIN_FALLBACK = os.getenv("SITE_DOMAIN_FALLBACK", "ip.1kko.com")
 DESKTOP_CANVAS = {"width": 1440, "height": 380, "focus_x": 0.58, "fit_ratio": 0.4}
 MOBILE_CANVAS = {"width": 350, "height": 255, "focus_x": 0.5, "fit_ratio": 0.78}
 
+# The STUN server the self page's WebRTC leak test asks, from the visitor's
+# browser and only when they press the button. Besides the map tiles it is the
+# only other host the page contacts, so the page footer and /privacy name it,
+# both reading it from here. Empty removes the test.
+WEBRTC_STUN_URL = os.getenv("WEBRTC_STUN_URL", "stun:stun.cloudflare.com:3478").strip()
+WEBRTC_STUN_HOST = WEBRTC_STUN_URL.removeprefix("stun:")
+
 # MCP (Model Context Protocol) endpoint. Set MCP_ENABLED=false to drop the
 # mount and its lifespan entirely, so the endpoint can be turned off with an
 # env change and a restart rather than a deploy.
