@@ -27,6 +27,7 @@ from config import (
     WHOIS_TIMEOUT_SECONDS,
 )
 from managers import (
+    DNS_FAILURES,
     DomainManager,
     GeoIpManager,
     SSLManager,
@@ -413,6 +414,9 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
     try:
         if kind == "domain" and want - {"whois"}:
             logging.debug("domain=%s", sanitize_log_input(target))
+            # The A query's exception, and the AAAA fallback's, logged once
+            # both have run (below).
+            a_miss = aaaa_miss = None
             try:
                 # Same public resolvers and time budget as the record sweep;
                 # the system resolver in the container is Docker's 127.0.0.11.
@@ -423,7 +427,7 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
                 resolution = "ok"
             except Exception as e:
                 resolution = dns_status(e)
-                logging.warning("No A record for %s: %s", sanitize_log_input(target), e)
+                a_miss = e
             if resolution == "noanswer":
                 # The name exists but has no A record: an IPv6-only host. Its
                 # address still has a location, an owner and a PTR, all asked
@@ -436,11 +440,24 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
                     resolved_ip = str(aaaa_records[0])
                     resolution = "ok"
                 except Exception as e:
-                    logging.debug(
-                        "No AAAA record for %s either: %s",
-                        sanitize_log_input(target),
-                        e,
-                    )
+                    aaaa_miss = e
+            if a_miss is not None:
+                # A miss is a warning only when nothing resolved and a resolver
+                # failed (timeout, SERVFAIL), as for the PTR in
+                # perform_reverse_lookup. An IPv6-only name's NoAnswer, NXDOMAIN
+                # and a name with no address at all are answers, and a warning
+                # for each buried the real failures.
+                failed = not resolved_ip and any(
+                    miss is not None and dns_status(miss) in DNS_FAILURES
+                    for miss in (a_miss, aaaa_miss)
+                )
+                logging.log(
+                    logging.WARNING if failed else logging.DEBUG,
+                    "No A record for %s: %s%s",
+                    sanitize_log_input(target),
+                    a_miss,
+                    f"; AAAA: {aaaa_miss}" if aaaa_miss is not None else "",
+                )
             if resolved_ip and not is_safe_ip(resolved_ip):
                 raise PrivateAddressError(target)
 
