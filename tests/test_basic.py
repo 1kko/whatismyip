@@ -1,8 +1,9 @@
 """Smoke tests for the two public endpoints.
 
 These used to hit a separately-launched server on localhost:8000; they now run
-against FastAPI's TestClient with the external lookups (RDAP/WHOIS, GeoIP, DNS)
-mocked, so the whole suite runs offline and deterministically.
+against FastAPI's TestClient with the lookups they check (RDAP/WHOIS, GeoIP,
+DNS) mocked, so no server has to be running. The suite is not fully offline
+yet: "Testing Strategy" in CLAUDE.md lists what still reaches the network.
 """
 
 from unittest.mock import patch

@@ -1177,26 +1177,38 @@ So the list lives in the data volume instead:
   `data/geoip2fast.dat.gz` left by an older version is no longer read and can be
   deleted.
 - `data/tld/res/effective_tld_names.dat.txt` — the public suffix list above
+- `data/reputation/` — the IP reputation lists, each with a `.requested` file
+  whose time is that of its last download attempt (how the once-a-day Spamhaus
+  limit survives a restart)
+- `data/subdomains.sqlite3` (and its `-wal`/`-shm` files) — the cache of crt.sh
+  subdomain lists; deleting it costs only the cache
 
 These survive service restarts, and the directory is a Docker volume mount.
 
 ## Testing
 
-The whole suite runs on FastAPI's `TestClient` with every external lookup
-(RDAP/WHOIS, GeoIP, DNS, reverse DNS, TLS) mocked — no running service, no
-network:
+The suite runs on FastAPI's `TestClient`, so no service has to be running, and
+the lookups each test checks (RDAP/WHOIS, GeoIP, DNS, reverse DNS, TLS) are
+mocked:
 
 ```bash
-pytest                                              # 308 tests
-pytest tests/test_rdap.py                           # one file
-pytest tests/test_basic.py::TestBasic::test_get_domain_info
-pytest -v
+poetry run pytest                                   # the whole suite
+poetry run pytest tests/test_rdap.py                # one file
+poetry run pytest tests/test_basic.py::TestBasic::test_get_domain_info
+poetry run pytest -v
 ```
 
+It is not fully offline yet. Importing the app downloads nothing, but a few
+tests still send real DNS and RDAP-bootstrap queries, and on a fresh checkout
+the DNS tests have the `tld` package download a suffix list of its own. The
+"Testing Strategy" section of [CLAUDE.md](CLAUDE.md) has the details.
+
 Coverage spans pure units (gazetteer and distance, map projection, the view
-model, RDAP/WHOIS normalisation), endpoint behaviour and HTML rendering, the MCP
-tools and transport, and the security subsystem (proxy-header trust, SSRF guards,
-bans, rate limiting, geo-blocking).
+model, RDAP/WHOIS normalisation), endpoint behaviour and HTML rendering, response
+negotiation and plain-text output, DNS and TLS failure reporting, IPv6,
+reputation lists, subdomain discovery, the concurrency gate, the MCP tools and
+transport, and the security subsystem (proxy-header trust, SSRF guards, bans,
+rate limiting, geo-blocking).
 
 ### Code quality
 
@@ -1212,24 +1224,31 @@ push and pull request.
 
 ```
 whatismyip/
-├── main.py              # FastAPI app: routes, middleware, page rendering, wiring
-├── config.py            # all env-driven constants (no I/O, no import cycles)
-├── managers.py          # GeoIp / Domain / SSL / Header managers
-├── security.py          # IP bans, rate limit, suspicious paths, geo-blocking
+├── main.py              # FastAPI app: lifespan, routes, middleware, page rendering
+├── config.py            # env-driven settings (no import cycles)
+├── managers.py          # GeoIP / suffix list / DNS / TLS / header managers
+├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking
 ├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
 ├── lookup.py            # transport-agnostic lookup pipeline (gather())
+├── concurrency.py       # lookup concurrency gate and slow-leg thread pools
+├── textfmt.py           # ?format=text and ?fields=
+├── reputation.py        # IP reputation lists, downloaded daily, read in memory
+├── subdomains.py        # Certificate Transparency (crt.sh) subdomain lookup
+├── subdomain_store.py   # SQLite cache for subdomains.py
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── models.py            # Pydantic request models
 ├── geo.py               # gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
 ├── healthcheck.py       # container HEALTHCHECK: /healthz answers 200 or not
+├── server.json          # MCP Registry entry
 ├── scripts/             # gazetteer rebuild, font vendoring
-├── templates/           # browser.html, error.html (server-rendered pages)
+├── templates/           # browser.html, error.html, privacy.html and shared partials
 ├── static/              # css, js, self-hosted fonts, generated geo JSON
-├── tests/               # 308 tests, all offline
-├── data/                # persistent volume: GeoIP DBs, bans, geo rules
-├── Dockerfile           # multi-stage build (poetry export + uv pip)
+├── tests/               # pytest suite (TestClient, no running server)
+├── docs/                # README screenshots; ops/ runbooks (alerts, MCP directories)
+├── data/                # persistent volume: GeoIP DBs, lists, caches, bans, rules
+├── Dockerfile           # single-stage build (poetry export + uv pip), non-root
 ├── Makefile             # Docker workflow automation
 └── pyproject.toml       # Poetry dependencies and tool config
 ```

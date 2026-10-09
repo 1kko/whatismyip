@@ -335,9 +335,8 @@ def ssl_rows(ssl_data: dict | None, address: str | None = None) -> list[dict]:
 
 
 def _asn_org(location: dict) -> str:
-    """'AS4766 Korea Telecom' when the GeoLite2-ASN overlay supplied the AS
-    number; just the org name when only geoip2fast answered (it has no AS
-    numbers, only the announced block and name)."""
+    """'AS4766 Korea Telecom' from the GeoLite2-ASN record; just the org name
+    when the record carries no AS number."""
     name = location.get("asn_name")
     number = location.get("asn_number")
     if name and number:
@@ -676,8 +675,9 @@ def whois_display(whois_data: dict | None) -> dict:
 
 def geoip_rows(location: dict | None) -> list[dict]:
     """Detailed geolocation for the GeoIP accordion: country, region, city,
-    coordinates, accuracy radius, time zone and network, from geoip2fast plus
-    the GeoLite2-City overlay."""
+    coordinates, accuracy radius, time zone and network from GeoLite2-City, and
+    the AS org from GeoLite2-ASN. Until GeoLite2-City loads, the bundled
+    geoip2fast snapshot fills in the country and network alone."""
     location = location or {}
     code = (location.get("country_code") or "").strip()
     name = location.get("country_name") or ""

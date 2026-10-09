@@ -1,77 +1,77 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) and other coding
+agents when working with code in this repository. AGENTS.md only points here,
+so this is the one copy to keep current.
+
+Code is referred to by symbol (`main.security_middleware`,
+`managers.DomainManager.get_records`), never by line number: grep for the name.
 
 ## Project Overview
 
-A FastAPI-based web service that provides WHOIS, GeoIP, DNS records, and SSL certificate information for IP addresses and domain names, plus opt-in subdomain discovery via Certificate Transparency logs. The service features automatic GeoIP database updates and serves browser (HTML) and API (JSON) responses from the same URL, chosen by `?format=`, the `Accept` header, or failing both the user-agent.
+A FastAPI service that reports registration (RDAP, with port-43 WHOIS as a
+fallback for domains), GeoIP, DNS records, the TLS certificate and IP reputation
+for an IP address or a domain name, plus opt-in subdomain discovery from
+Certificate Transparency logs. One URL serves a server-rendered page to
+browsers, JSON to API clients and plain text to shells, chosen by `?format=`,
+then the `Accept` header, then the user-agent. An MCP server at `/mcp` exposes
+the same lookups to AI agents. The GeoIP databases, the public suffix list and
+the reputation lists are downloaded into `data/` and refreshed by a background
+scheduler, so a lookup reads them locally.
 
 ## Development Commands
 
 ### Environment Setup
 ```bash
-# Activate virtual environment and install dependencies
-poetry shell
-poetry install
+poetry install   # then prefix commands with `poetry run`
 ```
 
 ### Building
 ```bash
-# Build Docker image (preferred)
-make build
-# or
-make  # default target builds image
+make build   # docker build -t whatismyip . (after pruning dangling images)
+make         # same
 ```
 
 ### Running the Application
 
-**Docker (recommended for production):**
+**Docker:**
 ```bash
-# Run in detached mode with auto-restart
-make serve
-
-# Run interactively (foreground)
-make run
-
-# View logs
-make logs
-
-# Stop the service
+make serve   # detached, --restart unless-stopped, data/ mounted at /app/data
+make run     # foreground
+make logs    # follow the container's logs
 make stop
 ```
 
-**Direct Python execution (development):**
-```bash
-# Start FastAPI with auto-reload
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+Production does not use these. Once CI passes on `main`,
+`.github/workflows/deploy.yml` has Coolify build and deploy the image, then polls
+`/healthz` until its `version` is the merged commit.
 
-# Or run directly
-python main.py
+**Directly (development):**
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python main.py   # the same app on port 8000, without --reload
 ```
+
+Either way the boot work runs in the app lifespan before the port is bound
+(see [Boot and the scheduler](#boot-and-the-scheduler)): on an empty `data/`,
+the first start downloads GeoLite2-City and GeoLite2-ASN (tens of MB) and the
+public suffix list, and then the reputation lists in the background.
 
 ### Testing
 ```bash
-# The whole suite runs on FastAPI's TestClient with external lookups mocked —
-# no running service, no network.
-pytest
-
-# Run a single file or test
-pytest tests/test_rdap.py
-pytest tests/test_basic.py::TestBasic::test_get_domain_info
-
-# Run with verbose output
-pytest -v
+poetry run pytest                      # the whole suite; no running server
+poetry run pytest tests/test_rdap.py   # one file
+poetry run pytest tests/test_basic.py::TestBasic::test_get_domain_info
+poetry run pytest -v
 ```
 
-**Note:** No live server is required — every test file uses `TestClient`.
+Every test uses FastAPI's `TestClient`. The suite is not fully offline: see
+[Testing Strategy](#testing-strategy) for what still reaches the network.
 
 ### Code Quality
 ```bash
-# Lint with ruff
-poetry run ruff check .
-
-# Format with ruff
-poetry run ruff format .
+poetry run ruff check .          # E, F and S (Bandit) rules
+poetry run ruff format .         # CI runs `ruff format --check .`
 ```
 
 ## Architecture
@@ -79,54 +79,111 @@ poetry run ruff format .
 ### Core Components
 
 **Modules:**
-- `config.py`: every environment-driven constant (timeouts, cache TTLs, file paths, rate-limit/ban settings, geo-block defaults, trusted proxies, map canvases). Pure values — imported by everything, imports nothing app-local, which keeps the tree cycle-free.
-- `managers.py` — data-gathering managers, one thin wrapper per source:
-  - `GeoIpManager`: GeoLite2-City (country, city, coordinates) and GeoLite2-ASN (carrier) lookups over memory-mapped mmdb files, refreshed every 3 days via APScheduler (failed refreshes retried hourly), with geoip2fast's bundled country snapshot as the fallback until the first download; `GET /healthz` reports which DBs are actually loaded
-  - `DomainManager`: DNS (A, AAAA, MX, NS, CNAME, TXT), reverse DNS, domain validation
-  - `SSLManager`: SSL certificate retrieval for HTTPS endpoints
-  - `HeaderManager`: strips proxy/forwarding headers
-- `security.py` — request-security subsystem: `IPBanManager`, `RateLimiter`, `SuspiciousPatternDetector`, `WhitelistManager`, `GeoBlockManager`
-- `rdap.py`: RDAP lookups (whoisit) with a port-43 WHOIS fallback, both normalised to one canonical dict
-- `models.py`: Pydantic models (`WhoisResponse`, `GeoRulesUpdate`)
-- `lookup.py`: transport-agnostic lookup pipeline (`gather()`), shared by the
-  HTTP routes and the MCP tools. Raises `PrivateAddressError` and
-  `InvalidTargetError` rather than `HTTPException` so it stays free of FastAPI.
-  `gather(legs=)` runs only the named legs; the default (None) runs them all,
-  and the page, the full JSON and MCP all use the default.
+- `config.py`: the environment-driven constants (timeouts, cache TTLs, file
+  paths, rate-limit/ban settings, geo-block defaults, trusted proxies, map
+  canvases, feature switches). It calls `load_dotenv()` and imports nothing
+  app-local, so every module can import it without a cycle. Two settings are
+  read elsewhere: `ADMIN_API_KEY` in `main.py`, and `GEO_CITIES_FILE` /
+  `GEO_COUNTRIES_FILE` in `geo.py`.
+- `managers.py` — one wrapper per data source:
+  - `GeoIpManager`: GeoLite2-City (country, city, coordinates) and GeoLite2-ASN
+    (carrier) lookups over memory-mapped mmdb files, refreshed every 3 days
+    (`update_city_database`, `update_asn_database`), with geoip2fast's bundled
+    country snapshot as the fallback until the first download.
+    `database_status()` and `build_ages()` feed `/healthz`
+  - `TldNamesManager`: the Public Suffix List that `tld` parses, kept in
+    `data/tld/`. Constructed before `DomainManager` (see `lookup.py`), because
+    it repoints `tld` at the data volume
+  - `DomainManager`: `is_valid_domain` (does the target have a public suffix),
+    `zone_apex`, `get_records` (the record sweep) and `perform_reverse_lookup`
+    (PTR)
+  - `SSLManager.get_ssl_info`: the certificate, read from a verified IP
+  - `HeaderManager`: strips proxy/forwarding headers from the echoed headers
+  - module functions: `_recursive_resolver` (every DNS query goes through it),
+    `dns_status`, `_with_host_ips`
+- `security.py` — the request-security subsystem: `IPBanManager`,
+  `IpRuleManager` (hand-written `data/ip_rules.json`), `RateLimiter`,
+  `SuspiciousPatternDetector`, `WhitelistManager`, `GeoBlockManager`, and
+  `get_client_ip` / `client_ip_from_scope` (proxy headers are trusted only from
+  `TRUSTED_PROXIES`, or from private, loopback and link-local peers when that is
+  unset). `main.security_middleware` applies them.
+- `rdap.py`: `lookup_rdap` (whoisit) and `normalize_whois` (python-whois's
+  port-43 output) both produce one canonical dict (`CANONICAL_FIELDS`).
+  `rdap_breaker` (a `CircuitBreaker`) skips an RDAP host after repeated
+  failures; `refresh_rdap_bootstrap` keeps IANA's bootstrap registry current.
+- `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of
+  `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
+- `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
+  `GET /{domain_ip}` and the MCP tools. Also `classify_target`, `is_safe_ip`,
+  `lookup_whois` (RDAP first, port-43 only for a domain, cached in
+  `_whois_cache`), `lookup_location` and `ip_reputation`. Raises
+  `PrivateAddressError` and `InvalidTargetError` rather than `HTTPException`
+  so it stays free of FastAPI. `gather(legs=)` runs only the named legs
+  (`LEGS`); the default (None) runs them all, and the page, the full JSON and
+  MCP all use the default. Builds the manager singletons (`geo_ip_manager`,
+  `tld_names_manager`, `domain_manager`, `reputation_manager`) at import, which
+  reads `data/` but makes no network call. The self page (`GET /`) does not use
+  `gather()`: `main._self_lookup` runs its legs.
 - `concurrency.py`: the lookup gate and the slow-leg thread pools. At most
   `LOOKUP_CONCURRENCY` lookups run at once: `gather()` holds a slot for its
   legs and the self page for its own. MCP tool calls first take a slot at a
   smaller gate of their own, so they never hold more than
   `MCP_LOOKUP_CONCURRENCY` of the global slots. A full gate is `LookupBusy` —
-  a `503` with `Retry-After` over HTTP, never a ban. RDAP/WHOIS (`registration_pool`) and crt.sh
-  (`subdomain_pool`) run on their own pools, not the default executor; GeoIP
-  runs inline. Imports only `config`, so `subdomains.py` may use it.
+  a `503` with `Retry-After` over HTTP, never a ban. RDAP/WHOIS
+  (`registration_pool`) and crt.sh (`subdomain_pool`) run on their own pools,
+  not the default executor; GeoIP runs inline. Imports only `config`, so
+  `subdomains.py` may use it.
 - `textfmt.py`: `?format=text` and `?fields=`. The field table (names are
   `mcp_server`'s compact_* shapes, flattened; each field lists the `gather()`
   legs it needs and the target kinds it applies to) and the text/flat-JSON
   rendering. Pure: `main.py` runs the lookup. `-` is "no value", `?` is "the
   lookup failed".
 - `subdomains.py`: subdomain discovery from Certificate Transparency (crt.sh),
-  opt-in per request. Owns normalization, single-flight, and a global outbound
-  budget. Must not import `lookup` or `main` — importing `lookup` builds the
-  GeoIP/TLD/Domain managers at module scope, which would drag the GeoIP
+  opt-in per request. `get_subdomains()` owns normalization, single-flight, and
+  a global outbound budget; `invalid_target_reason()` decides which targets may
+  be sent at all. Must not import `lookup` or `main` — importing `lookup` builds
+  the GeoIP/TLD/Domain managers at module scope, which would drag the GeoIP
   database into every test that touches subdomain code.
-- `subdomain_store.py`: SQLite cache for the above, at `data/subdomains.sqlite3`
-  (gitignored, along with its WAL sidecars). No network; every operation
-  degrades to a miss rather than raising.
+- `subdomain_store.py`: `SubdomainStore`, the SQLite cache for the above, at
+  `data/subdomains.sqlite3` (gitignored, along with its WAL sidecars). No
+  network; every operation degrades to a miss rather than raising.
 - `reputation.py`: IP reputation from key-free public lists (Spamhaus DROP and
   ASN-DROP, Tor exits, X4BNet VPN/datacenter). `ReputationManager` keeps them in
   `data/reputation/` (gitignored) the way `TldNamesManager` keeps the suffix
   list, and answers `check(ip, asn)` from sorted intervals in memory. Imports
   only `config` and the standard library; `lookup.py` builds the singleton.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
-  Streamable HTTP). Five tools, all thin shells over `lookup.gather()` (or, for
-  `subdomains`, over `subdomains.get_subdomains()`) that reshape output for an
-  LLM context.
-- `main.py`: FastAPI app + middleware + routes + page rendering; wires the managers/security singletons and the scheduler. `negotiate()` (HTML-vs-JSON: `?format=`, then `Accept`, then the user-agent via `BrowserDetector`) lives here.
+  Streamable HTTP, stateless). Five tools: `lookup`, `dns_records` and
+  `ssl_certificate` over `lookup.gather()`, `subdomains` over
+  `subdomains.get_subdomains()` (registered only under `SUBDOMAIN_ENABLED`),
+  and `whoami_caller` over `lookup.lookup_location()` and
+  `lookup.ip_reputation()`. Each reshapes its data for an LLM context (the
+  `compact_*` functions). `build_mcp`, `McpDispatch`, `McpBarePathRoute` and
+  `McpDisabled` are the mount plumbing `main.py` wires.
+- `viewmodel.py`: `build_view()` turns a response dict into what
+  `templates/browser.html` renders. Pure, with no I/O, and it imports only
+  `config`, `reputation.grade` and the standard library, so `mcp_server.py`
+  reuses its certificate helpers without a cycle.
+- `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`) and
+  `haversine_km`.
+- `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
+  great-circle math behind it.
+- `healthcheck.py`: the Docker `HEALTHCHECK`: exit 0 when `/healthz` answers
+  200, whatever its `status`.
+- `main.py`: the FastAPI app, middleware, routes and page rendering; wires the
+  manager and security singletons and the scheduler. The symbols to know:
+  `lifespan` and `start_background_work` (boot work), `scheduler` and
+  `_refresh_with_retry`, `security_middleware` and
+  `security_headers_middleware`, `negotiate()` (HTML/JSON/text: `?format=`,
+  then `Accept`, then the user-agent via `BrowserDetector`), `health_reasons()`
+  and `healthz`, `build_map_payload`, `render_page`, `render_error` and
+  `render_refused_target`, `_self_lookup`, and the routes `get_self_info`,
+  `get_ip_info` and `head_lookup`.
 
-**API Endpoints**:
-- `GET /` - Returns client's own IP information (detects client IP from x-real-ip header or request.client.host)
+**Endpoints** (single-segment fixed routes are declared before the
+`/{domain_ip}` catch-all, which would otherwise swallow them):
+- `GET /` - the caller's own address (`security.get_client_ip`), looked up by
+  `main._self_lookup`. `?format=text` answers the bare address with no lookup
 - `GET /?whois=only` - the caller's own registration, JSON only: the self page
   waits `SELF_WHOIS_SOFT_DEADLINE_SECONDS` (1.5) for WHOIS, then goes out with
   the panel loading, and `app.js` fills it from here. It joins the lookup the
@@ -134,49 +191,133 @@ poetry run ruff format .
   task alive and its gate slot held) or reads the cache; it starts and gates a
   lookup of its own only when there is neither. JSON/text/`?fields=` on `/`
   still wait for the record
-- `GET /{domain_ip}` - Returns information for specified domain or IP address
+- `GET /{domain_ip}` - a domain or an IP address (IPv4 or IPv6), through
+  `lookup.gather()`
 - `GET /{domain_ip}?subdomains=include|only` - opt-in Certificate Transparency
   subdomain list; see [Subdomain lookup](#subdomain-lookup)
+- `?format=html|json|text` and `?fields=` on both lookup routes
+- `HEAD /`, `HEAD /{domain_ip}` - `main.head_lookup`: `200` with the
+  Content-Type a GET would negotiate, and no lookup
+- `GET /healthz` - `ok` or `degraded` with `reasons` (`main.health_reasons`,
+  no network calls), the deployed `version`, and which datasets are loaded
+- `GET /robots.txt`, `GET /favicon.ico` (a `301` to `/static/favicon.ico`),
+  `GET /privacy` - fixed answers, exempt from the rate limit like `/static/`
+- `POST /mcp` - the MCP endpoint; every other method is a `405`
+- `/admin/*` - bans, per-IP rules, geo rules and stats, behind the `api-key`
+  header (`ADMIN_API_KEY`); a missing or wrong key is a `404`
 
 ### Response Flow
 
 1. **Format Negotiation**: `negotiate()` picks the response format: `?format=html|json|text` first (unknown value -> 400), then an `Accept` header that names `text/html`/`application/json`/`text/plain` (q-values honoured), and only when `Accept` is absent or `*/*` the user-agent (`BrowserDetector`: browsers get HTML; PowerShell, despite its `Mozilla/5.0`, gets JSON). `text` is `textfmt.py`'s: the bare client IP on `/`, a `key: value` block on `/{domain_ip}`; `?fields=` (either route; JSON unless text was negotiated) runs only the `gather(legs=)` the named fields need. Both lookup routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, errors included
-2. **IP Resolution**: Domains are resolved to IP addresses via DNS A records
-3. **Data Gathering**: Parallel collection of WHOIS, GeoIP, DNS records, and SSL certificate data
-4. **Response Assembly**: All data combined into unified response structure (WhoisResponse model)
-5. **Logging**: All requests logged with client IP and lookup target
+2. **Classification**: `lookup.classify_target` calls the target a domain,
+   `ipv4`, `ipv6` or `invalid` before any network work; an invalid target is a
+   `400` (`InvalidTargetError`), and so is a private or reserved address
+   (`PrivateAddressError`, from `is_safe_ip`). A browser gets
+   `main.render_refused_target`'s error page instead of the JSON
+3. **IP Resolution**: a domain's A record, or its AAAA record when it has no A
+   (an IPv6-only host), from the public resolvers; the address must pass
+   `is_safe_ip` too
+4. **Data Gathering** (`lookup._run_legs`, holding a `lookup_gate` slot): the
+   registration lookup runs alongside everything else; a domain's DNS sweep and
+   TLS handshake run concurrently; an IP gets its PTR, then a sweep of the PTR
+   name. GeoIP is read inline, and reputation from the lists in memory
+5. **Response Assembly**: `main.get_ip_info` builds a plain dict (`address`,
+   `resolved_ip`, `resolution`, `datetime`, `domain`, `location`, `whois`,
+   `ssl`, `headers`, `map`, `distance_km`, `origin`, `elapsed_ms`, plus
+   `reputation` and `subdomains` when present) and returns it as JSON or
+   renders it through `render_page` and `viewmodel.build_view()`
+6. **Logging**: every lookup is logged as `client={client_ip} lookup={target}`
 
 ### Key Technical Details
 
-**DNS Resolution** (main.py:153-230):
-- Uses public DNS servers (8.8.8.8, 1.1.1.1) to avoid Docker DNS issues
-- Attempts to use domain's authoritative nameservers when available
+#### Boot and the scheduler
+
+`main.lifespan`, `main.start_background_work`:
+- Importing `main` makes no network call and leaves the scheduler stopped
+  (`tests/test_boot.py` checks both in a fresh interpreter). It builds the
+  managers, which read `data/`, and registers the scheduler's jobs.
+- The lifespan, which uvicorn enters once per process before binding the port,
+  runs `start_background_work()`: it starts the `BackgroundScheduler`, then
+  refreshes the public suffix list if it has aged out (a fresh volume holds only
+  the bundled seed, stamped expired) and fetches each GeoLite2 database that did
+  not open (`_fetch_unloaded_geoip_dbs`). Startup waits for those fetches, so
+  the first request finds the databases. The lifespan then starts the MCP
+  session manager, and on shutdown stops the scheduler without waiting for a
+  refresh in flight (each one writes a temp file and `os.replace()`s it).
+- `BACKGROUND_REFRESH_ENABLED=false` skips the scheduler and the boot fetches.
+  Only `tests/conftest.py` sets it; in production nothing would ever refresh,
+  and `/healthz` would report `scheduler_stopped`.
+- Jobs: GeoLite2-City and -ASN every 3 days; the public suffix list daily
+  (re-fetched once older than `TLD_MAX_AGE_DAYS`); the RDAP bootstrap daily;
+  the reputation lists every `REPUTATION_CHECK_INTERVAL_SECONDS` (first run at
+  start); expired-ban cleanup; and cleanup of both rate-limiter buckets.
+  `_refresh_with_retry` retries a failed GeoLite2 or suffix-list refresh on a
+  one-shot timer and counts consecutive failures for `/healthz`
+  (`_refresh_failures`).
+- A `BackgroundScheduler` that has been shut down cannot run jobs again (its
+  executor pool is gone), so a test that drives the lifespan swaps in a fresh
+  scheduler.
+
+#### DNS Resolution
+
+`managers._recursive_resolver`, `managers.DomainManager.get_records`,
+`managers.DomainManager.zone_apex`:
+- Every query — the gating A/AAAA in `lookup._run_legs`, the sweep, NS/MX host
+  addresses, PTR — goes to `config.PUBLIC_RESOLVERS` (8.8.8.8, 1.1.1.1) with
+  `DNS_QUERY_TIMEOUT` / `DNS_QUERY_LIFETIME`. Never the system resolver
+  (Docker's 127.0.0.11) and never a domain's own nameservers:
+  `get_records`'s `ns_servers` argument is accepted and ignored.
+- The sweep asks A, AAAA, MX, NS, CNAME, TXT (and SPF from it) and PTR
+  concurrently. NS and MX host addresses go through `_with_host_ips`, capped at
+  `DNS_HOST_RESOLVE_LIMIT`; rows past the cap carry `ip_skipped`. A TXT string
+  over 255 bytes arrives split and is joined with no separator (RFC 7208).
 - NS, the zone's SPF, and MX for a name with none of its own come from the zone
   apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
   turned naver.co.kr into co.kr), floored at the registrable domain. Zone MX
   rows carry `from_zone`; the response names `queried_name` and `zone`
+- Known gap: `zone_apex`'s floor comes from `tld.get_fld(...,
+  search_private=False)`, which reads `tld`'s separate public-only list
+  (`data/tld/res/effective_tld_names_public_only.dat.txt`). `TldNamesManager`
+  neither seeds nor refreshes that file, so the first domain lookup on a fresh
+  volume makes `tld` download it from publicsuffix.org synchronously, inside
+  the request, and nothing refreshes it after.
 
-**GeoIP Databases** (`GeoIpManager` in managers.py):
+#### GeoIP Databases
+
+`managers.GeoIpManager`:
 - `data/GeoLite2-City.mmdb` answers country, city, coordinates and the matched
   block; `data/GeoLite2-ASN.mmdb` the carrier. Both are memory-mapped by
-  `maxminddb`, fetched at boot when they do not open (missing or truncated), and
-  refreshed every 3 days (MaxMind's licensed endpoint when `MAXMIND_ACCOUNT_ID`
-  and `MAXMIND_LICENSE_KEY` are set, free jsdelivr mirrors otherwise)
+  `maxminddb`, fetched by the boot work when they do not open (missing or
+  truncated), and refreshed every 3 days (MaxMind's licensed endpoint when
+  `MAXMIND_ACCOUNT_ID` and `MAXMIND_LICENSE_KEY` are set, falling back to the
+  free jsdelivr mirrors, which are the only source otherwise)
 - Geo-blocking judges the City database's `country_code` (falling back to the
   block's `registered_country`, as geoip2fast's builder did)
 - `geoip2fast` survives only as a fallback: its bundled country-only snapshot
-  (`geoip2fast-ipv6.dat.gz`, a 2024 build inside the package) is loaded only when
-  no City database opened, so a fresh volume still has a country. It is never
-  downloaded or refreshed. Loaded, it costs ~50 MB of heap until the next restart
-  (its data lives in module globals); the city+ASN geoip2fast build it replaced
-  cost ~900 MB, and `/healthz` reports `databases.geoip2fast.source` as
-  `bundled` while it answers, `unused` otherwise. `city_overlay` and
-  `asn_overlay` keep their historical names
-- An address no database places gets `country_code: "--"`, geoip2fast's old
-  marker, so geo-blocking and the JSON API see what they always have
+  (`geoip2fast-ipv6.dat.gz`, a 2024 build inside the package,
+  `managers.GEOIP_FALLBACK_FILE`) is loaded only when no City database opened,
+  so a fresh volume still has a country. It is never downloaded or refreshed.
+  Loaded, it costs ~50 MB of heap until the next restart (its data lives in
+  module globals); the city+ASN geoip2fast build it replaced cost ~900 MB, and
+  `/healthz` reports `databases.geoip2fast.source` as `bundled` while it
+  answers, `unused` otherwise. `city_overlay` and `asn_overlay` keep their
+  historical names
+- An address no database places gets `country_code: "--"`
+  (`managers.NO_COUNTRY`), geoip2fast's old marker, so geo-blocking and the
+  JSON API see what they always have
 
-**Error Handling**:
-- WHOIS failures return `{"error": "..."}` in response rather than 500 errors
+#### Registration (RDAP and WHOIS)
+
+`lookup.lookup_whois` runs `rdap.lookup_rdap` on `registration_pool` within
+`RDAP_TIMEOUT_SECONDS`. A domain RDAP cannot answer falls back to port-43 WHOIS
+(`lookup._whois_fallback`); an IP never does, because python-whois answers an
+IP with the registration of its PTR name's domain, so it gets
+`{"error": RIR_RDAP_UNAVAILABLE}`. Answers are cached for `WHOIS_CACHE_TTL`
+(6 h), failures for `WHOIS_CACHE_ERROR_TTL` (5 min).
+
+#### Error Handling
+
+- A registration failure is `{"error": "..."}` in the response, never a 500
 - A DNS query that fails is never an empty list: each record type's outcome is
   in `domain.status` (`ok|noanswer|nxdomain|timeout|servfail|error`, from
   `managers.dns_status`), next to the unchanged record keys. The page prints
@@ -184,14 +325,22 @@ poetry run ruff format .
   `{"error": status}` for a failed type. The MX status is the zone's when the
   name fell back to the zone's MX
 - An untrusted TLS certificate is still returned, with `trusted: false` and `verify_error`; an unreachable port 443 or failed handshake is `{"error", "reason"}`; `None` only when no handshake was attempted
+- A browser gets `templates/error.html` for a 400, 403, 429 or 503, with the
+  same status as the JSON (`main.render_error`); every other client gets the
+  JSON
 
-**Logging** (main.py:32-51):
-- Console and file logging (service.log)
-- TimedRotatingFileHandler: Daily rotation, 7-day retention
+#### Logging
+
+Configured at `main` module scope:
+- Console and file logging (`service.log`, in the working directory)
+- `TimedRotatingFileHandler`: daily rotation, `LOG_RETENTION_DAYS` (7) kept;
+  `/privacy` reads the same constant
 - Request format: `client={client_ip} lookup={target}`
 
-**Link previews** (`templates/browser.html` `<head>`, `build_view()` `title` /
-`description` / `canonical_path`):
+#### Link previews
+
+`templates/browser.html` `<head>`, `build_view()` `title` / `description` /
+`canonical_path`:
 - og:/twitter: tags and `<link rel=canonical>` hang off `public_base_url()`, so
   `PUBLIC_BASE_URL` sets their host and scheme. og:image is the existing
   512×512 `static/image/logo.png`.
@@ -203,15 +352,18 @@ poetry run ruff format .
   `BrowserDetector.browser_patterns`, i.e. only negotiate()'s user-agent step:
   `?format=` and `Accept` still win.
 
-**MCP endpoint** (`mcp_server.py`):
+#### MCP endpoint
+
+`mcp_server.py`:
 - Mounted at `/mcp` **before** the `/{domain_ip}` catch-all, which would
   otherwise swallow it — the same ordering constraint as `/healthz`.
 - `transport_security=` is mandatory. Without a Host allowlist the SDK arms
   DNS-rebinding protection for localhost only and answers every production
   request with `421 Misdirected Request`, logging one warning and telling the
-  client nothing useful.
+  client nothing useful. The allowlist is `MCP_ALLOWED_HOSTS`.
 - The host app's lifespan must enter `mcp.session_manager.run()`; a mounted
-  sub-app's own lifespan never runs.
+  sub-app's own lifespan never runs. `MCP_ENABLED=false` mounts
+  `McpDisabled` (a `404`) instead, and the lifespan skips it.
 - Starlette's `Mount("/mcp")` cannot match a bare `/mcp` — it compiles
   `path + "/{path:path}"`, so only `/mcp/...` ever matches — hence the
   separate bare-path route registered ahead of the Mount.
@@ -230,12 +382,17 @@ poetry run ruff format .
   `error.type=tool_error`, so this split is what SigNoz's tool error rate sees.
 - `/mcp` is exempt from geo-blocking, the suspicious-path detector, and
   automatic bans — every hosted-AI user shares a few provider egress IPs, so a
-  ban would take all of them offline at once. It gets its own rate bucket and
-  returns `429` with no escalation. An automatic ban earned on the lookup
-  paths doesn't carry over either: `/mcp` checks
+  ban would take all of them offline at once. It gets its own rate bucket
+  (`mcp_rate_limiter`) and returns `429` with no escalation. An automatic ban
+  earned on the lookup paths doesn't carry over either: `/mcp` checks
   `is_banned(ip, reason="manual")`, so only an admin ban applies there.
+- The SDK buffers a request body with no cap of its own, so
+  `security_middleware` refuses a POST to `/mcp` over `MCP_MAX_BODY_BYTES`, or
+  without a numeric `Content-Length`, with a `413` before the body is read.
 - MCP tests must use `with TestClient(app) as client:`; the rest of the suite
-  uses a module-level client, which never runs the lifespan.
+  uses a module-level client, which never runs the lifespan. Under the suite's
+  `BACKGROUND_REFRESH_ENABLED=false` that lifespan starts only the MCP session
+  manager.
 - Prefix matching on request paths is dangerous here because `/{domain_ip}` is
   a catch-all: `startswith("/mcp")` also matches the reachable page
   `/mcpfoo.com`. Always match the exact surface (`path == "/mcp" or
@@ -248,18 +405,18 @@ poetry run ruff format .
   `.github/workflows/mcp-publish.yml` with GitHub OIDC. Never switch it to
   `mcp-publisher login http`: the registry would fetch
   `/.well-known/mcp-registry-auth`, which the suspicious-path detector bans
-  for 24 hours.
+  for 24 hours. `docs/ops/mcp-directories.md` covers the other directories.
 
 ### Project Structure
 ```
 whatismyip/
-├── main.py              # FastAPI app: routes, middleware, page rendering, wiring
-├── config.py            # all env-driven constants (no I/O, no cycles)
-├── managers.py          # GeoIp / Domain / SSL / Header managers
-├── security.py          # IP bans, rate limit, suspicious paths, geo-blocking
-├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
-├── models.py            # Pydantic models (WhoisResponse, GeoRulesUpdate)
-├── lookup.py            # transport-agnostic lookup pipeline (gather())
+├── main.py              # FastAPI app: lifespan, middleware, routes, page rendering, wiring
+├── config.py            # env-driven constants (reads .env; imports nothing app-local)
+├── managers.py          # GeoIp / TldNames / Domain / SSL / Header managers
+├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking
+├── rdap.py              # RDAP-first registration lookups + WHOIS normalisation, breaker
+├── models.py            # GeoRulesUpdate, the one Pydantic model
+├── lookup.py            # transport-agnostic lookup pipeline (gather()), manager singletons
 ├── concurrency.py       # lookup gate (503 when full) + RDAP/WHOIS and crt.sh pools
 ├── textfmt.py           # ?format=text and ?fields=: field table, rendering (pure)
 ├── subdomains.py        # crt.sh adapter, normalization, cache-fill orchestration
@@ -269,36 +426,41 @@ whatismyip/
 ├── geo.py               # Gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
+├── healthcheck.py       # Docker HEALTHCHECK: /healthz answers 200 or not
+├── server.json          # official MCP Registry entry (see mcp-publish.yml)
 ├── scripts/
 │   ├── build_gazetteer.py  # regenerates static/geo/*.json from GeoNames
 │   └── fetch_fonts.sh      # vendors Inter + JetBrains Mono into static/fonts/
 ├── templates/
-│   ├── browser.html     # server-rendered page (no client-side templating)
+│   ├── browser.html     # server-rendered lookup page (no client-side templating)
 │   ├── error.html       # 400/403/429/503 page for browsers, same status as the JSON
-│   └── _search.html     # search box included by both (app.js finds it by id)
+│   ├── privacy.html     # /privacy, filled from the constants the code runs on
+│   ├── _search.html     # search box included by browser.html and error.html (app.js finds it by id)
+│   └── _footer.html     # footer included by all three pages
 ├── static/
-│   ├── css/whatismyip.css  # design tokens + layout (dark only)
-│   ├── js/app.js           # search, copy, accordions, lazy JSONEditor
-│   ├── js/map.js           # paints the server's map payload
+│   ├── css/whatismyip.css  # design tokens + layout (dark only); jsoneditor.css is vendored
+│   ├── js/app.js           # search, copy, accordions, WHOIS fill-in, subdomain panel, lazy JSONEditor
+│   ├── js/map.js           # paints the server's map payload, with the attribution
+│   ├── js/fingerprint.js   # self page's browser fingerprint, computed and kept client-side
+│   ├── js/webrtc.js        # opt-in WebRTC leak test (one STUN request from the browser)
+│   ├── js/jsoneditor.min.js # vendored, loaded only when the Raw JSON panel opens
 │   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs)
+│   ├── image/, favicons    # logo (also og:image), icons, web manifest
 │   └── geo/                # cities.json, countries.json (generated, committed)
-├── tests/
-│   ├── test_geo.py      # gazetteer + distance (unit)
-│   ├── test_mapgeom.py  # projection, tiles, arcs (unit)
-│   ├── test_viewmodel.py# view model + WHOIS/SSL rendering (unit)
-│   ├── test_rdap.py     # RDAP/WHOIS normalisation + fallback routing (unit)
-│   ├── test_subdomains.py       # crt.sh adapter, normalization, single-flight (unit)
-│   ├── test_subdomain_store.py  # SQLite cache, degrades to a miss on failure (unit)
-│   ├── test_reputation.py       # list parsers, intervals, grade, download guard, surfaces
-│   ├── test_page.py     # API + HTML via TestClient
-│   ├── test_basic.py    # endpoint smoke tests via TestClient (mocked I/O)
-│   ├── test_concurrency_gate.py # gate 503s, what takes no slot, pool isolation
-│   └── test_security.py # security subsystem via TestClient (mocked I/O)
-├── data/                # Volume mount for persistent data (Docker); also holds
-│                         # subdomains.sqlite3 (gitignored, created on first use)
-├── Dockerfile           # Multi-stage build with poetry + uv
+├── tests/                  # see Testing Strategy for each file
+│   ├── conftest.py         # env switches set before main is imported; per-test security reset
+│   └── fixtures/           # MaxMind's GeoLite2 test mmdbs, the MCP server.json schema
+├── docs/
+│   ├── images/          # README screenshots
+│   └── ops/             # alerts.md (healthz probe, SigNoz alerts), mcp-directories.md
+├── .github/
+│   ├── dependabot.yml   # weekly: GitHub Actions, pip, Docker
+│   └── workflows/       # ci, deploy, healthz-probe, mcp-publish, security-audit
+├── data/                # Volume mount for persistent data (Docker); gitignored contents:
+│                        # GeoLite2 mmdbs, tld/, reputation/, subdomains.sqlite3, bans/rules
+├── Dockerfile           # single stage: poetry export + uv pip, non-root, OTel entrypoint
 ├── Makefile             # Docker workflow automation
-└── pyproject.toml       # Poetry dependencies and project metadata
+└── pyproject.toml       # Poetry dependencies and ruff/pytest config
 ```
 
 ### Map subsystem
@@ -306,12 +468,13 @@ whatismyip/
 **Coordinates**: from GeoLite2-City's `location`. When it has none (or only the
 geoip2fast country fallback is loaded), `static/geo/cities.json` (GeoNames cities15000)
 matches the city name, with a population-weighted country centroid as the last
-resort. Private IPs get no map.
+resort (`geo.Gazetteer.resolve`). Private IPs get no map.
 
 **Projection**: all map math is server-side and unit-tested (`tests/test_mapgeom.py`).
-The server emits tile URLs with pixel offsets plus a projected great-circle polyline for
-two fixed canvases (desktop band 1440×300, mobile card 350×170); `static/js/map.js` only
-paints them.
+`main.build_map_payload` has `mapgeom.build_canvas` emit tile URLs with pixel
+offsets plus a projected great-circle polyline for two fixed canvases,
+`config.DESKTOP_CANVAS` (a 1440-wide band) and `config.MOBILE_CANVAS` (a
+350-wide card); `static/js/map.js` only paints them.
 
 **Antimeridian**: Seoul → California crosses the Pacific. The map centers on the
 shortest-path midpoint longitude and wraps tile x by 2^zoom; a naive Mercator straight
@@ -322,17 +485,20 @@ not just the endpoints, because the great circle bulges far north of both cities
 CSP allows exactly that one host in `img-src`. Tile `<img>`s must send a Referer:
 OSM blocks referer-less web traffic with a 403 "Access blocked" tile, so map.js
 sets `referrerPolicy = "strict-origin"` on them, overriding the page-wide
-`no-referrer` without leaking the lookup path. Tiles are requested one zoom level out and
-painted at 2× so a page view costs ~4 requests, and inverted in CSS to turn OSM's light
-basemap dark. **Attribution is mandatory** and appears on the map and in the footer.
+`no-referrer` without leaking the lookup path. Both canvases fetch tiles at
+their native zoom (`build_canvas`'s `tile_zoom_offset` is 0) so roads and place
+names stay legible, which costs ~15 tile requests on desktop and ~6 on mobile;
+CSS inverts them to turn OSM's light basemap dark. **Attribution is mandatory**:
+map.js's `attribution()` draws "© OpenStreetMap contributors · GeoLite2 by
+MaxMind" on the map itself.
 
 ### Subdomain lookup
 
 **Opt-in by query parameter, not by route.** `?subdomains=include|only` on the
-existing `/{domain_ip}` route. The security middleware reads `request.url.path`
-(`main.py:508`, `main.py:689`), which excludes the query string, so the path
-stays `/{domain}` and `WhitelistManager` classifies it exactly as before — no
-security policy was widened to add this. A route like `/api/certs/{domain}`
+existing `/{domain_ip}` route. `main.security_middleware` classifies requests by
+`request.url.path`, which excludes the query string, so the path stays
+`/{domain}` and `WhitelistManager.is_lookup` classifies it exactly as before —
+no security policy was widened to add this. A route like `/api/certs/{domain}`
 would need `lookup_patterns` widened — it matches a single path segment — and
 without that change, a target matching a detector rule (`\.config$`, `\.log$`
 and friends use `search()`) would ban a legitimate visitor for 24 hours.
@@ -358,7 +524,7 @@ names.
 for every subdomain under a public suffix, and a `%` (or a `_` in the
 registered name) is a wildcard of the caller's choosing. Either could get the
 service IP blocked. `subdomains.invalid_target_reason()` is the one check — the
-`?subdomains=` gate in `main.py`, the MCP `subdomains` tool, and
+`?subdomains=` gate in `main.get_ip_info`, the MCP `subdomains` tool, and
 `get_subdomains()` itself as a backstop all call it. `is_valid_domain` is no
 substitute: it asks only whether a public suffix is present, and `com` has one.
 
@@ -385,11 +551,12 @@ read-only volume or a full disk costs the cache, not the request.
 ### IP reputation
 
 **Downloaded by the scheduler, read from memory.** The `refresh-reputation` job
-fetches each list into `data/reputation/` once its copy is a day old (at boot
-only what is missing or stale); `check()` is a bisect over merged integer
-ranges, so a lookup makes no outbound request and adds no SSRF surface.
-`lookup.ip_reputation()` is the one entry point for `gather()`, the self page
-and `whoami_caller`; it takes the AS number for ASN-DROP from GeoLite2-ASN.
+fetches each list into `data/reputation/` once its copy is a day old (its first
+run, at start, fetches only what is missing or stale); `check()` is a bisect
+over merged integer ranges, so a lookup makes no outbound request and adds no
+SSRF surface. `lookup.ip_reputation()` is the one entry point for `gather()`,
+the self page and `whoami_caller`; it takes the AS number for ASN-DROP from
+GeoLite2-ASN.
 
 **Spamhaus allows one download a day, and that is enforced in code.** Each
 file's request time is written to `<file>.requested` before the request is sent,
@@ -403,52 +570,128 @@ stale (over `REPUTATION_MAX_AGE_HOURS`), missing or family-mismatched list is in
 descriptions and `?fields=risk_level` (which stays out of the text block) all
 keep that distinction. The service's own ban list is never a signal.
 
-**Tests.** `tests/conftest.py` sets `REPUTATION_ENABLED=false`, so importing
-`main` schedules no download and every other test sees the responses it always
-did. `tests/test_reputation.py` builds enabled managers over synthetic lists and
-monkeypatches `lookup.reputation_manager` (and `main.reputation_manager` for
-`/healthz`).
+**Tests.** `tests/conftest.py` sets `REPUTATION_ENABLED=false`, so no test can
+make a Spamhaus download (even one that starts a real scheduler) and every other
+test sees the responses it always did. `tests/test_reputation.py` builds enabled
+managers over synthetic lists and monkeypatches `lookup.reputation_manager` (and
+`main.reputation_manager` for `/healthz`).
 
 ### Dependencies
 
-**Core:**
-- FastAPI + uvicorn: Web framework and ASGI server
-- python-whois: WHOIS protocol client
+**Runtime** (`pyproject.toml`):
+- FastAPI (`fastapi[all]`, which brings Jinja2) + uvicorn: web framework and ASGI server
+- whoisit: RDAP, the primary registration source; requests is its HTTP client
+- python-whois: the port-43 WHOIS fallback for domains
 - maxminddb: memory-mapped GeoLite2 City/ASN readers
 - geoip2fast: only its bundled country snapshot, the fallback before the first
   GeoLite2 download
-- dnspython: DNS resolution and record queries
-- APScheduler: Background task scheduling for database updates
+- dnspython: every DNS query
+- tld: Public Suffix List parsing (`is_valid_domain`, `zone_apex`, subdomain
+  target checks)
+- cryptography: parsing the certificate of a handshake that failed verification
+- mcp: the official MCP SDK (Streamable HTTP)
+- APScheduler: the background refresh and cleanup jobs
+- python-dotenv: `.env` loading
+- opentelemetry-*: traces, metrics and logs via `opentelemetry-instrument`,
+  which the Docker entrypoint wraps uvicorn in
 
 **Development:**
-- ruff: Linting and formatting
-- pytest + requests: Integration testing
+- ruff: linting (with Bandit's S rules) and formatting
+- pytest + pytest-asyncio (`asyncio_mode = "auto"`): the suite
+- pip-audit: the dependency audit CI runs
 
 ### Docker Build Process
 
-The Dockerfile uses a two-stage approach:
-1. Export dependencies from Poetry to requirements.txt
-2. Install via `uv pip` (faster than pip) with `--system` flag (no virtualenv in container)
-3. Copy source files, templates, and static assets
-4. Expose port 8000 with uvicorn --reload for development
+A single stage on `python:3.12-slim`, pinned by digest:
+1. `pip install uv poetry`, then `poetry export` the lock to `requirements.txt`
+2. `uv pip install --system --require-hashes` (no virtualenv in the container)
+3. Copy `*.py`, `templates/` and `static/` into `/app`, create `/app/data`, and
+   drop to the non-root `appuser`. A new top-level module ships on its own; a
+   new top-level directory needs its own `COPY`
+4. `SOURCE_COMMIT` (build arg or Coolify's runtime env) becomes `/healthz`
+   `version` and OTel `service.version`
+5. `HEALTHCHECK` runs `healthcheck.py`; the entrypoint is
+   `opentelemetry-instrument uvicorn main:app --host 0.0.0.0 --port 8000
+   --no-server-header`, with no `--reload`
+
+### CI and deploy
+
+- `ci.yml`: ruff check, ruff format --check, pytest, and pip-audit on every
+  push to `main` and every pull request against it
+- `deploy.yml`: after CI passes on `main` (or by manual dispatch), the
+  self-hosted runner on the Coolify host triggers the deploy and waits for
+  `/healthz` `version` to read the commit
+- `healthz-probe.yml`: checks production's `/healthz` from outside every 15
+  minutes; `degraded` fails it too (`docs/ops/alerts.md`)
+- `mcp-publish.yml`: publishes `server.json` to the MCP Registry, by hand only
+- `security-audit.yml`: a weekly pip-audit that opens or updates a
+  `security-audit` issue when it finds something
 
 ### Testing Strategy
 
-Every test runs against FastAPI's `TestClient` with the external lookups
-(RDAP/WHOIS, GeoIP, DNS, reverse DNS) mocked, so `pytest` needs no running
-service and no network. Coverage spans:
-- Pure units: gazetteer/distance, map projection, the view model, RDAP/WHOIS normalisation
-- Subdomain discovery: crt.sh adapter normalisation/dedup (including the `@`
-  discard rule), single-flight, the outbound budget, and the SQLite cache's
-  degrade-to-a-miss behaviour
-- Endpoint behaviour and HTML rendering via `TestClient`
-- The security subsystem: proxy-header trust, SSRF guards, bans, rate limiting, geo-blocking
+Every test runs on FastAPI's `TestClient`; most use one module-level client,
+which never runs the lifespan, and the MCP tests use `with TestClient(app)`,
+which does. `tests/conftest.py` sets the environment before any test module
+imports `main`: `BACKGROUND_REFRESH_ENABLED=false` (no lifespan starts the
+scheduler or downloads anything), `REPUTATION_ENABLED=false`, the admin key, the
+trusted proxies, and ban/geo-rule files under `/tmp`. Its autouse fixture clears
+the rate limiter and ban list around every test.
 
-```bash
-pytest
-```
+The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
+and importing `main` makes no network call. The suite is still not fully
+offline:
+- On a fresh checkout, the DNS tests make `tld` download its public-only suffix
+  list (the `zone_apex` gap above) into `data/tld/res/`. Offline, every test
+  that reaches `zone_apex` fails (84 on 2026-10-09) until that file exists.
+- A few tests in `test_basic.py`, `test_page.py` and `test_security.py` leave
+  reverse DNS, the zone SOA lookup or the RDAP bootstrap unmocked, so they send
+  real queries to 8.8.8.8/1.1.1.1 and data.iana.org. Offline those fail inside
+  the app and the tests still pass, only slower.
+- `test_webrtc_leak.py` runs `static/js/webrtc.js` in node and skips those
+  tests when `node` is not installed.
+
+Test files:
+- Units: `test_geo.py` (gazetteer, distance), `test_mapgeom.py` (projection,
+  tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering),
+  `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing),
+  `test_managers.py` (GeoLite2 lookups, the country fallback, database
+  sources and status, `TldNamesManager`, `is_valid_domain`), `test_lookup.py`
+  (target normalisation, `is_safe_ip`, `gather()`), `test_subdomains.py`
+  (crt.sh adapter, normalisation and the `@` rule, single-flight, budget),
+  `test_subdomain_store.py` (the SQLite cache degrades to a miss)
+- Boot: `test_boot.py` (importing `main` touches no network; the lifespan
+  starts and stops the scheduler)
+- Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
+  retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
+  security headers, fingerprint panel, `?subdomains=`), `test_negotiation.py`
+  (`?format=`/Accept/user-agent), `test_text_format.py` (`?format=text`,
+  `?fields=`), `test_error_pages.py` (`error.html` for browsers),
+  `test_open_graph.py` (link previews), `test_privacy_page.py` (`/privacy`),
+  `test_robots_head.py` (`/robots.txt`, `/favicon.ico`, HEAD),
+  `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`),
+  `test_ip_whois_column.py` (an IP's WHOIS column), `test_subdomain_panel.py`
+  (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test)
+- Lookup behaviour: `test_classify_target.py` (refused before any network
+  work), `test_ipv6.py` (IPv6 literals, AAAA), `test_dns_status.py` (a failed
+  query is never "no records"), `test_zone_apex.py` (NS/MX/SPF from the zone
+  apex), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
+  255 bytes), `test_resolver_unification.py` (one resolver set and budget),
+  `test_tls_reasons.py` (why a certificate fails), `test_rdap_budget.py`
+  (RDAP/WHOIS cost, no port-43 for an IP), `test_concurrency_gate.py` (gate
+  503s, what takes no slot, pool isolation), `test_subdomain_targets.py`
+  (which targets may reach crt.sh), `test_reputation.py` (list parsers,
+  intervals, grade, download guard, surfaces)
+- Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding
+  guards, the admin key, bans, rate limiting, geo-blocking, the probe detector
+  and whitelist, per-IP rules, response headers, log injection), `test_ssrf.py`
+  (only global unicast becomes a connection target)
+- MCP: `test_mcp.py` (handshake, tools, transport limits, rate bucket),
+  `test_mcp_iserror.py` (`isError` on outright failures),
+  `test_mcp_manual_ban.py` (only a manual ban applies), `test_mcp_registry.py`
+  (`server.json`, its publish workflow, the page's tool list)
+- Ops: `test_healthz_degraded.py` (`degraded` and its reasons,
+  `healthcheck.py`), `test_deploy_version.py` (`/healthz` `version`)
 
 ## Commit Conventions
 - Never include Claude session URLs or metadata in commit messages.
 - Do not add "Co-Authored-By" lines.
-
