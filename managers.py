@@ -32,6 +32,8 @@ from tld.conf import set_setting as set_tld_setting
 from tld.utils import MozillaTLDSourceParser, reset_tld_names
 
 from config import (
+    DNS_HOST_RESOLVE_LIMIT,
+    DNS_HOST_RESOLVE_WORKERS,
     DNS_QUERY_LIFETIME,
     DNS_QUERY_TIMEOUT,
     GEOIP_ASN_DB_FILE,
@@ -70,6 +72,39 @@ def _recursive_resolver() -> dns.resolver.Resolver:
     resolver.timeout = DNS_QUERY_TIMEOUT
     resolver.lifetime = DNS_QUERY_LIFETIME
     return resolver
+
+
+def _with_host_ips(rows: list[dict], rdtype: str = "A") -> list[dict]:
+    """Add each row's "ip": the first `rdtype` address its "hostname" has.
+
+    Any record type that names hosts (NS, MX, and whatever comes next) goes
+    through here, because its answer is sized by whoever runs the zone. Only the
+    first DNS_HOST_RESOLVE_LIMIT rows are resolved, on at most
+    DNS_HOST_RESOLVE_WORKERS threads; the rest keep their row with "ip": None
+    and "ip_skipped": True, so a host nobody asked about does not read as a
+    host with no address.
+
+    The pool is this call's own, never the caller's: get_records() runs this
+    from inside its record-type sweep, and a bounded pool whose workers wait on
+    tasks queued behind them in that same pool deadlocks.
+    """
+    head = rows[:DNS_HOST_RESOLVE_LIMIT]
+
+    def first_address(row: dict) -> str | None:
+        try:
+            return str(_recursive_resolver().resolve(row["hostname"], rdtype)[0])
+        except Exception:
+            return None
+
+    if head:
+        workers = min(len(head), DNS_HOST_RESOLVE_WORKERS)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for row, ip in zip(head, pool.map(first_address, head)):
+                row["ip"] = ip
+    for row in rows[len(head) :]:
+        row["ip"] = None
+        row["ip_skipped"] = True
+    return rows
 
 
 class _AuthDroppingRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -545,24 +580,15 @@ class DomainManager:
         }
         base_domain = self.remove_subdomains(domain)
 
-        def a_ip(name: str) -> str | None:
-            try:
-                return str(_recursive_resolver().resolve(name, "A")[0])
-            except Exception:
-                return None
-
         def fetch_ns() -> list:
             try:
                 answer = _recursive_resolver().resolve(base_domain, "NS")
             except Exception:
                 return []
             targets = [r.target for r in answer]
-            with ThreadPoolExecutor(max_workers=max(len(targets), 1)) as pool:
-                ips = list(pool.map(lambda t: a_ip(str(t)), targets))
-            return [
-                {"hostname": t.to_text(), "ttl": answer.rrset.ttl, "ip": ip_}
-                for t, ip_ in zip(targets, ips)
-            ]
+            return _with_host_ips(
+                [{"hostname": t.to_text(), "ttl": answer.rrset.ttl} for t in targets]
+            )
 
         def fetch_a() -> list:
             try:
@@ -577,17 +603,16 @@ class DomainManager:
             except Exception:
                 return []
             rows = list(answer)
-            with ThreadPoolExecutor(max_workers=max(len(rows), 1)) as pool:
-                ips = list(pool.map(lambda r: a_ip(str(r.exchange)), rows))
-            return [
-                {
-                    "preference": r.preference,
-                    "hostname": r.exchange.to_text(),
-                    "ttl": answer.rrset.ttl,
-                    "ip": ip_,
-                }
-                for r, ip_ in zip(rows, ips)
-            ]
+            return _with_host_ips(
+                [
+                    {
+                        "preference": r.preference,
+                        "hostname": r.exchange.to_text(),
+                        "ttl": answer.rrset.ttl,
+                    }
+                    for r in rows
+                ]
+            )
 
         def fetch_cname():
             try:

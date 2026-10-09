@@ -31,6 +31,13 @@ TIMEOUT_SECONDS = 5
 PUBLIC_RESOLVERS = ["8.8.8.8", "1.1.1.1"]
 DNS_QUERY_TIMEOUT = float(os.getenv("DNS_QUERY_TIMEOUT", "2"))  # per nameserver
 DNS_QUERY_LIFETIME = float(os.getenv("DNS_QUERY_LIFETIME", "3"))  # per query, total
+# NS and MX answers are sized by whoever runs the zone: hundreds of MX records
+# (thousands over TCP) are one zone edit away, and resolving each host's address
+# turned a single lookup into that many threads and outbound queries. Per record
+# type, only the first LIMIT hosts get an address, over at most WORKERS threads;
+# the rest are still listed. Real zones fit well inside both.
+DNS_HOST_RESOLVE_LIMIT = max(int(os.getenv("DNS_HOST_RESOLVE_LIMIT", "10")), 0)
+DNS_HOST_RESOLVE_WORKERS = max(int(os.getenv("DNS_HOST_RESOLVE_WORKERS", "5")), 1)
 
 # RDAP is a single HTTPS GET, so it answers in well under a second when the TLD
 # supports it; give it a tight budget and fall back to port-43 WHOIS otherwise.

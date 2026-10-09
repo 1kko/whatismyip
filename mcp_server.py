@@ -124,8 +124,9 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
 # GET /{domain}: `_whois_fallback` (lookup.py) documents that `wait_for`
 # cannot actually cancel its worker thread on timeout, so a blackholing WHOIS
 # server holds a thread for the OS TCP timeout (~2 min) rather than the 15s
-# budget; and `DomainManager.get_records()` (managers.py) sizes its own
-# nested thread pools by attacker-controlled DNS record counts. A semaphore
+# budget; and `DomainManager.get_records()` (managers.py) opens nested thread
+# pools of its own — no longer sized by the zone's record count, but still up
+# to 7 + 2 x DNS_HOST_RESOLVE_WORKERS threads per call. A semaphore
 # caps how many gather() calls run at once; wait_for gives the whole call a
 # hard wall-clock ceiling so a stuck one can't hold its slot forever.
 _GATHER_CONCURRENCY = asyncio.Semaphore(8)
