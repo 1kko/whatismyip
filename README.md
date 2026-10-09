@@ -60,8 +60,8 @@ RDAP registration data and the full TLS certificate, expanded.
   refreshed every 3 days. Until the first download lands, the country-only
   snapshot bundled with `geoip2fast` answers country alone, so geo-blocking
   always has one to judge. `GET /healthz` reports which databases are actually
-  loaded, so a silent fallback to the bundled country-only database is visible
-  from outside.
+  loaded, and turns `degraded` when one is missing or its build has gone stale,
+  so a silent fallback or a frozen feed is visible from outside.
 - **DNS** — A, MX, NS, CNAME, TXT, SPF and PTR, queried concurrently against
   public resolvers with a bounded per-query budget.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
@@ -267,6 +267,7 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # fall back to the mirrors on failure.
 # MAXMIND_ACCOUNT_ID=your_account_id
 # MAXMIND_LICENSE_KEY=your_license_key
+# GEOIP_MAX_BUILD_AGE_DAYS=21        # /healthz reports an older build as degraded
 
 # Public Suffix List — how a probe is told apart from a lookup (see below)
 # TLD_LIST_URL=https://publicsuffix.org/list/public_suffix_list.dat
@@ -461,13 +462,14 @@ immediately, with a refresh kicked off in the background. Data from
 
 ### `GET /healthz`
 
-Liveness, the deployed commit, and which GeoIP databases are actually serving
-lookups:
+Liveness, the deployed commit, whether anything is degraded and why, and which
+GeoIP databases are actually serving lookups:
 
 ```json
 {
   "status": "ok",
   "version": "08fe93c34e33922e1bdd38be3cd9528ac1342f85",
+  "reasons": [],
   "databases": {
     "geoip2fast": { "source": "unused", "content": null, "build": null },
     "city_overlay": { "loaded": true, "build": "2026-07-31" },
@@ -477,10 +479,44 @@ lookups:
 }
 ```
 
+`status` is `ok`, or `degraded` when `reasons` is not empty. Either way the
+answer is `200`: degraded means some lookups are worse than they should be, not
+that the process is down, so the container's `HEALTHCHECK` (`healthcheck.py`)
+passes on any `200` and only an external monitor acts on `status`. Each reason
+is a stable `code` plus a `message` naming what is wrong:
+
+| `code` | Meaning |
+|---|---|
+| `geoip_bundled` | GeoLite2-City is not loaded (not downloaded yet, or the file will not open): country comes from the bundled snapshot, with no city or coordinates |
+| `geoip_asn_missing` | GeoLite2-ASN is not loaded: carrier fields are empty |
+| `geoip_build_stale` | a loaded GeoLite2 build is older than `GEOIP_MAX_BUILD_AGE_DAYS` (21) |
+| `public_suffix_list_overdue` | the suffix list was never downloaded, or is more than two days past `TLD_MAX_AGE_DAYS` |
+| `scheduler_stopped` | the background scheduler is not running, or its jobs are over 5 minutes overdue |
+| `refresh_failing` | a dataset refresh (GeoLite2, suffix list) has failed twice in a row, i.e. its hourly retry failed too |
+| `rdap_breaker_open` | RDAP servers currently skipped after repeated failures, so lookups routed to them fail fast |
+
+None of these checks makes a network call, so the endpoint stays cheap to poll.
+
+The `HEALTHCHECK` request comes from `127.0.0.1` inside the container and goes
+through the security middleware like any other. Under `GEO_MODE=allowlist` a
+loopback address has no country and is refused, so the container would read
+as unhealthy. If you use allowlist mode, add
+`{"name": "healthcheck", "ipv4": "127.0.0.1", "block": false}` to
+[`data/ip_rules.json`](#per-ip-rules).
+
+The free `geolite2-asn` mirror has not been updated since 2024-07-29, so an
+instance without MaxMind credentials reports `geoip_build_stale` for
+GeoLite2-ASN until `MAXMIND_ACCOUNT_ID` and `MAXMIND_LICENSE_KEY` are set or
+`GEOIP_ASN_DB_URL` points at a maintained copy.
+
 `version` is the commit SHA from the `SOURCE_COMMIT` environment variable
 (Coolify sets it on every deploy; a plain `docker build` takes it as a build
 arg), or `unknown` when it is unset. The deploy workflow polls it until it reads
 back the commit CI passed.
+
+Production is probed from outside by `.github/workflows/healthz-probe.yml`;
+that probe and the SigNoz alerts to create by hand are described in
+[`docs/ops/alerts.md`](docs/ops/alerts.md).
 
 `databases.geoip2fast.source` is `bundled` while the country-only snapshot
 shipped with `geoip2fast` is answering country — no GeoLite2-City database has
@@ -1000,6 +1036,7 @@ whatismyip/
 ├── geo.py               # gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
+├── healthcheck.py       # container HEALTHCHECK: /healthz answers 200 or not
 ├── scripts/             # gazetteer rebuild, font vendoring
 ├── templates/           # browser.html, error.html (server-rendered pages)
 ├── static/              # css, js, self-hosted fonts, generated geo JSON
