@@ -47,9 +47,11 @@ jobs:
           poetry install
 
       - name: Run tests
-        # The suite mocks every external lookup and needs no GeoIP data files:
-        # GeoIpManager falls back to the database bundled with geoip2fast when
-        # data/ is absent, as it is on a fresh checkout.
+        # The suite needs no GeoIP data files: GeoIpManager falls back to the
+        # country snapshot bundled with geoip2fast when data/ is absent, as it
+        # is on a fresh checkout, and nothing here downloads GeoLite2 (the app
+        # lifespan that would is off in tests/conftest.py). A few tests still
+        # reach the network: see "Testing Strategy" in CLAUDE.md.
         run: poetry run pytest -q
 
   security:

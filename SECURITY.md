@@ -63,8 +63,10 @@ Requests are processed in this order:
 1. **IP Ban Check** - Block banned IPs immediately
 2. **Geographic Check** - Apply country/region restrictions
 3. **Suspicious Pattern Detection** - Block malicious request patterns. Skipped
-   for whitelisted paths: static assets, and the lookup surface, whose target is
-   an arbitrary domain and would otherwise trip rules like `\.json$`.
+   for static assets, and for a lookup whose target is a real domain (one with
+   a public suffix) or an IPv4 address: a target is an arbitrary name and would
+   otherwise trip rules like `\.json$` (see
+   [Suspicious Patterns](#suspicious-patterns)).
 4. **Rate Limiting** - Prevent abuse through request frequency limits. Static
    assets under `/static/` are exempt, because a single page load fetches about
    a dozen of them and would otherwise trip the per-second limit, and so are
@@ -73,10 +75,13 @@ Requests are processed in this order:
    RDAP/WHOIS and TLS work happens. A `HEAD` on those runs no lookup but is
    counted all the same.
 
-`/admin/*` and `/mcp` are handled ahead of this chain: both check bans, `/admin/*`
-is rate limited on the same bucket, and `/mcp` uses its own looser bucket and
-never escalates to a ban (every user of a hosted AI client shares a handful of
-provider egress IPs).
+`/admin/*` and `/mcp` are handled ahead of this chain. `/admin/*` checks every
+ban and is rate limited on the same bucket. `/mcp` honours only a manual ban
+(an automatic one earned on the lookup paths does not carry over), uses its own
+looser bucket, and never escalates to a ban (every user of a hosted AI client
+shares a handful of provider egress IPs). It also refuses, with `413`, a POST
+over `MCP_MAX_BODY_BYTES` or without a numeric `Content-Length`, before the
+body is read.
 
 ## Configuration
 
@@ -102,7 +107,7 @@ Automatically detected patterns (in `security.py`, `SuspiciousPatternDetector`):
 - `.env` files
 - `.php`, `.asp`, `.aspx` scripts
 - `.json`, `.xml`, `.sql` files
-- `.bak`, `.log`, `.conf`, `.ini` files
+- `.bak`, `.log`, `.conf`, `.config`, `.ini` files
 - `/admin`, `/wp-*` paths
 - `/.git/`, `/cgi-bin/` paths
 - Hidden files (dotfiles)
@@ -172,6 +177,14 @@ A response missing the `===BEGIN ICANN DOMAINS===` marker is rejected rather
 than installed — a list that matches nothing would make every domain read as a
 probe and ban the visitors looking them up. `GET /healthz` reports which copy is
 live (`downloaded`, `bundled` or `missing`) and its age.
+
+One copy is still left to `tld`. `DomainManager.zone_apex` asks for the
+registrable domain with private suffixes excluded, which `tld` answers from a
+second file, `res/effective_tld_names_public_only.dat.txt`. `TldNamesManager`
+neither seeds nor refreshes it, so the first domain lookup on a fresh volume
+has `tld` download it from publicsuffix.org synchronously, inside that request,
+and it is never refreshed after. Because `tld` is pointed at the data volume,
+the write itself succeeds.
 
 ## Admin API Usage
 
@@ -382,12 +395,22 @@ Only allow specific countries/regions, block all others.
 
 ## Background Jobs
 
-Automated maintenance tasks run via APScheduler:
+Automated maintenance tasks run via APScheduler. The scheduler starts in the
+app's lifespan, when the server starts, never when the module is imported;
+startup then also fetches whatever the data volume lacks (the GeoLite2
+databases that did not open, and the public suffix list once it has aged out)
+before the port is bound.
 
-1. **GeoIP Database Update** - Every 3 days
+1. **GeoIP Database Update** - GeoLite2-City and GeoLite2-ASN every 3 days; a
+   failed refresh is retried after `GEOIP_UPDATE_RETRY_SECONDS` (1 hour)
 2. **Ban Cleanup** - Every 5 minutes (removes expired bans)
-3. **Rate Limit Cleanup** - Every 1 minute (prevents memory leaks)
-4. **IP Reputation Lists** - Checked every 10 minutes, each list downloaded
+3. **Rate Limit Cleanup** - Every 1 minute, for the lookup bucket and the `/mcp`
+   bucket (prevents memory leaks)
+4. **Public Suffix List** - Checked daily, re-fetched once older than
+   `TLD_MAX_AGE_DAYS` (see [Public Suffix List](#public-suffix-list))
+5. **RDAP Bootstrap** - IANA's registry of RDAP servers, checked daily and
+   re-fetched once a week old
+6. **IP Reputation Lists** - Checked every 10 minutes, each list downloaded
    once its copy in `data/reputation/` is a day old (and at boot only when
    missing or stale). The URLs are operator config, never request input, so the
    feature adds no SSRF surface, and a lookup reads the lists from memory
@@ -500,7 +523,7 @@ Add trusted IPs to bypass geo-blocking:
 ### Legitimate traffic being blocked
 
 **Check:**
-1. Review whitelist patterns in `main.py` (WhitelistManager)
+1. Review whitelist patterns in `security.py` (`WhitelistManager`)
 2. Check if IP is in ban list: `GET /admin/bans`
 3. Verify geo-blocking rules: `GET /admin/geo/rules`
 4. Check rate limits in `.env`
@@ -508,7 +531,7 @@ Add trusted IPs to bypass geo-blocking:
 ### False positive suspicious requests
 
 **Solution:**
-- Update suspicious patterns in `main.py` (SuspiciousPatternDetector)
+- Update suspicious patterns in `security.py` (`SuspiciousPatternDetector`)
 - Add exception to whitelist patterns
 - Restart service after changes
 
@@ -704,7 +727,7 @@ curl -X PUT -H "api-key: $API_KEY" \
 
 ```bash
 # These should all succeed
-curl http://localhost:8000/static/style.css
+curl http://localhost:8000/static/css/whatismyip.css
 curl http://localhost:8000/
 curl http://localhost:8000/google.com
 ```
