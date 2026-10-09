@@ -89,8 +89,8 @@ poetry run ruff format .
 - `rdap.py`: RDAP lookups (whoisit) with a port-43 WHOIS fallback, both normalised to one canonical dict
 - `models.py`: Pydantic models (`WhoisResponse`, `GeoRulesUpdate`)
 - `lookup.py`: transport-agnostic lookup pipeline (`gather()`), shared by the
-  HTTP routes and the MCP tools. Raises `PrivateAddressError` rather than
-  `HTTPException` so it stays free of FastAPI.
+  HTTP routes and the MCP tools. Raises `PrivateAddressError` and
+  `InvalidTargetError` rather than `HTTPException` so it stays free of FastAPI.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
   Streamable HTTP). Four tools, all thin shells over `lookup.gather()` that
   reshape its output for an LLM context.

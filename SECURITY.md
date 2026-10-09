@@ -719,7 +719,13 @@ The FastAPI app is constructed with `openapi_url=None` so
 ## SSRF and DNS Rebinding
 
 User-supplied domains/IPs flow into WHOIS, DNS, GeoIP, and SSL
-certificate lookups. Two defenses:
+certificate lookups. Before any of them runs, `classify_target`
+(`lookup.py`) must call the target a domain name or an IP address. A
+target with a control character, a character no hostname has, or no
+public suffix is answered with HTTP 400 (an `error` result from the MCP
+tools) without a single outbound query; python-whois would otherwise
+write it, CR/LF included, into its port-43 query. Two defenses then
+apply to the address:
 
 1. **Public-address allowlist** (`is_safe_ip`). An IP given as the
    target, and the A record a domain resolves to, must be globally
