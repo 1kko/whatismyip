@@ -22,6 +22,7 @@ import sys
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import dns.resolver
 import httpx
 import pytest
 
@@ -46,6 +47,19 @@ LOCATION = {
     "country_name": "United States",
     "city_name": "Los Angeles",
     "is_private": False,
+}
+
+# What SSLManager.get_ssl_info hands back for a trusted certificate, in the
+# getpeercert() shape the compact_* helpers parse.
+CERT = {
+    "issuer": ((("organizationName", "Let's Encrypt"),),),
+    "subject": ((("commonName", "example.com"),),),
+    "subjectAltName": (("DNS", "example.com"),),
+    "notAfter": "Dec 31 23:59:59 2099 GMT",
+    "protocol": "TLSv1.3",
+    "trusted": True,
+    "hostname_match": True,
+    "verify_error": None,
 }
 
 GATE = concurrency.lookup_gate
@@ -337,6 +351,106 @@ class TestMcp:
         assert result.is_error
         assert result.structured_content == {"error": BUSY_MESSAGE}
         assert page.status_code == 200
+
+    async def test_lookup_runs_every_leg(self, legs):
+        """The full tool reads every leg, so it still asks for the default: a
+        domain's registration, A query, sweep and handshake (no PTR step)."""
+        result = await mcp_server.lookup("example.com")
+        assert result["ip"] == DOMAIN_IP
+        assert result["registration"]["name"] == "example.com"
+        assert _ran(legs) == {"whois", "resolver", "records", "ssl"}
+
+    async def test_dns_records_runs_only_the_resolver_and_the_sweep(self, legs):
+        """A DNS question used to cost an RDAP query and a TLS handshake whose
+        answers the tool threw away."""
+        result = await mcp_server.dns_records(domain="example.com")
+        assert result["resolved_ip"] == DOMAIN_IP
+        assert result["resolution"] == "ok"
+        assert _ran(legs) == {"resolver", "records"}
+        # The sweep is of the name, at the address its A query found.
+        [sweep] = legs["records"].call_args_list
+        assert sweep.args == ("example.com",)
+        assert sweep.kwargs["ip"] == DOMAIN_IP
+
+    async def test_ssl_certificate_runs_only_the_resolver_and_the_handshake(self, legs):
+        legs["ssl"].return_value = CERT
+        result = await mcp_server.ssl_certificate(domain="example.com")
+        assert result["issuer"] == "Let's Encrypt"
+        assert result["san"] == ["example.com"]
+        assert result["trusted"] is True
+        assert _ran(legs) == {"resolver", "ssl"}
+
+    async def test_dns_records_of_an_ip_still_sweeps_its_ptr_name(self, legs):
+        """An IP's records are its PTR name's, so the "dns" leg keeps the
+        reverse lookup in front of the sweep (lookup._run_legs)."""
+        legs["reverse"].return_value = "dns.google"
+        result = await mcp_server.dns_records(domain="8.8.8.8")
+        assert result["resolution"] == "literal"
+        assert _ran(legs) == {"reverse", "records"}
+        legs["records"].assert_called_once_with("dns.google", ip="8.8.8.8")
+
+    async def test_ssl_certificate_of_an_ip_is_refused_before_any_query(self, legs):
+        """The answer is the one it always gave; it no longer costs a
+        registration lookup and a PTR query on the way to it."""
+        result = await mcp_server.ssl_certificate(domain="8.8.8.8")
+        assert result.is_error
+        assert result.structured_content == {
+            "error": "TLS is checked for domain names only, not IP addresses"
+        }
+        assert _ran(legs) == set()
+
+    async def test_ssl_certificate_of_a_name_with_no_address_still_says_so(self, legs):
+        """With "resolve" still in the narrowed set, a name that does not exist
+        is reported as before, and nothing else is asked about it."""
+        legs["resolver"].return_value.resolve.side_effect = dns.resolver.NXDOMAIN()
+        result = await mcp_server.ssl_certificate(domain="gone.example.com")
+        assert result.is_error
+        assert result.structured_content == {
+            "error": "TLS not checked for gone.example.com: no A record"
+        }
+        assert _ran(legs) == {"resolver", "ssl"}
+        # The TLS leg is entered, but SSLManager.get_ssl_info answers None for
+        # a name with no verified address before it opens a socket.
+        legs["ssl"].assert_called_once_with("gone.example.com", None)
+
+    async def test_dns_records_of_a_name_on_a_private_address_is_refused(self, legs):
+        """The refusal comes after the A query and before the sweep, as on the
+        page; no registration task was started to cancel, and both slots the
+        call held are free again."""
+        legs["resolver"].return_value.resolve.return_value = ["10.0.0.1"]
+        result = await mcp_server.dns_records(domain="internal.example.com")
+        assert result.is_error
+        assert result.structured_content == {
+            "error": (
+                "internal.example.com resolves to 10.0.0.1, in 10.0.0.0/8, "
+                "private-use network (RFC 1918), not a public address"
+            ),
+            "code": "private",
+        }
+        assert _ran(legs) == {"resolver"}
+        async with holding(MCP_GATE), holding(GATE):
+            pass
+
+    async def test_a_narrow_tool_whose_sweep_hangs_gives_both_slots_back(self, legs):
+        """The narrowed legs keep the one ceiling, _GATHER_TIMEOUT_SECONDS: a
+        sweep that never answers ends the call as "Lookup timed out", and the
+        MCP slot and the global one it held are free again at once."""
+        stuck = threading.Event()
+
+        def hang(name, ip=None):
+            stuck.wait(timeout=10)
+            return {}
+
+        legs["records"].side_effect = hang
+        try:
+            with patch("mcp_server._GATHER_TIMEOUT_SECONDS", 0.2):
+                result = await mcp_server.dns_records(domain="example.com")
+        finally:
+            stuck.set()
+        assert result.is_error
+        assert result.structured_content == {"error": "Lookup timed out"}
+        async with holding(MCP_GATE), holding(GATE):
+            pass
 
 
 class TestGate:

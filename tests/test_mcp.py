@@ -6,6 +6,7 @@ runs the lifespan when used as a context manager; without it the first request
 fails with "RuntimeError: Task group is not initialized".
 """
 
+import asyncio
 import re
 from unittest.mock import AsyncMock, patch
 
@@ -133,7 +134,7 @@ FAKE_LOOKUP = {
 
 
 def test_lookup_tool_returns_a_compact_result():
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return FAKE_LOOKUP
 
     with TestClient(app) as client:
@@ -196,7 +197,7 @@ FAKE_IP_LOOKUP = {
 
 
 def _lookup_payload(gathered, target):
-    async def fake_gather(_target):
+    async def fake_gather(_target, legs=None):
         return gathered
 
     with TestClient(app) as client:
@@ -378,7 +379,7 @@ def test_the_tool_descriptions_say_what_a_country_level_fix_is_worth():
 
 
 def test_lookup_tool_reports_private_targets_as_an_error():
-    async def boom(target):
+    async def boom(target, legs=None):
         raise lookup.PrivateAddressError(target)
 
     with TestClient(app) as client:
@@ -545,7 +546,7 @@ def test_mcp_rate_limiter_cleanup_is_scheduled():
 
 
 def test_dns_records_returns_the_full_sweep():
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return {
             **FAKE_LOOKUP,
             "domain": {
@@ -573,7 +574,7 @@ def test_dns_records_returns_the_full_sweep():
 
 
 def test_dns_records_narrows_to_requested_types():
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return {
             **FAKE_LOOKUP,
             "domain": {"a": ["1.2.3.4"], "mx": [], "ns": ["ns1.example.com"]},
@@ -598,7 +599,7 @@ def test_dns_records_with_an_explicit_empty_type_list_returns_nothing():
     """types=[] is a different request from omitting the argument: "narrow to
     nothing", not "everything". Truthiness would conflate the two."""
 
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return {
             **FAKE_LOOKUP,
             "domain": {"a": ["1.2.3.4"], "mx": [], "ns": ["ns1.example.com"]},
@@ -620,7 +621,7 @@ def test_dns_records_with_an_explicit_empty_type_list_returns_nothing():
 
 
 def test_dns_records_reports_private_targets_as_an_error():
-    async def boom(target):
+    async def boom(target, legs=None):
         raise lookup.PrivateAddressError(target)
 
     with TestClient(app) as client:
@@ -655,7 +656,7 @@ def test_dns_records_rejects_a_type_it_never_queries():
 
 
 def test_lookup_tool_reports_a_timeout():
-    async def hang(target):
+    async def hang(target, legs=None):
         raise TimeoutError()
 
     with TestClient(app) as client:
@@ -670,6 +671,69 @@ def test_lookup_tool_reports_a_timeout():
         assert payload["error"] == "Lookup timed out"
 
 
+async def test_bounded_gather_forwards_the_legs_it_is_given():
+    """The one seam the tools narrow gather() through. None goes through as
+    None, so a tool that passes nothing still gets every leg."""
+    asked = []
+
+    async def fake_gather(target, legs=None):
+        asked.append((target, legs))
+        return FAKE_LOOKUP
+
+    with patch("mcp_server.gather", fake_gather):
+        await mcp_server._bounded_gather(
+            "example.com", legs=frozenset({"resolve", "dns"})
+        )
+        await mcp_server._bounded_gather("example.com")
+    assert asked == [("example.com", {"resolve", "dns"}), ("example.com", None)]
+
+
+async def test_a_narrowed_call_keeps_the_same_wall_clock_ceiling():
+    """One ceiling (_GATHER_TIMEOUT_SECONDS) for every tool: the narrow tools'
+    legs carry budgets of their own (DNS_QUERY_LIFETIME per query; for TLS,
+    TLS_CONNECT_TIMEOUT_SECONDS on the connect and TIMEOUT_SECONDS on the
+    handshake), so there is no second knob to get wrong."""
+
+    async def stuck(target, legs=None):
+        await asyncio.sleep(5)
+        return FAKE_LOOKUP
+
+    with (
+        patch("mcp_server.gather", stuck),
+        patch("mcp_server._GATHER_TIMEOUT_SECONDS", 0.01),
+    ):
+        with pytest.raises(TimeoutError):
+            await mcp_server._bounded_gather(
+                "example.com", legs=frozenset({"resolve", "dns"})
+            )
+
+
+def test_each_tool_asks_gather_for_the_legs_it_reads():
+    """dns_records reads `domain`, ssl_certificate reads `ssl`, lookup reads
+    everything, and each asks gather() for exactly that (lookup.LEGS). A DNS
+    question costs no RDAP query, TLS handshake or AbuseIPDB request, and a
+    certificate question no DNS sweep; the answer shapes do not change."""
+    asked = []
+
+    async def fake_gather(target, legs=None):
+        asked.append(legs)
+        return FAKE_LOOKUP
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            for name, arguments in (
+                ("lookup", {"target": "example.com"}),
+                ("dns_records", {"domain": "example.com"}),
+                ("ssl_certificate", {"domain": "example.com"}),
+            ):
+                response = _rpc(
+                    client, "tools/call", {"name": name, "arguments": arguments}
+                )
+                assert response.status_code == 200
+    assert asked == [None, {"resolve", "dns"}, {"resolve", "tls"}]
+
+
 def test_ssl_certificate_reports_the_expiry_clock():
     cert = {
         "issuer": ((("organizationName", "Let's Encrypt"),),),
@@ -679,7 +743,7 @@ def test_ssl_certificate_reports_the_expiry_clock():
         "protocol": "TLSv1.3",
     }
 
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return {**FAKE_LOOKUP, "ssl": cert, "resolved_ip": "93.184.216.34"}
 
     with TestClient(app) as client:
@@ -697,7 +761,7 @@ def test_ssl_certificate_reports_the_expiry_clock():
 
 
 def test_ssl_certificate_without_a_certificate_is_an_error():
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return {**FAKE_LOOKUP, "ssl": None}
 
     with TestClient(app) as client:
@@ -712,7 +776,7 @@ def test_ssl_certificate_without_a_certificate_is_an_error():
 
 
 def test_ssl_certificate_reports_private_targets_as_an_error():
-    async def boom(target):
+    async def boom(target, legs=None):
         raise lookup.PrivateAddressError(target)
 
     with TestClient(app) as client:

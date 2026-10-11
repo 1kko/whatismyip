@@ -930,7 +930,9 @@ class TestReverseDnsConfirmed:
 
 class TestGatherLegs:
     async def test_the_default_still_runs_every_leg(self):
-        """The page, the full JSON and every MCP tool call gather() bare."""
+        """The page, the full JSON and the MCP `lookup` tool call gather()
+        bare; dns_records and ssl_certificate narrow it (see TestMcp in
+        tests/test_concurrency_gate.py)."""
         with _legs() as mocks:
             data = await lookup.gather("example.com")
         assert _ran(mocks) == {"whois", "geo", "resolver", "records", "ssl"}

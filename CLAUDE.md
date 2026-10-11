@@ -151,9 +151,14 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   every row to `is_safe_ip`); an address in no row is `reserved`.
   `gather(legs=)` runs only the named legs
   (`LEGS`); the default (None) runs them all, and the page, the full JSON and
-  MCP all use the default. Builds the manager singletons (`geo_ip_manager`,
-  `tld_names_manager`, `domain_manager`, `reputation_manager`,
-  `abuseipdb_client`) at import, which reads `data/` but makes no network call.
+  the MCP `lookup` tool use the default. MCP `dns_records` and
+  `ssl_certificate` pass `mcp_server._DNS_LEGS` (`{"resolve", "dns"}`) and
+  `_TLS_LEGS` (`{"resolve", "tls"}`), so neither spends a registration
+  lookup, the other's leg or an AbuseIPDB request; `?fields=` narrows the
+  same way through `textfmt.legs_for()`. Builds the manager singletons
+  (`geo_ip_manager`, `tld_names_manager`, `domain_manager`,
+  `reputation_manager`, `abuseipdb_client`) at import, which reads `data/` but
+  makes no network call.
   `canonical_hostname` lower-cases, normalizes IDNA dot separators, encodes
   each non-ASCII label with the direct `idna` dependency's UTS 46 processing,
   validates every label, and removes one trailing root dot. ASCII service
@@ -204,8 +209,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `config`, `reputation` and the standard library; `lookup.py` builds the
   client.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
-  Streamable HTTP, stateless). Five tools: `lookup`, `dns_records` and
-  `ssl_certificate` over `lookup.gather()`, `subdomains` over
+  Streamable HTTP, stateless). Five tools: `lookup` over `lookup.gather()`,
+  `dns_records` and `ssl_certificate` over `gather(legs=)` narrowed to their
+  own legs (`_DNS_LEGS`, `_TLS_LEGS`), `subdomains` over
   `subdomains.get_subdomains()` (registered only under `SUBDOMAIN_ENABLED`),
   and `whoami_caller` over `lookup.lookup_location()` and
   `lookup.ip_reputation()`. Each reshapes its data for an LLM context (the
@@ -885,7 +891,9 @@ managers over synthetic lists and monkeypatches `lookup.reputation_manager` (and
 (`abuseipdb.py`) alongside the other legs. Only a target given as an IP: never
 the address a domain resolves to, and never the visitor's own (`_self_lookup`
 and `whoami_caller` call `ip_reputation()`, which has no AbuseIPDB part), since
-that would hand every visitor's address to a third party unasked. Keep it that
+that would hand every visitor's address to a third party unasked. And only
+when the `reputation` leg is wanted: MCP `dns_records` and `ssl_certificate`
+of an IP, and `?fields=` without a reputation field, ask nothing. Keep it that
 way. The free plan allows 1,000 checks a UTC day, so an answer is cached a day
 per address and no request goes out past `ABUSEIPDB_DAILY_LIMIT` or after
 AbuseIPDB reports the quota spent (`X-RateLimit-Remaining: 0`, `429`) until its
@@ -1055,10 +1063,11 @@ Test files:
   `test_tls_reasons.py` (why a certificate fails, the TLS connect and handshake
   budgets), `test_rdap_budget.py`
   (RDAP/WHOIS cost, no port-43 for an IP), `test_concurrency_gate.py` (gate
-  503s, what takes no slot, pool isolation), `test_subdomain_targets.py`
-  (which targets may reach crt.sh), `test_reputation.py` (list parsers,
-  intervals, grade, download guard, surfaces), `test_abuseipdb.py` (cache,
-  quota, failures, which lookups ask, surfaces)
+  503s, what takes no slot, pool isolation, the legs each MCP tool runs),
+  `test_subdomain_targets.py` (which targets may reach crt.sh),
+  `test_reputation.py` (list parsers, intervals, grade, download guard,
+  surfaces), `test_abuseipdb.py` (cache, quota, failures, which lookups ask,
+  surfaces)
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding
   guards, the admin key, bans, rate limiting, geo-blocking, the probe detector
   and whitelist, per-IP rules, response headers, log injection), `test_ssrf.py`
