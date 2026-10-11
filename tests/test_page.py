@@ -1298,6 +1298,53 @@ class TestFingerprintPanel:
         assert not re.search(r"vpn\s+detect", js, re.IGNORECASE)
         assert "spoof" not in js.lower()
 
+    def test_page_data_carries_the_addresss_side_of_the_comparison(self):
+        """fingerprint.js reads location.time_zone, country_code and precision
+        from #page-data (the response render_page embeds) to compare the
+        browser's clock and languages with the address. GeoIP is patched the
+        way tests/test_self_first_paint.py does it, so the data/ of the
+        machine running the suite does not decide the answer."""
+        location = {
+            "ip": SEOUL_IP,
+            "country_code": "SE",
+            "country_name": "Sweden",
+            "city_name": "Linköping",
+            "lat": 58.4167,
+            "lon": 15.6167,
+            "accuracy_km": 20,  # within geo.MAX_CITY_ACCURACY_KM: precision "city"
+            "time_zone": "Europe/Stockholm",
+            "asn_name": "Bredband2",
+            "is_private": False,
+        }
+        with (
+            patch(
+                "main.lookup_location",
+                AsyncMock(side_effect=lambda ip: dict(location)),
+            ),
+            patch(
+                "main.lookup_whois",
+                AsyncMock(return_value={"source": "rdap", "name": "TEST"}),
+            ),
+            patch("main.domain_manager.perform_reverse_lookup", return_value=None),
+        ):
+            html = client.get("/", headers=BROWSER_UA).text
+        data = _embedded_json(html, "page-data")
+        assert data["location"]["time_zone"] == "Europe/Stockholm"
+        assert data["location"]["country_code"] == "SE"
+        assert data["location"]["precision"] == "city"
+
+    def test_a_private_visitor_gets_no_time_zone_to_compare(self):
+        """A dev server with no proxy in front: GeoIP places nothing, so the
+        page carries time_zone null, country_code "--" and no precision (null:
+        there are no coordinates to grade), and both rows read "not
+        comparable" (tests/test_fingerprint_consistency.py covers the rows for
+        exactly this record)."""
+        html = local_client.get("/", headers=BROWSER_UA).text
+        location = _embedded_json(html, "page-data")["location"]
+        assert location["time_zone"] is None
+        assert location["country_code"] == "--"
+        assert location.get("precision") is None
+
 
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):

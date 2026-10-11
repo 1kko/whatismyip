@@ -612,7 +612,8 @@ below by text:
   be in its temporal dead zone.
 - Node runs the pure functions and a fake-DOM harness
   (`tests/test_fingerprint_consistency.py`), which skips without node;
-  `test_page.py` pins the exports and the labels without node.
+  `test_page.py` pins the exports, the labels and the `#page-data` contract
+  without node.
 
 #### MCP endpoint
 
