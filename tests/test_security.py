@@ -517,6 +517,17 @@ class TestAdminConfigInjection:
         assert response.status_code == 200
         assert response.json()["status"] == "updated"
 
+    def test_the_rules_put_above_are_gone_for_the_next_test(self):
+        """Runs right after test_update_geo_rules_valid_request: pytest keeps a
+        class's order. conftest's reset deletes GEO_RULES_FILE and reloads the
+        defaults after every test, so the RU blocklist PUT above is neither
+        left in memory nor waiting in the file for the next run to load."""
+        config = main.geo_block_manager.config
+        assert config["mode"] == "disabled"
+        assert config["blocked_countries"] == []
+        with open(main.geo_block_manager.config_file) as f:
+            assert json.load(f)["blocked_countries"] == []
+
     def test_update_geo_rules_invalid_mode(self):
         """Config injection: Invalid mode should return 400."""
         response = client.put(

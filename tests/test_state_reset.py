@@ -5,18 +5,68 @@ The ban list and the geo rules are files the security managers load when main
 is imported. They lived at fixed /tmp paths every pytest run on the machine
 shared, so the RU blocklist test_security.py PUTs through /admin/geo/rules was
 the next run's starting point, and five test files pinned geo-blocking open to
-get around it.
+get around it. In-process, conftest's reset_security_state cleared the lookup
+rate limiter and the ban list alone; the MCP bucket, the WHOIS cache, the RDAP
+breaker, the self page's lookups in flight and the refresh failure count were
+cleared, or not, file by file.
 """
 
 import json
 import tempfile
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+import lookup
 import main
+import rdap
 
 pytest_plugins = ["pytester"]
 
 TESTS = Path(__file__).parent
+
+client = TestClient(main.app)
+ADMIN = {"api-key": "test-secret-key"}
+
+
+def test_geo_rules_a_test_puts_are_gone_for_the_next(reset_state):
+    rules = {"mode": "blocklist", "blocked_countries": ["RU"]}
+    assert client.put("/admin/geo/rules", json=rules, headers=ADMIN).status_code == 200
+    assert main.geo_block_manager.config["blocked_countries"] == ["RU"]
+
+    reset_state()
+
+    config = main.geo_block_manager.config
+    assert config["mode"] == "disabled"
+    assert config["blocked_countries"] == []
+    on_disk = json.loads(Path(main.geo_block_manager.config_file).read_text())
+    assert on_disk == config
+
+
+def test_every_piece_of_module_state_is_put_back(reset_state):
+    ip = "203.0.113.60"
+    main.rate_limiter.allow_request(ip)
+    main.mcp_rate_limiter.allow_request(ip)
+    main.ip_ban_manager.ban_ip(ip, reason="manual", duration=3600)
+    lookup._whois_cache.set(ip, {"source": "rdap"}, ttl=600)
+    main._self_whois_tasks[ip] = object()
+    main._refresh_failures["GeoLite2-City"] = 2
+    for _ in range(rdap.rdap_breaker.threshold):
+        rdap.rdap_breaker.record_failure("rdap.example.net")
+    assert main.rdap_breaker.open_hosts() == ["rdap.example.net"]
+
+    reset_state()
+
+    assert not main.rate_limiter.request_history
+    assert not main.mcp_rate_limiter.request_history
+    assert main.ip_ban_manager.banned_ips == {}
+    assert lookup._whois_cache.get(ip) is None
+    assert main._self_whois_tasks == {}
+    assert main._refresh_failures == {}
+    # One breaker under both names: lookup_rdap records into rdap's,
+    # health_reasons reads main's.
+    assert main.rdap_breaker is rdap.rdap_breaker
+    assert main.rdap_breaker.open_hosts() == []
 
 
 def test_the_state_files_live_in_a_directory_of_this_runs_own():

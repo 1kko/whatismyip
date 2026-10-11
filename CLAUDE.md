@@ -469,8 +469,8 @@ whatismyip/
 │   ├── image/, favicons    # logo (also og:image), icons, web manifest
 │   └── geo/                # cities.json, countries.json (generated, committed)
 ├── tests/                  # see Testing Strategy for each file
-│   ├── conftest.py         # env switches set before main is imported; per-test security reset;
-│   │                       # offline lookup defaults and the network guard
+│   ├── conftest.py         # env switches and a state dir per run, set before main is imported;
+│   │                       # per-test reset of module state; offline defaults and the network guard
 │   └── fixtures/           # MaxMind's GeoLite2 test mmdbs, the MCP server.json schema
 ├── docs/
 │   ├── images/          # README screenshots
@@ -675,8 +675,12 @@ scheduler or downloads anything), `REPUTATION_ENABLED=false`, an empty
 `ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo/IP-rule
 files under a per-run temporary `STATE_DIR`; geo-blocking mode, country lists,
 and unknown-country handling are pinned off. `pytest_sessionfinish` removes
-`STATE_DIR` after the run. Its `reset_security_state` fixture (autouse) clears
-the rate limiter and ban list around every test.
+`STATE_DIR` after the run. Its `reset_security_state` fixture (autouse) runs
+`_reset_mutable_state` before and after every test: both rate-limit buckets,
+the ban list, `lookup._whois_cache`, `main._self_whois_tasks` and
+`main._refresh_failures` emptied, a new RDAP breaker bound to both
+`rdap.rdap_breaker` and `main.rdap_breaker`, and the geo rules reloaded from
+those defaults. A new piece of module-level state gets its line there.
 
 The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
 and importing `main` makes no network call. The suite runs offline, and
@@ -715,7 +719,8 @@ Test files:
   `test_subdomain_store.py` (the SQLite cache degrades to a miss)
 - Boot: `test_boot.py` (importing `main` touches no network; the lifespan
   starts and stops the scheduler), `test_offline_guard.py` (the offline
-  defaults and the network guard), `test_state_reset.py` (per-run state files)
+  defaults and the network guard), `test_state_reset.py` (a state directory
+  per run, what the per-test reset covers)
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
   security headers, fingerprint panel, `?subdomains=`), `test_negotiation.py`
