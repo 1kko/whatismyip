@@ -1,26 +1,96 @@
+/* Each face comes in three files, split by script in scripts/fetch_fonts.sh
+   and told apart here by unicode-range: the browser fetches the Latin file
+   for every page, and the Latin Extended-A and Cyrillic+Greek files only when
+   such text is on the page (a registrant name, a city). Anything outside the
+   three falls back to the system fonts, as CJK always has. The ranges repeat
+   the script's LATIN (Google Fonts' latin plus the four symbols the page
+   writes itself), EXTENDED_A and CYRILLIC_GREEK. LATIN and EXTENDED_A share
+   U+0131 and U+0152-0153; the face declared last is tried first for a shared
+   character, so each face's Latin block comes last and a Latin page never
+   fetches the Extended-A file for them. */
 @font-face {
   font-family: "InterVariable";
-  src: url("/static/fonts/InterVariable.woff2") format("woff2");
+  src: url("/static/fonts/InterVariable-extended-a.woff2") format("woff2");
   font-weight: 100 900;
   font-display: swap;
+  unicode-range: U+0100-017F, U+0218-021B;
+}
+@font-face {
+  font-family: "InterVariable";
+  src: url("/static/fonts/InterVariable-cyrillic-greek.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116, U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+@font-face {
+  font-family: "InterVariable";
+  src: url("/static/fonts/InterVariable-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074, U+20AC, U+2122, U+2191-2193, U+2212, U+2215, U+221E, U+2248, U+25B8, U+FEFF, U+FFFD;
 }
 @font-face {
   font-family: "JetBrains Mono";
-  src: url("/static/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  src: url("/static/fonts/JetBrainsMono-Regular-extended-a.woff2") format("woff2");
   font-weight: 400;
   font-display: swap;
+  unicode-range: U+0100-017F, U+0218-021B;
 }
 @font-face {
   font-family: "JetBrains Mono";
-  src: url("/static/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+  src: url("/static/fonts/JetBrainsMono-Regular-cyrillic-greek.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116, U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-Regular-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074, U+20AC, U+2122, U+2191-2193, U+2212, U+2215, U+221E, U+2248, U+25B8, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-Medium-extended-a.woff2") format("woff2");
   font-weight: 500;
   font-display: swap;
+  unicode-range: U+0100-017F, U+0218-021B;
 }
 @font-face {
   font-family: "JetBrains Mono";
-  src: url("/static/fonts/JetBrainsMono-SemiBold.woff2") format("woff2");
+  src: url("/static/fonts/JetBrainsMono-Medium-cyrillic-greek.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116, U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-Medium-latin.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074, U+20AC, U+2122, U+2191-2193, U+2212, U+2215, U+221E, U+2248, U+25B8, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-SemiBold-extended-a.woff2") format("woff2");
   font-weight: 600;
   font-display: swap;
+  unicode-range: U+0100-017F, U+0218-021B;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-SemiBold-cyrillic-greek.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116, U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-SemiBold-latin.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074, U+20AC, U+2122, U+2191-2193, U+2212, U+2215, U+221E, U+2248, U+25B8, U+FEFF, U+FFFD;
 }
 
 :root {
