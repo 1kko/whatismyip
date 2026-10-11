@@ -72,7 +72,10 @@ RDAP registration data and the full TLS certificate, expanded.
   loaded, and turns `degraded` when one is missing or its build has gone stale,
   so a silent fallback or a frozen feed is visible from outside.
 - **DNS** — A, AAAA, MX, NS, CNAME, TXT, SPF and PTR, queried concurrently against
-  public resolvers with a bounded per-query budget.
+  public resolvers with a bounded per-query budget, plus every CNAME hop the
+  resolver followed to answer the A query (`cname_chain`, each with the TTL
+  left in the resolver's cache) and the canonical name they end at
+  (`canonical_name`), read off that answer at no extra query.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
   match, protocol and cipher, and whether the certificate is trusted. An
   expired, self-signed, wrong-host or chain-incomplete certificate is still
@@ -107,6 +110,10 @@ RDAP registration data and the full TLS certificate, expanded.
   the wrong way across Europe. The number is printed only between two
   city-level fixes: with a centroid at either end it would be the centroid's
   distance, not the address's.
+- **CNAME chain** — the DNS table draws a row per CNAME hop the resolver
+  followed, each under its own name and with its own TTL. When the address was
+  found under another name, the GeoIP card ends with a "Resolves via" row
+  naming it, so its location and ASN are not read as the queried name's own.
 - **Fingerprint panel** (self view only) — around 27 browser signals plus an
   entropy estimate, computed in the browser and never sent to the server.
 - **WebRTC leak test** (in the fingerprint panel, opt-in) — asks one STUN server
@@ -702,6 +709,8 @@ rate limit as `GET`.
     "mx": [{ "preference": 0, "hostname": "nasa-gov.mail.protection.outlook.com.", "ttl": 600, "ip": "52.101.8.50" }],
     "ns": [{ "hostname": "a12-64.akam.net.", "ttl": 600, "ip": "184.26.160.64" }],
     "cname": null,
+    "canonical_name": "nasa.gov",
+    "cname_chain": [],
     "txt": [{ "text": ["MS=ms93625004"], "ttl": 364 }],
     "spf": [],
     "ptr": [],
@@ -950,7 +959,7 @@ is unaffected.)
 | Tool | What it does |
 |---|---|
 | `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). |
-| `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
+| `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way. |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |

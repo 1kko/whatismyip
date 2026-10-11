@@ -552,6 +552,100 @@ class TestGeoIpSection:
         assert rows["Coordinates"] == "—"
         assert rows["Accuracy"] == "—"
 
+    def test_a_name_reached_through_a_cname_chain_says_whose_location_it_is(self):
+        response = dict(
+            DOMAIN_RESPONSE,
+            domain={
+                **DOMAIN_RESPONSE["domain"],
+                "queried_name": "www.example.com",
+                "canonical_name": "edge.example.net",
+                "cname_chain": [
+                    {
+                        "name": "www.example.com.",
+                        "target": "alias.example.net.",
+                        "ttl": 300,
+                    },
+                    {
+                        "name": "alias.example.net.",
+                        "target": "edge.example.net.",
+                        "ttl": 60,
+                    },
+                ],
+            },
+        )
+        rows = {
+            r["label"]: r["value"]
+            for r in build_view(response, is_self=False)["geoip_rows"]
+        }
+        assert rows["Resolves via"] == (
+            "edge.example.net — the location and ASN above are its"
+        )
+        # Only that the names differ is known: no "CDN" verdict.
+        assert "CDN" not in rows["Resolves via"]
+
+    def test_a_name_that_is_its_own_canonical_name_gets_no_such_row(self):
+        response = dict(
+            DOMAIN_RESPONSE,
+            domain={
+                **DOMAIN_RESPONSE["domain"],
+                "queried_name": "google.com",
+                "canonical_name": "google.com",
+                "cname_chain": [],
+            },
+        )
+        labels = [r["label"] for r in build_view(response, is_self=False)["geoip_rows"]]
+        assert "Resolves via" not in labels
+
+    def test_an_ip_target_never_gets_the_row(self):
+        """Review Focus 1. An IP's sweep is of its PTR name, whose own A
+        record may sit behind a CNAME; the location on the card is the IP's,
+        so that chain says nothing about it. The self page is an IP target."""
+        response = dict(
+            IP_RESPONSE,
+            domain={
+                **IP_RESPONSE["domain"],
+                "queried_name": "dns.google",
+                "canonical_name": "edge.example.net",
+                "cname_chain": [
+                    {"name": "dns.google.", "target": "edge.example.net.", "ttl": 300}
+                ],
+            },
+        )
+        for is_self in (True, False):
+            labels = [
+                r["label"] for r in build_view(response, is_self=is_self)["geoip_rows"]
+            ]
+            assert "Resolves via" not in labels, is_self
+
+    def test_a_response_without_the_keys_renders_as_before(self):
+        """A mocked sweep has no canonical_name: no row, no KeyError."""
+        labels = [
+            r["label"] for r in build_view(DOMAIN_RESPONSE, is_self=False)["geoip_rows"]
+        ]
+        assert "Resolves via" not in labels
+
+    def test_a_sweep_that_did_not_answer_names_no_canonical_name(self):
+        """Neither the A nor the AAAA query of the sweep answered (the public
+        resolvers timed out), so canonical_name is null with queried_name set:
+        the chain is unknown, not absent. The card must not print 'Resolves
+        via None' for a name it never learned; the DNS table's A row already
+        says the query failed. DOMAIN_RESPONSE has no queried_name at all, so
+        the test above cannot tell this case from the no-chain one."""
+        response = dict(
+            DOMAIN_RESPONSE,
+            domain={
+                **DOMAIN_RESPONSE["domain"],
+                "a": [],
+                "queried_name": "www.example.com",
+                "canonical_name": None,
+                "cname_chain": [],
+                "status": {"a": "timeout", "aaaa": "timeout"},
+            },
+        )
+        rows = build_view(response, is_self=False)["geoip_rows"]
+        assert "Resolves via" not in [r["label"] for r in rows]
+        assert not any("None" in str(r["value"]) for r in rows)
+
 
 class TestPrecisionWording:
     """What the hero and the GeoIP card say when the fix is not a city.

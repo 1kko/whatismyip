@@ -358,8 +358,24 @@ def _dns_rows(response_data: dict) -> list[dict]:
             )
         rows.extend(failed(kind, key))
 
+    chain = [hop for hop in domain.get("cname_chain") or [] if isinstance(hop, dict)]
     cname = domain.get("cname")
-    if cname:
+    if chain:
+        # One row per hop the resolver followed for the A answer, under the
+        # hop's own owner name (written without the trailing dot, like the
+        # address in the other rows) and with the TTL the resolver had left
+        # for it. The first hop is the `cname` record, so that single row is
+        # not drawn on top of it.
+        for hop in chain:
+            rows.append(
+                {
+                    "type": "CNAME",
+                    "name": str(hop.get("name", "")).rstrip("."),
+                    "value": str(hop.get("target", "")),
+                    "ttl": hop.get("ttl", ""),
+                }
+            )
+    elif cname:
         rows.append(
             {
                 "type": "CNAME",
