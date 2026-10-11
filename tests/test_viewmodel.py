@@ -5,6 +5,7 @@ from viewmodel import (
     build_view,
     country_flag,
     format_distance,
+    reputation_view,
     ssl_rows,
     whois_display,
     whois_fill,
@@ -827,7 +828,7 @@ class TestWhoisNotRegistered:
         assert failed["tone"] == "warning"
 
         ok = self._status({"registrar": "Example Registrar"})
-        assert ok["value"] == "available"
+        assert ok["value"] == "record found"  # the lookup's status, not the name's
         assert ok["tone"] == "success"
 
 
@@ -925,7 +926,9 @@ class TestWhoisThinRecord:
     def test_the_facts_column_has_a_fourth_state(self):
         thin = self._status(THIN_RECORD)
         assert (thin["value"], thin["tone"]) == ("no details", "muted")
-        assert self._status({"registrar": "Example Registrar"})["value"] == "available"
+        assert (
+            self._status({"registrar": "Example Registrar"})["value"] == "record found"
+        )
         assert self._status({"error": "not registered"})["value"] == "not registered"
         failed = self._status({"error": "WHOIS lookup timed out"})
         assert (failed["value"], failed["tone"]) == ("unavailable", "warning")
@@ -1074,3 +1077,52 @@ class TestStatusTag:
     def test_the_link_preview_does_not_change(self):
         # _summary() reads only the TLS tags off the hero.
         assert "serverHold" not in self._view(["server hold"])["description"]
+
+
+class TestReputationLevelWording:
+    """The Level row said "None" for reputation.LEVELS[0], which beside
+    "Listed on 1 of 5 lists" (an informational datacenter listing) reads as
+    "no level at all". The JSON keeps the word `none`; only the card changes."""
+
+    TOR = {
+        "id": "tor_exit",
+        "label": "Tor exit",
+        "source": "Tor Project",
+        "as_of": "2026-10-09T06:13:20Z",
+    }
+    DATACENTER = {
+        "id": "datacenter",
+        "label": "Datacenter",
+        "source": "X4BNet lists_vpn",
+        "as_of": "2026-10-09T06:13:20Z",
+    }
+
+    def _card(self, level, signals=()):
+        return reputation_view(
+            {
+                "level": level,
+                "signals": list(signals),
+                "checked": [] if level is None else [self.TOR, self.DATACENTER],
+                "unavailable": [],
+                "attribution": [],
+            }
+        )
+
+    def test_none_reads_as_no_signals(self):
+        card = self._card("none", [dict(self.DATACENTER, weight=0)])
+        assert card["rows"][0] == {
+            "label": "Level",
+            "value": "No signals",
+            "tone": "default",
+        }
+        assert card["summary"].startswith("Listed on 1 of the 2 lists checked")
+
+    def test_no_list_read_is_still_unknown(self):
+        card = self._card(None)
+        assert card["rows"][0]["value"] == "Unknown"
+        assert card["rows"][0]["tone"] == "muted"
+
+    def test_graded_levels_are_unchanged(self):
+        card = self._card("medium", [dict(self.TOR, weight=50)])
+        assert card["rows"][0]["value"] == "Medium"
+        assert card["rows"][0]["tone"] == "warning"

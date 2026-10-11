@@ -530,7 +530,9 @@ def _whois_column(whois_data: dict | None) -> dict:
     elif whois_data.get("thin"):
         status, tone = "no details", "muted"
     else:
-        status, tone = "available", "success"
+        # "record found", not "available": this Status is the lookup's, and
+        # "available" beside a name reads as "available to register".
+        status, tone = "record found", "success"
     # Separate from the status above: this one only asks whether there is a
     # usable record to draw values from, and there isn't in either failing case.
     no_record = bool(error) or not whois_data
@@ -586,6 +588,17 @@ def _certificate_column(ssl_data: dict | None) -> dict:
 # grade it carries on its own: a Spamhaus listing is red, Tor and VPN amber, a
 # datacenter (weight 0, informational) plain.
 _LEVEL_TONES = {"high": "danger", "medium": "warning", "low": "warning"}
+
+# The level's word on the card. `none` is the band below `low`
+# (reputation.LEVELS[0]); printed as "Level None" beside "Listed on 1 of 5
+# lists" (an informational datacenter listing) it reads as "no level at all".
+# "no signals" says what it is. None, when no list could be read, stays
+# "unknown". The JSON and `?fields=risk_level` keep the word `none`.
+_LEVEL_TEXT = {"none": "no signals"}
+
+
+def _level_text(level: str | None) -> str:
+    return _LEVEL_TEXT.get(level, level or "unknown")
 
 
 def _signal_name(signal: dict) -> str:
@@ -934,7 +947,7 @@ def reputation_view(reputation: dict | None) -> dict | None:
     rows = [
         {
             "label": "Level",
-            "value": (level or "unknown").capitalize(),
+            "value": _level_text(level).capitalize(),
             "tone": _LEVEL_TONES.get(level, "default" if level else "muted"),
         }
     ]

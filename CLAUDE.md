@@ -696,6 +696,11 @@ stale (over `REPUTATION_MAX_AGE_HOURS`), missing or family-mismatched list is in
 `unavailable` with its reason, never silently dropped. The page, the MCP tool
 descriptions and `?fields=risk_level` (which stays out of the text block) all
 keep that distinction. The service's own ban list is never a signal.
+The page's Level row prints `none` as "No signals" and null as "Unknown"
+(`viewmodel._level_text`); the JSON, MCP and `?fields=risk_level` keep the word
+`none`. Likewise the WHOIS facts column says "record found", never "available",
+for a lookup that found a record: "available" beside a name reads as "available
+to register".
 
 **Tests.** `tests/conftest.py` sets `REPUTATION_ENABLED=false`, so no test can
 make a Spamhaus download (even one that starts a real scheduler) and every other
