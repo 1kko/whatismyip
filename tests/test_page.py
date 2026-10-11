@@ -452,6 +452,58 @@ class TestDnsRows:
         assert "{'cname'" not in html
         assert "{&#39;cname&#39;" not in html
 
+    # The shape fetch_a() puts in cname_chain: DNS text per hop, as `cname`.
+    CHAIN = [
+        {"name": "www.example.com.", "target": "alias.example.net.", "ttl": 300},
+        {"name": "alias.example.net.", "target": "edge.example.net.", "ttl": 60},
+    ]
+
+    def test_a_chain_is_one_row_per_hop_with_its_own_name_and_ttl(self):
+        from main import _dns_rows
+
+        rows = _dns_rows(
+            {
+                "address": "www.example.com",
+                "domain": {
+                    "cname": {"cname": "alias.example.net.", "ttl": 300},
+                    "cname_chain": [dict(hop) for hop in self.CHAIN],
+                },
+            }
+        )
+        # The first hop is the `cname` record: one row for it, not two.
+        assert rows == [
+            {
+                "type": "CNAME",
+                "name": "www.example.com",
+                "value": "alias.example.net.",
+                "ttl": 300,
+            },
+            {
+                "type": "CNAME",
+                "name": "alias.example.net",
+                "value": "edge.example.net.",
+                "ttl": 60,
+            },
+        ]
+
+    def test_an_empty_chain_leaves_the_cname_row_as_it_was(self):
+        from main import _dns_rows
+
+        rows = _dns_rows(
+            {
+                "address": "www.example.com",
+                "domain": {"cname": dict(self.CNAME), "cname_chain": []},
+            }
+        )
+        assert rows == [
+            {
+                "type": "CNAME",
+                "name": "www.example.com",
+                "value": "example.com.",
+                "ttl": 300,
+            }
+        ]
+
 
 class TestSecurityHeaders:
     def test_csp_allows_only_the_osm_tile_host(self):

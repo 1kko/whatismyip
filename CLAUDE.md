@@ -342,6 +342,13 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   trailing dot like `queried_name`, and `queried_name` itself when there is
   no hop; `null` with an empty chain when neither query answered, and
   `status.a` says why). `cname` stays the first hop, from its own query
+- `main._dns_rows` draws one CNAME row per hop (the hop's owner name without
+  its trailing dot, its target, its TTL) in place of the single `cname` row,
+  and `viewmodel.geoip_rows(location, domain)` ends with a 'Resolves via
+  `<canonical_name>` — the location and ASN above are its' row when it
+  differs from `queried_name`. `build_view()` passes `domain` for a domain
+  target only: an IP's sweep is of its PTR name, and its location is its own.
+  Only that the names differ is known, so nothing says 'CDN'
 - `zone_apex`'s floor comes from `tld.get_fld(..., search_private=False)`,
   which reads `tld`'s separate public-only list
   (`data/tld/res/effective_tld_names_public_only.dat.txt`). `TldNamesManager`
@@ -877,7 +884,8 @@ Test files:
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
   `test_dns_status.py` (a failed
   query is never "no records"), `test_cname_chain.py` (the CNAME chain and
-  canonical name read off the A answer), `test_zone_apex.py` (NS/MX/SPF from the zone
+  canonical name read off the A answer, the hop rows and the GeoIP 'Resolves
+  via' row), `test_zone_apex.py` (NS/MX/SPF from the zone
   apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
   floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
   255 bytes), `test_resolver_unification.py` (one resolver set and budget),

@@ -15,6 +15,8 @@ the answer section exactly as it does for a live response. gather()'s other
 legs are answered locally. No network.
 """
 
+import re
+
 import dns.message
 import dns.name
 import dns.rdata
@@ -136,6 +138,12 @@ def offline(monkeypatch, fake_dns):
 
 JSON_UA = {"user-agent": "curl/8.0"}
 client = TestClient(app, client=("118.235.14.201", 41234))
+BROWSER_UA = {
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    )
+}
 
 
 # --- get_records -----------------------------------------------------------
@@ -294,3 +302,58 @@ def test_the_json_api_carries_the_chain_and_the_canonical_name(offline):
     ]
     # Unchanged beside them: the first-hop cname record.
     assert body["domain"]["cname"] == {"cname": HOPS[0][0], "ttl": 300}
+
+
+# --- HTTP: the page ------------------------------------------------------------
+
+
+def _dns_rows_of(html: str, rdtype: str) -> list[list[str]]:
+    table = re.search(r'<table class="records records--dns">.*?</table>', html, re.S)
+    assert table, "no DNS table"
+    rows = re.findall(rf"<tr>\s*<td>{rdtype}</td>.*?</tr>", table.group(0), re.S)
+    return [
+        [cell.strip() for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        for row in rows
+    ]
+
+
+def _geoip_rows_of(html: str) -> dict[str, str]:
+    panel = re.search(r'id="acc-geoip".*?</details>', html, re.S)
+    assert panel, "no GeoIP accordion"
+    return {
+        label.strip(): value.strip()
+        for label, value in re.findall(
+            r'<tr><td>(.*?)</td><td colspan="3" class="tone-\w+">(.*?)</td></tr>',
+            panel.group(0),
+            re.S,
+        )
+    }
+
+
+def test_the_page_lists_every_hop_and_says_whose_location_it_shows(offline):
+    """The completion condition: /www.microsoft.com shows one CNAME row per
+    hop, under the hop's own name and TTL, and the GeoIP card says the
+    address was reached through the Akamai edge name, so the location and
+    ASN it shows are that name's."""
+    html = client.get(f"/{QNAME}", headers=BROWSER_UA).text
+
+    assert _dns_rows_of(html, "CNAME") == [
+        ["CNAME", "www.microsoft.com", HOPS[0][0], "300"],
+        ["CNAME", HOPS[0][0].rstrip("."), HOPS[1][0], "60"],
+    ]
+    assert _dns_rows_of(html, "A") == [["A", QNAME, EDGE_IP, "20"]]
+    via = _geoip_rows_of(html)["Resolves via"]
+    assert via == f"{CANONICAL} — the location and ASN above are its"
+    # Only that the name differs is known, so the page does not call it a CDN.
+    assert "CDN" not in via
+
+
+def test_a_name_without_a_chain_gets_the_page_it_always_had(offline):
+    offline.answers["example.com", "A"] = _answer(
+        "example.com", "A", ["93.184.216.34"], 300
+    )
+
+    html = client.get("/example.com", headers=BROWSER_UA).text
+
+    assert _dns_rows_of(html, "CNAME") == []
+    assert "Resolves via" not in html

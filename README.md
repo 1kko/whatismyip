@@ -110,6 +110,10 @@ RDAP registration data and the full TLS certificate, expanded.
   the wrong way across Europe. The number is printed only between two
   city-level fixes: with a centroid at either end it would be the centroid's
   distance, not the address's.
+- **CNAME chain** — the DNS table draws a row per CNAME hop the resolver
+  followed, each under its own name and with its own TTL. When the address was
+  found under another name, the GeoIP card ends with a "Resolves via" row
+  naming it, so its location and ASN are not read as the queried name's own.
 - **Fingerprint panel** (self view only) — around 27 browser signals plus an
   entropy estimate, computed in the browser and never sent to the server.
 - **WebRTC leak test** (in the fingerprint panel, opt-in) — asks one STUN server

@@ -803,11 +803,30 @@ def whois_display(whois_data: dict | None) -> dict:
     return out
 
 
-def geoip_rows(location: dict | None) -> list[dict]:
+def resolved_via(domain: dict | None) -> str | None:
+    """The canonical name a domain target's address was found under, when it
+    is not the queried name: the last hop of the CNAME chain the resolver
+    followed for the A answer. None without a chain, and None when the sweep
+    did not answer (canonical_name null): the chain is then unknown, not
+    absent, and status.a says why."""
+    domain = domain or {}
+    canonical = domain.get("canonical_name")
+    if not canonical or canonical == domain.get("queried_name"):
+        return None
+    return str(canonical)
+
+
+def geoip_rows(location: dict | None, domain: dict | None = None) -> list[dict]:
     """Detailed geolocation for the GeoIP accordion: country, region, city,
     coordinates, accuracy radius, time zone and network from GeoLite2-City, and
     the AS org from GeoLite2-ASN. Until GeoLite2-City loads, the bundled
-    geoip2fast snapshot fills in the country and network alone."""
+    geoip2fast snapshot fills in the country and network alone.
+
+    `domain` is a domain target's record sweep; an IP target passes none, its
+    location being its own. When the sweep's A answer went through a CNAME
+    chain, a last row names the canonical name the address belongs to, so the
+    location and ASN above it are not read as the queried name's own. Only
+    that the names differ is known, so the row does not call it a CDN."""
     location = location or {}
     code = (location.get("country_code") or "").strip()
     name = location.get("country_name") or ""
@@ -825,7 +844,7 @@ def geoip_rows(location: dict | None) -> list[dict]:
     coords = f"{lat}, {lon}" if lat is not None and lon is not None else DASH
     accuracy_text = _accuracy_text(location)
 
-    return [
+    rows = [
         {"label": "Country", "value": country, "tone": "default"},
         {"label": "Region", "value": region, "tone": "default"},
         {
@@ -851,6 +870,16 @@ def geoip_rows(location: dict | None) -> list[dict]:
             "tone": "default",
         },
     ]
+    via = resolved_via(domain)
+    if via:
+        rows.append(
+            {
+                "label": "Resolves via",
+                "value": f"{via} — the location and ASN above are its",
+                "tone": "default",
+            }
+        )
+    return rows
 
 
 def _whois_hint(whois_data: dict | None) -> str:
@@ -1149,7 +1178,9 @@ def build_view(
         "whois_pending": whois_pending(response.get("whois")),
         "accordions": _accordions(response, subdomains_enabled),
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
-        "geoip_rows": geoip_rows(location),
+        # A domain's address may have been found under another name (a CNAME
+        # chain); an IP's sweep is of its PTR name, and its location is its own.
+        "geoip_rows": geoip_rows(location, None if is_ip else domain),
         "reputation": reputation_view(response.get("reputation")),
         "subdomains": response.get("subdomains"),
         "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],
