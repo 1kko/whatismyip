@@ -1009,6 +1009,165 @@ class TestDesignTokens:
         assert "prefers-color-scheme" not in CSS.read_text(encoding="utf-8")
 
 
+def _media_blocks(css, query):
+    """The bodies of every `@media (<query>) { ... }` block in the stylesheet,
+    joined. A media block nests rule blocks, so the braces are balanced by
+    hand; a regex over `[^}]*` would stop at the first rule's closing brace."""
+    bodies = []
+    needle = f"@media ({query})"
+    start = css.find(needle)
+    while start != -1:
+        open_brace = css.index("{", start)
+        depth = 0
+        end = open_brace
+        for end in range(open_brace, len(css)):
+            if css[end] == "{":
+                depth += 1
+            elif css[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        bodies.append(css[open_brace + 1 : end])
+        start = css.find(needle, end)
+    return "\n".join(bodies)
+
+
+class TestMobileLayout:
+    """Three defects measured at 390px (docs/images/mobile.png and the
+    2026-10-09 self-mobile screenshot), each fixed by a CSS rule. The suite has
+    no layout engine (see the map.js and fingerprint.js source checks above),
+    so the rules are pinned by text, and the media block a rule lives in is
+    what keeps it off the desktop: the 440px box and its 14px must not move."""
+
+    def test_inputs_are_16px_under_900px_so_ios_does_not_zoom(self):
+        # iOS Safari zooms a focused field whose text is under 16px, and the
+        # visitor pinches back or submits to undo it.
+        css = CSS.read_text(encoding="utf-8")
+        mobile = _media_blocks(css, "max-width: 900px")
+        assert re.search(r"\.search input[^{]*\{[^}]*font-size:\s*16px", mobile)
+        assert re.search(r"\.subdomains__filter[^{]*\{[^}]*font-size:\s*16px", mobile)
+        # Each 16px rule must come after its base rule: the selectors share a
+        # specificity, so the later one wins, and the filter's base rule sits
+        # far below the main 900px block.
+        search_base = css.index("font: 500 14px/1 var(--font-mono)")
+        filter_base = css.index("font: 500 12.5px/1.4 var(--font-mono)")
+        search_rule = re.search(r"\.search input[^{]*\{\s*font-size:\s*16px", css)
+        filter_rule = re.search(r"\.subdomains__filter[^{]*\{\s*font-size:\s*16px", css)
+        assert search_rule.start() > search_base
+        assert filter_rule.start() > filter_base
+
+    def test_the_desktop_box_is_unchanged(self):
+        css = CSS.read_text(encoding="utf-8")
+        assert re.search(r"\.search-wrap\s*\{[^}]*width:\s*440px", css)
+        assert "font: 500 14px/1 var(--font-mono)" in css
+        assert "font: 500 12.5px/1.4 var(--font-mono)" in css
+
+    def test_pinch_zoom_is_still_allowed(self):
+        # The other way to stop the zoom is `maximum-scale=1`, which also stops
+        # a visitor zooming on purpose. The fix is the font size, so the
+        # viewport meta stays as it is on every page that has the search box.
+        for name in ("browser.html", "error.html", "privacy.html"):
+            page = Path("templates", name).read_text(encoding="utf-8")
+            assert 'content="width=device-width, initial-scale=1.0"' in page, name
+            assert "maximum-scale" not in page, name
+            assert "user-scalable" not in page, name
+
+    def test_the_keyboard_badge_is_hidden_on_a_touch_screen(self):
+        css = CSS.read_text(encoding="utf-8")
+        touch = _media_blocks(css, "hover: none")
+        assert re.search(r"\.search__hint\s*\{[^}]*display:\s*none", touch)
+        # The badge goes, not the key: a tablet with a keyboard still has "/",
+        # so the keydown handler stays and does not ask about hover itself.
+        js = Path("static/js/app.js").read_text(encoding="utf-8")
+        handler = js.split('document.addEventListener("keydown"')[1].split("});")[0]
+        assert 'event.key === "/"' in handler
+        assert "hover" not in handler
+        assert "matchMedia" not in handler
+        # One include serves every page with the box, so one rule covers them.
+        for name in ("browser.html", "error.html", "privacy.html"):
+            page = Path("templates", name).read_text(encoding="utf-8")
+            assert '{% include "_search.html" %}' in page, name
+
+    def test_accordion_titles_stay_on_one_line(self):
+        css = CSS.read_text(encoding="utf-8")
+        assert re.search(r"\.accordion__title\s*\{[^}]*white-space:\s*nowrap", css)
+        hint = re.search(r"^\.hint\s*\{([^}]*)\}", css, re.M).group(1)
+        for declaration in (
+            "min-width: 0",
+            "overflow: hidden",
+            "text-overflow: ellipsis",
+            "white-space: nowrap",
+        ):
+            assert declaration in hint, declaration
+
+    def test_a_truncated_hint_keeps_its_full_text_in_title(self):
+        # The ellipsis is visual: the DOM text stays whole for a screen reader,
+        # and the span's title repeats it for a pointer's hover. Jinja escapes
+        # both the same way, so the two strings are equal as markup.
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        spans = re.findall(
+            r'<span class="hint" id="(hint-[a-z]+)" title="([^"]*)">([^<]*)</span>',
+            html,
+        )
+        assert {name for name, _, _ in spans} >= {
+            "hint-whois",
+            "hint-dns",
+            "hint-ssl",
+            "hint-geoip",
+            "hint-headers",
+            "hint-raw",
+        }
+        for name, title, text in spans:
+            assert title == text, name
+        self_page = client.get("/", headers=BROWSER_UA).text
+        assert (
+            '<span class="hint" id="fp-acc-hint" title="browser signals">'
+            "browser signals</span>" in self_page
+        )
+
+    def test_a_quote_in_a_hint_cannot_leave_its_title(self):
+        # A registrar name is third-party text, and the WHOIS hint prints it.
+        # Jinja escapes the attribute and the text the same way, so a quote
+        # cannot end title="..." early and the two stay equal as markup;
+        # app.js writes .title as a property, which needs no escaping.
+        registrar = 'Acme "Names" <b>&</b> Co\'s'
+        gathered = {**GATHERED, "whois": {"registrar": registrar}}
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            html = client.get("/example.com", headers=BROWSER_UA).text
+        escaped = "Acme &#34;Names&#34; &lt;b&gt;&amp;&lt;/b&gt; Co&#39;s"
+        assert (
+            f'<span class="hint" id="hint-whois" title="{escaped}">{escaped}</span>'
+            in html
+        )
+
+    def test_the_scripts_that_rewrite_a_hint_rewrite_its_title(self):
+        # app.js fills the WHOIS hint on the self page and the Subdomains hint
+        # when that panel opens; fingerprint.js fills the Fingerprint hint. No
+        # JS runtime here (see the fingerprint.js checks above), so by source
+        # text, the way tests/test_subdomain_panel.py pins app.js's wiring.
+        js = Path("static/js/app.js").read_text(encoding="utf-8")
+        for name, element in (
+            ("setWhoisHint", "hint"),
+            ("setSubdomainHint", "subdomainHint"),
+        ):
+            body = re.search(rf"^function {name}\(.*?^\}}$", js, re.M | re.S).group(0)
+            assert f"{element}.textContent = text" in body, name
+            assert f"{element}.title = text" in body, name
+        fp = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        assert 'setHint("fp-acc-hint"' in fp
+        assert "el.title = text" in fp
+
+    def test_the_copy_icon_is_a_24px_target(self):
+        # WCAG 2.2 target size (minimum, 2.5.8) is 24px: the 14px icon plus 5px
+        # of padding each side. 4px made a 22px target.
+        css = CSS.read_text(encoding="utf-8")
+        icon = re.search(r"^\.copy-icon\s*\{([^}]*)\}", css, re.M).group(1)
+        assert re.search(r"padding:\s*5px;", icon)
+        html = client.get("/", headers=BROWSER_UA).text
+        button = html.split('id="fp-copy"')[1].split("</button>")[0]
+        assert 'width="14" height="14"' in button
+
+
 # gather() is patched throughout this class. tests/test_page.py has no mocking
 # layer — every existing test here uses an IP target — and "/example.com" would
 # otherwise drive real DNS, a real TLS handshake and a real RDAP query, putting
@@ -1307,7 +1466,10 @@ class TestSubdomainRegistration:
         with patch("lookup.lookup_rdap", lambda target: dict(self.RECORD)):
             html = client.get("/www.example.com", headers=BROWSER_UA).text
 
-        hint = 'id="hint-whois">registration of example.com · Example Registrar<'
+        hint = (
+            'id="hint-whois" title="registration of example.com · Example Registrar">'
+            "registration of example.com · Example Registrar<"
+        )
         assert hint in html
         assert '<td>Registration of</td><td colspan="3">example.com</td>' in html
         assert "not registered" not in html

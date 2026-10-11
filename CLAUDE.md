@@ -505,6 +505,31 @@ Configured at `main` module scope:
   `BrowserDetector.browser_patterns`, i.e. only negotiate()'s user-agent step:
   `?format=` and `Accept` still win.
 
+#### Mobile layout
+
+`static/css/whatismyip.css`, the `@media (max-width: 900px)` blocks and
+`@media (hover: none)`; `tests/test_page.py` `TestMobileLayout` pins each rule
+below by text:
+- Under 900px the search box (`.search input`) and the subdomain filter
+  (`.subdomains__filter`) are 16px: iOS Safari zooms a focused field below
+  that, and the viewport meta rightly leaves pinch-zoom on (`maximum-scale`
+  would take it away), so the font size is the fix. Desktop keeps 14px in the
+  440px box and 12.5px in the filter. The filter's 16px rule sits after its
+  base rule, not in the main 900px block: same specificity, later wins.
+- `@media (hover: none)` hides the `/` badge (`kbd.search__hint`) on
+  touch-first devices. The keydown handler in `app.js` stays, so an attached
+  keyboard still has the shortcut. `_search.html` is one include, so
+  `browser.html`, `error.html` and `privacy.html` all get the rule.
+- Accordion titles never wrap (`.accordion__title`), and a hint that does not
+  fit truncates with an ellipsis (`.hint`). The cut is visual: the DOM text
+  stays whole for a screen reader, and the span's `title` repeats it, so
+  everything that writes a hint writes `title` too — the template,
+  `app.js`'s `setWhoisHint` / `setSubdomainHint`, `fingerprint.js`'s
+  `setHint`. The 390px self page cuts the DNS hint
+  (`A 0 · AAAA 0 · MX 0 · NS 0 · TXT 0`); opening the accordion shows it all.
+- `.copy-icon` (the fingerprint UNIQUE ID row) is a 24px target: the 14px
+  icon with 5px padding, WCAG 2.2's minimum (2.5.8).
+
 #### MCP endpoint
 
 `mcp_server.py`:

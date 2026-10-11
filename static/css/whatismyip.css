@@ -131,6 +131,12 @@ body {
   color: var(--text-muted);
   font: 500 11px/1 var(--font-mono);
 }
+/* A keyboard badge means nothing on a touch screen. hover: none is the
+   touch-first signal (a phone, a tablet without a pointer); the "/" keydown
+   handler in app.js stays, so an attached keyboard still has the shortcut. */
+@media (hover: none) {
+  .search__hint { display: none; }
+}
 .search-wrap { position: relative; width: 440px; max-width: 100%; }
 .search { width: 100%; }
 .search.is-invalid { border-color: var(--danger); }
@@ -227,11 +233,12 @@ body {
   cursor: pointer;
 }
 .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
-/* Inline copy icon (the fingerprint UNIQUE ID row) */
+/* Inline copy icon (the fingerprint UNIQUE ID row). 5px around the 14px icon
+   makes a 24px target, WCAG 2.2's minimum (2.5.8); 4px was 22px. */
 .copy-icon {
   display: inline-flex;
   align-items: center;
-  padding: 4px;
+  padding: 5px;
   border: 0;
   background: none;
   color: var(--text-muted);
@@ -371,8 +378,21 @@ body {
   transform: rotate(90deg);
   color: var(--accent);
 }
-.accordion__title { flex: 1; }
-.hint { font-size: 12px; font-weight: 400; color: var(--text-muted); }
+/* One line each at 390px: the title never wraps, and a hint that does not fit
+   ("A 0 · AAAA 0 · MX 0 · NS 0 · TXT 0" beside "DNS records") truncates with
+   an ellipsis. The cut is visual only: the DOM text stays whole for a screen
+   reader, and the span's title attribute repeats it on hover; on a phone,
+   opening the accordion shows it all. */
+.accordion__title { flex: 1; white-space: nowrap; }
+.hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
 .accordion__body {
   padding: 16px 18px 18px;
   border-top: 1px solid var(--border);
@@ -741,6 +761,10 @@ table.records--dns td:nth-child(4) {
   .topbar { padding-block: 14px; }
   .search-wrap { width: 100%; }
   .search { width: 100%; height: 44px; }
+  /* iOS Safari zooms a focused field whose text is under 16px, and the
+     viewport meta rightly leaves pinch-zoom on (maximum-scale would take it
+     away), so the font size is the fix. The desktop box keeps 14px. */
+  .search input { font-size: 16px; }
   .band { height: auto; padding-bottom: 8px; }
   .band .map { display: none; }
   /* No text sits over the mobile card, so it needs far less dimming, and with
@@ -855,6 +879,12 @@ table.records--dns td:nth-child(4) {
 
 .subdomains__filter::placeholder { color: var(--text-muted); font-family: var(--font-sans); }
 .subdomains__filter:focus { outline: none; border-color: var(--accent); }
+/* The same 16px floor as the search box (see the 900px block above). It sits
+   here, not there, because the base rule above shares its specificity and the
+   later of the two wins. */
+@media (max-width: 900px) {
+  .subdomains__filter { font-size: 16px; }
+}
 
 /* "Full list as JSON": the browser's default link blue is near-invisible here. */
 .subdomains__meta a { color: var(--accent); }

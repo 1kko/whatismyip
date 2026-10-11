@@ -159,7 +159,10 @@ class TestServerRenderedPanel:
                 html = client.get(
                     "/example.com?subdomains=include", headers=BROWSER_UA
                 ).text
-        assert '<span class="hint" id="hint-subdomains">6,002 subdomains found' in html
+        assert (
+            '<span class="hint" id="hint-subdomains" '
+            'title="6,002 subdomains found">6,002 subdomains found' in html
+        )
 
     def test_an_error_is_still_an_error(self):
         panel = _panel(_subdomains(0, error="crt.sh timed out"))

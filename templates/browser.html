@@ -117,7 +117,7 @@
             <details class="accordion" id="acc-fingerprint">
                 <summary class="accordion__header">
                     <span class="accordion__title">Fingerprint</span>
-                    <span class="hint" id="fp-acc-hint">browser signals</span>
+                    <span class="hint" id="fp-acc-hint" title="browser signals">browser signals</span>
                 </summary>
                 <div class="accordion__body">
                     <noscript>
@@ -169,7 +169,7 @@
             <details class="accordion" id="acc-{{ item.id }}">
                 <summary class="accordion__header">
                     <span class="accordion__title">{{ item.title }}</span>
-                    <span class="hint" id="hint-{{ item.id }}">{{ item.hint }}</span>
+                    <span class="hint" id="hint-{{ item.id }}" title="{{ item.hint }}">{{ item.hint }}</span>
                 </summary>
                 <div class="accordion__body">
                     {% if item.id == 'raw' %}
