@@ -367,6 +367,14 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   differs from `queried_name`. `build_view()` passes `domain` for a domain
   target only: an IP's sweep is of its PTR name, and its location is its own.
   Only that the names differ is known, so nothing says 'CDN'
+- The page's DNS table (`main._dns_rows`, `main._zone_of`,
+  `viewmodel.dns_names`) names the other rows by the name each was asked of:
+  `queried_name` (an IP target's PTR name; the address when the response has
+  none), or the zone for NS rows and `from_zone` MX rows, a failed NS row
+  included (a failed MX row stays on `queried_name`: the response cannot say
+  which of the two MX queries raised). A zone row whose zone differs from
+  `queried_name` carries `from_zone: True`; no other row has the key. JSON,
+  MCP `dns_records` and `?format=text` are unchanged
 - `zone_apex`'s floor comes from `tld.get_fld(..., search_private=False)`,
   which reads `tld`'s separate public-only list
   (`data/tld/res/effective_tld_names_public_only.dat.txt`). `TldNamesManager`

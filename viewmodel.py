@@ -443,6 +443,18 @@ def dns_banner(domain: dict | None) -> str | None:
     return f"{domain.get('queried_name')} does not resolve (NXDOMAIN)"
 
 
+def dns_names(domain: dict | None, address: str) -> tuple[str, str]:
+    """(queried name, zone) for the DNS table: the name the sweep was of -- an
+    IP target's PTR name -- and the zone apex its NS and fallback MX were
+    answered by (DomainManager.get_records sets both). A response without them
+    (an IP with no PTR gets `{}`; older fixtures carry neither) names the
+    address twice, which the template reads as "no zone to mention".
+    """
+    domain = domain or {}
+    queried = domain.get("queried_name") or address
+    return queried, domain.get("zone") or queried
+
+
 def _dns_count_row(label: str, domain: dict, key: str) -> dict:
     failure = dns_failure_text(domain, key)
     if failure:
@@ -1135,6 +1147,7 @@ def build_view(
     domain = response.get("domain") or {}
     address = response.get("address") or ""
     is_ip = _is_ip(address)
+    dns_queried_name, dns_zone = dns_names(domain, address)
 
     if is_ip:
         facts = [
@@ -1175,6 +1188,8 @@ def build_view(
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,
         "dns_banner": dns_banner(domain),
+        "dns_queried_name": dns_queried_name,
+        "dns_zone": dns_zone,
         "whois_pending": whois_pending(response.get("whois")),
         "accordions": _accordions(response, subdomains_enabled),
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),

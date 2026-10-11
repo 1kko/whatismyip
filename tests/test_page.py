@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 from contextlib import contextmanager
@@ -415,6 +416,108 @@ class TestDnsRows:
         ttls = {row["type"]: row["ttl"] for row in self._rows()}
         assert ttls["NS"] == 20675
         assert ttls["A"] == 300
+
+    # The shape get_records() returns for a name below its zone apex: NS was
+    # asked of the zone, and the MX fell back to the zone's, labelled.
+    ZONE_DOMAIN = {
+        "queried_name": "www.example.com",
+        "zone": "example.com",
+        "a": [{"ip": "93.184.216.34", "ttl": 300}],
+        "mx": [
+            {
+                "preference": 10,
+                "hostname": "mail.example.com.",
+                "ttl": 3600,
+                "from_zone": "example.com",
+            }
+        ],
+        "ns": [{"hostname": "a.iana-servers.net.", "ttl": 86400}],
+        "txt": [{"text": ["v=spf1 include:_spf.example.net -all"], "ttl": 300}],
+        "cname": None,
+        "status": {},
+    }
+
+    def test_zone_rows_carry_the_zone_name_and_the_marker(self):
+        from main import _dns_rows
+
+        rows = _dns_rows({"address": "www.example.com", "domain": self.ZONE_DOMAIN})
+        by_type = {row["type"]: row for row in rows}
+        # The name's own records keep the queried name and the pinned shape.
+        assert by_type["A"] == {
+            "type": "A",
+            "name": "www.example.com",
+            "value": "93.184.216.34",
+            "ttl": 300,
+        }
+        assert "from_zone" not in by_type["TXT"]
+        # NS is always the zone's; this MX is, because get_records said so.
+        assert by_type["NS"]["name"] == "example.com"
+        assert by_type["NS"]["from_zone"] is True
+        assert by_type["MX"]["name"] == "example.com"
+        assert by_type["MX"]["from_zone"] is True
+
+    def test_a_failed_ns_query_is_the_zones_too(self):
+        # NS is asked of the zone whether or not it answers, so the failure row
+        # is the zone's as well. (A failed MX stays on the queried name: the
+        # response cannot say which of the two MX queries raised.)
+        from main import _dns_rows
+
+        domain = {**self.ZONE_DOMAIN, "ns": [], "status": {"ns": "timeout"}}
+        rows = _dns_rows({"address": "www.example.com", "domain": domain})
+        assert [row for row in rows if row["type"] == "NS"] == [
+            {
+                "type": "NS",
+                "name": "example.com",
+                "value": "(timed out)",
+                "ttl": "",
+                "from_zone": True,
+                "tone": "warning",
+            }
+        ]
+
+    def test_the_apex_names_itself_everywhere_without_a_marker(self):
+        from main import _dns_rows
+
+        domain = {
+            **self.ZONE_DOMAIN,
+            "queried_name": "example.com",
+            "mx": [{"preference": 10, "hostname": "mail.example.com.", "ttl": 3600}],
+        }
+        rows = _dns_rows({"address": "example.com", "domain": domain})
+        assert {row["name"] for row in rows} == {"example.com"}
+        assert not any("from_zone" in row for row in rows)
+
+    def test_an_ip_targets_rows_name_the_ptr_name_the_sweep_was_of(self):
+        # lookup._run_legs sweeps the PTR name, not the address, so that is
+        # the name every row was asked of.
+        from main import _dns_rows
+
+        rows = _dns_rows(
+            {
+                "address": "8.8.8.8",
+                "domain": {
+                    "queried_name": "dns.google",
+                    "zone": "dns.google",
+                    "a": [{"ip": "8.8.8.8", "ttl": 300}],
+                    "ns": [{"hostname": "ns1.zdns.google.", "ttl": 300}],
+                },
+            }
+        )
+        assert {row["name"] for row in rows} == {"dns.google"}
+        assert not any("from_zone" in row for row in rows)
+
+    def test_the_json_domain_is_the_gathered_one_untouched(self):
+        # Rendering the rows must not write into the response: the JSON API
+        # and MCP dns_records read the same dict, and their contract is fixed.
+        gathered = {
+            **GATHERED,
+            "address": "www.example.com",
+            "domain": copy.deepcopy(self.ZONE_DOMAIN),
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            assert client.get("/www.example.com", headers=BROWSER_UA).status_code == 200
+            body = client.get("/www.example.com", headers=JSON_UA).json()
+        assert body["domain"] == self.ZONE_DOMAIN
 
     # The shape fetch_cname() actually returns. This fixture used to be a bare
     # string, which is why the page could print the whole dict's repr unnoticed.
