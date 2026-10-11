@@ -197,6 +197,9 @@ class TestContent:
         assert "IP address" in text
         assert "service.log" in text
 
+    def test_says_an_email_address_is_not_logged(self):
+        assert "such as an email address, is refused" in _privacy_text()
+
     def test_log_retention_matches_the_handler(self):
         """The page and the rotating handler read the same constant."""
         assert main.LOG_RETENTION_DAYS == 7

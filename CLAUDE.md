@@ -324,7 +324,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    `ssl`, `headers`, `map`, `distance_km`, `origin`, `elapsed_ms`, plus
    `reputation` and `subdomains` when present) and returns it as JSON or
    renders it through `render_page` and `viewmodel.build_view()`
-6. **Logging**: every lookup is logged as `client={client_ip} lookup={target}`
+6. **Logging**: every lookup is logged as `client={client_ip} lookup={target}`,
+   with `<email-like>` in place of a target that has an `@` in it
+   (`lookup.loggable_target`)
 
 ### Key Technical Details
 
@@ -526,7 +528,10 @@ Configured at `main` module scope:
 - Console and file logging (`service.log`, in the working directory)
 - `TimedRotatingFileHandler`: daily rotation, `LOG_RETENTION_DAYS` (7) kept;
   `/privacy` reads the same constant
-- Request format: `client={client_ip} lookup={target}`
+- Request format: `client={client_ip} lookup={target}`; a target with an `@`
+  in it is refused and written as `<email-like>` (`lookup.loggable_target`), so
+  an email address or a URL's password stays out of the line. uvicorn's access
+  line and the OTel trace still carry the path as sent
 
 #### Link previews
 

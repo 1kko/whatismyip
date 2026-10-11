@@ -8,6 +8,7 @@ given -- and came back as an empty 200 page tagged DOMAIN. Those failures were
 """
 
 import contextlib
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import dns.name
@@ -400,6 +401,35 @@ def test_port_and_email_targets_do_not_escalate_to_a_ban():
     assert statuses == [200, 400] * 2
     assert after == 200
     assert not main.ip_ban_manager.is_banned("8.8.8.8")
+
+
+@pytest.mark.parametrize(
+    "target, logged",
+    [
+        ("example.com", "example.com"),
+        ("8.8.8.8", "8.8.8.8"),
+        ("foo\r\nbar.com", "foobar.com"),
+        ("user@example.com", "<email-like>"),
+        ("user:secret@example.com", "<email-like>"),
+    ],
+)
+def test_loggable_target(target, logged):
+    assert lookup.loggable_target(target) == logged
+
+
+def test_the_request_log_keeps_nothing_of_an_email_address(caplog):
+    caplog.set_level(logging.INFO)
+    with _legs():
+        client.get("/jane.doe@example.org", headers=API_UA)
+        client.get("/user:secret@example.com", headers=API_UA)
+        client.get("/example.com:443", headers=API_UA)
+    # The service logs through the root logger. The test client's own request
+    # lines (logger "httpx") carry the URL, and are not the service's log.
+    lines = [r.getMessage() for r in caplog.records if r.name == "root"]
+    assert lines.count("client=8.8.8.8 lookup=<email-like>") == 2
+    assert "client=8.8.8.8 lookup=example.com" in lines
+    for leak in ("jane.doe", "example.org", "secret"):
+        assert not any(leak in line for line in lines), leak
 
 
 @pytest.mark.parametrize(

@@ -1543,8 +1543,10 @@ whatismyip/
 ## Logging
 
 Console plus a rotating `service.log` (daily rotation, 7-day retention). Every
-lookup is logged as `client={client_ip} lookup={target}`, and security events
-carry the country:
+lookup is logged as `client={client_ip} lookup={target}`. A target with an `@` in
+it is refused, and that line writes it as `lookup=<email-like>`, so an email
+address or a URL's password stays out of it; uvicorn's access line and the
+request's trace still carry the path as sent. Security events carry the country:
 
 ```
 2026-08-20 11:22:24,296 - main.py:571 - security_middleware - SECURITY: Banned 203.0.113.7 (CN) for suspicious request: /.env

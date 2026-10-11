@@ -32,7 +32,9 @@
         <ul>
             <li><strong>Every lookup</strong>, from this page, the JSON API or the text API, writes
                 one log line: the time, your IP address and what you looked up. Opening the home
-                page is a lookup of your own address.</li>
+                page is a lookup of your own address. Something with an @ in it, such as an email
+                address, is refused, and that line records only that it had one; the web server's
+                own access line and the request's trace, below, still carry the path as sent.</li>
             <li><strong>Refused requests.</strong> When a request is blocked, rate limited or banned,
                 the log keeps your IP address and why, with the country GeoIP puts that address in
                 or the path you asked for where the rule turns on them.</li>

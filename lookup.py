@@ -136,6 +136,24 @@ def sanitize_log_input(value: str) -> str:
     return value.replace("\n", "").replace("\r", "").replace("\x00", "")
 
 
+# What the request log writes in place of a target with an "@" in it.
+EMAIL_LIKE_LOG_MARKER = "<email-like>"
+
+
+def loggable_target(target: str) -> str:
+    """A lookup target as the request log may keep it.
+
+    A target with an "@" in it is refused (EMAIL_LIKE_TARGET), and what it
+    carries is nothing the log needs: the name before the @ of somebody's
+    email address, or a URL's password. The log keeps a week of lines and
+    ships them to the collector, so such a target is written as a fixed
+    marker; every other one as sanitize_log_input leaves it.
+    """
+    if "@" in target:
+        return EMAIL_LIKE_LOG_MARKER
+    return sanitize_log_input(target)
+
+
 _IDNA_DOTS = str.maketrans({"。": ".", "．": ".", "｡": "."})
 
 

@@ -90,6 +90,7 @@ from lookup import (
     geo_ip_manager,
     ip_reputation,
     is_safe_ip,
+    loggable_target,
     lookup_location,
     lookup_whois,
     normalize_lookup_target,
@@ -2059,7 +2060,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     logging.info(
         "client=%s lookup=%s",
         sanitize_log_input(client_ip),
-        sanitize_log_input(domain_ip),
+        # A target with an "@" in it is logged as a marker: see loggable_target.
+        loggable_target(domain_ip),
     )
 
     fmt = negotiate(request)
