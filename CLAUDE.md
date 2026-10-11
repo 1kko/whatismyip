@@ -152,7 +152,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `mcp_server`'s compact_* shapes, flattened; each field lists the `gather()`
   legs it needs and the target kinds it applies to) and the text/flat-JSON
   rendering. Pure: `main.py` runs the lookup. `-` is "no value", `?` is "the
-  lookup failed".
+  lookup failed": `field_values` marks the registration fields for a broken
+  RDAP/WHOIS lookup, every field read from the address (chosen by leg, so a
+  new field follows; `_NAME_LEGS`, whois and the dns sweep, ask about the
+  name and keep their own status) when the gating A query's `resolution` is
+  in `managers.DNS_FAILURES`, and the `tls` fields when the TLS leg came back
+  `{"error"}`; `nxdomain`/`noanswer` stay `-`.
 - `subdomains.py`: subdomain discovery from Certificate Transparency (crt.sh),
   opt-in per request. `get_subdomains()` owns normalization, single-flight, and
   a global outbound budget; `invalid_target_reason()` decides which targets may

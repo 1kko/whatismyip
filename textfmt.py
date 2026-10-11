@@ -20,7 +20,7 @@ from mcp_server import (
     compact_reputation,
     compact_ssl,
 )
-from viewmodel import DASH
+from viewmodel import DASH, DNS_FAILURE_TEXT
 
 _BOTH = frozenset({"domain", "ip"})
 _DOMAIN = frozenset({"domain"})
@@ -62,10 +62,19 @@ _NOT_IN_BLOCK = frozenset({*_RISK_FIELDS, "abuse_score"})
 
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires")
 
+# The legs that ask about the name, never the address it resolves to: the
+# registry (whois) and the record sweep (dns), whose record types each carry
+# their own status. A gating A query that failed leaves their answers
+# standing; every other leg reads the address, and is unknown without one.
+_NAME_LEGS = frozenset({"whois", "dns"})
+
 # Text placeholders. "-" is an answer: there is no such value, or the field
 # does not apply to this target. "?" is not: the lookup behind the value
-# failed, so whether there is one is unknown. Only a failed WHOIS/RDAP lookup
-# can be told apart today; a DNS or TLS failure still reads as "-".
+# failed, so whether there is one is unknown. field_values() tells them apart:
+# a registration lookup that broke, a gating A query that ended in a
+# managers.DNS_FAILURES status (every field read from the address), a TLS leg
+# that read no certificate (the cert_* fields), a reputation list that could
+# not be checked. nxdomain and noanswer are answers, and stay "-".
 MISSING = "-"
 UNKNOWN = "?"
 
@@ -177,15 +186,26 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         name: None if value == "" or value == DASH else value
         for name, value in values.items()
     }
+    errors: dict[str, str] = {}
+    # The gating A query failed (timeout, SERVFAIL, an error dnspython could
+    # not name: the keys of DNS_FAILURE_TEXT, viewmodel's mirror of
+    # managers.DNS_FAILURES), so the name has no address to go on: the address,
+    # GeoIP, the certificate and the reputation are unknown, not empty. Chosen
+    # by leg, so a field added to FIELDS later follows the rule: every field
+    # that needs a leg reading the address (any but _NAME_LEGS) and applies to
+    # the target. nxdomain and noanswer are answers, and reach here as "-".
+    resolution = data.get("resolution")
+    if resolution in DNS_FAILURE_TEXT:
+        for name, (legs, kinds) in FIELDS.items():
+            if kind in kinds and legs - _NAME_LEGS:
+                errors[name] = str(resolution)
     # compact_registration reports "not registered" as registered: false, not
     # as an error, so only a lookup that broke lands here. A field that does
     # not apply to the target stays "-" whatever happened to the lookup.
     error = registration.get("error")
-    errors = {
-        name: str(error)
-        for name in _REGISTRATION_FIELDS
-        if error and kind in FIELDS[name][1]
-    }
+    for name in _REGISTRATION_FIELDS:
+        if error and kind in FIELDS[name][1]:
+            errors[name] = str(error)
     # No list could be read: the level is unknown, not "none".
     if reputation and reputation.get("level") is None:
         for name in _RISK_FIELDS:
@@ -194,6 +214,17 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     for entry in reputation.get("could_not_check") or []:
         if entry["list"] == "AbuseIPDB" and kind in FIELDS["abuse_score"][1]:
             errors["abuse_score"] = entry["reason"]
+    # No certificate was read: port 443 never answered, the handshake never
+    # completed, or the host is IPv6-only and this server has no route to try
+    # (managers.TLS_SKIPPED_IPV6). Whether there is one is unknown, so every
+    # tls field is "?", worded as the MCP ssl_certificate tool words it
+    # (compact_ssl already built it). None from get_ssl_info -- no address, so
+    # no handshake was attempted -- is not in `tls` at all and stays "-".
+    tls_error = tls.get("error")
+    if tls_error:
+        for name, (legs, kinds) in FIELDS.items():
+            if "tls" in legs and kind in kinds:
+                errors[name] = str(tls_error)
     return values, errors
 
 
