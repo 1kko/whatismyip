@@ -242,6 +242,17 @@ class TestContent:
         assert "never sent" in text
         assert "cookie" in text.lower()
 
+    def test_says_the_probes_run_only_when_the_panel_is_opened(self):
+        """The active probes wait for the panel (Task 19.1); the policy says
+        so next to the never-sent promise, and the sentence still reads with
+        the WebRTC clause removed when the test is off."""
+        text = _privacy_text()
+        assert "probes run only when you open it" in text
+        assert "WebRTC test only when you press its button" in text
+        off = _privacy_text(WEBRTC_STUN_URL="", WEBRTC_STUN_HOST="")
+        assert "probes run only when you open it." in off
+        assert "WebRTC" not in off
+
 
 # --- The Link header -------------------------------------------------------------
 
@@ -325,6 +336,15 @@ class TestFingerprintPanel:
         """The host a visitor reached, not a hard-coded one."""
         panel = self._panel(PUBLIC_BASE_URL="https://ip.example.org")
         assert "never sent to ip.example.org" in panel
+
+    def test_says_the_active_probes_wait_for_the_panel_to_open(self):
+        """Firefox with resistFingerprinting, and Tor Browser, show a canvas
+        permission icon the moment a page reads a canvas outside a user
+        action. The probes wait for the panel to be opened, and the panel
+        says so next to its never-sent promise."""
+        panel = self._panel()
+        assert "probes run only when you open this panel" in panel
+        assert "never sent to testserver" in panel.lower()
 
     def test_fingerprint_js_no_longer_credits_the_csp(self):
         """default-src 'self' allows a same-origin fetch, so the CSP is not

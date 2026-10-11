@@ -1250,6 +1250,33 @@ class TestFingerprintPanel:
         js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
         assert "copyBtn.disabled = false" in js
 
+    def test_hint_reads_open_to_measure_before_the_panel_is_opened(self):
+        """The "N signals · ≈ N bits" summary needs the active probes, which
+        wait for the first opening; until then the header says what opening
+        the panel does."""
+        html = client.get("/", headers=BROWSER_UA).text
+        hint = re.search(r'id="fp-acc-hint"[^>]*>([^<]*)</span>', html)
+        assert hint, html
+        assert hint.group(1) == "open to measure"
+
+    def test_active_probes_run_from_measure_on_the_first_opening(self):
+        """Canvas, audio, WebGL-parameter and font probes live in measure(),
+        started by a click on the accordion's header, or by its toggle for an
+        opening with no click; never by an idle callback at load. Firefox
+        with resistFingerprinting (and Tor Browser) asks before a canvas read
+        only inside a click or a key and declines one anywhere else unasked,
+        and a <details> fires toggle after the click, not in it.
+        tests/test_fingerprint_probes.py runs the script to check the timing;
+        this pins the shape."""
+        js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        assert 'header.addEventListener("click"' in js
+        assert 'panel.addEventListener("toggle"' in js
+        assert "if (!panel.open || measured)" in js  # the app.js accordion pattern
+        assert "async function measure()" in js
+        assert '"measuring…"' in js
+        assert "requestIdleCallback" not in js
+        assert "idle(async" not in js
+
 
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):
@@ -1509,8 +1536,8 @@ class TestMobileLayout:
             assert title == text, name
         self_page = client.get("/", headers=BROWSER_UA).text
         assert (
-            '<span class="hint" id="fp-acc-hint" title="browser signals">'
-            "browser signals</span>" in self_page
+            '<span class="hint" id="fp-acc-hint" title="open to measure">'
+            "open to measure</span>" in self_page
         )
 
     def test_a_quote_in_a_hint_cannot_leave_its_title(self):

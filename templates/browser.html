@@ -117,7 +117,7 @@
             <details class="accordion" id="acc-fingerprint">
                 <summary class="accordion__header">
                     <span class="accordion__title">Fingerprint</span>
-                    <span class="hint" id="fp-acc-hint" title="browser signals">browser signals</span>
+                    <span class="hint" id="fp-acc-hint" title="open to measure">open to measure</span>
                 </summary>
                 <div class="accordion__body">
                     <noscript>
@@ -138,7 +138,9 @@
                         measured on real traffic. Reload — the ID stays the same.
                     </p>
                     <p class="device__note">
-                        Computed in your browser and never sent to {{ site_domain }}.
+                        Computed in your browser and never sent to {{ site_domain }}. The canvas,
+                        audio, WebGL and font probes run only when you open this panel; the other
+                        signals are read as the page loads.
                     </p>
                     {% if stun_url %}
                     {# Opt-in: static/js/webrtc.js reads the STUN server and the address

@@ -131,7 +131,11 @@ RDAP registration data and the full TLS certificate, expanded.
   carry `rel="nofollow"`, and each click is an ordinary lookup under the rate
   limit.
 - **Fingerprint panel** (self view only) — around 27 browser signals plus an
-  entropy estimate, computed in the browser and never sent to the server.
+  entropy estimate, computed in the browser and never sent to the server. The
+  passive signals are read as the page loads; the canvas, audio, WebGL and font
+  probes run only when the panel is opened, so a browser that asks before a
+  canvas is read (Tor Browser, Firefox with `resistFingerprinting`) asks on
+  that click, not on landing.
 - **WebRTC leak test** (in the fingerprint panel, opt-in) — asks one STUN server
   (`WEBRTC_STUN_URL`, Cloudflare's by default) which public address the
   browser's WebRTC traffic uses, and compares it with the address the page saw,

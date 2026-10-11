@@ -680,7 +680,7 @@ whatismyip/
 │   ├── css/whatismyip.css  # design tokens + layout (dark only); jsoneditor.css is vendored
 │   ├── js/app.js           # search, copy, accordions, WHOIS fill-in, subdomain panel, lazy JSONEditor
 │   ├── js/map.js           # paints the server's map payload, with the attribution
-│   ├── js/fingerprint.js   # self page's browser fingerprint, computed and kept client-side
+│   ├── js/fingerprint.js   # self page's browser fingerprint, client-side only; the active probes wait for the panel's first opening
 │   ├── js/webrtc.js        # opt-in WebRTC leak test (one STUN request from the browser)
 │   ├── js/jsoneditor.min.js # vendored, loaded only when the Raw JSON panel opens
 │   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs): per face a -latin, an -extended-a and a -cyrillic-greek file behind unicode-range
@@ -966,9 +966,9 @@ and importing `main` makes no network call. The suite runs offline, and
 - A test that genuinely needs the network is marked `@pytest.mark.network`. It
   is skipped unless `RUN_NETWORK_TESTS=1`, and then runs with neither layer in
   place. No test needs it today.
-- `test_webrtc_leak.py`, `test_map_pin.py` and `test_boot.py` run node and a
-  fresh interpreter as subprocesses, outside the guard. The node tests skip
-  when `node` is not installed.
+- `test_webrtc_leak.py`, `test_map_pin.py`, `test_fingerprint_probes.py` and
+  `test_boot.py` run node and a fresh interpreter as subprocesses, outside the
+  guard. The node tests skip when `node` is not installed.
 
 Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
@@ -998,7 +998,11 @@ Test files:
   `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`, and
   `?fields=` joining the self lookup),
   `test_ip_whois_column.py` (an IP's WHOIS column), `test_subdomain_panel.py`
-  (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test), `test_map_pin.py` (map.js's approximate pin and its page wiring, run in node)
+  (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test),
+  `test_map_pin.py` (map.js's approximate pin and its page wiring, run in
+  node), `test_fingerprint_probes.py` (the active fingerprint probes wait for
+  the panel's first opening, and a click on its header reads the canvas
+  inside the click, the only moment Firefox's resistFingerprinting asks)
 - Lookup behaviour: `test_classify_target.py` (refused before any network
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
   `test_dns_status.py` (a failed
