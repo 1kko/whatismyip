@@ -48,6 +48,10 @@ CURL = {"user-agent": "curl/8.7.1", "accept": "*/*"}
 # `code` -- the address's IANA block, from lookup.refused_address -- follow it.
 PRIVATE_PREFIX = b'{"detail":"Private or reserved IP addresses are not allowed"'
 INVALID_BYTES = b'{"error":"not a domain name or IP address","code":"invalid_target"}'
+EMAIL_BYTES = (
+    b'{"error":"looks like an email address; enter the domain after the @",'
+    b'"code":"invalid_target"}'
+)
 DENIED_BYTES = b'{"error":"Access denied due to the policy"}'
 TOO_MANY_BYTES = b'{"error":"Too many requests"}'
 
@@ -338,6 +342,24 @@ class TestInvalidTarget:
         response = client.get("/%7Btarget%7D?format=json", headers=CHROME)
         assert response.status_code == 400
         assert response.content == INVALID_BYTES
+
+    def test_an_email_address_gets_its_own_hint_and_none_of_its_text(self):
+        """The page says what went wrong, in the same words as the JSON, and
+        repeats nothing of what was typed: not the name before the @, and
+        not the domain after it either."""
+        response = client.get("/jane.doe@example.org", headers=CHROME)
+        assert response.status_code == 400
+        assert _has_search_box(response.text)
+        text = _visible_text(response.text)
+        assert "Not a domain name or IP address" in text
+        assert "That looks like an email address; enter the domain after the @." in text
+        assert "jane.doe" not in response.text
+        assert "example.org" not in response.text
+
+    def test_an_api_client_gets_the_email_message(self):
+        response = client.get("/jane.doe@example.org", headers=CURL)
+        assert response.status_code == 400
+        assert response.content == EMAIL_BYTES
 
 
 # --- 400: a special-use name (.onion, home.arpa) ------------------------------

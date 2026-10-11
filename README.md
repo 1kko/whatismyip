@@ -471,6 +471,13 @@ is rejected with `400` before any lookup runs:
 {"error": "not a domain name or IP address", "code": "invalid_target"}
 ```
 
+An email address is refused the same way rather than cut to the domain after
+its `@`, which would answer a different question; only the message differs:
+
+```json
+{"error": "looks like an email address; enter the domain after the @", "code": "invalid_target"}
+```
+
 A name under `.onion` (RFC 7686) or `home.arpa` (RFC 8375) is a hostname with a
 public suffix, but nothing public can answer for it, and a Tor hidden service's
 name is not one to hand to a resolver or a WHOIS server. It is refused the same

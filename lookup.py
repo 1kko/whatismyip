@@ -93,6 +93,14 @@ class InvalidTargetError(Exception):
         self.message = message
 
 
+# InvalidTargetError's message for a target with an "@" in it: an email
+# address, or a URL's user:password@host. The code stays "invalid_target", which
+# README documents as "not a target at all"; main.render_refused_target picks
+# its page by comparing the message with this constant, and static/js/app.js
+# keeps a copy, word for word, for the search box.
+EMAIL_LIKE_TARGET = "looks like an email address; enter the domain after the @"
+
+
 class TTLCache:
     """Tiny time-bounded cache. Read/written only from the event-loop thread, so
     it needs no lock; eviction is FIFO once it reaches maxsize."""
@@ -665,6 +673,11 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
             raise InvalidTargetError(
                 target, code="special_use_name", message=SPECIAL_USE_NAMES[suffix]
             )
+        # No hostname or address has an "@" in it. Refused with a reason
+        # rather than cut to the domain after the @, which would answer a
+        # question nobody asked.
+        if "@" in target:
+            raise InvalidTargetError(target, message=EMAIL_LIKE_TARGET)
         raise InvalidTargetError(target)
     if kind != "domain":
         # One spelling per address, ipaddress's (RFC 5952 for IPv6), so the

@@ -311,6 +311,10 @@ class TestTargetText:
         [
             ("/localhost", "error: not a domain name or IP address\n"),
             (
+                "/user@example.com",
+                "error: looks like an email address; enter the domain after the @\n",
+            ),
+            (
                 "/10.0.0.1",
                 "error: 10.0.0.1 is in 10.0.0.0/8, private-use network (RFC 1918), "
                 "not a public address\n",

@@ -399,10 +399,11 @@ async def lookup(target: str) -> dict[str, Any]:
     summary of its TLS certificate. Accepts "example.com", "8.8.8.8",
     "2001:4860:4860::8888", or a pasted URL; a port after the host
     ("example.com:443") is dropped. Use this first; the other tools go deeper
-    on one aspect. Private and reserved addresses are refused, and
-    so are .onion and home.arpa names, which nothing public answers for. For
-    a private or reserved address, the failed call's `code` names its IANA
-    block (`private`, `cgnat`, `loopback`, `documentation`, `multicast`, ...).
+    on one aspect. Private and reserved addresses are refused, and so are
+    .onion and home.arpa names, which nothing public answers for. For a
+    private or reserved address, the failed call's `code` names its IANA block
+    (`private`, `cgnat`, `loopback`, `documentation`, `multicast`, ...). An
+    email address is refused too: pass the domain after the @ instead.
     A name is looked up and returned as `target` in one spelling: lower case,
     no trailing dot, and an internationalised name as its UTS 46 A-label
     (`straße.de` as `xn--strae-oqa.de`). `dns_records` and `ssl_certificate`

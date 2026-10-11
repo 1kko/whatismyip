@@ -300,7 +300,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    IDNA 2003 name dnspython queries, not only the raw text); never the rest
    of `.arpa`, which PTR names live in. The check is not in
    `is_valid_domain`, which `main._suspicious_path_is_ordinary` reads: the
-   probe verdict for these paths must not change. A browser gets
+   probe verdict for these paths must not change.
+   A target with an `@` in it (an email address, a URL's `user:password@`)
+   keeps the code `invalid_target`, with `lookup.EMAIL_LIKE_TARGET` as its
+   message, which `static/js/app.js` copies word for word. A browser gets
    `main.render_refused_target`'s error page instead of the JSON, with copy
    chosen by `code` for `cgnat`, `documentation`/`benchmarking` and
    `6to4`/`teredo`/`nat64` (`_carried_ipv4` names the IPv4 address inside,

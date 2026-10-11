@@ -846,6 +846,66 @@ def test_the_search_box_drops_a_port_like_the_server():
 
 
 @pytest.mark.skipif(NODE is None, reason="needs node")
+def test_the_search_box_words_an_email_address_like_the_server():
+    assert _js(["EMAIL_LIKE_TARGET"], "EMAIL_LIKE_TARGET") == lookup.EMAIL_LIKE_TARGET
+
+
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_the_search_box_refuses_an_email_address_before_asking_the_server():
+    """An email address gets its own hint rather than "not a domain or an IP
+    address", and nothing is navigated to: the server would only refuse it."""
+    values = [
+        "user@example.com",
+        "user:secret@example.com",
+        "example.com",
+        "8.8.8.8",
+        "",
+        "foo bar",
+    ]
+    expression = f"{json.dumps(values)}.map(lookupTargetError)"
+    js = _js([*SEARCH, "EMAIL_LIKE_TARGET", "lookupTargetError"], expression)
+    email = f"That {lookup.EMAIL_LIKE_TARGET}."
+    assert js == [
+        email,
+        email,
+        None,
+        None,
+        "Enter a domain or an IP address.",
+        '"foo bar" is not a domain or an IP address.',
+    ]
+
+
+def test_the_search_box_navigates_only_past_lookup_target_error():
+    """The submit handler asks lookupTargetError before it navigates, so the
+    hint above is what a visitor actually sees."""
+    source = APP_JS.read_text(encoding="utf-8")
+    handler = re.search(
+        r'^form\.addEventListener\("submit", \(event\) => \{.*?^\}\);$',
+        source,
+        re.M | re.S,
+    ).group(0)
+    assert handler.index("lookupTargetError(target)") < handler.index(
+        "window.location.assign"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_neither_normaliser_drops_the_name_before_an_at():
+    """The URL parser drops a "user@" by itself: new URL("http://user@münchen.de")
+    has the hostname "xn--mnchen-3ya.de". A normaliser that leaned on it would
+    look up the domain where the server refuses the address."""
+    values = [
+        "user@example.com",
+        "user@example.com:443",
+        "user@münchen.de",
+        "https://user:secret@example.com/",
+    ]
+    expression = f"{json.dumps(values)}.map(normalizeLookupTarget)"
+    assert all("@" in v for v in _js(["normalizeLookupTarget"], expression))
+    assert all("@" in lookup.normalize_lookup_target(v) for v in values)
+
+
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_the_search_box_puts_a_name_in_the_servers_canonical_spelling():
     values = [
         "NASA.GOV.",

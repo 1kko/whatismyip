@@ -22,6 +22,12 @@ API_UA = {"user-agent": "curl/8"}
 BROWSER_UA = {"user-agent": "Mozilla/5.0 Chrome/120"}
 
 INVALID_BODY = {"error": "not a domain name or IP address", "code": "invalid_target"}
+# Same code: README documents invalid_target as "not a target at all", and an
+# email address is not one. Only the message says which mistake it was.
+EMAIL_BODY = {
+    "error": "looks like an email address; enter the domain after the @",
+    "code": "invalid_target",
+}
 PRIVATE_DETAIL = "Private or reserved IP addresses are not allowed"
 PRIVATE_10 = (
     "10.0.0.1 is in 10.0.0.0/8, private-use network (RFC 1918), not a public address"
@@ -185,6 +191,21 @@ async def test_gather_refuses_an_invalid_target_before_any_lookup(target):
     _assert_nothing_went_out(mocks)
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["user@example.com", "jane.doe@example.org:443", "user:secret@example.com"],
+)
+async def test_gather_refuses_an_email_address_with_its_own_message(target):
+    # Not cut to the domain after the @: that would answer a question nobody
+    # asked. A URL's user:password@ lands here too.
+    with _legs() as mocks:
+        with pytest.raises(lookup.InvalidTargetError) as raised:
+            await lookup.gather(target)
+    assert raised.value.code == "invalid_target"
+    assert raised.value.message == lookup.EMAIL_LIKE_TARGET
+    _assert_nothing_went_out(mocks)
+
+
 # --- HTTP ---------------------------------------------------------------------
 
 
@@ -207,6 +228,23 @@ def test_invalid_target_is_a_400_with_no_outbound_call(path):
         response = client.get(path, headers=API_UA)
     assert response.status_code == 400
     assert response.json() == INVALID_BODY
+    _assert_nothing_went_out(mocks)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/user@example.com",
+        "/jane.doe@example.org:443",
+        "/user:secret@example.com",
+        "/user@example.com?fields=target",
+    ],
+)
+def test_an_email_address_is_a_400_with_its_own_message(path):
+    with _legs() as mocks:
+        response = client.get(path, headers=API_UA)
+    assert response.status_code == 400
+    assert response.json() == EMAIL_BODY
     _assert_nothing_went_out(mocks)
 
 
@@ -762,3 +800,15 @@ def test_a_special_use_name_with_subdomains_only_is_refused_by_the_gate(path):
     assert "special-use name" in response.json()["detail"]
     _assert_nothing_went_out(mocks)
     mocks["subdomains"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "tool, argument",
+    [("lookup", "target"), ("dns_records", "domain"), ("ssl_certificate", "domain")],
+)
+def test_mcp_tools_refuse_an_email_address_with_its_own_message(tool, argument):
+    with TestClient(app) as mcp_client, _legs() as mocks:
+        mcp_client.post("/mcp", json=MCP_INIT, headers=MCP_HEADERS)
+        payload = _call_tool(mcp_client, tool, {argument: "jane.doe@example.org"})
+    assert payload == {"error": EMAIL_BODY["error"]}
+    _assert_nothing_went_out(mocks)

@@ -78,6 +78,7 @@ from mcp_server import (
 )
 from models import GeoRulesUpdate
 from lookup import (
+    EMAIL_LIKE_TARGET,
     InvalidTargetError,
     PrivateAddressError,
     abuseipdb_client,
@@ -646,8 +647,9 @@ def render_refused_target(
     path would otherwise let a link put words on this page.
 
     A .onion or home.arpa name (InvalidTargetError with code "special_use_name")
-    gets its reason, in config's words; every other invalid target the fixed
-    "not a domain name" text.
+    gets its reason, in config's words; a target with an "@" in it, the
+    EMAIL_LIKE_TARGET message and nothing of what was typed; every other
+    invalid target the fixed "not a domain name" text.
 
     The copy follows exc.code where the local-network sentence would mislead:
     CGNAT (the carrier's shared space, not the visitor's own network),
@@ -666,6 +668,15 @@ def render_refused_target(
                 "Not a public name",
                 f"{exc.message[:1].upper()}{exc.message[1:]}, so there is "
                 "nothing public to look up.",
+            )
+        if exc.message == EMAIL_LIKE_TARGET:
+            # The same words the JSON and the search box use, and nothing of
+            # the target: not the name before the @, nor the domain after it.
+            return render_error(
+                request,
+                400,
+                "Not a domain name or IP address",
+                f"That {EMAIL_LIKE_TARGET}.",
             )
         return render_error(
             request,
