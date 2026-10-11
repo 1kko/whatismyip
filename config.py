@@ -23,6 +23,15 @@ load_dotenv()
 APP_VERSION = os.getenv("SOURCE_COMMIT", "").strip() or "unknown"
 
 TIMEOUT_SECONDS = 5
+# The TLS leg's TCP connect gets a budget of its own; TIMEOUT_SECONDS above
+# stays the handshake's (and the public suffix list download's, at four times
+# it, in TldNamesManager.update). A host that drops the SYN on 443 — a
+# mail-only host, a DNS server, a parked name — used to hold the whole response
+# for the handshake budget, 5 s, while every other leg was done in about a
+# second; a reachable host completes the connect in one round trip. Linux
+# retransmits a lost SYN after 1 s and again after 3 s, so 3 leaves room for
+# one lost SYN and none for two.
+TLS_CONNECT_TIMEOUT_SECONDS = float(os.getenv("TLS_CONNECT_TIMEOUT_SECONDS", "3"))
 
 # DNS record sweep: query the fast, cached public resolvers concurrently with a
 # bounded per-query budget. Switching to a domain's authoritative nameservers and

@@ -313,12 +313,18 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 ```
 
 Timeouts and cache TTLs (`RDAP_TIMEOUT_SECONDS`, `WHOIS_TIMEOUT_SECONDS`,
-`SELF_WHOIS_SOFT_DEADLINE_SECONDS`, `WHOIS_CACHE_TTL`, `DNS_QUERY_TIMEOUT`, …)
-are tunable through the same mechanism — see `config.py`. So are the
-concurrency limits: `LOOKUP_CONCURRENCY`
+`SELF_WHOIS_SOFT_DEADLINE_SECONDS`, `WHOIS_CACHE_TTL`, `DNS_QUERY_TIMEOUT`,
+`TLS_CONNECT_TIMEOUT_SECONDS`, …) are tunable through the same mechanism — see
+`config.py`. So are the concurrency limits: `LOOKUP_CONCURRENCY`
 (lookups at once, default 16), `LOOKUP_GATE_WAIT_SECONDS`,
 `LOOKUP_BUSY_RETRY_AFTER_SECONDS`, `MCP_LOOKUP_CONCURRENCY`, and
 `REGISTRATION_WORKERS` (threads for RDAP and port-43 WHOIS, default 8).
+`TLS_CONNECT_TIMEOUT_SECONDS` (seconds, above 0; default 3) bounds the TLS
+leg's TCP connect to port 443 on its own, so a host that drops the SYN — a
+mail-only host, a DNS server, a parked name — costs about 3 s rather than 5 s,
+and its `ssl` still reads
+`{"error": "port 443 unreachable", "reason": "timed out"}`. A handshake that
+follows a connect keeps its 5 s.
 
 ## API
 

@@ -13,6 +13,7 @@ assume are the ones OpenSSL actually reports.
 """
 
 import datetime
+import importlib
 import logging
 import re
 import socket
@@ -20,7 +21,7 @@ import ssl
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from cryptography import x509
@@ -31,6 +32,7 @@ from fastapi.testclient import TestClient
 
 import lookup
 import managers
+from config import TIMEOUT_SECONDS, TLS_CONNECT_TIMEOUT_SECONDS
 from main import app
 from managers import SSLManager
 from viewmodel import _cert_expiry
@@ -267,6 +269,17 @@ class TestTrustedCertificate:
         # One handshake, the verifying one: no second, unverified read.
         assert len(seen.sockets) == len(seen.contexts) == 1
 
+    def test_the_connect_budget_then_the_handshake_budget(self):
+        with scripted_tls(_tls_socket(peercert=VERIFIED_PEERCERT)) as seen:
+            SSLManager.get_ssl_info(HOST, verified_ip=IP)
+        # The TCP connect runs under its own, shorter budget; the handshake
+        # budget goes on the same socket before wrap_socket, which is when
+        # SSLSocket copies the socket's timeout.
+        assert seen.sockets[0].settimeout.call_args_list == [
+            call(TLS_CONNECT_TIMEOUT_SECONDS),
+            call(TIMEOUT_SECONDS),
+        ]
+
 
 class TestUntrustedCertificate:
     @pytest.mark.parametrize(
@@ -335,10 +348,13 @@ class TestUntrustedCertificate:
         assert relaxed.check_hostname is False
         assert relaxed.verify_mode == ssl.CERT_NONE
         assert relaxed.minimum_version == ssl.TLSVersion.TLSv1_2
-        # Same per-socket timeout as the verifying handshake.
-        assert (
-            seen.sockets[1].settimeout.call_args == seen.sockets[0].settimeout.call_args
-        )
+        # The re-read goes through _connect too: the connect budget, then the
+        # handshake budget, on each socket. call_args alone would only compare
+        # the last call and miss a connect made under the wrong budget.
+        assert [s.settimeout.call_args_list for s in seen.sockets] == [
+            [call(TLS_CONNECT_TIMEOUT_SECONDS), call(TIMEOUT_SECONDS)],
+            [call(TLS_CONNECT_TIMEOUT_SECONDS), call(TIMEOUT_SECONDS)],
+        ]
 
     def test_expiry_is_read_from_the_certificate(self, pki):
         info, _ = _untrusted(pki.expired, 10, "certificate has expired")
@@ -443,6 +459,13 @@ class TestUnreachable:
             info = SSLManager.get_ssl_info(HOST, verified_ip=IP)
         assert info == {"error": "port 443 unreachable", "reason": reason}
         assert seen.contexts == []  # nothing to shake hands with
+        # Only the connect budget was ever set: the handshake budget belongs
+        # to a handshake, and there was none.
+        assert seen.sockets[0].settimeout.call_args_list == [
+            call(TLS_CONNECT_TIMEOUT_SECONDS)
+        ]
+        # Closed here, not left for the garbage collector.
+        seen.sockets[0].close.assert_called_once_with()
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     @pytest.mark.parametrize(
@@ -473,6 +496,28 @@ class TestUnreachable:
         with scripted_tls() as seen:
             assert SSLManager.get_ssl_info(HOST, verified_ip=None) is None
         assert seen.sockets == []
+
+
+class TestConnectBudget:
+    def test_the_connect_budget_sits_inside_the_handshake_budget(self):
+        # A reachable host answers a SYN in one round trip. Linux retransmits a
+        # lost SYN after 1 s and again after 3 s, so 3 keeps one lost SYN and
+        # anything under 2 would not. The handshake keeps the 5 s it always had.
+        assert 2 <= TLS_CONNECT_TIMEOUT_SECONDS < TIMEOUT_SECONDS == 5
+
+    def test_the_environment_sets_the_connect_budget(self, monkeypatch):
+        """README and .env.example tell an operator to set it. config reads it
+        once, at import, so this re-imports config under a patched environment
+        and then once more, so later tests see the real environment's value
+        (test_deploy_version.reload_config does the same for APP_VERSION)."""
+        config = importlib.import_module("config")
+        monkeypatch.setenv("TLS_CONNECT_TIMEOUT_SECONDS", "2.5")
+        try:
+            assert importlib.reload(config).TLS_CONNECT_TIMEOUT_SECONDS == 2.5
+        finally:
+            monkeypatch.undo()
+            importlib.reload(config)
+        assert config.TLS_CONNECT_TIMEOUT_SECONDS == TLS_CONNECT_TIMEOUT_SECONDS
 
 
 class TestDerParsing:
