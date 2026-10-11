@@ -461,12 +461,14 @@ class GeoBlockManager:
                     self.config = json.load(f)
                 logging.info(f"Loaded geo-blocking config from {self.config_file}")
             else:
-                # Default configuration from environment or defaults
+                # Default configuration from environment or defaults. The lists
+                # are copies: main.block_country and main.allow_country append
+                # in place, which would otherwise rewrite the defaults.
                 self.config = {
                     "mode": GEO_MODE_INITIAL,
-                    "blocked_countries": GEO_BLOCKED_COUNTRIES_INITIAL,
+                    "blocked_countries": list(GEO_BLOCKED_COUNTRIES_INITIAL),
                     "blocked_regions": [],
-                    "allowed_countries": GEO_ALLOWED_COUNTRIES_INITIAL,
+                    "allowed_countries": list(GEO_ALLOWED_COUNTRIES_INITIAL),
                     "allowed_regions": [],
                     "block_unknown": GEO_BLOCK_UNKNOWN_INITIAL,
                     "bypass_ips": [],

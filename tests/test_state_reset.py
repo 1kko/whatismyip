@@ -15,6 +15,7 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import lookup
@@ -67,6 +68,26 @@ def test_every_piece_of_module_state_is_put_back(reset_state):
     # health_reasons reads main's.
     assert main.rdap_breaker is rdap.rdap_breaker
     assert main.rdap_breaker.open_hosts() == []
+
+
+@pytest.mark.parametrize(
+    "route, key",
+    [
+        ("/admin/geo/block/country/RU", "blocked_countries"),
+        ("/admin/geo/allow/country/KR", "allowed_countries"),
+    ],
+)
+def test_a_country_added_through_the_admin_api_is_gone_for_the_next(
+    reset_state, route, key
+):
+    """These routes append to the list in place. Were it the environment's own
+    default list, load_config() would hand the country straight back."""
+    assert client.post(route, headers=ADMIN).status_code == 200
+    assert main.geo_block_manager.config[key] != []
+
+    reset_state()
+
+    assert main.geo_block_manager.config[key] == []
 
 
 def test_the_state_files_live_in_a_directory_of_this_runs_own():
