@@ -160,6 +160,27 @@ class TestInvalidTargetReason:
         assert "special-use name" in reason
         assert words in reason
 
+    @pytest.mark.parametrize("mark", ("\u200c", "\u200d", "\u1806"))
+    @pytest.mark.parametrize(
+        ("shape", "words"),
+        [
+            ("router.ho{0}me.arpa", "home network"),
+            ("x.on{0}ion", "Tor onion address"),
+            ("not{0}home.arpa", None),
+        ],
+    )
+    def test_a_mark_idna2003_deletes_uses_the_wire_name(self, mark, shape, words):
+        """The charset rule used to answer these first. A mark nameprep deletes
+        inside home or onion is the special-use name; between not and home it
+        is nothome.arpa, which is still not a name crt.sh may be asked."""
+        reason = subdomains.invalid_target_reason(shape.format(mark))
+        assert reason
+        if words is None:
+            assert "special-use name" not in reason
+        else:
+            assert "special-use name" in reason
+            assert words in reason
+
 
 class TestGetSubdomainsRefusesInvalidTargets:
     """The backstop: a future caller that forgets the gate still cannot send a

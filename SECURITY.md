@@ -788,7 +788,10 @@ write it, CR/LF included, into its port-43 query. So is a name under
 `.onion` (RFC 7686) or `home.arpa` (RFC 8375), with the code
 `special_use_name` (`lookup.special_use_suffix`): both are on the public
 suffix list, yet nothing public answers for them, and a Tor hidden
-service's name is not one to hand to a resolver or a WHOIS server. Two
+service's name is not one to hand to a resolver or a WHOIS server. The
+suffix is matched on the IDNA 2003 name that codec would put on the wire.
+Nameprep deletes U+200C, U+200D and U+1806, which UTS 46 leaves in the
+label, so a check of the raw text would still query `home.arpa`. Two
 defenses then apply to the address:
 
 1. **Public-address allowlist** (`is_safe_ip`). An IP given as the

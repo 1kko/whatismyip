@@ -254,7 +254,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    `config.SPECIAL_USE_SUFFIXES` (`onion`, `home.arpa`: on the PSL, so
    `is_valid_domain` says yes) is `invalid` too, and `gather()` raises
    `InvalidTargetError(code="special_use_name")` with the reason from
-   `config.SPECIAL_USE_NAMES` (`lookup.special_use_suffix`); never the rest
+   `config.SPECIAL_USE_NAMES` (`lookup.special_use_suffix`, matched on the
+   IDNA 2003 name dnspython queries, not only the raw text); never the rest
    of `.arpa`, which PTR names live in. The check is not in
    `is_valid_domain`, which `main._suspicious_path_is_ordinary` reads: the
    probe verdict for these paths must not change. A browser gets
@@ -600,7 +601,8 @@ substitute: it asks only whether a public suffix is present, and `com` has one.
 The HTTP gate sees the canonical spelling, so an IDN such as `/straße.de` reaches
 it as its A-label; the MCP subdomains tool checks its argument as given.
 `.onion` and `home.arpa` names are refused there too (`config.SPECIAL_USE_NAMES`,
-the same two suffixes `lookup.special_use_suffix` refuses): crt.sh may hold
+the same two suffixes `lookup.special_use_suffix` refuses, on the same IDNA
+2003 name): crt.sh may hold
 `.onion` certificates, but a Tor address typed here is not sent to a third
 party any more than to the DNS.
 
