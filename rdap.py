@@ -85,6 +85,7 @@ def _configure_whoisit() -> None:
     whoisit.utils.http_timeout = RDAP_HTTP_TIMEOUT_SECONDS
     whoisit.utils.http_max_retries = RDAP_HTTP_RETRIES
     whoisit.clear_session()
+    whoisit._bootstrap.session = whoisit.get_session()
 
 
 _configure_whoisit()
@@ -142,17 +143,34 @@ def bootstrap_rdap(force: bool = False) -> bool:
     override table enabled. Idempotent and thread-safe; returns whether the
     registry is ready."""
     with _bootstrap_lock:
+        if whoisit.is_bootstrapped() and not force:
+            return True
+        saved = whoisit.save_bootstrap_data() if whoisit.is_bootstrapped() else None
         try:
-            if force or not whoisit.is_bootstrapped():
-                whoisit.bootstrap(overrides=True)
-            return whoisit.is_bootstrapped()
+            if saved is not None:
+                whoisit.clear_bootstrapping()
+            whoisit.bootstrap(overrides=True)
         except Exception:
-            logging.warning("RDAP bootstrap failed; WHOIS fallback stays in use")
-            return False
+            whoisit.clear_bootstrapping()
+            if saved is None:
+                logging.warning("RDAP bootstrap failed; WHOIS fallback stays in use")
+                return False
+            logging.warning("RDAP bootstrap refresh failed; keeping the old registry")
+            _restore_bootstrap(saved)
+        return whoisit.is_bootstrapped()
+
+
+def _restore_bootstrap(saved: str) -> None:
+    """Restore a saved registry into a cleared whoisit instance."""
+    try:
+        whoisit.load_bootstrap_data(saved, overrides=True)
+    except Exception:
+        whoisit.clear_bootstrapping()
+        logging.exception("could not restore the saved RDAP bootstrap registry")
 
 
 def refresh_rdap_bootstrap() -> None:
-    """Scheduler hook: re-fetch the registry only when it has gone stale."""
+    """Re-fetch a week-old registry, retaining the old one if IANA fails."""
     try:
         if not whoisit.is_bootstrapped() or whoisit.bootstrap_is_older_than(7):
             bootstrap_rdap(force=True)

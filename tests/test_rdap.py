@@ -10,7 +10,9 @@ cleared before and after each test that loads one.
 import asyncio
 import copy
 import datetime
+import importlib
 import json
+import threading
 import time
 
 import pytest
@@ -142,6 +144,28 @@ def clean_whoisit():
 @pytest.fixture
 def stale_registry(clean_whoisit):
     whoisit.load_bootstrap_data(_registry_json(0), overrides=True)
+
+
+def _whoisit_like_bootstrap(calls: list, fresh_timestamp: int):
+    def fake(**kwargs):
+        calls.append(dict(kwargs))
+        if whoisit.is_bootstrapped():
+            return
+        whoisit.load_bootstrap_data(
+            _registry_json(fresh_timestamp), overrides=bool(kwargs.get("overrides"))
+        )
+
+    return fake
+
+
+def _half_loaded(calls: list):
+    def fake(**kwargs):
+        calls.append(dict(kwargs))
+        broken = json.loads(_registry_json(int(time.time())))
+        broken["dns"] = {"services": []}
+        whoisit.load_bootstrap_data(json.dumps(broken), overrides=True)
+
+    return fake
 
 
 class TestIsIp:
@@ -315,13 +339,137 @@ class TestRdapOverrides:
         assert out["status"] == ["active"]
 
 
-class TestJscontactEntities:
+class TestJscontactCardNames:
     def test_registrar_and_registrant_come_from_the_cards(self):
         out = rdap._normalize_rdap_domain(RDAP_DOMAIN_JSCONTACT, "kisa.or.kr")
         assert out["registrar"] == "KISA"
         assert out["registrant"] == "Korea Internet & Security Agency"
         assert out["dnssec"] is True
 
+
+class TestBootstrapRefresh:
+    def test_a_forced_refresh_replaces_the_loaded_registry(
+        self, stale_registry, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(
+            whoisit, "bootstrap", _whoisit_like_bootstrap(calls, int(time.time()))
+        )
+        assert rdap.bootstrap_rdap(force=True) is True
+        assert calls == [{"overrides": True}]
+        assert not whoisit.bootstrap_is_older_than(7)
+        assert rdap._rdap_host("admin.ch", "domain") == "rdap.nic.ch"
+
+    def test_a_failed_refresh_keeps_the_registry_it_had(
+        self, stale_registry, monkeypatch
+    ):
+        def unreachable(**kwargs):
+            raise whoisit.errors.BootstrapError("data.iana.org did not answer")
+
+        monkeypatch.setattr(whoisit, "bootstrap", unreachable)
+        assert rdap.bootstrap_rdap(force=True) is True
+        assert rdap._rdap_host("admin.ch", "domain") == "rdap.nic.ch"
+        assert whoisit.bootstrap_is_older_than(7)
+
+    def test_the_daily_job_refetches_a_registry_older_than_a_week(
+        self, stale_registry, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(
+            whoisit, "bootstrap", _whoisit_like_bootstrap(calls, int(time.time()))
+        )
+        rdap.refresh_rdap_bootstrap()
+        assert calls == [{"overrides": True}]
+        assert not whoisit.bootstrap_is_older_than(7)
+
+    def test_the_daily_job_leaves_a_fresh_registry_alone(
+        self, clean_whoisit, monkeypatch
+    ):
+        whoisit.load_bootstrap_data(_registry_json(int(time.time())), overrides=True)
+        calls = []
+        monkeypatch.setattr(
+            whoisit, "bootstrap", _whoisit_like_bootstrap(calls, int(time.time()))
+        )
+        rdap.refresh_rdap_bootstrap()
+        assert calls == []
+
+    def test_a_forced_fetch_with_nothing_loaded_has_nothing_to_restore(
+        self, clean_whoisit, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(
+            whoisit, "bootstrap", _whoisit_like_bootstrap(calls, int(time.time()))
+        )
+        assert rdap.bootstrap_rdap(force=True) is True
+        assert calls == [{"overrides": True}]
+
+    def test_a_refresh_that_fails_after_loading_keeps_the_old_registry(
+        self, stale_registry, monkeypatch
+    ):
+        monkeypatch.setattr(whoisit, "bootstrap", _half_loaded([]))
+        assert rdap.bootstrap_rdap(force=True) is True
+        assert rdap._rdap_host("admin.ch", "domain") == "rdap.nic.ch"
+        assert rdap._rdap_host("kisa.or.kr", "domain") == "rdap.nic.or.kr"
+        assert whoisit.bootstrap_is_older_than(7)
+
+    def test_a_first_fetch_that_fails_after_loading_leaves_nothing_loaded(
+        self, clean_whoisit, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(whoisit, "bootstrap", _half_loaded(calls))
+        assert rdap.bootstrap_rdap() is False
+        assert not whoisit.is_bootstrapped()
+        assert rdap.bootstrap_rdap() is False
+        assert len(calls) == 2
+
+    def test_a_lookup_during_a_refresh_waits_for_the_new_registry(
+        self, stale_registry, monkeypatch
+    ):
+        fetching, release = threading.Event(), threading.Event()
+        fetch = _whoisit_like_bootstrap([], int(time.time()))
+
+        def slow_fetch(**kwargs):
+            fetching.set()
+            release.wait(5)
+            fetch(**kwargs)
+
+        monkeypatch.setattr(whoisit, "bootstrap", slow_fetch)
+        monkeypatch.setattr(whoisit, "domain", lambda name, **kw: dict(RDAP_DOMAIN))
+        answers = []
+        refresh = threading.Thread(target=rdap.bootstrap_rdap, kwargs={"force": True})
+        asking = threading.Thread(
+            target=lambda: answers.append(rdap.lookup_rdap("admin.ch"))
+        )
+        refresh.start()
+        assert fetching.wait(5)
+        asking.start()
+        asking.join(0.2)
+        waited = asking.is_alive()
+        release.set()
+        refresh.join(5)
+        asking.join(5)
+        assert waited
+        assert answers[0]["registrar"] == "Markmonitor Inc."
+        assert not whoisit.bootstrap_is_older_than(7)
+
+    def test_the_registry_fetch_retries_no_more_than_a_query(
+        self, clean_whoisit, monkeypatch
+    ):
+        retries = []
+
+        def first_request(session, url, *args, **kwargs):
+            retries.append(session.get_adapter(url).max_retries.total)
+            raise whoisit.errors.BootstrapError("no network in the test suite")
+
+        monkeypatch.setattr(whoisit, "bootstrap", whoisit._bootstrap.bootstrap)
+        monkeypatch.setattr(
+            importlib.import_module("whoisit.bootstrap"), "http_request", first_request
+        )
+        assert rdap.bootstrap_rdap() is False
+        assert retries == [rdap.RDAP_HTTP_RETRIES]
+
+
+class TestJscontactEntities:
     def test_a_vcard_name_still_wins(self):
         out = rdap._normalize_rdap_domain(dict(RDAP_DOMAIN, raw=KRNIC_RDAP_JSON), "x")
         assert out["registrar"] == "Markmonitor Inc."

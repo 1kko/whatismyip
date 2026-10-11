@@ -612,7 +612,9 @@ scheduler.add_job(
 )
 # The IANA RDAP bootstrap registry (TLD/IP-block -> RDAP server) rarely changes;
 # check daily and only re-fetch when it is older than a week. The first lookup
-# bootstraps lazily, so nothing here blocks startup.
+# bootstraps lazily, so nothing here blocks startup. A forced refresh saves the
+# loaded registry, clears it so whoisit really fetches, and restores it if IANA
+# fails; lookups wait on rdap._bootstrap_lock during that bounded fetch.
 scheduler.add_job(refresh_rdap_bootstrap, "interval", days=1)
 # The public suffix list is only re-fetched once the local copy is older than
 # TLD_MAX_AGE_DAYS, so a daily check costs nothing and a restart does not

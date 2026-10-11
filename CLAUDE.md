@@ -114,7 +114,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `_jscontact_name` reads registrar and registrant names from JSContact cards
   in raw responses from registries such as KRNIC.
   `rdap_breaker` (a `CircuitBreaker`) skips an RDAP host after repeated
-  failures; `refresh_rdap_bootstrap` keeps the registry current.
+  failures. `refresh_rdap_bootstrap` saves and clears a week-old registry so
+  whoisit actually fetches again, restores the saved copy on failure, and
+  holds `_bootstrap_lock` while using the configured no-retry session.
 - `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of
   `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
 - `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
