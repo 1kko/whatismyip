@@ -455,6 +455,70 @@ def dns_names(domain: dict | None, address: str) -> tuple[str, str]:
     return queried, domain.get("zone") or queried
 
 
+def _canonical_ip(text: Any) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """One value per address however it is spelled, as gather() gives every
+    target: an IPv4-mapped address (::ffff:a.b.c.d) is the IPv4 address it
+    carries. None for anything that is not an address."""
+    try:
+        ip = ipaddress.ip_address(str(text).strip())
+    except ValueError:
+        return None
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
+
+
+def fcrdns_state(
+    reverse_dns: str | None, domain: dict | None, address: str
+) -> str | None:
+    """Whether the PTR name of `address` resolves back to it: forward-confirmed
+    reverse DNS, what a mail server checks. Read off the PTR and the sweep of
+    that name a lookup has already made, so it costs no query.
+
+    "confirmed": one of the name's A records (AAAA for an IPv6 address) is the
+    address, so one match in a round robin is enough. "unconfirmed": none is,
+    or the name has no address of that family, or does not exist. "no_ptr":
+    the address has no PTR. "unknown": that A/AAAA query failed, which says
+    nothing either way. None when there is nothing to judge: `address` is not
+    an IP (a domain's sweep is of the domain, not of a PTR name), or `domain`
+    holds no sweep (?fields= on `/` runs none).
+    """
+    ip = _canonical_ip(address)
+    if ip is None:
+        return None
+    if not reverse_dns:
+        return "no_ptr"
+    if not domain:
+        return None
+    key = "aaaa" if ip.version == 6 else "a"
+    if dns_failure_text(domain, key):
+        return "unknown"
+    for record in domain.get(key) or []:
+        if isinstance(record, dict) and _canonical_ip(record.get("ip")) == ip:
+            return "confirmed"
+    return "unconfirmed"
+
+
+# How the REVERSE DNS column's PTR row words a verdict. "Does not point back"
+# and no further: CDNs and shared hosts fail the check legitimately, so the row
+# never says spoofed or forged. "unknown" adds nothing, because the A/AAAA row
+# under it already reads "(timed out)" or the like.
+_FCRDNS_SUFFIX = {
+    "confirmed": (" → confirmed", "success"),
+    "unconfirmed": (" → does not point back", "warning"),
+}
+
+
+def _ptr_row(reverse: str | None, domain: dict, address: str) -> dict:
+    if not reverse:
+        return {"label": "PTR", "value": DASH, "tone": "muted"}
+    verdict = _FCRDNS_SUFFIX.get(fcrdns_state(reverse, domain, address))
+    if verdict is None:
+        return {"label": "PTR", "value": reverse, "tone": "default"}
+    suffix, tone = verdict
+    return {"label": "PTR", "value": reverse, "suffix": suffix, "tone": tone}
+
+
 def _dns_count_row(label: str, domain: dict, key: str) -> dict:
     failure = dns_failure_text(domain, key)
     if failure:
@@ -480,17 +544,13 @@ def _reverse_column(location: dict, domain: dict, address: str) -> dict:
     domain = domain or {}
     reverse = location.get("reverse_dns")
     # The PTR name's own addresses of the looked-up address's family: the
-    # ones that would confirm the PTR points back.
+    # ones fcrdns_state() compares with the address for the PTR row.
     label, key = ("AAAA", "aaaa") if _ip_version(address) == 6 else ("A", "a")
     ttl = next(iter(domain.get(key) or []), {}).get("ttl")
     return {
         "title": "REVERSE DNS",
         "rows": [
-            {
-                "label": "PTR",
-                "value": reverse or DASH,
-                "tone": "default" if reverse else "muted",
-            },
+            _ptr_row(reverse, domain, address),
             _dns_count_row(label, domain, key),
             _dns_count_row("NS", domain, "ns"),
             {

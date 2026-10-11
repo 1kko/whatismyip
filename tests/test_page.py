@@ -1420,3 +1420,113 @@ class TestDnsTableStyles:
             r"table\.records--dns td:nth-child\(2\) \{([^}]*)\}", desktop
         )
         assert "display: none" not in column.group(1)
+
+
+class TestReverseDnsVerdict:
+    """The REVERSE DNS column says whether an IP's PTR name points back to it,
+    read off the sweep of that name the lookup already made."""
+
+    @staticmethod
+    def _sweep(name, a_records, aaaa_records=()):
+        # The shape DomainManager.get_records() returns for the PTR name.
+        return {
+            "queried_name": name,
+            "a": [{"ip": ip, "ttl": 300} for ip in a_records],
+            "aaaa": [{"ip": ip, "ttl": 300} for ip in aaaa_records],
+            "mx": [],
+            "ns": [],
+            "txt": [],
+            "cname": None,
+            "status": {
+                "a": "ok" if a_records else "noanswer",
+                "aaaa": "ok" if aaaa_records else "noanswer",
+            },
+        }
+
+    def _ip_gathered(self, a_records):
+        return {
+            **GATHERED,
+            "address": "8.8.8.8",
+            "resolved_ip": "8.8.8.8",
+            "resolution": "literal",
+            "reverse_dns": "dns.google.",
+            "location": {
+                "country_code": "US",
+                "country_name": "United States",
+                "reverse_dns": "dns.google.",
+            },
+            "domain": self._sweep("dns.google", a_records),
+            "whois": {"source": "rdap", "name": "GOGL"},
+        }
+
+    @staticmethod
+    def _self_page(visitor, sweep, headers=BROWSER_UA):
+        """GET / as `visitor`, with its PTR (host.example.net.), the sweep of
+        that name and its registration stubbed. lookup.domain_manager is the
+        object main's _self_lookup calls."""
+        with (
+            patch.object(
+                lookup.domain_manager,
+                "perform_reverse_lookup",
+                return_value="host.example.net.",
+            ),
+            patch.object(lookup.domain_manager, "get_records", return_value=sweep),
+            patch(
+                "main.lookup_whois",
+                new_callable=AsyncMock,
+                return_value={"source": "rdap", "name": "KORNET"},
+            ),
+        ):
+            return visitor.get("/", headers=headers).text
+
+    def test_an_ip_whose_ptr_points_back_reads_confirmed(self):
+        gathered = self._ip_gathered(["8.8.4.4", "8.8.8.8"])
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert (
+            '<span class="kv-value tone-success">dns.google. → confirmed</span>' in html
+        )
+
+    def test_an_ip_whose_ptr_points_elsewhere_does_not_point_back(self):
+        gathered = self._ip_gathered(["216.239.32.10"])
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert (
+            '<span class="kv-value tone-warning">'
+            "dns.google. → does not point back</span>" in html
+        )
+        assert "spoof" not in html.lower()
+
+    def test_the_self_page_shows_the_visitors_own_verdict(self):
+        """_self_lookup already sweeps the visitor's PTR name, and build_view
+        gives the self page the same column."""
+        html = self._self_page(client, self._sweep("host.example.net", [SEOUL_IP]))
+        assert (
+            '<span class="kv-value tone-success">host.example.net. → confirmed</span>'
+            in html
+        )
+
+    def test_a_dual_stack_visitor_is_judged_as_the_ipv4_address_it_carries(self):
+        """A dual-stack socket reports an IPv4 peer as ::ffff:a.b.c.d, and the
+        self page takes the address as it comes, not through gather()."""
+        dual_stack = TestClient(app, client=(f"::ffff:{SEOUL_IP}", 41234))
+        html = self._self_page(dual_stack, self._sweep("host.example.net", [SEOUL_IP]))
+        assert (
+            '<span class="kv-value tone-success">host.example.net. → confirmed</span>'
+            in html
+        )
+
+    def test_an_ipv6_visitor_is_judged_however_the_proxy_spelled_it(self):
+        """x-real-ip from a trusted proxy arrives as the proxy wrote it."""
+        sweep = self._sweep(
+            "host.example.net", [], aaaa_records=["2404:6800:4004:80b::200e"]
+        )
+        html = self._self_page(
+            local_client,
+            sweep,
+            headers={**BROWSER_UA, "x-real-ip": "2404:6800:4004:80B::200E"},
+        )
+        assert (
+            '<span class="kv-value tone-success">host.example.net. → confirmed</span>'
+            in html
+        )

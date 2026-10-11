@@ -80,7 +80,9 @@ RDAP registration data and the full TLS certificate, expanded.
   match, protocol and cipher, and whether the certificate is trusted. An
   expired, self-signed, wrong-host or chain-incomplete certificate is still
   shown, with the reason it fails.
-- **Reverse DNS** for IP addresses.
+- **Reverse DNS** for IP addresses, and whether the PTR name resolves back to
+  the address (forward-confirmed reverse DNS, what mail servers check): read off
+  the record sweep of that name the lookup already makes, so it costs no query.
 - **Reputation** — which public lists an address is on: Spamhaus DROP and
   ASN-DROP, Tor exits, and X4BNet's VPN and datacenter ranges, each with its
   source and the date of the copy read, and a level (none/low/medium/high)

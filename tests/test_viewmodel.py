@@ -1,9 +1,13 @@
 import datetime
 
+import pytest
+
 from rdap import _normalize_rdap_domain, _normalize_rdap_ip, normalize_whois
 from viewmodel import (
+    DASH,
     build_view,
     country_flag,
+    fcrdns_state,
     format_distance,
     reputation_view,
     ssl_rows,
@@ -1270,3 +1274,155 @@ class TestReputationLevelWording:
         card = self._card("medium", [dict(self.TOR, weight=50)])
         assert card["rows"][0]["value"] == "Medium"
         assert card["rows"][0]["tone"] == "warning"
+
+
+# --- forward-confirmed reverse DNS ---------------------------------------------------
+
+
+def _sweep(a=(), aaaa=(), a_status="ok", aaaa_status="ok"):
+    """The sweep of a PTR name, in the shape DomainManager.get_records()
+    returns: {"ip", "ttl"} dicts, and each type's dns_status() under "status"."""
+    return {
+        "queried_name": "dns.google",
+        "a": [{"ip": ip, "ttl": 300} for ip in a],
+        "aaaa": [{"ip": ip, "ttl": 300} for ip in aaaa],
+        "ns": [],
+        "status": {"a": a_status, "aaaa": aaaa_status},
+    }
+
+
+class TestFcrdnsState:
+    """Whether an IP's PTR name resolves back to it, read off the PTR and the
+    sweep of that name the lookup already made: no query of its own."""
+
+    def test_a_match_is_confirmed(self):
+        sweep = _sweep(a=["8.8.8.8"])
+        assert fcrdns_state("dns.google.", sweep, "8.8.8.8") == "confirmed"
+
+    def test_one_match_in_a_round_robin_is_enough(self):
+        sweep = _sweep(a=["8.8.4.4", "8.8.8.8"])
+        assert fcrdns_state("dns.google.", sweep, "8.8.8.8") == "confirmed"
+
+    def test_addresses_that_are_all_elsewhere_are_unconfirmed(self):
+        sweep = _sweep(a=["216.239.32.10", "216.239.34.10"])
+        assert fcrdns_state("dns.google.", sweep, "8.8.8.8") == "unconfirmed"
+
+    @pytest.mark.parametrize("status", ["noanswer", "nxdomain"])
+    def test_a_ptr_name_with_no_address_is_unconfirmed(self, status):
+        """noanswer and nxdomain are answers: the name has no address of that
+        family, or does not exist, so it cannot point back."""
+        sweep = _sweep(a_status=status)
+        assert fcrdns_state("dns.google.", sweep, "8.8.8.8") == "unconfirmed"
+
+    @pytest.mark.parametrize("status", ["timeout", "servfail", "error"])
+    def test_a_failed_forward_query_is_unknown_never_unconfirmed(self, status):
+        sweep = _sweep(a_status=status)
+        assert fcrdns_state("dns.google.", sweep, "8.8.8.8") == "unknown"
+
+    def test_no_ptr(self):
+        assert fcrdns_state(None, {}, "8.8.8.8") == "no_ptr"
+        assert fcrdns_state("", _sweep(a=["8.8.8.8"]), "8.8.8.8") == "no_ptr"
+
+    def test_an_ipv6_address_is_compared_with_aaaa(self):
+        v6 = "2001:4860:4860::8888"
+        sweep = _sweep(a=["8.8.8.8"], aaaa=["2001:4860:4860::8844", v6])
+        assert fcrdns_state("dns.google.", sweep, v6) == "confirmed"
+
+    def test_an_ipv6_address_whose_ptr_name_has_only_a_is_unconfirmed(self):
+        """One family is compared: an A record, even the same host's IPv4
+        address, does not confirm the PTR of an IPv6 address."""
+        sweep = _sweep(a=["8.8.8.8"], aaaa_status="noanswer")
+        v6 = "2001:4860:4860::8888"
+        assert fcrdns_state("dns.google.", sweep, v6) == "unconfirmed"
+
+    def test_a_failed_aaaa_query_is_unknown_for_ipv6_whatever_a_says(self):
+        sweep = _sweep(a=["8.8.8.8"], aaaa_status="timeout")
+        v6 = "2001:4860:4860::8888"
+        assert fcrdns_state("dns.google.", sweep, v6) == "unknown"
+
+    @pytest.mark.parametrize(
+        ("address", "records"),
+        [
+            # What a dual-stack socket reports for an IPv4 visitor.
+            ("::ffff:8.8.8.8", {"a": ["8.8.8.8"]}),
+            ("2001:4860:4860:0:0:0:0:8888", {"aaaa": ["2001:4860:4860::8888"]}),
+            ("2404:6800:4004:80B::200E", {"aaaa": ["2404:6800:4004:80b::200e"]}),
+        ],
+    )
+    def test_spellings_of_one_address_are_one_address(self, address, records):
+        """The self page's address comes from the socket or a proxy header, not
+        through gather(), which is what gives every other target one spelling."""
+        assert fcrdns_state("dns.google.", _sweep(**records), address) == "confirmed"
+
+    def test_there_is_nothing_to_judge_for_a_domain(self):
+        """A domain's sweep is of the domain itself, not of a PTR name."""
+        sweep = _sweep(a=["93.184.216.34"])
+        assert fcrdns_state(None, sweep, "example.com") is None
+
+    def test_there_is_nothing_to_judge_without_the_sweep(self):
+        """?fields= on `/` asks for the visitor's PTR but sweeps nothing."""
+        assert fcrdns_state("dns.google.", None, "8.8.8.8") is None
+        assert fcrdns_state("dns.google.", {}, "8.8.8.8") is None
+
+
+def _reverse_rows(response, is_self=False):
+    column = build_view(response, is_self=is_self)["facts"][1]
+    assert column["title"] == "REVERSE DNS"
+    return {row["label"]: row for row in column["rows"]}
+
+
+class TestReverseColumnVerdict:
+    def test_a_ptr_that_points_back_says_confirmed(self):
+        # IP_RESPONSE's PTR is dns.google., whose A records include 8.8.8.8.
+        assert _reverse_rows(IP_RESPONSE)["PTR"] == {
+            "label": "PTR",
+            "value": "dns.google.",
+            "suffix": " → confirmed",
+            "tone": "success",
+        }
+
+    def test_a_ptr_that_points_elsewhere_says_it_does_not_point_back(self):
+        response = {**IP_RESPONSE, "domain": _sweep(a=["216.239.32.10"])}
+        assert _reverse_rows(response)["PTR"] == {
+            "label": "PTR",
+            "value": "dns.google.",
+            "suffix": " → does not point back",
+            "tone": "warning",
+        }
+
+    def test_the_wording_never_accuses(self):
+        """CDNs and shared hosts fail this legitimately."""
+        response = {**IP_RESPONSE, "domain": _sweep(a=["216.239.32.10"])}
+        text = " ".join(
+            f"{row['value']}{row.get('suffix', '')}".lower()
+            for row in _reverse_rows(response).values()
+        )
+        for word in ("spoof", "forged", "fake", "invalid"):
+            assert word not in text
+
+    def test_a_failed_forward_query_leaves_the_name_as_it_was(self):
+        """The A row already says the query failed; the PTR row claims nothing."""
+        rows = _reverse_rows({**IP_RESPONSE, "domain": _sweep(a_status="timeout")})
+        assert rows["PTR"] == {
+            "label": "PTR",
+            "value": "dns.google.",
+            "tone": "default",
+        }
+        assert rows["A"] == {"label": "A", "value": "(timed out)", "tone": "warning"}
+
+    def test_no_ptr_is_still_a_muted_dash(self):
+        location = {**IP_RESPONSE["location"], "reverse_dns": None}
+        response = {**IP_RESPONSE, "location": location, "domain": {}}
+        assert _reverse_rows(response)["PTR"] == {
+            "label": "PTR",
+            "value": DASH,
+            "tone": "muted",
+        }
+
+    def test_the_self_page_judges_the_visitors_own_address(self):
+        """build_view gives the self page the same column; its address can be
+        the ::ffff: form a dual-stack socket reports."""
+        response = {**IP_RESPONSE, "address": "::ffff:8.8.8.8"}
+        row = _reverse_rows(response, is_self=True)["PTR"]
+        assert row["value"] == "dns.google."
+        assert row["suffix"] == " → confirmed"
