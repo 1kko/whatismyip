@@ -802,3 +802,38 @@ class TestSubdomainPanel:
         assert 'id="acc-subdomains"' not in html
         meta = html.split('name="mcp-tools"')[1].split(">")[0]
         assert "subdomains" not in meta
+
+
+class TestSubdomainRegistration:
+    RECORD = {
+        "source": "rdap",
+        "name": "example.com",
+        "registrar": "Example Registrar",
+    }
+
+    def test_the_json_carries_the_registrable_domains_record_with_labels(self):
+        asked = []
+
+        def rdap(target):
+            asked.append(target)
+            return dict(self.RECORD)
+
+        with patch("lookup.lookup_rdap", rdap):
+            response = client.get("/www.example.com", headers=JSON_UA)
+
+        assert response.status_code == 200
+        whois = response.json()["whois"]
+        assert asked == ["example.com"]
+        assert whois["registrar"] == "Example Registrar"
+        assert whois["queried_name"] == "www.example.com"
+        assert whois["registrable_domain"] == "example.com"
+
+    def test_the_page_says_whose_registration_it_shows(self):
+        with patch("lookup.lookup_rdap", lambda target: dict(self.RECORD)):
+            html = client.get("/www.example.com", headers=BROWSER_UA).text
+
+        hint = 'id="hint-whois">registration of example.com · Example Registrar<'
+        assert hint in html
+        assert '<td>Registration of</td><td colspan="3">example.com</td>' in html
+        assert "not registered" not in html
+        assert "no registration record" not in html

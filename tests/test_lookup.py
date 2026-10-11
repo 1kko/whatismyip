@@ -1,8 +1,12 @@
 """Unit tests for the extracted lookup orchestration."""
 
+from types import SimpleNamespace
+
 import pytest
 
 import lookup
+from config import WHOIS_CACHE_ERROR_TTL
+from rdap import NOT_REGISTERED
 
 
 def test_normalize_lookup_target_strips_scheme_and_path():
@@ -127,3 +131,190 @@ async def test_gather_returns_no_map_keys(monkeypatch):
     assert result["location"]["reverse_dns"] == "dns.google"
     for forbidden in ("map", "distance_km", "origin"):
         assert forbidden not in result
+
+
+class TestRegistrationTarget:
+    """Registration uses one labelled record for a domain and its hosts."""
+
+    RECORD = {"source": "rdap", "registrar": "Example Registrar"}
+
+    @pytest.fixture
+    def rdap(self, monkeypatch):
+        asked = []
+
+        def fake(target):
+            asked.append(target)
+            return {**self.RECORD, "name": target}
+
+        monkeypatch.setattr(lookup, "lookup_rdap", fake)
+        return asked
+
+    @pytest.fixture
+    def port43(self, monkeypatch):
+        asked = []
+
+        def fake(target, **kwargs):
+            asked.append(target)
+            return {"domain_name": target, "registrar": "Example Registrar"}
+
+        monkeypatch.setattr(lookup.whois, "whois", fake)
+        return asked
+
+    def test_registration_target_floors_a_hostname_on_its_registrable_domain(self):
+        assert lookup.registration_target("www.example.com") == "example.com"
+        assert lookup.registration_target("a.b.example.co.uk") == "example.co.uk"
+        assert lookup.registration_target("example.com") == "example.com"
+        assert lookup.registration_target("co.uk") == "co.uk"
+        assert lookup.registration_target("8.8.8.8") == "8.8.8.8"
+        assert lookup.registration_target("2001:db8::1") == "2001:db8::1"
+
+    @pytest.mark.asyncio
+    async def test_a_hostname_is_asked_as_its_registrable_domain_and_labelled(
+        self, rdap
+    ):
+        out = await lookup.lookup_whois("www.example.com")
+
+        assert rdap == ["example.com"]
+        assert out["name"] == "example.com"
+        assert out["registrar"] == "Example Registrar"
+        assert out["queried_name"] == "www.example.com"
+        assert out["registrable_domain"] == "example.com"
+
+    @pytest.mark.asyncio
+    async def test_the_cache_holds_the_bare_record_under_the_registrable_domain(
+        self, rdap
+    ):
+        await lookup.lookup_whois("www.example.com")
+
+        assert lookup._whois_cache.get("www.example.com") is None
+        cached = lookup._whois_cache.get("example.com")
+        assert cached["name"] == "example.com"
+        assert "queried_name" not in cached
+        assert "registrable_domain" not in cached
+
+    @pytest.mark.asyncio
+    async def test_variants_share_one_lookup_and_each_gets_its_own_label(self, rdap):
+        first = await lookup.lookup_whois("www.example.com")
+        second = await lookup.lookup_whois("api.example.com")
+        third = await lookup.lookup_whois("example.com")
+
+        assert rdap == ["example.com"]
+        assert [r["queried_name"] for r in (first, second, third)] == [
+            "www.example.com",
+            "api.example.com",
+            "example.com",
+        ]
+        assert {r["registrable_domain"] for r in (first, second, third)} == {
+            "example.com"
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_registrable_domain_and_a_public_suffix_are_asked_as_is(
+        self, rdap
+    ):
+        own = await lookup.lookup_whois("example.com")
+        suffix = await lookup.lookup_whois("co.uk")
+
+        assert rdap == ["example.com", "co.uk"]
+        assert own["queried_name"] == own["registrable_domain"] == "example.com"
+        assert suffix["queried_name"] == suffix["registrable_domain"] == "co.uk"
+
+    @pytest.mark.asyncio
+    async def test_case_and_a_trailing_dot_do_not_split_the_cache(self, rdap):
+        out = await lookup.lookup_whois("WWW.Example.COM.")
+
+        assert rdap == ["example.com"]
+        assert out["queried_name"] == "www.example.com."
+        assert out["registrable_domain"] == "example.com"
+
+    @pytest.mark.asyncio
+    async def test_an_unregistered_registrable_domain_is_not_registered(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            lookup, "lookup_rdap", lambda target: {"error": NOT_REGISTERED}
+        )
+
+        out = await lookup.lookup_whois("www.nosuch-name.com")
+
+        assert out == {
+            "error": NOT_REGISTERED,
+            "queried_name": "www.nosuch-name.com",
+            "registrable_domain": "nosuch-name.com",
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_private_suffix_floors_on_the_operators_domain(self, rdap):
+        out = await lookup.lookup_whois("foo.github.io")
+
+        assert rdap == ["github.io"]
+        assert out["registrable_domain"] == "github.io"
+        assert out["queried_name"] == "foo.github.io"
+
+    @pytest.mark.asyncio
+    async def test_port43_fallback_asks_for_the_registrable_domain(
+        self, monkeypatch, port43
+    ):
+        monkeypatch.setattr(lookup, "lookup_rdap", lambda target: None)
+
+        out = await lookup.lookup_whois("www.naver.co.kr")
+
+        assert port43 == ["naver.co.kr"]
+        assert out["source"] == "whois"
+        assert out["name"] == "naver.co.kr"
+        assert out["queried_name"] == "www.naver.co.kr"
+        assert out["registrable_domain"] == "naver.co.kr"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_lookup_is_shared_by_the_names_under_it(self, monkeypatch):
+        asked = []
+        now = [1000.0]
+
+        def down(target):
+            asked.append(target)
+            return None
+
+        monkeypatch.setattr(lookup, "lookup_rdap", down)
+        monkeypatch.setattr(lookup, "time", SimpleNamespace(time=lambda: now[0]))
+        first = await lookup.lookup_whois("www.example.com")
+        second = await lookup.lookup_whois("api.example.com")
+
+        assert asked == ["example.com"]
+        assert first["error"] == second["error"] == "WHOIS lookup failed"
+        assert second["queried_name"] == "api.example.com"
+        assert second["registrable_domain"] == "example.com"
+
+        now[0] += WHOIS_CACHE_ERROR_TTL + 1
+        await lookup.lookup_whois("mail.example.com")
+        assert asked == ["example.com", "example.com"]
+
+    @pytest.mark.asyncio
+    async def test_a_suffix_list_that_cannot_load_asks_about_the_name_as_given(
+        self, rdap, monkeypatch
+    ):
+        def unloadable(domain):
+            raise TypeError("'NoneType' object is not subscriptable")
+
+        monkeypatch.setattr(lookup.domain_manager, "registrable_domain", unloadable)
+
+        out = await lookup.lookup_whois("www.example.com")
+
+        assert rdap == ["www.example.com"]
+        assert out["queried_name"] == out["registrable_domain"] == "www.example.com"
+
+    @pytest.mark.asyncio
+    async def test_an_address_is_asked_as_itself_with_no_labels(self, rdap):
+        out = await lookup.lookup_whois("8.8.8.8")
+
+        assert rdap == ["8.8.8.8"]
+        assert "queried_name" not in out
+        assert "registrable_domain" not in out
+        assert lookup.cached_whois("8.8.8.8") == out
+
+    @pytest.mark.asyncio
+    async def test_gather_carries_the_labels(self, rdap):
+        result = await lookup.gather("www.example.com", legs={"whois"})
+
+        assert rdap == ["example.com"]
+        assert result["whois"]["queried_name"] == "www.example.com"
+        assert result["whois"]["registrable_domain"] == "example.com"

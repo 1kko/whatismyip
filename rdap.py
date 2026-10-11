@@ -86,9 +86,10 @@ _configure_whoisit()
 # negative answer, not a failure. It travels in `error` so consumers that only
 # ask "is there registration data?" keep working unchanged, but anything that
 # reports the outcome to a person or a model compares against this sentinel
-# instead, because the two read very differently: a subdomain like
-# docs.github.com is not registered and never will be, while a timeout means we
-# simply do not know.
+# instead, because the two read very differently: a timeout means we simply do
+# not know, while this means the registry has no record for the name it was
+# asked about. lookup.lookup_whois asks about the registrable domain, so a
+# domain answer means that domain itself is unregistered.
 NOT_REGISTERED = "not registered"
 
 # An IP whose RIR could not be asked (timeout, server error, breaker open). It

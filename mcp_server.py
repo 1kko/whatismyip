@@ -129,20 +129,25 @@ def compact_network(loc: dict) -> dict:
 
 def compact_registration(whois: dict | None) -> dict:
     whois = whois or {}
+    names = {
+        key: whois[key]
+        for key in ("queried_name", "registrable_domain")
+        if key in whois
+    }
     error = whois.get("error")
     # "not registered" is an answer, not a failure, and the distinction matters
     # more to a model than to a person: told `error`, it reports that the lookup
     # broke and the user should try again; told `registered: false`, it can say
-    # the name has no registration -- which is simply what a subdomain looks
-    # like. Same reasoning as dns_records refusing to return {} for a record
-    # type this server never queried.
+    # the registrable domain has no registration. Same reasoning as dns_records
+    # refusing to return {} for a record type this server never queried.
     if error == NOT_REGISTERED:
-        return {"registered": False, "name": whois.get("name")}
+        return {"registered": False, "name": whois.get("name"), **names}
     if error:
-        return {"error": error}
+        return {"error": error, **names}
     return {
         "source": whois.get("source"),
         "name": whois.get("name"),
+        **names,
         "registrar": whois.get("registrar"),
         "registrant": whois.get("registrant"),
         "registrant_country": whois.get("country"),
@@ -276,6 +281,11 @@ async def lookup(target: str) -> dict[str, Any]:
     no trailing dot, and an internationalised name as its UTS 46 A-label
     (`straße.de` as `xn--strae-oqa.de`). `dns_records` and `ssl_certificate`
     echo `domain` the same way.
+
+    `registration` is the record of the registrable domain that covers the
+    target: for "www.github.com" it is github.com's, identified by
+    `registrable_domain` and `queried_name`. `registered: false` means that
+    registrable domain itself has no registration.
 
     `reputation` (for a domain, of the address it resolves to) names the
     public lists the address is on: Spamhaus DROP/ASN-DROP, Tor exits, VPN and

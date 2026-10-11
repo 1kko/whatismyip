@@ -115,8 +115,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
 - `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
   `GET /{domain_ip}` and the MCP tools. Also `classify_target`, `is_safe_ip`,
-  `lookup_whois` (RDAP first, port-43 only for a domain, cached in
-  `_whois_cache`), `lookup_location` and `ip_reputation`. Raises
+  `lookup_whois` (RDAP first, port-43 only for a domain; a hostname is looked
+  up and cached as its registrable domain and the answer carries both names),
+  `lookup_location` and `ip_reputation`. Raises
   `PrivateAddressError` and `InvalidTargetError` rather than `HTTPException`
   so it stays free of FastAPI. `gather(legs=)` runs only the named legs
   (`LEGS`); the default (None) runs them all, and the page, the full JSON and
@@ -337,6 +338,14 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 IP with the registration of its PTR name's domain, so it gets
 `{"error": RIR_RDAP_UNAVAILABLE}`. Answers are cached for `WHOIS_CACHE_TTL`
 (6 h), failures for `WHOIS_CACHE_ERROR_TTL` (5 min).
+
+A domain is asked about as its registrable domain through
+`lookup.registration_target` and `DomainManager.registrable_domain`, using the
+same ICANN-view public suffix floor as `zone_apex`. This makes `www.` and
+`api.` variants share one cached record. Domain answers carry `queried_name`
+and `registrable_domain`; IP answers carry neither. `NOT_REGISTERED` therefore
+means the registrable domain itself has no record. If the suffix list cannot
+be read, the lookup asks about the supplied name instead of failing.
 
 #### Error Handling
 

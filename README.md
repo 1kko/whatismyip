@@ -55,6 +55,9 @@ RDAP registration data and the full TLS certificate, expanded.
   no WHOIS fallback: when its RIR's RDAP server does not answer, the lookup says
   so instead of showing the registration of the address's reverse-DNS domain.
   An RDAP server that fails three times in a row is skipped for 10 minutes.
+  A hostname such as `www.github.com` gets the registration that covers it,
+  `github.com`'s, with `queried_name` and `registrable_domain` identifying both
+  names. `not registered` therefore means the registrable domain has no record.
 - **GeoIP** — country, real coordinates, the precise city and an accuracy radius
   from GeoLite2-City, and the carrier from GeoLite2-ASN, both memory-mapped and
   refreshed every 3 days. Until the first download lands, the country-only
@@ -349,8 +352,9 @@ name is put in one canonical spelling before any lookup: lower case, without a
 trailing root dot, and with each non-ASCII label encoded as its UTS 46 A-label.
 `NASA.GOV`, `nasa.gov.` and `nasa.gov` are one lookup; `straße.de` is returned
 as `xn--strae-oqa.de`. That spelling is used for `address`, MCP `target` and
-`domain`, `?fields=target`, DNS, TLS SNI, registration lookup and the page title.
-Private and reserved addresses are rejected with `400`.
+`domain`, `?fields=target`, DNS, TLS SNI and the page title. Its registrable
+domain is used for RDAP/WHOIS and the registration cache. Private and reserved
+addresses are rejected with `400`.
 
 A target that is neither a domain name under a public suffix nor an IP address
 is rejected with `400` before any lookup runs:
@@ -481,6 +485,9 @@ lines would read as a clean bill of health the lists cannot give.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
 own address; `cert_*` and the domain-only fields are `-`.
+Registration fields describe the registrable domain (`www.github.com` uses
+`github.com`'s registrar and expiry). The full JSON and MCP `lookup` response
+include the `registrable_domain` label; this flat form does not.
 
 A value is never left blank:
 
@@ -685,7 +692,9 @@ rate limit as `GET`.
     "expires": "2027-07-31T14:55:32.905000+00:00",
     "dnssec": true,
     "whois_server": "",
-    "url": "https://rdap.cloudflareregistry.com/rdap/domain/nasa.gov"
+    "url": "https://rdap.cloudflareregistry.com/rdap/domain/nasa.gov",
+    "queried_name": "nasa.gov",
+    "registrable_domain": "nasa.gov"
   },
   "ssl": {
     "subject": [[["commonName", "nasa.gov"]]],
@@ -719,6 +728,9 @@ target is an IP, so a `null` address says why.
 
 `whois.source` is `rdap` or `whois` depending on which source answered, and a
 failed lookup returns `{"error": "..."}` there rather than failing the request.
+For a hostname below its registrable domain, `whois` is that domain's record:
+`queried_name` is the requested hostname and `registrable_domain` is the name
+whose registration answered (`www.github.com` becomes `github.com`).
 `ssl` is `null` for IP lookups and for domains with no address. A domain whose
 only address is IPv6 gets `{"error": "TLS not checked", "reason": "IPv6-only
 host; this server has no IPv6 connectivity"}`: no handshake was attempted, so
@@ -869,7 +881,7 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. The tool description tells the model that a level of `none` is not "safe". |
+| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. The tool description tells the model that a level of `none` is not "safe". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |

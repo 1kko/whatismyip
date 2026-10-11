@@ -467,8 +467,8 @@ def _whois_column(whois_data: dict | None) -> dict:
     whois_data = whois_data or {}
     error = whois_data.get("error")
     # Three states, not two. "not registered" is an answer -- the registry was
-    # reached and said there is no such registration, which is the normal result
-    # for a subdomain -- while "unavailable" means we could not find out.
+    # reached and found no registration for the registrable domain -- while
+    # "unavailable" means we could not find out.
     if error == NOT_REGISTERED:
         status, tone = "not registered", "muted"
     elif error or not whois_data:
@@ -664,6 +664,14 @@ def _whois_value(key: str, value: Any) -> str:
     return str(value)
 
 
+def _covering_registration(whois_data: dict) -> str | None:
+    """Return the registrable domain when its record covers another name."""
+    registrable = whois_data.get("registrable_domain")
+    if registrable and registrable != whois_data.get("queried_name"):
+        return registrable
+    return None
+
+
 def whois_display(whois_data: dict | None) -> dict:
     """Turn a canonical registration record into ordered, labelled strings for
     the WHOIS accordion. Returns an error row on failure and {} when absent."""
@@ -677,6 +685,9 @@ def whois_display(whois_data: dict | None) -> dict:
     if error:
         return {"Error": str(error)}
     out: dict[str, str] = {}
+    covering = _covering_registration(whois_data)
+    if covering:
+        out["Registration of"] = covering
     for key, label in _WHOIS_ROWS:
         text = _whois_value(key, whois_data.get(key))
         if text and text != DASH:
@@ -748,7 +759,9 @@ def _whois_hint(whois_data: dict | None) -> str:
     created = _year(whois_data.get("created"))
     expires = _year(whois_data.get("expires"))
     span = f" · {created} → {expires}" if created and expires else ""
-    return f"{who}{span}"
+    hint = f"{who}{span}"
+    covering = _covering_registration(whois_data)
+    return f"registration of {covering} · {hint}" if covering else hint
 
 
 def whois_fill(whois_data: dict | None) -> dict:

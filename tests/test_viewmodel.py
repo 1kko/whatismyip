@@ -427,12 +427,37 @@ class TestWhoisDisplay:
         assert whois_display(None) == {}
 
     def test_not_registered_is_reported_as_an_answer_not_an_error(self):
-        """The registry was reached and said there is no such registration --
-        which is what every subdomain looks like. Labelling it "Error" sends a
-        reader off to retry a lookup that already succeeded."""
+        """The registry answered that the registrable domain has no record."""
         out = whois_display({"error": "not registered"})
         assert "Error" not in out
         assert out == {"Status": "no registration record for this name"}
+
+    def test_a_record_of_the_registrable_domain_says_so_first(self):
+        record = {
+            "source": "rdap",
+            "name": "example.com",
+            "registrar": "Example Registrar",
+            "status": ["client transfer prohibited"],
+            "queried_name": "www.example.com",
+            "registrable_domain": "example.com",
+        }
+        out = whois_display(record)
+        assert list(out)[0] == "Registration of"
+        assert out["Registration of"] == "example.com"
+        assert out["Name"] == "example.com"
+        assert out["Status"] == "client transfer prohibited"
+
+    def test_the_names_own_record_has_no_such_row(self):
+        record = {
+            "source": "rdap",
+            "name": "example.com",
+            "queried_name": "example.com",
+            "registrable_domain": "example.com",
+        }
+        assert "Registration of" not in whois_display(record)
+        assert "Registration of" not in whois_display(
+            {"source": "rdap", "name": "GOGL"}
+        )
 
 
 class TestGeoIpSection:
@@ -564,9 +589,7 @@ def test_a_failed_lookup_says_so_rather_than_inviting_another_click():
 
 
 class TestWhoisNotRegistered:
-    """A subdomain has no registration object -- registries register
-    example.com, not docs.example.com -- so "not registered" is the normal
-    answer for one, and must not read the same as a timeout."""
+    """An absent registration is an answer and differs from a timeout."""
 
     @staticmethod
     def _view(whois):
@@ -615,3 +638,58 @@ class TestWhoisNotRegistered:
         ok = self._status({"registrar": "Example Registrar"})
         assert ok["value"] == "available"
         assert ok["tone"] == "success"
+
+
+class TestWhoisOfTheRegistrableDomain:
+    RECORD = {
+        "source": "rdap",
+        "name": "example.com",
+        "registrar": "Example Registrar",
+        "created": datetime.datetime(1995, 8, 14, 4, 0, tzinfo=UTC),
+        "expires": datetime.datetime(2027, 8, 13, 4, 0, tzinfo=UTC),
+    }
+
+    @staticmethod
+    def _hint(address, whois):
+        view = build_view(
+            {
+                "address": address,
+                "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
+                "location": {},
+                "whois": whois,
+            },
+            is_self=False,
+        )
+        return next(i["hint"] for i in view["accordions"] if i["id"] == "whois")
+
+    def test_the_hint_leads_with_whose_registration_it_is(self):
+        labelled = {
+            **self.RECORD,
+            "queried_name": "www.example.com",
+            "registrable_domain": "example.com",
+        }
+        assert self._hint("www.example.com", labelled) == (
+            "registration of example.com · Example Registrar · 1995 → 2027"
+        )
+
+    def test_the_names_own_record_reads_as_before(self):
+        own = {
+            **self.RECORD,
+            "queried_name": "example.com",
+            "registrable_domain": "example.com",
+        }
+        assert self._hint("example.com", own) == "Example Registrar · 1995 → 2027"
+        assert self._hint("example.com", self.RECORD) == (
+            "Example Registrar · 1995 → 2027"
+        )
+
+    def test_an_unregistered_registrable_domain_still_reads_not_registered(self):
+        missing = {
+            "error": "not registered",
+            "queried_name": "www.nosuch-name.com",
+            "registrable_domain": "nosuch-name.com",
+        }
+        assert self._hint("www.nosuch-name.com", missing) == "not registered"
+        assert whois_display(missing) == {
+            "Status": "no registration record for this name"
+        }

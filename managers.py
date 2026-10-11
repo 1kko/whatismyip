@@ -689,6 +689,17 @@ class DomainManager:
         except (tld_exceptions.TldDomainNotFound, tld_exceptions.TldBadUrl):
             return False
 
+    def registrable_domain(self, domain: str) -> str | None:
+        """Return the ICANN-view registrable domain below a public suffix.
+
+        Private suffixes are ignored, so ``foo.github.io`` resolves to
+        ``github.io``. A public suffix queried directly is returned as itself;
+        addresses and unparseable strings return ``None``.
+        """
+        return get_fld(
+            domain, fail_silently=True, fix_protocol=True, search_private=False
+        )
+
     def zone_apex(self, domain: str) -> str:
         """The apex of the DNS zone that serves `domain`: where its NS live, and
         the MX and SPF it falls back to.
@@ -706,10 +717,7 @@ class DomainManager:
         fallback when DNS cannot answer. ICANN suffixes only: a private one
         (github.io) is a real operator's zone, not a registry's.
         """
-        floor = (
-            get_fld(domain, fail_silently=True, fix_protocol=True, search_private=False)
-            or domain
-        )
+        floor = self.registrable_domain(domain) or domain
         try:
             zone = dns.resolver.zone_for_name(
                 domain, resolver=_recursive_resolver(), lifetime=DNS_QUERY_LIFETIME
