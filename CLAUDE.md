@@ -317,9 +317,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    (an IPv6-only host), from the public resolvers; the address must pass
    `is_safe_ip` too
 4. **Data Gathering** (`lookup._run_legs`, holding a `lookup_gate` slot): the
-   registration lookup runs alongside everything else; a domain's DNS sweep and
-   TLS handshake run concurrently; an IP gets its PTR, then a sweep of the PTR
-   name. GeoIP is read inline, and reputation from the lists in memory; an IP
+   registration lookup runs alongside everything else; a domain's DNS sweep
+   (its DMARC record included) and TLS handshake run concurrently; an IP gets
+   its PTR, then a sweep of the PTR name, without DMARC. GeoIP is read inline,
+   and reputation from the lists in memory; an IP
    target is also sent to AbuseIPDB, alongside the rest
 5. **Response Assembly**: `main.get_ip_info` builds a plain dict (`address`,
    `resolved_ip`, `resolution`, `datetime`, `domain`, `location`, `whois`,
@@ -370,8 +371,11 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   (Docker's 127.0.0.11) and never a domain's own nameservers:
   `get_records`'s `ns_servers` argument is accepted and ignored.
 - The sweep asks A, AAAA, MX, NS, CNAME, TXT (and SPF from it) and PTR
-  concurrently. NS and MX host addresses go through `_with_host_ips`, capped at
-  `DNS_HOST_RESOLVE_LIMIT`; rows past the cap carry `ip_skipped`. A TXT string
+  concurrently, and DMARC when asked: `get_records(dmarc=True)` comes from
+  `lookup._run_legs` for a domain target only, so the self page's and an IP
+  target's PTR-name sweeps make no `_dmarc` query. NS and MX host addresses go
+  through `_with_host_ips`, capped at `DNS_HOST_RESOLVE_LIMIT`; rows past the
+  cap carry `ip_skipped`. A TXT string
   over 255 bytes arrives split and is joined with no separator (RFC 7208).
 - NS, the zone's SPF, and MX for a name with none of its own come from the zone
   apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
@@ -416,6 +420,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   one. Without that copy `tld` downloads `?publiconly` itself, inside the
   request and with no timeout, and offline `get_fld` raises `TypeError` even
   with `fail_silently`.
+- DMARC follows RFC 7489 §6.6.3: TXT at `_dmarc.<name>`, kept when it opens
+  with `v=DMARC1` (joined like SPF), and only when the name holds no policy
+  record, `_dmarc.<registrable_domain()>` once — the public suffix list's
+  answer, never the SOA zone. A failed first query never falls back, a failed
+  fallback is the status, and each record's `queried_name` says which name
+  answered.
 
 #### GeoIP Databases
 
@@ -510,7 +520,8 @@ for an IP, whose registration is its network's.
   `managers.dns_status`), next to the unchanged record keys. The page prints
   `(timed out)`-style text and an NXDOMAIN banner; MCP `dns_records` returns
   `{"error": status}` for a failed type. The MX status is the zone's when the
-  name fell back to the zone's MX
+  name fell back to the zone's MX, and the DMARC status the registrable
+  domain's when the name fell back to its record
 - An IP's forward-confirmed reverse DNS (`viewmodel.fcrdns_state`) is read
   off its PTR and the sweep of the PTR name already fetched, never a query of
   its own: `unknown` when that A/AAAA query failed, never `unconfirmed`. The

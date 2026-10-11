@@ -644,9 +644,10 @@ async def abuse_report(ip: str) -> dict:
 
 # The parts of gather() a caller can ask for by name. "resolve" is a domain's A
 # query; "ptr" and "dns" are an IP's reverse lookup and the record sweep (of the
-# domain, or of an IP's PTR name); "geo", "tls" and "whois" are what they say;
-# "reputation" is the address checked against the lists in memory, and for an
-# address looked up directly, against AbuseIPDB too.
+# domain with its DMARC record, or of an IP's PTR name without one); "geo",
+# "tls" and "whois" are what they say; "reputation" is the address checked
+# against the lists in memory, and for an address looked up directly, against
+# AbuseIPDB too.
 LEGS = frozenset({"resolve", "geo", "ptr", "dns", "tls", "whois", "reputation"})
 
 
@@ -794,10 +795,15 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
             if resolved_ip and not is_safe_ip(resolved_ip):
                 raise refused_address(target, resolved_ip)
 
-            # The record sweep and the TLS handshake are independent.
+            # The record sweep and the TLS handshake are independent. Only a
+            # domain target's sweep asks for the DMARC record: an IP target's
+            # PTR name below, and the visitor's own on the self page, get no
+            # query they did not get before.
             domain_data, ssl_data = await asyncio.gather(
                 asyncio.to_thread(
-                    lambda: domain_manager.get_records(target, ip=resolved_ip)
+                    lambda: domain_manager.get_records(
+                        target, ip=resolved_ip, dmarc=True
+                    )
                 )
                 if "dns" in want
                 else _skipped(),

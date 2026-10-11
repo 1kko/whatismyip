@@ -79,7 +79,10 @@ RDAP registration data and the full TLS certificate, expanded.
   public resolvers with a bounded per-query budget, plus every CNAME hop the
   resolver followed to answer the A query (`cname_chain`, each with the TTL
   left in the resolver's cache) and the canonical name they end at
-  (`canonical_name`), read off that answer at no extra query.
+  (`canonical_name`), read off that answer at no extra query. A domain's sweep
+  also asks for its DMARC record: `_dmarc.<name>`, or its registrable domain's
+  when the name has none, as RFC 7489 discovery does — one TXT query, two at
+  most.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
   match, protocol and cipher, and whether the certificate is trusted. An
   expired, self-signed, wrong-host or chain-incomplete certificate is still
@@ -821,7 +824,8 @@ rate limit as `GET`.
     "txt": [{ "text": ["MS=ms93625004"], "ttl": 364 }],
     "spf": [],
     "ptr": [],
-    "status": { "a": "ok", "aaaa": "ok", "mx": "ok", "ns": "ok", "cname": "noanswer", "txt": "ok", "spf": "noanswer", "ptr": "nxdomain" }
+    "dmarc": [{ "text": "v=DMARC1; p=reject; fo=1; rua=mailto:dmarcmail@mail.nasa.gov,mailto:reports@dmarc.cyber.dhs.gov", "ttl": 600, "queried_name": "_dmarc.nasa.gov" }],
+    "status": { "a": "ok", "aaaa": "ok", "mx": "ok", "ns": "ok", "cname": "noanswer", "txt": "ok", "spf": "noanswer", "ptr": "nxdomain", "dmarc": "ok" }
   },
   "location": {
     "ip": "192.0.66.108",
@@ -886,7 +890,11 @@ rate limit as `GET`.
 `domain.status` says how each record type's query ended: `ok`, `noanswer` (the
 name has none of that type), `nxdomain` (the name does not exist), or a failure
 — `timeout`, `servfail`, `error` — in which case the empty list next to it
-means "could not find out", not "none". `resolved_ip` is the address the target
+means "could not find out", not "none". `dmarc` is the name's DMARC record
+(`_dmarc.<name>`, kept when it opens with `v=DMARC1`), or, when it has none,
+its registrable domain's; each record's `queried_name` says which name
+answered, and `status.dmarc` is the status of that last query. It is there
+for a domain target only. `resolved_ip` is the address the target
 resolved to, and `resolution` is how: that A query's status for a name (`ok`
 too when a name with no A record resolved through AAAA), or `literal` when the
 target is an IP, so a `null` address says why.

@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import lookup
+import main
 import managers
 import mcp_server
 import viewmodel
@@ -603,6 +604,36 @@ def test_json_carries_resolved_ip_and_resolution(offline, outcome):
 
     assert body["resolved_ip"] is None
     assert body["resolution"] == outcome
+
+
+def test_only_a_domain_target_asks_for_dmarc(offline, monkeypatch):
+    """The visitor's own address gets no query it did not get before: the self
+    page still sweeps its PTR name, without _dmarc. Nor does an IP target's
+    PTR name, which is not a domain anyone asked about."""
+
+    async def fake_whois(target):
+        return {"source": "rdap", "name": target}
+
+    monkeypatch.setattr(main, "lookup_whois", fake_whois)
+    offline.records["201.14.235.118.in-addr.arpa", "PTR"] = ["visitor.example.net."]
+
+    self_body = client.get("/", headers=JSON_UA).json()
+    ip_body = client.get("/93.184.216.34", headers=JSON_UA).json()
+
+    # Both PTR names were swept, and neither was asked for a policy.
+    assert self_body["domain"]["queried_name"] == "visitor.example.net"
+    assert ip_body["domain"]["queried_name"] == "edge.example.net"
+    assert "dmarc" not in self_body["domain"]
+    assert "dmarc" not in ip_body["domain"]
+    assert _dmarc_asked(offline) == []
+
+    body = client.get("/example.com", headers=JSON_UA).json()
+
+    assert _dmarc_asked(offline) == ["_dmarc.example.com"]
+    assert body["domain"]["dmarc"] == [
+        {"text": DMARC_TEXT, "ttl": 300, "queried_name": "_dmarc.example.com"}
+    ]
+    assert body["domain"]["status"]["dmarc"] == "ok"
 
 
 def _dns_table_row(html: str, rdtype: str) -> list[str]:

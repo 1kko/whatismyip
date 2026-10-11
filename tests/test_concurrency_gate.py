@@ -437,7 +437,7 @@ class TestMcp:
         MCP slot and the global one it held are free again at once."""
         stuck = threading.Event()
 
-        def hang(name, ip=None):
+        def hang(name, ip=None, dmarc=False):
             stuck.wait(timeout=10)
             return {}
 
