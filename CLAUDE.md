@@ -593,6 +593,10 @@ service IP blocked. `subdomains.invalid_target_reason()` is the one check — th
 substitute: it asks only whether a public suffix is present, and `com` has one.
 The HTTP gate sees the canonical spelling, so an IDN such as `/straße.de` reaches
 it as its A-label; the MCP subdomains tool checks its argument as given.
+`.onion` and `home.arpa` names are refused there too (`config.SPECIAL_USE_NAMES`,
+the same two suffixes `lookup.special_use_suffix` refuses): crt.sh may hold
+`.onion` certificates, but a Tor address typed here is not sent to a third
+party any more than to the DNS.
 
 **No scheduler job**, unlike GeoIP and the public suffix list. Those are read
 by every request, so pre-refreshing always pays. This store is filled and read

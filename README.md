@@ -544,7 +544,10 @@ any other lookup.
 `GET /{domain}?subdomains=include` adds a list of the domain's subdomains, as
 seen in public Certificate Transparency logs. `?subdomains=only` skips the rest
 of the pipeline (DNS, TLS, GeoIP, the map) and returns just that list; it only
-accepts a domain, not an IP, and answers `400` for one.
+accepts a domain, not an IP, and answers `400` for one. A `.onion` or
+`home.arpa` name is refused too, with the reason in `detail`: crt.sh may hold
+`.onion` certificates, but a Tor address typed here is not sent to a third
+party any more than to the DNS.
 
 Omitting the parameter changes nothing: the default lookup never contacts
 crt.sh, so its latency and uptime cannot affect an ordinary request. Any value

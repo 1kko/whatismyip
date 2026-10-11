@@ -213,6 +213,13 @@ class TestContent:
         for party in ("RDAP", "IANA", "WHOIS", "crt.sh", "port 443"):
             assert _mentions(text, party), party
 
+    def test_says_a_special_use_name_is_sent_to_none_of_them(self):
+        # lookup.special_use_suffix and subdomains.invalid_target_reason
+        # refuse these before any resolver, registry or crt.sh is asked.
+        text = _privacy_text()
+        assert _mentions(text, ".onion")
+        assert _mentions(text, "home.arpa")
+
     def test_crt_sh_is_not_listed_when_subdomains_are_off(self):
         assert not _mentions(_privacy_text(SUBDOMAIN_ENABLED=False), "crt.sh")
 

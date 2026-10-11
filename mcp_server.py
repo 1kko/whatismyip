@@ -472,8 +472,8 @@ async def subdomains(
     certificate, so it is evidence of existence and never a complete inventory.
     Use it for "what else is under this domain?". `limit` caps how many names
     come back; `count` always reports the true total. Pass a registered domain
-    or a name under one: an IP address or a bare public suffix (com, co.uk,
-    github.io) is refused.
+    or a name under one: an IP address, a bare public suffix (com, co.uk,
+    github.io) or a .onion or home.arpa name is refused.
     """
     if limit < 1:
         return _fail("limit must be at least 1")

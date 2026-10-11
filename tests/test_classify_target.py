@@ -519,3 +519,26 @@ def test_mcp_tools_report_a_special_use_name_with_its_reason(
         payload = _call_tool(mcp_client, tool, {argument: target})
     assert payload == {"error": message}
     _assert_nothing_went_out(mocks)
+
+
+def test_a_special_use_name_with_subdomains_include_contacts_nothing():
+    # The gate in get_ip_info asks invalid_target_reason before it starts the
+    # crt.sh task, so the refusal must come from there, not from the cancel
+    # that follows gather()'s error: an AsyncMock counts the task's creation
+    # as a call.
+    with _legs() as mocks:
+        response = client.get("/x.onion?subdomains=include", headers=API_UA)
+    assert response.status_code == 400
+    assert response.json() == {"error": ONION_MESSAGE, "code": "special_use_name"}
+    _assert_nothing_went_out(mocks)
+    mocks["subdomains"].assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["/x.onion", "/router.home.arpa"])
+def test_a_special_use_name_with_subdomains_only_is_refused_by_the_gate(path):
+    with _legs() as mocks:
+        response = client.get(f"{path}?subdomains=only", headers=API_UA)
+    assert response.status_code == 400
+    assert "special-use name" in response.json()["detail"]
+    _assert_nothing_went_out(mocks)
+    mocks["subdomains"].assert_not_called()

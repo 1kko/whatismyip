@@ -31,6 +31,7 @@ from tld import get_tld
 
 from concurrency import run_in, subdomain_pool
 from config import (
+    SPECIAL_USE_NAMES,
     SUBDOMAIN_CACHE_TTL,
     SUBDOMAIN_ERROR_TTL,
     SUBDOMAIN_FETCH_PER_MINUTE,
@@ -87,6 +88,9 @@ def invalid_target_reason(domain: str) -> str | None:
     everyone. The HTTP gate, the MCP tool and get_subdomains() all ask this
     one function, so they cannot drift apart.
 
+    A name under a special-use suffix the list carries (.onion, home.arpa) is
+    refused too, with the reason from config.SPECIAL_USE_NAMES.
+
     The suffix check reads the same parsed list DomainManager.is_valid_domain
     does: `tld` holds one process-wide trie, and TldNamesManager points it at
     the data volume when lookup.py is imported, which main.py does before any
@@ -114,6 +118,13 @@ def invalid_target_reason(domain: str) -> str | None:
             return f"every label must be 1-{_MAX_LABEL} characters"
         if label.startswith("-") or label.endswith("-"):
             return "a label must not start or end with a hyphen"
+    # On the public suffix list, so the suffix check below would let them
+    # through, yet nothing public answers for them -- and a Tor hidden
+    # service's name typed here is not forwarded to crt.sh any more than to
+    # the DNS (lookup.special_use_suffix refuses it on the lookup path).
+    for suffix, why in SPECIAL_USE_NAMES.items():
+        if domain == suffix or domain.endswith("." + suffix):
+            return f"{domain} is a special-use name: {why}"
     try:
         parsed = get_tld(domain, fix_protocol=True, as_object=True)
     except (tld_exceptions.TldDomainNotFound, tld_exceptions.TldBadUrl):
