@@ -2,6 +2,7 @@ import copy
 import io
 import json
 import re
+import struct
 import tokenize
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,6 +15,7 @@ import lookup
 import mcp_server
 from main import app, build_map_payload, normalize_lookup_target
 from main import _is_route
+from viewmodel import SITE_DESCRIPTION
 
 CSS = Path("static/css/whatismyip.css")
 
@@ -1649,6 +1651,121 @@ class TestMobileLayout:
         html = client.get("/", headers=BROWSER_UA).text
         button = html.split('id="fp-copy"')[1].split("</button>")[0]
         assert 'width="14" height="14"' in button
+
+
+MANIFEST = Path("static/site.webmanifest")
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _manifest():
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+
+def _manifest_icons(manifest):
+    """The app's icons and every shortcut's: an install reads them all."""
+    icons = list(manifest.get("icons", []))
+    for shortcut in manifest.get("shortcuts", []):
+        icons += shortcut.get("icons", [])
+    return icons
+
+
+def _png_size(path):
+    """(width, height) from the IHDR chunk, which every PNG opens with."""
+    header = path.read_bytes()[:24]
+    assert header[:8] == PNG_SIGNATURE and header[12:16] == b"IHDR", path
+    return struct.unpack(">II", header[16:24])
+
+
+class TestWebManifest:
+    """static/site.webmanifest is what "Install app" and "Add to Home Screen"
+    read. It was the favicon generator's placeholder: installing the site made
+    an app called "MySite" with a white splash in front of a dark page."""
+
+    def test_names_and_describes_the_app_as_the_page_does(self):
+        manifest = _manifest()
+        assert manifest["name"] == "WhatIsMyIP"
+        assert manifest["short_name"] == "My IP"
+        assert manifest["description"] == SITE_DESCRIPTION
+        assert manifest["lang"] == "en"
+
+    def test_both_colours_are_the_page_background(self):
+        """Changing --bg in REQUIRED_TOKENS (and the CSS) fails here until the
+        manifest follows."""
+        manifest = _manifest()
+        background = REQUIRED_TOKENS["--bg"].upper()
+        assert manifest["theme_color"].upper() == background
+        assert manifest["background_color"].upper() == background
+
+    def test_opens_the_self_page_as_a_standalone_app(self):
+        manifest = _manifest()
+        assert manifest["id"] == "/"
+        # No ?utm_source=: a launch is a visit, and nothing here counts visits.
+        assert manifest["start_url"] == "/"
+        assert manifest["scope"] == "/"
+        assert manifest["display"] == "standalone"
+
+    def test_shortcuts_lead_to_my_ip_and_the_privacy_page(self):
+        shortcuts = _manifest()["shortcuts"]
+        assert [(s["name"], s["url"]) for s in shortcuts] == [
+            ("My IP", "/"),
+            ("Privacy", "/privacy"),
+        ]
+        # DevTools warns about every shortcut that has no 96x96 icon.
+        for shortcut in shortcuts:
+            assert "96x96" in [icon["sizes"] for icon in shortcut["icons"]], shortcut
+
+    def test_every_url_is_root_relative(self):
+        """A browser resolves the manifest's URLs against the manifest's own
+        address, /static/site.webmanifest: "./" would open /static/, and
+        "//host" another site."""
+        manifest = _manifest()
+        urls = [manifest["id"], manifest["start_url"], manifest["scope"]]
+        urls += [shortcut["url"] for shortcut in manifest["shortcuts"]]
+        urls += [icon["src"] for icon in _manifest_icons(manifest)]
+        for url in urls:
+            assert url.startswith("/") and not url.startswith("//"), url
+
+    def test_every_icon_is_a_real_file_at_its_declared_size(self):
+        """Every icon is a PNG today; an SVG or WebP one needs its own check."""
+        icons = _manifest_icons(_manifest())
+        assert icons
+        for icon in icons:
+            # Only static/ is mounted: a file elsewhere in the repository would
+            # pass is_file() here and still 404 for the browser.
+            assert icon["src"].startswith("/static/"), icon["src"]
+            path = Path(icon["src"].lstrip("/"))
+            assert path.is_file(), icon["src"]
+            assert icon["type"] == "image/png", icon["src"]
+            width, height = _png_size(path)
+            assert icon["sizes"] == f"{width}x{height}", icon["src"]
+
+    def test_a_large_icon_can_be_shown_unmasked(self):
+        """Chrome installs only with a purpose "any" icon (the default when
+        purpose is absent) of 144px or more. Both PNGs are full-bleed, so
+        "maskable" alone let a round launcher crop the magnifier's handle."""
+        usable = [
+            icon
+            for icon in _manifest()["icons"]
+            if int(icon["sizes"].split("x")[0]) >= 192
+            and "any" in icon.get("purpose", "any").split()
+        ]
+        assert usable
+
+    def test_served_as_a_web_app_manifest(self):
+        response = client.get("/static/site.webmanifest")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/manifest+json")
+
+    def test_no_service_worker(self):
+        """Offline means nothing for a lookup, and a worker's cache would fight
+        the lookup routes' Cache-Control: no-store."""
+        assert "serviceworker" not in _manifest()
+        # The scripts, and the templates for an inline <script>.
+        sources = sorted(Path("static/js").glob("*.js"))
+        sources += sorted(Path("templates").glob("*.html"))
+        for path in sources:
+            text = path.read_text(encoding="utf-8")
+            assert "serviceWorker.register" not in text, path
 
 
 # gather() is patched throughout this class. tests/test_page.py has no mocking

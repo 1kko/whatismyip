@@ -621,6 +621,29 @@ below by text:
   `test_page.py` pins the exports, the labels and the `#page-data` contract
   without node.
 
+#### Web manifest and theme colour
+
+`static/site.webmanifest`, linked from all three templates' `<head>`:
+- It is what "Install app" and "Add to Home Screen" read: `name` WhatIsMyIP,
+  `short_name` My IP, `description` = `viewmodel.SITE_DESCRIPTION`,
+  `id`/`start_url`/`scope` `/`, `display: standalone`, `theme_color` and
+  `background_color` = `--bg`, and shortcuts to `/` and `/privacy`.
+  `tests/test_page.py` `TestWebManifest` pins each against its source: change
+  `--bg` (and `REQUIRED_TOKENS`) and it fails until the manifest follows.
+- Every URL in it starts with `/`. A browser resolves the manifest's URLs
+  against its own address, `/static/site.webmanifest`, so `./` would open
+  `/static/`.
+- The app icons are `purpose: "any"`. Both PNGs are full-bleed, so `maskable`
+  alone let a round launcher crop the magnifier, and Chrome installs only with
+  an `any` icon of 144px or more. Add a `maskable` entry back only with artwork
+  that keeps the safe-zone margin. Each shortcut carries the 96×96 favicon,
+  since DevTools flags a shortcut without a 96×96 icon.
+- No service worker. Offline means nothing for a lookup, and a worker's cache
+  would fight the lookup routes' `Cache-Control: no-store`. Launching the app,
+  or its My IP shortcut, is one self lookup, the same as a visit; `/privacy` is
+  a fixed answer outside the lookup budget. `start_url` carries no
+  `?utm_source=`.
+
 #### MCP endpoint
 
 `mcp_server.py`:
@@ -1066,7 +1089,7 @@ Test files:
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
   security headers, fingerprint panel, `?subdomains=`, lookup links, the font
-  subsets and preloads), `test_negotiation.py`
+  subsets and preloads, web manifest), `test_negotiation.py`
   (`?format=`/Accept/user-agent), `test_text_format.py`
   (`?format=text`, `?fields=`), `test_error_pages.py` (`error.html` for browsers),
   `test_open_graph.py` (link previews), `test_privacy_page.py` (`/privacy`),
