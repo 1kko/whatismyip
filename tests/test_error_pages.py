@@ -223,6 +223,52 @@ class TestInvalidTarget:
         assert response.content == INVALID_BYTES
 
 
+# --- 400: a special-use name (.onion, home.arpa) ------------------------------
+
+ONION_BYTES = (
+    b'{"error":"a Tor onion address is not resolvable on the public DNS",'
+    b'"code":"special_use_name"}'
+)
+
+
+class TestSpecialUseName:
+    def test_a_browser_is_told_why_a_tor_address_has_no_answer(self):
+        response = client.get("/x.onion", headers=CHROME)
+        assert response.status_code == 400
+        assert _is_html(response)
+        assert _has_search_box(response.text)
+        text = _visible_text(response.text)
+        assert "Not a public name" in text
+        assert "A Tor onion address is not resolvable on the public DNS" in text
+        assert "Not a domain name or IP address" not in text
+
+    def test_a_browser_is_told_why_home_arpa_has_no_answer(self):
+        response = client.get("/router.home.arpa", headers=CHROME)
+        assert response.status_code == 400
+        text = _visible_text(response.text)
+        assert "Not a public name" in text
+        assert "Home.arpa names only exist inside a home network" in text
+
+    def test_the_page_is_fixed_text_whatever_the_name(self):
+        """The message comes from config.SPECIAL_USE_NAMES, never from the
+        path: a link cannot put words on this page by choosing the label."""
+        first = client.get("/x.onion", headers=CHROME)
+        second = client.get("/another.onion", headers=CHROME)
+        assert _same_page(first.text) == _same_page(second.text)
+        assert "x.onion" not in first.text
+
+    def test_an_api_client_gets_the_json(self):
+        response = client.get("/x.onion", headers=CURL)
+        assert response.status_code == 400
+        assert _is_json(response)
+        assert response.content == ONION_BYTES
+
+    def test_format_json_from_a_browser_gets_json(self):
+        response = client.get("/x.onion?format=json", headers=CHROME)
+        assert response.status_code == 400
+        assert response.content == ONION_BYTES
+
+
 # --- 403 and 429 from the security middleware ---------------------------------
 
 

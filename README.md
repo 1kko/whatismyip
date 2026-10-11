@@ -892,8 +892,9 @@ path all stay in the log line. See [Getting unbanned](#getting-unbanned).
 The bodies above are what every client that is not answered as a browser gets
 (see [Response format](#response-format)). A browser gets the same status as a
 small page with the search box instead: the `403` page says only the sentence
-above, the `429` page adds "Try again later", and a private address such as
-`192.168.0.1` gets an explanation of local network addresses and a link to `/`.
+above, the `429` page adds "Try again later", a private address such as
+`192.168.0.1` gets an explanation of local network addresses and a link to `/`,
+and a `.onion` or `home.arpa` name gets the reason it has no public answer.
 `/mcp` always answers JSON.
 
 ## MCP (Model Context Protocol)
