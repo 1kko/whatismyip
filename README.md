@@ -1149,6 +1149,13 @@ connected client would notice:
 Do not add a prerelease suffix such as `1.0.0-1`. SemVer sorts it below
 `1.0.0`, so the registry would not mark it as the latest version.
 
+The `title`, `description`, `websiteUrl` and icon in `server.json` are also
+what `initialize` reports in `serverInfo` (and `server/discover` for a
+2026-07-28 client), from `MCP_SERVER_TITLE`, `MCP_SERVER_DESCRIPTION`,
+`MCP_WEBSITE_URL` and `MCP_ICON_URL` in `config.py`: the image has no
+`server.json`, so `tests/test_mcp_registry.py` fails when the two disagree.
+Change both in the same pull request.
+
 ### Configuration
 
 | Variable | Default | Meaning |

@@ -396,6 +396,20 @@ MCP_LOOKUP_CONCURRENCY = max(int(os.getenv("MCP_LOOKUP_CONCURRENCY", "8")), 1)
 # unbounded-length body with 413 before it's ever read into memory).
 MCP_MAX_BODY_BYTES = int(os.getenv("MCP_MAX_BODY_BYTES", str(256 * 1024)))
 
+# What initialize's serverInfo, and a 2026-07-28 client's server/discover, say
+# about this server: the same card as server.json, the MCP Registry entry. The
+# image does not carry server.json (the Dockerfile copies *.py, templates/ and
+# static/), so the values live here and tests/test_mcp_registry.py keeps the
+# two equal: change both in the same pull request. Fixed rather than derived
+# from PUBLIC_BASE_URL, whose default is "".
+MCP_SERVER_TITLE = "WhatIsMyIP"
+MCP_SERVER_DESCRIPTION = (
+    "Geolocation, ASN, RDAP/WHOIS, DNS, TLS certificates and CT subdomains for "
+    "any IP or domain"
+)
+MCP_WEBSITE_URL = "https://ip.1kko.com"
+MCP_ICON_URL = "https://ip.1kko.com/static/image/logo.png"
+
 # Subdomain lookup (Certificate Transparency). Opt-in per request: the default
 # lookup path never touches crt.sh, so its unpredictable latency (measured
 # 2.6-13.5s for the same query within one hour) cannot reach a page view.

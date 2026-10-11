@@ -652,6 +652,12 @@ below by text:
   defaults (`readOnlyHint=false`, `destructiveHint=true`) present five write
   tools. Hints, not guarantees. `server.json` lists no tools, so it does not
   change.
+- `MCPServer(...)` also gets `title`, `description`, `website_url` and
+  `icons` from `config.MCP_SERVER_TITLE`, `MCP_SERVER_DESCRIPTION`,
+  `MCP_WEBSITE_URL` and `MCP_ICON_URL`: the same card as `server.json`, which
+  is not in the image. `tests/test_mcp_registry.py` fails when the two
+  disagree, so change both together. They are constants, not env: the
+  registry card names this host, and `PUBLIC_BASE_URL` defaults to `""`.
 - `compact_location` carries `precision` and `country_source` and nulls
   `lat`/`lon`/`time_zone` unless `precision` is `city`: the HTTP JSON keeps
   the numbers, the model gets only what the grade supports (a centroid's
@@ -1084,7 +1090,8 @@ Test files:
   limits, rate bucket),
   `test_mcp_iserror.py` (`isError` on outright failures),
   `test_mcp_manual_ban.py` (only a manual ban applies), `test_mcp_registry.py`
-  (`server.json`, its publish workflow, the page's tool list)
+  (`server.json`, its publish workflow, the page's tool list, and the
+  `initialize` card that must match `server.json`)
 - Ops: `test_healthz_degraded.py` (`degraded` and its reasons,
   `healthcheck.py`), `test_deploy_version.py` (`/healthz` `version`),
   `test_dependabot_config.py` (the pip groups and their order, security

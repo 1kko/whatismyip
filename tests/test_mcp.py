@@ -18,6 +18,12 @@ import eppstatus
 import lookup
 import main
 import mcp_server
+from config import (
+    MCP_ICON_URL,
+    MCP_SERVER_DESCRIPTION,
+    MCP_SERVER_TITLE,
+    MCP_WEBSITE_URL,
+)
 from main import app
 
 MCP_HEADERS = {
@@ -46,6 +52,36 @@ def _rpc(client, method, params=None, id_=2):
     return client.post("/mcp", json=body, headers=MCP_HEADERS)
 
 
+MODERN_VERSION = "2026-07-28"
+# The per-request envelope of that revision, which has no initialize: every
+# request names its protocol version and client capabilities in params._meta.
+MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": MODERN_VERSION,
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
+def _modern_rpc(client, method, params=None, id_=2):
+    """One 2026-07-28 request. The transport routes on the MCP-Protocol-Version
+    header (a handshake-era value, or none, takes the initialize path instead)
+    and the SDK's inbound ladder requires Mcp-Method to match the body."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": id_,
+        "method": method,
+        "params": {**(params or {}), "_meta": MODERN_META},
+    }
+    return client.post(
+        "/mcp",
+        json=body,
+        headers={
+            **MCP_HEADERS,
+            "MCP-Protocol-Version": MODERN_VERSION,
+            "Mcp-Method": method,
+        },
+    )
+
+
 def test_initialize_handshake():
     with TestClient(app) as client:
         response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
@@ -53,6 +89,15 @@ def test_initialize_handshake():
         result = response.json()["result"]
         assert result["serverInfo"]["name"] == "whatismyip"
         assert "tools" in result["capabilities"]
+        # The card a client shows for this server: the same one as server.json
+        # (tests/test_mcp_registry.py ties the two), not a bare name.
+        info = result["serverInfo"]
+        assert info["title"] == MCP_SERVER_TITLE
+        assert info["description"] == MCP_SERVER_DESCRIPTION
+        assert info["websiteUrl"] == MCP_WEBSITE_URL
+        assert info["icons"] == [
+            {"src": MCP_ICON_URL, "mimeType": "image/png", "sizes": ["512x512"]}
+        ]
 
 
 def test_mcp_initialize_reports_the_deployed_version():
@@ -64,6 +109,18 @@ def test_mcp_initialize_reports_the_deployed_version():
     assert server_info["name"] == "whatismyip"
     assert server_info["version"] == config.APP_VERSION
     assert server_info["version"]
+
+
+def test_a_2026_client_reads_the_same_card_from_server_discover():
+    """A 2026-07-28 client never sends initialize. It reads the server's card
+    from server/discover, and every result after that carries serverInfo in
+    _meta, so the card has to be right there too."""
+    with TestClient(app) as client:
+        result = _modern_rpc(client, "server/discover").json()["result"]
+        info = result["_meta"]["io.modelcontextprotocol/serverInfo"]
+        assert info["title"] == MCP_SERVER_TITLE
+        assert info["websiteUrl"] == MCP_WEBSITE_URL
+        assert info["icons"][0]["src"] == MCP_ICON_URL
 
 
 def test_tools_list_exposes_the_five_tools():

@@ -22,14 +22,18 @@ from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from mcp.types import CallToolResult, Icon, TextContent, ToolAnnotations
 
 from concurrency import LookupBusy, LookupGate
 from config import (
     APP_VERSION,
     MCP_ALLOWED_HOSTS,
     MCP_ALLOWED_ORIGINS,
+    MCP_ICON_URL,
     MCP_LOOKUP_CONCURRENCY,
+    MCP_SERVER_DESCRIPTION,
+    MCP_SERVER_TITLE,
+    MCP_WEBSITE_URL,
     RDAP_TIMEOUT_SECONDS,
     SUBDOMAIN_ENABLED,
     SUBDOMAIN_MCP_DEFAULT_LIMIT,
@@ -65,7 +69,16 @@ from viewmodel import (
 # `version` is initialize's serverInfo.version, "" unless given. The deployed
 # commit, as /healthz reports it, rather than server.json's registry version:
 # server.json is not in the image, and the commit is what finds the build.
-mcp = MCPServer("whatismyip", version=APP_VERSION)
+# title, description, website_url and the icon are server.json's card, from
+# config so the two stay equal (tests/test_mcp_registry.py).
+mcp = MCPServer(
+    "whatismyip",
+    title=MCP_SERVER_TITLE,
+    description=MCP_SERVER_DESCRIPTION,
+    website_url=MCP_WEBSITE_URL,
+    icons=[Icon(src=MCP_ICON_URL, mime_type="image/png", sizes=["512x512"])],
+    version=APP_VERSION,
+)
 
 # Without annotations the spec has a client assume readOnlyHint=false and
 # destructiveHint=true: five write tools on a server that only looks things
