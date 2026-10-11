@@ -58,7 +58,7 @@
         <div class="hero inset">
             <div class="tags">
                 {% for tag in view.tags %}
-                <span class="tag tone-{{ tag.tone }}">{{ tag.text }}</span>
+                {% if tag.href %}<a class="tag tone-{{ tag.tone }} lookup-link" href="{{ tag.href }}" rel="nofollow">{{ tag.text }}</a>{% else %}<span class="tag tone-{{ tag.tone }}">{{ tag.text }}</span>{% endif %}
                 {% endfor %}
             </div>
             <h1 class="ip mono">{{ view.target }}</h1>
@@ -105,7 +105,7 @@
                 {% for row in column.rows %}
                 <div class="kv">
                     <span class="kv-label">{{ row.label }}</span>
-                    <span class="kv-value tone-{{ row.tone }}">{{ row.value }}{% if row.suffix %}{{ row.suffix }}{% endif %}</span>
+                    <span class="kv-value tone-{{ row.tone }}">{% if row.href %}<a class="lookup-link" href="{{ row.href }}" rel="nofollow">{{ row.value }}</a>{% else %}{{ row.value }}{% endif %}{% if row.suffix %}{{ row.suffix }}{% endif %}</span>
                 </div>
                 {% endfor %}
             </div>
@@ -328,7 +328,20 @@
                     <table class="records">
                         <tbody>
                         {% for key, value in whois.items() %}
-                        <tr><td>{{ key }}</td><td colspan="3">{{ value }}</td></tr>
+                        {# The name servers are the one row whose value is a list of
+                           lookup targets: view.whois_name_servers carries them one
+                           entry each (same names and order as the joined text), so
+                           each gets its own link. #}
+                        <tr><td>{{ key }}</td><td colspan="3">
+                            {%- if key == "Name servers" and view.whois_name_servers -%}
+                                {%- for ns in view.whois_name_servers -%}
+                                    {%- if not loop.first %}, {% endif -%}
+                                    {%- if ns.href %}<a class="lookup-link" href="{{ ns.href }}" rel="nofollow">{{ ns.text }}</a>{% else %}{{ ns.text }}{% endif -%}
+                                {%- endfor -%}
+                            {%- else -%}
+                                {{ value }}
+                            {%- endif -%}
+                        </td></tr>
                         {% else %}
                         <tr><td colspan="4" class="tone-muted">No WHOIS data</td></tr>
                         {% endfor %}

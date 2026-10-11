@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 from config import SUBDOMAIN_ENABLED
@@ -52,6 +52,27 @@ DNS_FAILURE_TEXT = {
     "servfail": "(server failure)",
     "error": "(lookup failed)",
 }
+
+# The shape of main.lookup_href: a hostname or address -> the path of its own
+# lookup, or None when the page must print it as text. main passes it into
+# build_view(); the default, None, links nothing, and this module stays free of
+# lookup (whose import builds the GeoIP, suffix-list and DNS managers).
+LinkFor = Callable[[str], str | None]
+
+
+def _href(link_for: LinkFor | None, value: Any) -> str | None:
+    """link_for(value), or None without a link function or a name to link."""
+    if link_for is None or not isinstance(value, str) or not value:
+        return None
+    return link_for(value)
+
+
+def _linked(item: dict, link_for: LinkFor | None, value: Any) -> dict:
+    """A facts row or a hero tag with an `href` when `value` links, else the
+    dict exactly as it was: no href key at all, so a view built without
+    link_for -- and every row and tag tests compare whole -- is unchanged."""
+    href = _href(link_for, value)
+    return {**item, "href": href} if href else item
 
 
 def country_flag(country_code: str | None) -> str:
@@ -398,7 +419,9 @@ def _asn_org(location: dict) -> str:
     return name or DASH
 
 
-def _network_column(location: dict, address: str) -> dict:
+def _network_column(
+    location: dict, address: str, link_for: LinkFor | None = None
+) -> dict:
     rows = [
         {"label": "CIDR", "value": location.get("cidr") or DASH, "tone": "default"},
         {
@@ -418,11 +441,15 @@ def _network_column(location: dict, address: str) -> dict:
         )
     else:
         rows.append(
-            {
-                "label": "rDNS",
-                "value": location.get("reverse_dns") or DASH,
-                "tone": "default" if location.get("reverse_dns") else "muted",
-            }
+            _linked(
+                {
+                    "label": "rDNS",
+                    "value": location.get("reverse_dns") or DASH,
+                    "tone": "default" if location.get("reverse_dns") else "muted",
+                },
+                link_for,
+                location.get("reverse_dns"),
+            )
         )
     return {"title": "NETWORK", "rows": rows}
 
@@ -509,14 +536,20 @@ _FCRDNS_SUFFIX = {
 }
 
 
-def _ptr_row(reverse: str | None, domain: dict, address: str) -> dict:
+def _ptr_row(
+    reverse: str | None, domain: dict, address: str, link_for: LinkFor | None = None
+) -> dict:
+    # Only the name links (`href`); the verdict stays its own `suffix`, which
+    # the template prints after the anchor as plain text.
     if not reverse:
         return {"label": "PTR", "value": DASH, "tone": "muted"}
     verdict = _FCRDNS_SUFFIX.get(fcrdns_state(reverse, domain, address))
     if verdict is None:
-        return {"label": "PTR", "value": reverse, "tone": "default"}
-    suffix, tone = verdict
-    return {"label": "PTR", "value": reverse, "suffix": suffix, "tone": tone}
+        row = {"label": "PTR", "value": reverse, "tone": "default"}
+    else:
+        suffix, tone = verdict
+        row = {"label": "PTR", "value": reverse, "suffix": suffix, "tone": tone}
+    return _linked(row, link_for, reverse)
 
 
 def _dns_count_row(label: str, domain: dict, key: str) -> dict:
@@ -540,7 +573,9 @@ def _dns_column(domain: dict) -> dict:
     }
 
 
-def _reverse_column(location: dict, domain: dict, address: str) -> dict:
+def _reverse_column(
+    location: dict, domain: dict, address: str, link_for: LinkFor | None = None
+) -> dict:
     domain = domain or {}
     reverse = location.get("reverse_dns")
     # The PTR name's own addresses of the looked-up address's family: the
@@ -550,7 +585,7 @@ def _reverse_column(location: dict, domain: dict, address: str) -> dict:
     return {
         "title": "REVERSE DNS",
         "rows": [
-            _ptr_row(reverse, domain, address),
+            _ptr_row(reverse, domain, address, link_for),
             _dns_count_row(label, domain, key),
             _dns_count_row("NS", domain, "ns"),
             {
@@ -714,7 +749,7 @@ def _status_tags(whois_data: dict | None) -> list[dict]:
     return [{"text": " · ".join(codes), "tone": "danger"}] if codes else []
 
 
-def _tags(response: dict, is_ip: bool) -> list[dict]:
+def _tags(response: dict, is_ip: bool, link_for: LinkFor | None = None) -> list[dict]:
     location = response.get("location") or {}
     domain = response.get("domain") or {}
     if is_ip:
@@ -730,11 +765,25 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
     tags = [{"text": "DOMAIN", "tone": "default"}]
     first_a = next(iter(domain.get("a") or []), None)
     first_aaaa = next(iter(domain.get("aaaa") or []), None)
+    # The address tag is the one tag that names a lookup target, so it is the
+    # one that links (when link_for allows); no other tag gains an href key.
     if first_a:
-        tags.append({"text": f"A → {first_a['ip']}", "tone": "default"})
+        tags.append(
+            _linked(
+                {"text": f"A → {first_a['ip']}", "tone": "default"},
+                link_for,
+                first_a["ip"],
+            )
+        )
     elif first_aaaa:
         # An IPv6-only name: its address, rather than no address at all.
-        tags.append({"text": f"AAAA → {first_aaaa['ip']}", "tone": "default"})
+        tags.append(
+            _linked(
+                {"text": f"AAAA → {first_aaaa['ip']}", "tone": "default"},
+                link_for,
+                first_aaaa["ip"],
+            )
+        )
     # "TLS valid" only for a certificate that verified: any certificate at all
     # used to earn it, and a broken one now comes back rather than None.
     ssl_data = response.get("ssl") or {}
@@ -886,6 +935,30 @@ def resolved_via(domain: dict | None) -> str | None:
     if not canonical or canonical == domain.get("queried_name"):
         return None
     return str(canonical)
+
+
+def name_server_links(
+    whois_data: dict | None, link_for: LinkFor | None = None
+) -> list[dict]:
+    """The registration record's name servers, one {text, href} each, for the
+    template to draw the "Name servers" row as links: whois_display() joins
+    them into one string, which cannot carry a link per name. Same names,
+    order and deduplication as that string, so the row reads the same with or
+    without links. [] for a record with no list (an IP's), or one in error."""
+    if not whois_data or whois_data.get("error"):
+        return []
+    servers = whois_data.get("name_servers")
+    if not isinstance(servers, (list, tuple, set)):
+        return []
+    seen: set[str] = set()
+    out = []
+    for item in servers:
+        text = _whois_value("name_servers", item)
+        if not text or text == DASH or text in seen:
+            continue
+        seen.add(text)
+        out.append({"text": text, "href": _href(link_for, text)})
+    return out
 
 
 def geoip_rows(location: dict | None, domain: dict | None = None) -> list[dict]:
@@ -1201,8 +1274,15 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
 
 
 def build_view(
-    response: dict, is_self: bool, subdomains_enabled: bool = SUBDOMAIN_ENABLED
+    response: dict,
+    is_self: bool,
+    subdomains_enabled: bool = SUBDOMAIN_ENABLED,
+    link_for: LinkFor | None = None,
 ) -> dict:
+    """The template's view of a response. `link_for` (main.lookup_href) decides
+    which hostnames and addresses link to their own lookup -- the rDNS and PTR
+    rows, the A → tag and the name servers; the DNS table's rows are main's --
+    and None, the default, links nothing."""
     location = response.get("location") or {}
     domain = response.get("domain") or {}
     address = response.get("address") or ""
@@ -1211,13 +1291,13 @@ def build_view(
 
     if is_ip:
         facts = [
-            _network_column(location, address),
-            _reverse_column(location, domain, address),
+            _network_column(location, address, link_for),
+            _reverse_column(location, domain, address, link_for),
             _whois_column(response.get("whois")),
         ]
     else:
         facts = [
-            _network_column(location, address),
+            _network_column(location, address, link_for),
             _dns_column(domain),
             _certificate_column(response.get("ssl")),
         ]
@@ -1234,7 +1314,7 @@ def build_view(
         # canonical link. gather() already supplies the canonical spelling;
         # lower() is harmless defense for a synthetic response in a test.
         "canonical_path": "" if is_self else quote(address.lower(), safe=""),
-        "tags": _tags(response, is_ip),
+        "tags": _tags(response, is_ip, link_for),
         "flag": country_flag(location.get("country_code")),
         "country_name": location.get("country_name") or "",
         "city_line": _city_line(location),
@@ -1251,6 +1331,7 @@ def build_view(
         "dns_queried_name": dns_queried_name,
         "dns_zone": dns_zone,
         "whois_pending": whois_pending(response.get("whois")),
+        "whois_name_servers": name_server_links(response.get("whois"), link_for),
         "accordions": _accordions(response, subdomains_enabled),
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         # A domain's address may have been found under another name (a CNAME

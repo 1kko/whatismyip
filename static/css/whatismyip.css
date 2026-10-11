@@ -443,6 +443,15 @@ table.records a.lookup-link:focus-visible {
   color: var(--accent);
   text-decoration: underline;
 }
+/* The hero's A → tag is the whole tag, so the touch target is the tag's box:
+   it keeps the tag's own colour and lights its border instead of underlining. */
+.tag.lookup-link { color: var(--text-secondary); }
+.tag.lookup-link:hover,
+.tag.lookup-link:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+  text-decoration: none;
+}
 
 /* The DNS table is the only four-column one. Type and TTL are tiny and must not
    wrap; the value takes whatever is left and breaks there instead. */

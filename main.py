@@ -520,7 +520,10 @@ def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
     view = build_view(
-        response_data, is_self=is_self, subdomains_enabled=SUBDOMAIN_ENABLED
+        response_data,
+        is_self=is_self,
+        subdomains_enabled=SUBDOMAIN_ENABLED,
+        link_for=lookup_href,
     )
 
     # map.js labels the pins with the two IPs and draws the distance on the arc.
