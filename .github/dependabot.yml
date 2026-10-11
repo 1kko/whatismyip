@@ -15,12 +15,30 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      # Monday is Dependabot's default; written down because
+      # security-audit.yml runs at 09:00 UTC on Mondays and the grouped PR
+      # is meant to land right after it.
+      day: "monday"
     commit-message:
       prefix: "chore(deps)"
+    # Dependabot puts a dependency in the first group it matches, so otel must
+    # stay above the catch-all or the OTel packages fold into the weekly bundle.
     groups:
       otel:
         patterns:
           - "opentelemetry-*"
+      # Every other minor or patch bump, in one PR a week. A major outside otel
+      # matches no group and comes as its own PR. When one bump in the bundle
+      # breaks CI (ruff shipping a new rule is the likely case), comment
+      # `@dependabot ignore <package> minor version` on the PR and let the next
+      # run rebuild the bundle without it, or list the package under
+      # exclude-patterns here to keep receiving it on its own.
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "docker"
     directory: "/"
