@@ -123,6 +123,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   MCP all use the default. Builds the manager singletons (`geo_ip_manager`,
   `tld_names_manager`, `domain_manager`, `reputation_manager`,
   `abuseipdb_client`) at import, which reads `data/` but makes no network call.
+  `canonical_hostname` lower-cases, normalizes IDNA dot separators, encodes
+  each non-ASCII label with the direct `idna` dependency's UTS 46 processing,
+  validates every label, and removes one trailing root dot. ASCII service
+  labels such as `_dmarc` bypass the encoder. `normalize_lookup_target`
+  applies it after cutting a pasted URL to its host, so DNS, TLS SNI,
+  registration, the cache and echoed address all see one spelling.
   `abuse_report` asks AbuseIPDB, from `_run_legs` and only for an IP target. The self page (`GET /`) does not use
   `gather()`: `main._self_lookup` runs its legs.
 - `concurrency.py`: the lookup gate and the slow-leg thread pools. At most
@@ -220,7 +226,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 ### Response Flow
 
 1. **Format Negotiation**: `negotiate()` picks the response format: `?format=html|json|text` first (unknown value -> 400), then an `Accept` header that names `text/html`/`application/json`/`text/plain` (q-values honoured), and only when `Accept` is absent or `*/*` the user-agent (`BrowserDetector`: browsers get HTML; PowerShell, despite its `Mozilla/5.0`, gets JSON). `text` is `textfmt.py`'s: the bare client IP on `/`, a `key: value` block on `/{domain_ip}`; `?fields=` (either route; JSON unless text was negotiated) runs only the `gather(legs=)` the named fields need. Both lookup routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, errors included
-2. **Classification**: `lookup.classify_target` calls the target a domain,
+2. **Classification**: `lookup.normalize_lookup_target` cuts a pasted URL to
+   its host and gives a name its canonical spelling (lower case, no trailing
+   root dot, UTS 46 A-labels); `lookup.classify_target` then calls it a domain,
    `ipv4`, `ipv6` or `invalid` before any network work; an invalid target is a
    `400` (`InvalidTargetError`), and so is a private or reserved address
    (`PrivateAddressError`, from `is_safe_ip`). A browser gets
@@ -549,6 +557,8 @@ service IP blocked. `subdomains.invalid_target_reason()` is the one check — th
 `?subdomains=` gate in `main.get_ip_info`, the MCP `subdomains` tool, and
 `get_subdomains()` itself as a backstop all call it. `is_valid_domain` is no
 substitute: it asks only whether a public suffix is present, and `com` has one.
+The HTTP gate sees the canonical spelling, so an IDN such as `/straße.de` reaches
+it as its A-label; the MCP subdomains tool checks its argument as given.
 
 **No scheduler job**, unlike GeoIP and the public suffix list. Those are read
 by every request, so pre-refreshing always pays. This store is filled and read

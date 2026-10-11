@@ -344,8 +344,13 @@ cache before it asks the registry.
 ### `GET /{domain_or_ip}`
 
 Information about the given domain or IP. A pasted URL is normalised to its host,
-so `https://example.com/path?q=1` and `example.com` behave identically. Private
-and reserved addresses are rejected with `400`.
+so `https://example.com/path?q=1` and `example.com` behave identically. A domain
+name is put in one canonical spelling before any lookup: lower case, without a
+trailing root dot, and with each non-ASCII label encoded as its UTS 46 A-label.
+`NASA.GOV`, `nasa.gov.` and `nasa.gov` are one lookup; `straße.de` is returned
+as `xn--strae-oqa.de`. That spelling is used for `address`, MCP `target` and
+`domain`, `?fields=target`, DNS, TLS SNI, registration lookup and the page title.
+Private and reserved addresses are rejected with `400`.
 
 A target that is neither a domain name under a public suffix nor an IP address
 is rejected with `400` before any lookup runs:
@@ -449,7 +454,7 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 
 | Field | Value | Lookup it runs | Applies to |
 | --- | --- | --- | --- |
-| `target` | the target, after a pasted URL is cut to its host | none | both |
+| `target` | the target after URL host extraction and canonical name spelling (see `GET /{domain_or_ip}`) | none | both |
 | `ip` | the address a domain resolves to; an IP itself; on `/`, yours | A query (domains) | both |
 | `reverse_dns` | PTR name | reverse DNS | IP |
 | `country_code` | ISO 3166-1 alpha-2 | GeoIP (local) | both |
