@@ -990,7 +990,9 @@ is unaffected.)
 
 A call that could not answer at all (a private or malformed target, a timeout,
 no TLS handshake, the CT source unavailable) comes back with `isError: true` and
-`{"error": "..."}` as its structured content. A call that answered with a gap in
+`{"error": "..."}` as its structured content. For a private or reserved address
+the payload also carries `code`, the same block name as the HTTP `400`
+(`cgnat`, `private`, `documentation`, …). A call that answered with a gap in
 it, such as one DNS type timing out, the registration lookup failing inside
 `lookup`, or a stale subdomain list, is a normal result that carries the gap.
 

@@ -507,7 +507,9 @@ Configured at `main` module scope:
   can't build an output schema from a bare `dict`, so the response never gets
   `structuredContent`.
 - A call that failed outright returns `_fail()`: a `CallToolResult` with
-  `isError` set and `{"error": ...}` as `structuredContent`. The annotation
+  `isError` set and `{"error": ...}` as `structuredContent` (plus `code`,
+  through `_fail`'s `**extra`, for a refused address:
+  `_fail(exc.message, code=exc.code)` in the three `gather()` tools). The annotation
   stays `dict[str, Any]` anyway: the SDK refuses `dict | CallToolResult`, and
   skips output validation for an isError result. A gap inside an answer (one
   DNS type, the registration leg, `registered: false`, `stale: true`) stays a
