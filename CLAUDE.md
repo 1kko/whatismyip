@@ -447,6 +447,11 @@ Configured at `main` module scope:
   `version`, or `unknown`. The SDK sends `""` when none is given. It is not
   `server.json`'s registry version, which is not in the image and is bumped
   only when the listing changes.
+- `compact_location` carries `precision` and `country_source` and nulls
+  `lat`/`lon`/`time_zone` unless `precision` is `city`: the HTTP JSON keeps
+  the numbers, the model gets only what the grade supports (a centroid's
+  America/Chicago is nobody's time zone). `lookup` and `whoami_caller` say so
+  in their descriptions.
 - Tool return annotations need `dict[str, Any]`, not a bare `dict` — the SDK
   can't build an output schema from a bare `dict`, so the response never gets
   `structuredContent`.
