@@ -1061,6 +1061,14 @@ the payload also carries `code`, the same block name as the HTTP `400`
 it, such as one DNS type timing out, the registration lookup failing inside
 `lookup`, or a stale subdomain list, is a normal result that carries the gap.
 
+Every tool is annotated read-only (`readOnlyHint: true`, `destructiveHint:
+false`, `idempotentHint: true`) and carries a display `title`. `openWorldHint`
+is `true` for the four that ask another system (DNS, RDAP/WHOIS, a TLS
+handshake, crt.sh) and `false` for `whoami_caller`, which reads only the GeoIP
+database and the reputation lists in memory. Annotations are hints a client may
+ignore, not a promise it enforces; without them the spec has a client assume
+every tool may write.
+
 ### What `whoami_caller` actually reports
 
 The address that opened the MCP connection — which is **not always yours**, and

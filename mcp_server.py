@@ -22,7 +22,7 @@ from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from concurrency import LookupBusy, LookupGate
 from config import (
@@ -66,6 +66,25 @@ from viewmodel import (
 # commit, as /healthz reports it, rather than server.json's registry version:
 # server.json is not in the image, and the commit is what finds the build.
 mcp = MCPServer("whatismyip", version=APP_VERSION)
+
+# Without annotations the spec has a client assume readOnlyHint=false and
+# destructiveHint=true: five write tools on a server that only looks things
+# up. Hints a client may ignore, not guarantees. open_world_hint says whether
+# the tool reaches another system: four do (DNS, RDAP/WHOIS, a TLS handshake,
+# crt.sh); whoami_caller reads the GeoIP database and the reputation lists in
+# memory and sends nothing anywhere.
+_READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+_READ_ONLY_LOCAL = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
 
 
 def _fail(message: str, **extra: Any) -> CallToolResult:
@@ -321,7 +340,7 @@ async def _bounded_gather(target: str, legs: frozenset[str] | None = None) -> di
         )
 
 
-@mcp.tool()
+@mcp.tool(title="Look up an IP or domain", annotations=_READ_ONLY)
 async def lookup(target: str) -> dict[str, Any]:
     """Look up everything known about a domain name or IP address: its
     geolocation, network/ASN owner, registration (RDAP/WHOIS) details, and a
@@ -427,7 +446,7 @@ async def lookup(target: str) -> dict[str, Any]:
 _RECORD_TYPES = ("a", "aaaa", "mx", "ns", "cname", "txt", "spf", "ptr")
 
 
-@mcp.tool()
+@mcp.tool(title="DNS records", annotations=_READ_ONLY)
 async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, Any]:
     """DNS records for a domain: A, AAAA, MX, NS, CNAME, TXT, SPF, PTR — the
     exact set this server queries. Pass `types` (lowercase, a subset of those) to
@@ -510,7 +529,7 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     }
 
 
-@mcp.tool()
+@mcp.tool(title="TLS certificate", annotations=_READ_ONLY)
 async def ssl_certificate(domain: str) -> dict[str, Any]:
     """The TLS certificate a domain serves on port 443: issuer, subject,
     every SAN, the validity window, and how many days remain before it
@@ -614,7 +633,9 @@ async def subdomains(
 # server that does not offer this, rather than one that offers it and always
 # fails. The decorator form cannot express that.
 if SUBDOMAIN_ENABLED:
-    mcp.tool()(subdomains)
+    mcp.tool(title="Subdomains from Certificate Transparency", annotations=_READ_ONLY)(
+        subdomains
+    )
 
 
 def registered_tool_names() -> list[str]:
@@ -671,7 +692,7 @@ class CallerIPMiddleware:
         await self.app(scope, receive, send)
 
 
-@mcp.tool()
+@mcp.tool(title="Caller address", annotations=_READ_ONLY_LOCAL)
 async def whoami_caller() -> dict[str, Any]:
     """The IP address and location of whatever opened this MCP connection.
 

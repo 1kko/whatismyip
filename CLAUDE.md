@@ -644,6 +644,14 @@ below by text:
   `version`, or `unknown`. The SDK sends `""` when none is given. It is not
   `server.json`'s registry version, which is not in the image and is bumped
   only when the listing changes.
+- Every tool is registered with `title=` and `annotations=`: `_READ_ONLY`
+  (`read_only_hint=True, destructive_hint=False, idempotent_hint=True,
+  open_world_hint=True`) for the four that reach another system, and
+  `_READ_ONLY_LOCAL` (`open_world_hint=False`) for `whoami_caller`, which
+  reads only the mmdb and the lists in memory. Without annotations the spec's
+  defaults (`readOnlyHint=false`, `destructiveHint=true`) present five write
+  tools. Hints, not guarantees. `server.json` lists no tools, so it does not
+  change.
 - `compact_location` carries `precision` and `country_source` and nulls
   `lat`/`lon`/`time_zone` unless `precision` is `city`: the HTTP JSON keeps
   the numbers, the model gets only what the grade supports (a centroid's

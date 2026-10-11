@@ -70,14 +70,32 @@ def test_tools_list_exposes_the_five_tools():
     with TestClient(app) as client:
         client.post("/mcp", json=INIT, headers=MCP_HEADERS)
         response = _rpc(client, "tools/list")
-        names = {tool["name"] for tool in response.json()["result"]["tools"]}
-        assert names == {
+        listed = response.json()["result"]["tools"]
+        # Registration order, which is also the order of the page's mcp-tools
+        # tag (registered_tool_names()). TestPageToolList only compares the
+        # page with tools/list, so a registration moved elsewhere in
+        # mcp_server.py shows up here and nowhere else.
+        assert [tool["name"] for tool in listed] == [
             "lookup",
             "dns_records",
             "ssl_certificate",
-            "whoami_caller",
             "subdomains",
-        }
+            "whoami_caller",
+        ]
+        # Without annotations the spec has a client assume readOnlyHint=false
+        # and destructiveHint=true: five write tools on a server that only
+        # looks things up. Hints a client may ignore, not guarantees.
+        for tool in listed:
+            name = tool["name"]
+            assert tool["title"], name
+            assert tool["annotations"]["readOnlyHint"] is True, name
+            assert tool["annotations"]["destructiveHint"] is False, name
+            assert tool["annotations"]["idempotentHint"] is True, name
+            # whoami_caller reads the GeoIP database and the lists in memory
+            # and sends nothing anywhere; every other tool asks another system.
+            assert tool["annotations"]["openWorldHint"] is (name != "whoami_caller"), (
+                name
+            )
 
 
 def test_bad_host_header_is_rejected():
