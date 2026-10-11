@@ -111,6 +111,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   port-43 output) both produce one canonical dict (`CANONICAL_FIELDS`).
   `bootstrap_rdap` loads IANA's registry with whoisit's bundled override table
   enabled for RDAP servers IANA omits, including .ch/.li/.de/.io/.me/.us.
+  `_jscontact_name` reads registrar and registrant names from JSContact cards
+  in raw responses from registries such as KRNIC.
   `rdap_breaker` (a `CircuitBreaker`) skips an RDAP host after repeated
   failures; `refresh_rdap_bootstrap` keeps the registry current.
 - `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of

@@ -8,6 +8,7 @@ cleared before and after each test that loads one.
 """
 
 import asyncio
+import copy
 import datetime
 import json
 import time
@@ -50,6 +51,66 @@ RDAP_IP = {
     "registration_date": datetime.datetime(2023, 12, 28, 17, 24, tzinfo=UTC),
     "last_changed_date": datetime.datetime(2023, 12, 28, 17, 24, tzinfo=UTC),
     "entities": {"registrant": [{"name": "Google LLC"}]},
+}
+
+KRNIC_RDAP_JSON = {
+    "objectClassName": "domain",
+    "ldhName": "kisa.or.kr",
+    "rdapConformance": ["rdap_level_0", "redacted", "jscontact"],
+    "status": [
+        "server delete prohibited",
+        "server transfer prohibited",
+        "server update prohibited",
+    ],
+    "events": [
+        {"eventAction": "registration", "eventDate": "1996-07-19T15:00:00Z"},
+        {"eventAction": "last changed", "eventDate": "2025-05-09T08:31:52Z"},
+        {"eventAction": "expiration", "eventDate": "9999-12-30T15:00:00Z"},
+    ],
+    "nameservers": [
+        {"objectClassName": "nameserver", "ldhName": "rhea.kisa.or.kr"},
+        {"objectClassName": "nameserver", "ldhName": "center.kisa.or.kr"},
+    ],
+    "secureDNS": {"delegationSigned": True},
+    "port43": "whois.kisa.or.kr",
+    "entities": [
+        {
+            "objectClassName": "entity",
+            "roles": ["registrant"],
+            "jscontact_card": {
+                "name": {"full": "Korea Internet &amp; Security Agency"},
+                "organizations": {
+                    "org": {"name": "Korea Internet &amp; Security Agency"}
+                },
+            },
+        },
+        {
+            "objectClassName": "entity",
+            "roles": ["registrar"],
+            "jscontact_card": {
+                "name": {"full": "KISA"},
+                "organizations": {"org": {"name": "KISA"}},
+            },
+        },
+    ],
+}
+
+RDAP_DOMAIN_JSCONTACT = {
+    "name": "kisa.or.kr",
+    "handle": "",
+    "status": list(KRNIC_RDAP_JSON["status"]),
+    "nameservers": ["rhea.kisa.or.kr", "center.kisa.or.kr"],
+    "registration_date": datetime.datetime(1996, 7, 19, 15, 0, tzinfo=UTC),
+    "last_changed_date": datetime.datetime(2025, 5, 9, 8, 31, 52, tzinfo=UTC),
+    "expiration_date": datetime.datetime(9999, 12, 30, 15, 0, tzinfo=UTC),
+    "dnssec": True,
+    "whois_server": "whois.kisa.or.kr",
+    "url": "",
+    "entities": {
+        "registrant": [{"type": "entity"}],
+        "registrar": [{"type": "entity"}],
+    },
+    "raw": KRNIC_RDAP_JSON,
 }
 
 
@@ -252,6 +313,120 @@ class TestRdapOverrides:
         assert out["source"] == "rdap"
         assert out["registrar"] == registrar
         assert out["status"] == ["active"]
+
+
+class TestJscontactEntities:
+    def test_registrar_and_registrant_come_from_the_cards(self):
+        out = rdap._normalize_rdap_domain(RDAP_DOMAIN_JSCONTACT, "kisa.or.kr")
+        assert out["registrar"] == "KISA"
+        assert out["registrant"] == "Korea Internet & Security Agency"
+        assert out["dnssec"] is True
+
+    def test_a_vcard_name_still_wins(self):
+        out = rdap._normalize_rdap_domain(dict(RDAP_DOMAIN, raw=KRNIC_RDAP_JSON), "x")
+        assert out["registrar"] == "Markmonitor Inc."
+        assert out["registrant"] == "Google LLC"
+
+    def test_no_card_no_name(self):
+        no_card = {"entities": [{"roles": ["registrar"]}]}
+        empty = {"entities": [{"roles": ["registrar"], "jscontact_card": {}}]}
+        for record in (no_card, empty, {}, None):
+            assert rdap._jscontact_name(record, "registrar") is None
+
+    def test_a_record_without_raw_normalises_as_before(self):
+        out = rdap._normalize_rdap_domain({"name": "x.com"}, "x.com")
+        assert out["registrar"] is None
+        assert out["registrant"] is None
+
+    def test_a_nested_entity_is_searched(self):
+        nested = {
+            "entities": [
+                {
+                    "roles": ["registrar"],
+                    "entities": [
+                        {
+                            "roles": ["abuse"],
+                            "jscontact_card": {"name": {"full": "Abuse Desk"}},
+                        }
+                    ],
+                }
+            ]
+        }
+        assert rdap._jscontact_name(nested, "abuse") == "Abuse Desk"
+
+    def test_an_organisation_fills_in_for_a_missing_full_name(self):
+        record = {
+            "entities": [
+                {
+                    "roles": ["registrar"],
+                    "jscontact_card": {
+                        "organizations": {"org": {"name": "Example Registry"}}
+                    },
+                }
+            ]
+        }
+        assert rdap._jscontact_name(record, "registrar") == "Example Registry"
+
+    def test_whoisit_parses_the_handleless_record_only_under_overrides(
+        self, clean_whoisit
+    ):
+        def parse():
+            return whoisit.parse(
+                whoisit._bootstrap,
+                "domain",
+                "kisa.or.kr",
+                copy.deepcopy(KRNIC_RDAP_JSON),
+                include_raw=True,
+            )
+
+        whoisit.load_bootstrap_data(_registry_json(0), overrides=False)
+        with pytest.raises(whoisit.errors.ParseError):
+            parse()
+        whoisit.clear_bootstrapping()
+        whoisit.load_bootstrap_data(_registry_json(0), overrides=True)
+        parsed = parse()
+        assert parsed["handle"] == ""
+        assert parsed["entities"]["registrar"] == [{"type": "entity"}]
+        assert rdap._normalize_rdap_domain(parsed, "kisa.or.kr")["registrar"] == "KISA"
+
+    def test_lookup_rdap_asks_whoisit_for_the_raw_response(
+        self, stale_registry, monkeypatch
+    ):
+        seen = {}
+
+        def fake_domain(target, **kwargs):
+            seen.update(kwargs)
+            return dict(RDAP_DOMAIN_JSCONTACT)
+
+        monkeypatch.setattr(whoisit, "domain", fake_domain)
+        out = rdap.lookup_rdap("kisa.or.kr")
+        assert seen == {"include_raw": True}
+        assert out["registrar"] == "KISA"
+
+    def test_kisa_or_kr_keeps_its_registrar_over_rdap(
+        self, stale_registry, monkeypatch
+    ):
+        def krnic(name, include_raw=False, **kwargs):
+            return whoisit.parse(
+                whoisit._bootstrap,
+                "domain",
+                name,
+                copy.deepcopy(KRNIC_RDAP_JSON),
+                include_raw=include_raw,
+            )
+
+        monkeypatch.setattr(whoisit, "domain", krnic)
+        monkeypatch.setattr(
+            lookup.whois,
+            "whois",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("port 43 must not be asked")
+            ),
+        )
+        out = asyncio.run(lookup.lookup_whois("kisa.or.kr"))
+        assert out["source"] == "rdap"
+        assert out["registrar"] == "KISA"
+        assert out["registrant"] == "Korea Internet & Security Agency"
 
 
 if __name__ == "__main__":

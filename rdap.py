@@ -8,6 +8,11 @@ gTLDs and many ccTLDs to an RDAP server, and whoisit's bundled override table
 adds registries IANA omits or misstates, including .ch, .li, .de, .io, .me and
 .us. A TLD in neither still goes through python-whois.
 
+The override flag also permits handleless records such as KRNIC's. KRNIC uses
+JSContact cards, which whoisit's vCard parser does not name; `_jscontact_name`
+reads registrar and registrant names from the raw response retained by
+`whoisit.domain(..., include_raw=True)`.
+
 Both sources are normalised into one canonical dict so the API and the template
 never have to care which one answered:
 
@@ -45,11 +50,12 @@ an IP whose RIR does not answer gets RIR_RDAP_UNAVAILABLE instead.
 
 from __future__ import annotations
 
+import html
 import ipaddress
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -170,14 +176,46 @@ def _entity_email(entities: dict | None, role: str) -> str | None:
     return None
 
 
+def _rdap_entities(rdap_json: dict | None) -> Iterator[dict]:
+    """Yield every entity in an RDAP response, including nested contacts."""
+    for entity in (rdap_json or {}).get("entities") or []:
+        if isinstance(entity, dict):
+            yield entity
+            yield from _rdap_entities(entity)
+
+
+def _jscontact_name(rdap_json: dict | None, role: str) -> str | None:
+    """Read a role's name from the first matching JSContact card."""
+    for entity in _rdap_entities(rdap_json):
+        roles = [str(item).lower() for item in entity.get("roles") or []]
+        card = entity.get("jscontact_card")
+        if role not in roles or not isinstance(card, dict):
+            continue
+        name_obj = card.get("name")
+        name = name_obj.get("full") if isinstance(name_obj, dict) else None
+        if not name:
+            organizations = card.get("organizations")
+            if isinstance(organizations, dict):
+                for organization in organizations.values():
+                    if isinstance(organization, dict) and organization.get("name"):
+                        name = organization["name"]
+                        break
+        if name:
+            return html.unescape(str(name)).strip() or None
+    return None
+
+
 def _normalize_rdap_domain(raw: dict, target: str) -> dict:
     entities = raw.get("entities") or {}
+    rdap_json = raw.get("raw") or {}
     return {
         "source": "rdap",
         "name": raw.get("name") or target,
         "handle": raw.get("handle"),
-        "registrar": _entity_name(entities, "registrar"),
-        "registrant": _entity_name(entities, "registrant"),
+        "registrar": _entity_name(entities, "registrar")
+        or _jscontact_name(rdap_json, "registrar"),
+        "registrant": _entity_name(entities, "registrant")
+        or _jscontact_name(rdap_json, "registrant"),
         "abuse_email": _entity_email(entities, "abuse"),
         "status": list(raw.get("status") or []),
         "name_servers": list(raw.get("nameservers") or []),
@@ -330,7 +368,9 @@ def lookup_rdap(target: str) -> dict | None:
         if ip_target:
             result = _normalize_rdap_ip(whoisit.ip(target), target)
         else:
-            result = _normalize_rdap_domain(whoisit.domain(target), target)
+            result = _normalize_rdap_domain(
+                whoisit.domain(target, include_raw=True), target
+            )
     except whoisit.errors.ResourceDoesNotExist:
         # RDAP authoritatively says the name/allocation is unregistered; do not
         # waste a WHOIS round-trip re-confirming it.
