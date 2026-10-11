@@ -550,6 +550,19 @@ geoip2fast country fallback is loaded), `static/geo/cities.json` (GeoNames citie
 matches the city name, with a population-weighted country centroid as the last
 resort (`geo.Gazetteer.resolve`). Private IPs get no map.
 
+**Precision**: `lookup.lookup_location` grades GeoLite2's coordinates as
+`location.precision` (`geo.coordinate_precision`), and `main._apply_resolved_target`
+overwrites it with the gazetteer's grade for the coordinates the page draws;
+`build_map_payload` puts the visitor's on `origin.precision`. `viewmodel._city_line`
+prints "approximate · country-level" (or "registered in … · location unknown"
+when `country_source` is `registered`) in place of a city, and `distance_text`
+exists only when both ends are `city` (`viewmodel._precise_route`); the JSON's
+numbers never change. `render_page` hands map.js `target_precision` and
+`origin_precision`, and `pin()` draws a non-city pin as `map__pin--approx`
+(dashed in CSS, a halo half as wide again) with no `map__distance` chip.
+map.js exports `pin` for node like webrtc.js does; `tests/test_map_pin.py`
+runs it, and the page wiring that feeds it, against a fake document.
+
 **Projection**: all map math is server-side and unit-tested (`tests/test_mapgeom.py`).
 `main.build_map_payload` has `mapgeom.build_canvas` emit tile URLs with pixel
 offsets plus a projected great-circle polyline for two fixed canvases,
@@ -786,9 +799,9 @@ and importing `main` makes no network call. The suite runs offline, and
 - A test that genuinely needs the network is marked `@pytest.mark.network`. It
   is skipped unless `RUN_NETWORK_TESTS=1`, and then runs with neither layer in
   place. No test needs it today.
-- `test_webrtc_leak.py` and `test_boot.py` run node and a fresh interpreter as
-  subprocesses, outside the guard. The webrtc tests skip when `node` is not
-  installed.
+- `test_webrtc_leak.py`, `test_map_pin.py` and `test_boot.py` run node and a
+  fresh interpreter as subprocesses, outside the guard. The node tests skip
+  when `node` is not installed.
 
 Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
@@ -815,7 +828,7 @@ Test files:
   `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`, and
   `?fields=` joining the self lookup),
   `test_ip_whois_column.py` (an IP's WHOIS column), `test_subdomain_panel.py`
-  (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test)
+  (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test), `test_map_pin.py` (map.js's approximate pin and its page wiring, run in node)
 - Lookup behaviour: `test_classify_target.py` (refused before any network
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
   `test_dns_status.py` (a failed

@@ -1,9 +1,12 @@
+import json
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+import lookup
 import mcp_server
 from main import app, build_map_payload, normalize_lookup_target
 from main import _is_route
@@ -32,6 +35,110 @@ SEOUL_IP = "118.235.14.201"
 # visitor's address is set as the TestClient's own peer address instead.
 client = TestClient(app, client=(SEOUL_IP, 41234))
 local_client = TestClient(app, client=("127.0.0.1", 41234))
+
+# GeoLite2-City's records, as GeoIpManager.fetch_location flattens them.
+# US_CENTROID is 8.8.8.8 in the 2026-07-31 build: a country with coordinates
+# in the middle of Kansas and a 1000 km radius. REGISTERED_ONLY is 1.1.1.1:
+# only the country the block is registered in, nothing else. MOUNTAIN_VIEW
+# and SEOUL are ordinary city records.
+US_CENTROID = {
+    "ip": "8.8.8.8",
+    "country_code": "US",
+    "country_name": "United States",
+    "country_source": "located",
+    "city_name": "",
+    "subdivision_name": "",
+    "subdivision_code": "",
+    "lat": 37.751,
+    "lon": -97.822,
+    "accuracy_km": 1000,
+    "time_zone": "America/Chicago",
+    "cidr": "8.8.8.0/24",
+    "asn_name": "GOOGLE",
+    "asn_cidr": "8.8.8.0/24",
+    "asn_number": 15169,
+    "is_private": False,
+    "hostname": "",
+}
+MOUNTAIN_VIEW = {
+    **US_CENTROID,
+    "city_name": "Mountain View",
+    "subdivision_name": "California",
+    "subdivision_code": "CA",
+    "lat": 37.386,
+    "lon": -122.084,
+    "accuracy_km": 20,
+    "time_zone": "America/Los_Angeles",
+}
+REGISTERED_ONLY = {
+    **US_CENTROID,
+    "ip": "1.1.1.1",
+    "country_code": "AU",
+    "country_name": "Australia",
+    "country_source": "registered",
+    "lat": None,
+    "lon": None,
+    "accuracy_km": None,
+    "time_zone": None,
+    "cidr": "1.1.1.0/24",
+    "asn_name": "CLOUDFLARENET",
+    "asn_cidr": "1.1.1.0/24",
+    "asn_number": 13335,
+}
+SEOUL = {
+    **US_CENTROID,
+    "ip": SEOUL_IP,
+    "country_code": "KR",
+    "country_name": "South Korea",
+    "city_name": "Seoul",
+    "subdivision_name": "Seoul",
+    "subdivision_code": "11",
+    "lat": 37.5665,
+    "lon": 126.978,
+    "accuracy_km": 20,
+    "time_zone": "Asia/Seoul",
+    "cidr": "118.235.0.0/16",
+    "asn_name": "SK Telecom",
+    "asn_cidr": "118.235.0.0/16",
+    "asn_number": 9644,
+}
+# A visitor a carrier's CGNAT pool places only in a country.
+SEOUL_COARSE = {
+    **SEOUL,
+    "city_name": "",
+    "subdivision_name": "",
+    "subdivision_code": "",
+    "lat": 36.5,
+    "lon": 127.75,
+    "accuracy_km": 1000,
+}
+
+
+@contextmanager
+def geolite2(*records):
+    """GeoLite2's answer for each address in `records`, in place of the data/
+    files (or the bundled country snapshot on CI). Patched at the manager so
+    both ends go through lookup.lookup_location, which grades them as in
+    production; any other address still gets the real answer (the security
+    middleware's geo check looks the visitor up too)."""
+    by_ip = {record["ip"]: record for record in records}
+    real = lookup.geo_ip_manager.fetch_location
+
+    def fake(ip):
+        return dict(by_ip[ip]) if ip in by_ip else real(ip)
+
+    with patch.object(lookup.geo_ip_manager, "fetch_location", fake):
+        yield
+
+
+def _embedded_json(html, element_id):
+    """The JSON the page embeds for app.js (#page-data) and map.js (#map-data)."""
+    raw = re.search(
+        rf'<script type="application/json" id="{element_id}"[^>]*>(.*?)</script>',
+        html,
+        re.S,
+    ).group(1)
+    return json.loads(raw.replace("<\\/", "</"))
 
 
 class TestNormalizeLookupTarget:
@@ -172,6 +279,103 @@ class TestMapPayload:
         body = client.get("/", headers=JSON_UA).json()
         assert body["location"]["ip"] == SEOUL_IP
         assert body["origin"] is None
+
+
+class TestPrecisionOnThePage:
+    """Backlog #2. 8.8.8.8 drew a crisp pin in Kansas with "≈ 10,462 km from
+    you"; 1.1.1.1 an Australian flag over the outback. The page now says what
+    the fix is worth, the map draws it dashed, and the chip goes; the JSON
+    keeps every value it had and gains only the two markers."""
+
+    def test_a_country_centroid_target_is_called_approximate(self):
+        with geolite2(US_CENTROID, SEOUL):
+            html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert "approximate · country-level" in html
+        assert "registered in" not in html
+        map_data = _embedded_json(html, "map-data")
+        assert map_data["target_precision"] == "country"
+        assert map_data["origin_precision"] == "city"
+        assert map_data["distance_text"] is None  # no map__distance chip
+        page = _embedded_json(html, "page-data")
+        assert page["location"]["precision"] == "country"
+        assert page["location"]["lat"] == 37.751
+        assert page["location"]["accuracy_km"] == 1000
+        assert page["distance_km"] > 1000  # the arc is still drawn
+        assert page["origin"]["precision"] == "city"
+
+    def test_a_registered_only_target_says_registered_in(self):
+        with geolite2(REGISTERED_ONLY, SEOUL):
+            html = client.get("/1.1.1.1", headers=BROWSER_UA).text
+        assert "registered in Australia · location unknown" in html
+        hero = re.search(r'<div class="origin">.*?</section>', html, re.S).group(0)
+        assert "anycast" not in hero.lower()  # GeoLite2 has no such trait
+        map_data = _embedded_json(html, "map-data")
+        assert map_data["target_precision"] == "country"
+        assert map_data["distance_text"] is None
+        page = _embedded_json(html, "page-data")
+        assert page["location"]["country_code"] == "AU"
+        assert page["location"]["country_source"] == "registered"
+        assert page["location"]["precision"] == "country"
+        # The gazetteer's centroid, as before: the map still has a pin.
+        assert page["location"]["lat"] is not None
+
+    def test_a_city_fix_is_unchanged(self):
+        with geolite2(MOUNTAIN_VIEW, SEOUL):
+            html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert "Mountain View · California" in html
+        assert "approximate" not in html
+        map_data = _embedded_json(html, "map-data")
+        assert map_data["target_precision"] == "city"
+        assert map_data["origin_precision"] == "city"
+        assert map_data["distance_text"].startswith("≈ ")
+        assert map_data["distance_text"].endswith(" km from you")
+
+    def test_a_country_level_visitor_gets_no_distance(self):
+        """The other end of the arc: a visitor placed only in a country sees
+        no "≈ N km from you" either, and their home pin is dashed."""
+        with geolite2(MOUNTAIN_VIEW, SEOUL_COARSE):
+            html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        map_data = _embedded_json(html, "map-data")
+        assert map_data["target_precision"] == "city"
+        assert map_data["origin_precision"] == "country"
+        assert map_data["distance_text"] is None
+
+    def test_the_self_page_grades_the_visitors_own_fix(self):
+        with geolite2(SEOUL_COARSE):
+            body = client.get("/", headers=JSON_UA).json()
+            html = client.get("/", headers=BROWSER_UA).text
+        assert body["location"]["precision"] == "country"
+        assert body["location"]["country_source"] == "located"
+        assert "approximate · country-level" in html
+
+    def test_json_gains_only_the_markers(self):
+        with geolite2(US_CENTROID, SEOUL):
+            body = client.get("/8.8.8.8", headers=JSON_UA).json()
+        assert body["location"]["precision"] == "country"
+        assert body["location"]["country_source"] == "located"
+        assert body["location"]["lat"] == 37.751
+        assert body["location"]["lon"] == -97.822
+        assert body["location"]["accuracy_km"] == 1000
+        assert body["location"]["time_zone"] == "America/Chicago"
+        assert body["distance_km"] > 1000
+        assert body["origin"]["precision"] == "city"
+        assert body["origin"]["lat"] == 37.5665
+        assert body["origin"]["accuracy_km"] == 20
+
+    def test_text_and_fields_are_untouched(self):
+        """textfmt.FIELDS has no coordinate field, so neither format changes."""
+        with geolite2(US_CENTROID, SEOUL):
+            text = client.get("/8.8.8.8?format=text", headers=JSON_UA).text
+            fields = client.get("/8.8.8.8?fields=country_code", headers=JSON_UA).json()
+        assert "precision" not in text
+        assert "approximate" not in text
+        assert fields == {"country_code": "US"}
+
+    def test_the_css_dashes_the_approximate_pin(self):
+        css = CSS.read_text(encoding="utf-8")
+        assert ".map__pin--approx .map__pin-halo" in css
+        rule = css.split(".map__pin--approx .map__pin-halo", 1)[1].split("}", 1)[0]
+        assert "stroke-dasharray" in rule
 
 
 class TestDnsRows:

@@ -584,6 +584,12 @@ table.records--dns td:nth-child(4) {
 .map__pin--origin .map__pin-halo { fill: #8B97AC1F; stroke: #8B97AC66; }
 .map__pin--origin .map__pin-dot { fill: var(--text-secondary); }
 .map__pin-home { fill: var(--text-secondary); }
+/* A country-level fix: GeoLite2's country centroid (8.8.8.8 is "somewhere in
+   the US", ± 1000 km) or the gazetteer's. Dashed and, in map.js, wider: it
+   reads as "around here", where the solid ring reads as "here". */
+.map__pin--approx .map__pin-halo { fill: #5B8CFF0A; stroke: #5B8CFF80; stroke-dasharray: 6 5; }
+.map__pin--approx .map__pin-ring { stroke-dasharray: 5 4; }
+.map__pin--approx.map__pin--origin .map__pin-halo { fill: #8B97AC14; stroke: #8B97AC99; }
 .map__pin-label {
   fill: var(--text-primary);
   font-family: var(--font-mono);

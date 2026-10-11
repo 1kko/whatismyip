@@ -91,10 +91,17 @@ RDAP registration data and the full TLS certificate, expanded.
   tile URLs with pixel offsets and a projected great-circle polyline for two
   fixed canvases (desktop band and mobile card); the browser only paints them.
   Coordinates come from GeoLite2-City, with a committed GeoNames gazetteer
-  (city name, then country centroid) for addresses it gives none.
+  (city name, then country centroid) for addresses it gives none. A fix
+  GeoLite2 could only place in a country (its 1,000 km centroid for 8.8.8.8, or
+  a block it has no coordinates for) is drawn as a dashed, wider pin, and the
+  hero says `approximate · country-level` in place of a city — or
+  `registered in … · location unknown` when GeoLite2 had only the country the
+  block is registered in (1.1.1.1).
 - **Distance** — great-circle kilometres from the visitor to the target, drawn as
   an arc. Pacific crossings wrap the antimeridian correctly instead of running
-  the wrong way across Europe.
+  the wrong way across Europe. The number is printed only between two
+  city-level fixes: with a centroid at either end it would be the centroid's
+  distance, not the address's.
 - **Fingerprint panel** (self view only) — around 27 browser signals plus an
   entropy estimate, computed in the browser and never sent to the server.
 - **WebRTC leak test** (in the fingerprint panel, opt-in) — asks one STUN server
@@ -750,7 +757,7 @@ rate limit as `GET`.
   "headers": { "user-agent": "curl/8.7.1", "accept": "*/*" },
   "map": { "desktop": { "...": "tiles, pin and polyline in canvas pixels" }, "mobile": { "...": "" } },
   "distance_km": 9027.9,
-  "origin": { "ip": "203.0.113.7", "country_code": "KR", "country_name": "South Korea", "city_name": "Jongno-gu", "lat": 37.5794, "lon": 126.9754, "accuracy_km": 20 },
+  "origin": { "ip": "203.0.113.7", "country_code": "KR", "country_name": "South Korea", "city_name": "Jongno-gu", "lat": 37.5794, "lon": 126.9754, "accuracy_km": 20, "precision": "city" },
   "elapsed_ms": 237
 }
 ```
@@ -796,6 +803,9 @@ are no coordinates at all. `location.country_source` is `located`, or
 was found or only the bundled country snapshot answered (before the first
 GeoLite2 download). The numbers themselves are the same whatever the grade;
 only the two markers were added.
+`origin.precision` grades the visitor's end the same way. The page prints a
+distance, and a solid pin, only for a city-level fix; the JSON's `distance_km`
+is there either way.
 
 ### IP reputation
 
