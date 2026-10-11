@@ -95,8 +95,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
     `data/tld/`. Constructed before `DomainManager` (see `lookup.py`), because
     it repoints `tld` at the data volume
   - `DomainManager`: `is_valid_domain` (does the target have a public suffix),
-    `zone_apex`, `get_records` (the record sweep) and `perform_reverse_lookup`
-    (PTR)
+    `zone_apex`, `registrable_domain` (the ICANN-section floor `zone_apex`,
+    the registration lookup and the DMARC fallback share), `get_records` (the
+    record sweep; `dmarc=True` adds the name's DMARC record) and
+    `perform_reverse_lookup` (PTR)
   - `SSLManager.get_ssl_info`: the certificate, read from a verified IP.
     `_connect` gives the TCP connect `TLS_CONNECT_TIMEOUT_SECONDS` (3 s) and
     then sets `TIMEOUT_SECONDS` (5 s) for the handshake before returning, since
@@ -185,7 +187,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - `textfmt.py`: `?format=text` and `?fields=`. The field table (names are
   `mcp_server`'s compact_* shapes, flattened; each field lists the `gather()`
   legs it needs and the target kinds it applies to) and the text/flat-JSON
-  rendering. Pure: `main.py` runs the lookup. `-` is "no value", `?` is "the
+  rendering. Pure: `main.py` runs the lookup. `dmarc_policy` reads
+  `viewmodel.dmarc_policy()`, so the field and the page's Mail row agree.
+  `-` is "no value", `?` is "the
   lookup failed": `field_values` marks the registration fields for a broken
   RDAP/WHOIS lookup, every field read from the address (chosen by leg, so a
   new field follows; `_NAME_LEGS`, whois and the dns sweep, ask about the
@@ -232,7 +236,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `mcp_server.py` reuses its certificate helpers without a cycle. The one
   decision that needs `lookup` — which values link to their own lookup —
   comes in as the `link_for` argument (`main.lookup_href`); the default
-  `None` links nothing.
+  `None` links nothing. `dmarc_policy()` is the one reading of a name's
+  DMARC record (the Mail row in the DNS column): exactly one record, and an
+  inherited one's `sp=` for a subdomain.
 - `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
   and `coordinate_precision`, the one `city`/`country` rule for a fix.
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
@@ -315,9 +321,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    (an IPv6-only host), from the public resolvers; the address must pass
    `is_safe_ip` too
 4. **Data Gathering** (`lookup._run_legs`, holding a `lookup_gate` slot): the
-   registration lookup runs alongside everything else; a domain's DNS sweep and
-   TLS handshake run concurrently; an IP gets its PTR, then a sweep of the PTR
-   name. GeoIP is read inline, and reputation from the lists in memory; an IP
+   registration lookup runs alongside everything else; a domain's DNS sweep
+   (its DMARC record included) and TLS handshake run concurrently; an IP gets
+   its PTR, then a sweep of the PTR name, without DMARC. GeoIP is read inline,
+   and reputation from the lists in memory; an IP
    target is also sent to AbuseIPDB, alongside the rest
 5. **Response Assembly**: `main.get_ip_info` builds a plain dict (`address`,
    `resolved_ip`, `resolution`, `datetime`, `domain`, `location`, `whois`,
@@ -368,8 +375,11 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   (Docker's 127.0.0.11) and never a domain's own nameservers:
   `get_records`'s `ns_servers` argument is accepted and ignored.
 - The sweep asks A, AAAA, MX, NS, CNAME, TXT (and SPF from it) and PTR
-  concurrently. NS and MX host addresses go through `_with_host_ips`, capped at
-  `DNS_HOST_RESOLVE_LIMIT`; rows past the cap carry `ip_skipped`. A TXT string
+  concurrently, and DMARC when asked: `get_records(dmarc=True)` comes from
+  `lookup._run_legs` for a domain target only, so the self page's and an IP
+  target's PTR-name sweeps make no `_dmarc` query. NS and MX host addresses go
+  through `_with_host_ips`, capped at `DNS_HOST_RESOLVE_LIMIT`; rows past the
+  cap carry `ip_skipped`. A TXT string
   over 255 bytes arrives split and is joined with no separator (RFC 7208).
 - NS, the zone's SPF, and MX for a name with none of its own come from the zone
   apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
@@ -404,8 +414,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   drawn as `(of <owner>)` the same way. The NAME `<td>` stays attribute-free
   (tests match it as a bare `<td>`). JSON, MCP `dns_records` and
   `?format=text` are unchanged
-- `zone_apex`'s floor comes from `tld.get_fld(..., search_private=False)`,
-  which reads `tld`'s separate public-only list
+- `zone_apex`'s floor, `DomainManager.registrable_domain()`, comes from
+  `tld.get_fld(..., search_private=False)`, which reads `tld`'s separate
+  public-only list
   (`data/tld/res/effective_tld_names_public_only.dat.txt`). `TldNamesManager`
   keeps it as a byte copy of the full list, at boot (`_mirror_public_only`)
   and on every refresh: `tld`'s public-only parser stops at
@@ -413,6 +424,15 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   one. Without that copy `tld` downloads `?publiconly` itself, inside the
   request and with no timeout, and offline `get_fld` raises `TypeError` even
   with `fail_silently`.
+- DMARC follows RFC 7489 §6.6.3: TXT at `_dmarc.<name>`, kept when it opens
+  with `v=DMARC1` (joined like SPF), and only when the name holds no policy
+  record, `_dmarc.<registrable_domain()>` once — the public suffix list's
+  answer, never the SOA zone. A failed first query never falls back, a failed
+  fallback is the status, and each record's `queried_name` says which name
+  answered. The page's DNS table lists each record under that name
+  (`main._dmarc_rows`); an inherited one carries `inherited_from` and ends
+  VALUE with that domain in parentheses, as a zone row ends with `(zone)`,
+  since NAME is hidden under 900px.
 
 #### GeoIP Databases
 
@@ -507,7 +527,8 @@ for an IP, whose registration is its network's.
   `managers.dns_status`), next to the unchanged record keys. The page prints
   `(timed out)`-style text and an NXDOMAIN banner; MCP `dns_records` returns
   `{"error": status}` for a failed type. The MX status is the zone's when the
-  name fell back to the zone's MX
+  name fell back to the zone's MX, and the DMARC status the registrable
+  domain's when the name fell back to its record
 - An IP's forward-confirmed reverse DNS (`viewmodel.fcrdns_state`) is read
   off its PTR and the sweep of the PTR name already fetched, never a query of
   its own: `unknown` when that A/AAAA query failed, never `unconfirmed`. The
@@ -1147,11 +1168,11 @@ Test files:
   `test_fingerprint_consistency.py` (clock and languages vs address, in node)
 - Lookup behaviour: `test_classify_target.py` (refused before any network
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
-  `test_dns_status.py` (a failed
-  query is never "no records"), `test_cname_chain.py` (the CNAME chain and
-  canonical name read off the A answer, the hop rows, the GeoIP 'Resolves
-  via' row and `dns_records`' two keys), `test_zone_apex.py` (NS/MX/SPF from the zone
-  apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
+  `test_dns_status.py` (a failed query is never "no records"; DMARC
+  discovery), `test_cname_chain.py` (the CNAME chain and canonical name read
+  off the A answer, the hop rows, the GeoIP 'Resolves via' row and
+  `dns_records`' two keys), `test_zone_apex.py` (NS/MX/SPF from the zone
+  apex; DMARC from the registrable domain), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
   floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
   255 bytes), `test_resolver_unification.py` (one resolver set and budget),
   `test_tls_reasons.py` (why a certificate fails, the TLS connect and handshake

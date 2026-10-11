@@ -304,8 +304,9 @@ def _record_value(kind: str, record) -> str:
     """The part of a record a human reads, not its Python repr.
 
     DomainManager returns each type with its own shape: A and AAAA are
-    {ip, ttl}, MX is {preference, hostname, ttl, ip}, NS is {hostname, ttl, ip}
-    and TXT is {text: [...], ttl}. CNAME is a single {cname, ttl}, not a list.
+    {ip, ttl}, MX is {preference, hostname, ttl, ip}, NS is {hostname, ttl, ip},
+    TXT is {text: [...], ttl} and DMARC is {text, ttl, queried_name}, already
+    joined. CNAME is a single {cname, ttl}, not a list.
     """
     if not isinstance(record, dict):
         return str(record)
@@ -326,6 +327,8 @@ def _record_value(kind: str, record) -> str:
         # Chunks are 255-byte wire splits, not words (RFC 7208 §3.3).
         text = record.get("text", "")
         return "".join(text) if isinstance(text, list) else str(text)
+    if kind == "DMARC":
+        return str(record.get("text", ""))
     return str(record)
 
 
@@ -395,6 +398,45 @@ def _zone_of(kind: str, record: object, zone: str) -> str | None:
     return None
 
 
+def _dmarc_rows(domain: dict, queried_name: str) -> list[dict]:
+    """The DNS table's DMARC rows. Each record is listed under the _dmarc name
+    that answered -- the queried name's own, or its registrable domain's when
+    it has none. An inherited record also carries `inherited_from`, that
+    domain, which the template prints after VALUE as a zone row prints
+    "(zone)": the NAME column is hidden on a narrow screen, and the record
+    must not read as the queried name's own there either. A failed query gets
+    a row saying so, under the name asked first, as the other types' failed
+    rows do. The value is policy text, not a host, so no row links to a
+    lookup: like a TXT row, none has an href key."""
+    asked = f"_dmarc.{queried_name}"
+    rows = []
+    for record in domain.get("dmarc") or []:
+        if not isinstance(record, dict):
+            continue
+        name = record.get("queried_name") or asked
+        row = {
+            "type": "DMARC",
+            "name": name,
+            "value": _record_value("DMARC", record),
+            "ttl": record.get("ttl", ""),
+        }
+        if name != asked:
+            row["inherited_from"] = name.removeprefix("_dmarc.")
+        rows.append(row)
+    failure = dns_failure_text(domain, "dmarc")
+    if failure:
+        rows.append(
+            {
+                "type": "DMARC",
+                "name": asked,
+                "value": failure,
+                "ttl": "",
+                "tone": "warning",
+            }
+        )
+    return rows
+
+
 def _dns_rows(response_data: dict) -> list[dict]:
     """Flatten the DNS record dict into table rows.
 
@@ -446,6 +488,8 @@ def _dns_rows(response_data: dict) -> list[dict]:
                 )
             )
         rows.extend(failed(kind, key))
+
+    rows.extend(_dmarc_rows(domain, queried_name))
 
     chain = [hop for hop in domain.get("cname_chain") or [] if isinstance(hop, dict)]
     cname = domain.get("cname")

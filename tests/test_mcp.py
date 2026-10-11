@@ -778,6 +778,61 @@ def test_dns_records_rejects_a_type_it_never_queries():
         assert "caa" in payload["error"]
 
 
+def test_dns_records_answers_the_dmarc_type():
+    """The sweep returns "dmarc" now, so it is answered like any other type;
+    "caa", above, is still refused."""
+
+    # legs: #6's _bounded_gather hands the tool's legs on to gather().
+    async def fake_gather(target, legs=None):
+        return {
+            **FAKE_LOOKUP,
+            "domain": {
+                "a": [{"ip": "93.184.216.34", "ttl": 300}],
+                "dmarc": [
+                    {
+                        "text": "v=DMARC1; p=reject",
+                        "ttl": 300,
+                        "queried_name": "_dmarc.example.com",
+                    }
+                ],
+                "status": {"a": "ok", "dmarc": "ok"},
+            },
+        }
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {
+                    "name": "dns_records",
+                    "arguments": {"domain": "example.com", "types": ["dmarc"]},
+                },
+            )
+        result = response.json()["result"]
+        assert result["isError"] is False
+        assert result["structuredContent"]["records"] == {
+            "dmarc": [
+                {
+                    "text": "v=DMARC1; p=reject",
+                    "ttl": 300,
+                    "queried_name": "_dmarc.example.com",
+                }
+            ]
+        }
+
+
+def test_dns_records_documents_dmarc():
+    """The description a model reads says where the record comes from and how
+    to relay an inherited one; "SPF/DMARC questions" alone was there before."""
+    doc = " ".join(mcp_server.dns_records.__doc__.split())
+    assert "dmarc" in mcp_server._RECORD_TYPES
+    assert "_dmarc.<name>" in doc
+    assert "registrable domain" in doc
+    assert "queried_name" in doc
+
+
 def test_lookup_tool_reports_a_timeout():
     async def hang(target, legs=None):
         raise TimeoutError()

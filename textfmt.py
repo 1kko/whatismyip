@@ -20,7 +20,7 @@ from mcp_server import (
     compact_reputation,
     compact_ssl,
 )
-from viewmodel import DASH, DNS_FAILURE_TEXT, fcrdns_state
+from viewmodel import DASH, DNS_FAILURE_TEXT, dmarc_policy, fcrdns_state
 
 _BOTH = frozenset({"domain", "ip"})
 _DOMAIN = frozenset({"domain"})
@@ -61,6 +61,8 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "risk_signals": (frozenset({"reputation"}), _BOTH),
     # AbuseIPDB is asked only about an address looked up directly.
     "abuse_score": (frozenset({"reputation"}), _IP),
+    # The DMARC policy that governs the name (viewmodel.dmarc_policy).
+    "dmarc_policy": (frozenset({"dns"}), _DOMAIN),
 }
 
 # Asked for by name only, never in the text block. A bare "risk_level: none"
@@ -71,9 +73,16 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
 # "resolution: ok" is one more line for every reader to skip.
 # reverse_dns_confirmed is left out for its cost: in the block, every IP lookup
 # would pay for the sweep of its PTR name, which nothing else there reads.
+# dmarc_policy needs the record sweep, which the block is built to skip.
 _RISK_FIELDS = ("risk_level", "risk_signals")
 _NOT_IN_BLOCK = frozenset(
-    {*_RISK_FIELDS, "abuse_score", "resolution", "reverse_dns_confirmed"}
+    {
+        *_RISK_FIELDS,
+        "abuse_score",
+        "resolution",
+        "reverse_dns_confirmed",
+        "dmarc_policy",
+    }
 )
 
 # viewmodel.fcrdns_state()'s two answers. "no_ptr" is "-" (there is no PTR to
@@ -183,6 +192,8 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     registration = compact_registration(data.get("whois"))
     tls = compact_ssl(data.get("ssl")) or {}
     reputation = compact_reputation(data.get("reputation")) or {}
+    domain = data.get("domain") or {}
+    dmarc = dmarc_policy(domain) or {}
     fcrdns = fcrdns_state(
         data.get("reverse_dns"), data.get("domain"), data.get("address") or ""
     )
@@ -213,6 +224,7 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         # The ids, comma-separated: one value per field is the format.
         "risk_signals": ",".join(s["id"] for s in reputation.get("signals") or []),
         "abuse_score": (reputation.get("abuseipdb") or {}).get("abuse_confidence"),
+        "dmarc_policy": dmarc.get("policy"),
     }
     # The certificate helpers answer the page, which shows an em dash for
     # "none"; and a field that does not apply to the target is "-" whatever the
@@ -267,6 +279,16 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     # which "unconfirmed" would misstate.
     if fcrdns == "unknown" and kind in FIELDS["reverse_dns_confirmed"][1]:
         errors["reverse_dns_confirmed"] = _FCRDNS_FAILED
+    # The _dmarc query failed: the policy is unknown, not "-". nxdomain and
+    # noanswer are answers -- the name publishes none -- and stay "-". A
+    # failed A query does not reach this field: the sweep asks about the name
+    # (_NAME_LEGS), so its answer stands.
+    dmarc_status = (domain.get("status") or {}).get("dmarc")
+    if dmarc_status in DNS_FAILURE_TEXT and kind in FIELDS["dmarc_policy"][1]:
+        errors["dmarc_policy"] = dmarc_status
+    # The JSON says null beside the reason, never a policy.
+    if "dmarc_policy" in errors:
+        values["dmarc_policy"] = None
     return values, errors
 
 

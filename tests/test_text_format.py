@@ -1098,6 +1098,131 @@ class TestAgeFields:
         assert _ran(mocks) == set()
 
 
+# --- dmarc_policy -----------------------------------------------------------------
+
+DMARC_RECORD = {
+    "text": "v=DMARC1; p=reject; rua=mailto:dmarc@example.com",
+    "ttl": 300,
+    "queried_name": "_dmarc.example.com",
+}
+
+
+def _swept(dmarc, status):
+    """What the record sweep hands back for example.com, cut to DMARC."""
+    return {"queried_name": "example.com", "dmarc": dmarc, "status": status}
+
+
+class TestDmarcPolicyField:
+    def test_it_is_the_record_sweep_alone(self):
+        """No WHOIS, GeoIP or TLS: the A query that gates every address leg,
+        then the sweep, which asks for the DMARC record."""
+        with _legs() as mocks:
+            mocks["records"].return_value = _swept([DMARC_RECORD], {"dmarc": "ok"})
+            response = client.get("/example.com?fields=dmarc_policy", headers=CURL)
+        assert response.json() == {"dmarc_policy": "reject"}
+        assert _ran(mocks) == {"resolver", "records"}
+        assert mocks["records"].call_args.kwargs["dmarc"] is True
+
+    def test_it_stays_out_of_the_text_block(self):
+        """The block skips the sweep, so a field that needs it is asked for by
+        name only (test_the_block_skips_the_record_sweep_and_crt_sh)."""
+        with _legs():
+            response = client.get("/example.com?format=text", headers=CURL)
+        assert "dmarc_policy" not in dict(_block(response))
+
+    def test_an_inherited_policy_is_the_one_for_subdomains(self):
+        inherited = {**DMARC_RECORD, "text": "v=DMARC1; p=reject; sp=quarantine"}
+        with _legs() as mocks:
+            mocks["records"].return_value = {
+                "queried_name": "www.example.com",
+                "dmarc": [inherited],
+                "status": {"dmarc": "ok"},
+            }
+            response = client.get(
+                "/www.example.com?fields=dmarc_policy&format=text", headers=CURL
+            )
+        assert response.text == "quarantine\n"
+
+    @pytest.mark.parametrize("status", ["nxdomain", "noanswer"])
+    def test_no_record_is_a_dash(self, status):
+        with _legs() as mocks:
+            mocks["records"].return_value = _swept([], {"dmarc": status})
+            text = client.get(
+                "/example.com?fields=dmarc_policy&format=text", headers=CURL
+            )
+            body = client.get("/example.com?fields=dmarc_policy", headers=CURL)
+        assert text.text == "-\n"
+        assert body.json() == {"dmarc_policy": None}
+
+    def test_two_records_are_a_dash(self):
+        """RFC 7489 ends policy discovery at two records: no policy applies."""
+        second = {**DMARC_RECORD, "text": "v=DMARC1; p=none"}
+        with _legs() as mocks:
+            mocks["records"].return_value = _swept(
+                [DMARC_RECORD, second], {"dmarc": "ok"}
+            )
+            response = client.get("/example.com?fields=dmarc_policy", headers=CURL)
+        assert response.json() == {"dmarc_policy": None}
+
+    @pytest.mark.parametrize("status", ["timeout", "servfail", "error"])
+    def test_a_failed_dmarc_query_is_a_question_mark(self, status):
+        """The A query answered; the _dmarc TXT query did not."""
+        with _legs() as mocks:
+            mocks["records"].return_value = _swept([], {"dmarc": status})
+            text = client.get(
+                "/example.com?fields=ip,dmarc_policy&format=text", headers=CURL
+            )
+            body = client.get("/example.com?fields=dmarc_policy", headers=CURL)
+        assert text.text == f"{DOMAIN_IP}\n?\n"
+        assert body.json() == {"dmarc_policy": None, "errors": {"dmarc_policy": status}}
+
+    def test_resolvers_that_answer_nothing_are_a_question_mark(self):
+        """The gating A query and the _dmarc query both time out: the policy
+        is unknown, whatever the A query's own failure does to `ip`."""
+        timeout = dns.resolver.LifetimeTimeout(timeout=3.0, errors=[])
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = timeout
+            mocks["records"].return_value = _swept([], {"dmarc": "timeout"})
+            text = client.get(
+                "/example.com?fields=dmarc_policy&format=text", headers=CURL
+            )
+            body = client.get("/example.com?fields=dmarc_policy", headers=CURL)
+        assert text.text == "?\n"
+        assert body.json() == {
+            "dmarc_policy": None,
+            "errors": {"dmarc_policy": "timeout"},
+        }
+
+    def test_an_answered_policy_stands_when_the_a_query_failed(self):
+        """The gating A query timed out, the _dmarc query answered. The policy
+        does not hang on the address, so it stands, as on the page's Mail row
+        and in MCP dns_records: the A query's failure marks the fields that
+        read the address (ip here), and _NAME_LEGS leaves a field of the
+        record sweep to its own status."""
+        timeout = dns.resolver.LifetimeTimeout(timeout=3.0, errors=[])
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = timeout
+            mocks["records"].return_value = _swept([DMARC_RECORD], {"dmarc": "ok"})
+            text = client.get(
+                "/example.com?fields=ip,dmarc_policy&format=text", headers=CURL
+            )
+            body = client.get("/example.com?fields=ip,dmarc_policy", headers=CURL)
+        assert text.text == "?\nreject\n"
+        assert body.json() == {
+            "ip": None,
+            "dmarc_policy": "reject",
+            "errors": {"ip": "timeout"},
+        }
+
+    def test_an_ip_has_none_and_costs_nothing(self):
+        with _legs() as mocks:
+            ip = client.get("/8.8.8.8?fields=dmarc_policy&format=text", headers=CURL)
+            self_ = client.get("/?fields=dmarc_policy&format=text", headers=CURL)
+        assert ip.text == "-\n"
+        assert self_.text == "-\n"
+        assert _ran(mocks) == set()
+
+
 # --- lookup.gather(legs=) -----------------------------------------------------------
 
 

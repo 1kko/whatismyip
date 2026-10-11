@@ -144,6 +144,8 @@ RECORDS = {
     ("bbc.co.uk", "TXT"): ['"v=spf1 ip4:212.58.224.0/19 ~all"'],
     ("www.bbc.co.uk", "A"): ["151.101.0.81"],
     ("mail.bbc.co.uk", "MX"): ["5 inbound.bbc.co.uk."],
+    # bbc.co.uk publishes DMARC at the registrable domain only.
+    ("_dmarc.bbc.co.uk", "TXT"): ['"v=DMARC1; p=reject; sp=none"'],
     # abc.net.au
     ("abc.net.au", "NS"): ["ns1.abc.net.au.", "ns2.abc.net.au."],
     ("abc.net.au", "MX"): ["10 abc-net-au.mail.protection.outlook.com."],
@@ -303,6 +305,51 @@ def test_a_public_suffix_queried_directly_is_its_own_zone(fake_dns):
 
     assert records["zone"] == "co.kr"
     assert ns_hosts(records) == ["b.dns.kr.", "c.dns.kr."]
+
+
+def _dmarc_asked(fake):
+    return [n for n, kind in fake.queries if kind == "TXT" and n.startswith("_dmarc.")]
+
+
+def test_dmarc_is_asked_of_the_name_then_its_registrable_domain(fake_dns):
+    records = managers.DomainManager().get_records("www.bbc.co.uk", dmarc=True)
+
+    assert _dmarc_asked(fake_dns) == ["_dmarc.www.bbc.co.uk", "_dmarc.bbc.co.uk"]
+    # The registry's zone is never asked for this domain's policy.
+    assert "_dmarc.co.uk" not in fake_dns.asked("TXT")
+    assert records["dmarc"] == [
+        {
+            "text": "v=DMARC1; p=reject; sp=none",
+            "ttl": 300,
+            "queried_name": "_dmarc.bbc.co.uk",
+        }
+    ]
+
+
+def test_dmarc_falls_back_to_the_registrable_domain_not_the_zone(monkeypatch):
+    """DMARC's Organizational Domain comes from the public suffix list (RFC
+    7489 §3.2). A name in a delegated zone still inherits bbc.co.uk's policy:
+    the SOA zone corp.bbc.co.uk is where its NS live, not whose policy it is."""
+    fake = FakeDNS(
+        ZONES + ["corp.bbc.co.uk"],
+        {**RECORDS, ("www.corp.bbc.co.uk", "A"): ["151.101.0.82"]},
+    )
+    monkeypatch.setattr(managers, "_recursive_resolver", lambda: fake)
+
+    records = managers.DomainManager().get_records("www.corp.bbc.co.uk", dmarc=True)
+
+    assert records["zone"] == "corp.bbc.co.uk"
+    assert _dmarc_asked(fake) == ["_dmarc.www.corp.bbc.co.uk", "_dmarc.bbc.co.uk"]
+    assert records["dmarc"][0]["queried_name"] == "_dmarc.bbc.co.uk"
+
+
+def test_a_public_suffix_has_no_registrable_domain_to_fall_back_to(fake_dns):
+    """registrable_domain("co.uk") is co.uk itself, so the name is its own
+    Organizational Domain and nothing above it is asked."""
+    records = managers.DomainManager().get_records("co.uk", dmarc=True)
+
+    assert _dmarc_asked(fake_dns) == ["_dmarc.co.uk"]
+    assert records["status"]["dmarc"] == "nxdomain"
 
 
 async def test_an_ip_whose_ptr_ends_in_a_dot_keeps_its_zone(fake_dns, monkeypatch):

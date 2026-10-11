@@ -604,6 +604,110 @@ def _dns_count_row(label: str, domain: dict, key: str) -> dict:
     return {"label": label, "value": _count(domain.get(key)), "tone": "default"}
 
 
+# The tags read from a DMARC record (RFC 7489 §6.3). Any other tag is
+# skipped, as a receiver skips one it does not know.
+_DMARC_TAGS = ("p", "sp", "pct", "rua")
+_DMARC_POLICIES = ("none", "quarantine", "reject")
+
+
+def _parse_dmarc(text: str) -> dict[str, str]:
+    """p=, sp=, pct= and rua= from a DMARC record, read leniently: tag names in
+    any case, spaces around "=" and ";", empty or doubled semicolons. Another
+    tag is skipped, and so is a p= or sp= that names no policy; of a repeated
+    tag the first usable one wins. {} when the text does not open with
+    v=DMARC1, the value spelled exactly as managers._is_dmarc_record and
+    RFC 7489 §6.3 require: it is some other TXT record. For display only:
+    nothing here grades a policy.
+    """
+    parts = [part.strip() for part in str(text or "").split(";")]
+    parts = [part for part in parts if part]
+    if not parts:
+        return {}
+    name, sep, value = parts[0].partition("=")
+    if not sep or name.strip().lower() != "v" or value.strip() != "DMARC1":
+        return {}
+    tags: dict[str, str] = {}
+    for part in parts[1:]:
+        name, sep, value = part.partition("=")
+        name, value = name.strip().lower(), value.strip()
+        if not sep or name not in _DMARC_TAGS or name in tags:
+            continue
+        if name in ("p", "sp"):
+            value = value.lower()
+            if value not in _DMARC_POLICIES:
+                continue
+        tags[name] = value
+    return tags
+
+
+def dmarc_policy(domain: dict | None) -> dict | None:
+    """The DMARC policy that governs the queried name, from domain["dmarc"]:
+    {"tag": "p" | "sp", "policy", "pct", "inherited_from"}.
+
+    None unless exactly one record came back: with none there is no policy,
+    and two or more end policy discovery (RFC 7489 §6.6.3), so neither
+    applies. A record inherited from the registrable domain governs a
+    subdomain by its sp= when it has one, by its p= otherwise (§6.3), and
+    "inherited_from" names that domain so the policy is never read as the
+    name's own. "policy" is None when the record names none; "pct" only when
+    it narrows the policy below 100.
+    """
+    domain = domain or {}
+    records = domain.get("dmarc") or []
+    if len(records) != 1:
+        return None
+    record = records[0]
+    tags = _parse_dmarc(record.get("text", ""))
+    source = str(record.get("queried_name") or "").removeprefix("_dmarc.")
+    inherited = bool(source) and source != domain.get("queried_name")
+    tag = "sp" if inherited and "sp" in tags else "p"
+    pct = tags.get("pct")
+    return {
+        "tag": tag,
+        "policy": tags.get(tag),
+        "pct": pct if pct and pct != "100" else None,
+        "inherited_from": source if inherited else None,
+    }
+
+
+def _dmarc_text(domain: dict) -> str | None:
+    """The DMARC half of the Mail row: a failure, the policy, or None when
+    there is no record."""
+    failure = dns_failure_text(domain, "dmarc")
+    if failure:
+        return failure
+    records = domain.get("dmarc") or []
+    if not records:
+        return None
+    policy = dmarc_policy(domain)
+    if policy is None:
+        return f"{len(records)} records"
+    text = f"{policy['tag']}={policy['policy']}" if policy["policy"] else "no p= tag"
+    if policy["pct"]:
+        text += f" pct={policy['pct']}"
+    if policy["inherited_from"]:
+        text += f" ({policy['inherited_from']})"
+    return text
+
+
+def _mail_row(domain: dict) -> dict:
+    """SPF and DMARC on one line: whether the name has an SPF policy (its own
+    or its zone's), and the DMARC policy that governs it, as published. A
+    failed query says so and warns, as a count row does; p=none asks for
+    reports only, so it is an answer like any other policy, never a warning."""
+    spf_failure = dns_failure_text(domain, "spf")
+    dmarc_failure = dns_failure_text(domain, "dmarc")
+    spf = spf_failure or ("yes" if domain.get("spf") else None)
+    dmarc = _dmarc_text(domain)
+    if spf is None and dmarc is None:
+        return {"label": "Mail", "value": DASH, "tone": "default"}
+    return {
+        "label": "Mail",
+        "value": f"SPF {spf or DASH} · DMARC {dmarc or DASH}",
+        "tone": "warning" if spf_failure or dmarc_failure else "default",
+    }
+
+
 def _dns_column(domain: dict) -> dict:
     domain = domain or {}
     return {
@@ -614,6 +718,7 @@ def _dns_column(domain: dict) -> dict:
             _dns_count_row("MX", domain, "mx"),
             _dns_count_row("NS", domain, "ns"),
             _dns_count_row("TXT", domain, "txt"),
+            _mail_row(domain),
         ],
     }
 

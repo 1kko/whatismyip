@@ -10,6 +10,7 @@ The resolver is a fake, and so are gather()'s other legs: no network.
 """
 
 import re
+import threading
 
 import dns.exception
 import dns.message
@@ -21,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import lookup
+import main
 import managers
 import mcp_server
 import viewmodel
@@ -41,6 +43,7 @@ RECORDS = {
     ("example.com", "TXT"): ['"v=spf1 -all"'],
     ("www.example.com", "A"): ["93.184.216.34"],
     ("www.example.com", "TXT"): ['"v=spf1 include:_spf.example.net -all"'],
+    ("_dmarc.example.com", "TXT"): ['"v=DMARC1; p=none; rua=mailto:dmarc@example.com"'],
     ("34.216.184.93.in-addr.arpa", "PTR"): ["edge.example.net."],
 }
 
@@ -317,6 +320,235 @@ class TestSpfAndPtr:
         assert records["status"]["ptr"] == "timeout"
 
 
+DMARC_TEXT = "v=DMARC1; p=none; rua=mailto:dmarc@example.com"
+
+
+def _dmarc_asked(fake):
+    """The _dmarc names asked, in the order asked."""
+    return [name for name, kind in fake.queries if name.startswith("_dmarc.")]
+
+
+class TestDmarc:
+    """The DMARC policy record: one TXT query at _dmarc.<name>, made only when
+    the caller asks for it, filtered to v=DMARC1 and given a status of its own
+    like every other type."""
+
+    def test_the_record_comes_back_with_the_name_that_answered(self, fake_dns):
+        records = managers.DomainManager().get_records("example.com", dmarc=True)
+
+        assert records["dmarc"] == [
+            {"text": DMARC_TEXT, "ttl": 300, "queried_name": "_dmarc.example.com"}
+        ]
+        assert records["status"]["dmarc"] == "ok"
+
+    def test_the_sweep_asks_nothing_unless_told(self, fake_dns):
+        """The self page sweeps the visitor's PTR name with get_records(), and
+        the visitor's own address gets no query it did not get before."""
+        records = managers.DomainManager().get_records(
+            "example.com", ip="93.184.216.34"
+        )
+
+        assert "dmarc" not in records
+        assert "dmarc" not in records["status"]
+        assert _dmarc_asked(fake_dns) == []
+
+    @pytest.mark.parametrize("outcome", OUTCOMES)
+    def test_each_outcome_is_the_dmarc_status(self, fake_dns, outcome):
+        fake_dns.fail("_dmarc.example.com", outcome, "TXT")
+
+        records = managers.DomainManager().get_records("example.com", dmarc=True)
+
+        assert records["dmarc"] == []
+        assert records["status"]["dmarc"] == outcome
+
+    def test_a_txt_that_is_not_dmarc_is_no_record(self, fake_dns):
+        fake_dns.records["_dmarc.example.com", "TXT"] = ['"verification=abc123"']
+
+        records = managers.DomainManager().get_records("example.com", dmarc=True)
+
+        assert records["dmarc"] == []
+        assert records["status"]["dmarc"] == "noanswer"
+
+    def test_the_version_tag_is_read_leniently(self, fake_dns):
+        fake_dns.records["_dmarc.example.com", "TXT"] = ['" V = DMARC1 ;p=reject"']
+
+        records = managers.DomainManager().get_records("example.com", dmarc=True)
+
+        assert [r["text"] for r in records["dmarc"]] == [" V = DMARC1 ;p=reject"]
+
+    def test_the_version_value_must_be_exact(self, fake_dns):
+        """RFC 7489 §6.3: DMARC1 must match precisely or a receiver ignores the
+        record, so it must not be shown as the policy in force."""
+        fake_dns.records["_dmarc.example.com", "TXT"] = ['"v=dmarc1; p=reject"']
+
+        records = managers.DomainManager().get_records("example.com", dmarc=True)
+
+        assert records["dmarc"] == []
+        assert records["status"]["dmarc"] == "noanswer"
+
+    def test_a_record_over_255_bytes_is_joined_without_a_separator(self, fake_dns):
+        head = "v=DMARC1; p=reject; rua=mailto:dmarc-reports@exam"
+        fake_dns.records["_dmarc.example.com", "TXT"] = [f'"{head}" "ple.com"']
+
+        records = managers.DomainManager().get_records("example.com", dmarc=True)
+
+        assert records["dmarc"][0]["text"] == head + "ple.com"
+
+    def test_two_records_are_both_kept(self, fake_dns):
+        """RFC 7489 ends policy discovery when a name has two: both are shown,
+        and neither is passed off as the one in force."""
+        fake_dns.records["_dmarc.example.com", "TXT"] = [
+            '"v=DMARC1; p=none"',
+            '"v=DMARC1; p=reject"',
+        ]
+
+        records = managers.DomainManager().get_records("example.com", dmarc=True)
+
+        assert sorted(r["text"] for r in records["dmarc"]) == [
+            "v=DMARC1; p=none",
+            "v=DMARC1; p=reject",
+        ]
+        assert records["status"]["dmarc"] == "ok"
+
+
+class TestDmarcDiscovery:
+    """RFC 7489 §6.6.3: _dmarc.<name> first, and only when that holds no policy
+    record, _dmarc.<registrable domain>, once. A failed query is not "no
+    record", so it ends the search."""
+
+    def test_a_name_without_its_own_record_gets_its_registrable_domains(self, fake_dns):
+        records = managers.DomainManager().get_records("www.example.com", dmarc=True)
+
+        assert _dmarc_asked(fake_dns) == [
+            "_dmarc.www.example.com",
+            "_dmarc.example.com",
+        ]
+        assert records["dmarc"] == [
+            {"text": DMARC_TEXT, "ttl": 300, "queried_name": "_dmarc.example.com"}
+        ]
+        assert records["status"]["dmarc"] == "ok"
+
+    def test_a_name_with_its_own_record_keeps_it(self, fake_dns):
+        fake_dns.records["_dmarc.www.example.com", "TXT"] = ['"v=DMARC1; p=reject"']
+
+        records = managers.DomainManager().get_records("www.example.com", dmarc=True)
+
+        assert _dmarc_asked(fake_dns) == ["_dmarc.www.example.com"]
+        assert records["dmarc"][0]["queried_name"] == "_dmarc.www.example.com"
+
+    def test_a_txt_that_is_not_dmarc_sends_the_search_up(self, fake_dns):
+        fake_dns.records["_dmarc.www.example.com", "TXT"] = ['"verification=abc123"']
+
+        records = managers.DomainManager().get_records("www.example.com", dmarc=True)
+
+        assert records["dmarc"][0]["queried_name"] == "_dmarc.example.com"
+
+    @pytest.mark.parametrize("outcome", ["timeout", "servfail"])
+    def test_a_failed_first_query_does_not_fall_back(self, fake_dns, outcome):
+        fake_dns.fail("_dmarc.www.example.com", outcome, "TXT")
+
+        records = managers.DomainManager().get_records("www.example.com", dmarc=True)
+
+        assert _dmarc_asked(fake_dns) == ["_dmarc.www.example.com"]
+        assert records["dmarc"] == []
+        assert records["status"]["dmarc"] == outcome
+
+    @pytest.mark.parametrize("outcome", ["timeout", "servfail"])
+    def test_a_failed_fallback_is_the_rows_status(self, fake_dns, outcome):
+        """The name said "no record here", which sends the row to the
+        registrable domain; that query never answered, so the policy is
+        unknown, not absent."""
+        fake_dns.fail("_dmarc.example.com", outcome, "TXT")
+
+        records = managers.DomainManager().get_records("www.example.com", dmarc=True)
+
+        assert records["dmarc"] == []
+        assert records["status"]["dmarc"] == outcome
+
+    def test_neither_having_a_record_is_the_fallbacks_answer(self, fake_dns):
+        fake_dns.fail("_dmarc.example.com", "nxdomain", "TXT")
+
+        records = managers.DomainManager().get_records("www.example.com", dmarc=True)
+
+        assert records["dmarc"] == []
+        assert records["status"]["dmarc"] == "nxdomain"
+
+    def test_the_registrable_domain_itself_is_asked_once(self, fake_dns):
+        fake_dns.fail("_dmarc.example.com", "noanswer", "TXT")
+
+        managers.DomainManager().get_records("example.com", dmarc=True)
+
+        assert _dmarc_asked(fake_dns) == ["_dmarc.example.com"]
+
+    def test_two_records_at_the_name_end_the_search(self, fake_dns):
+        """Two policy records at the name end discovery there (RFC 7489
+        §6.6.3): both are kept for the page to count, and the registrable
+        domain's record is not asked for in their place."""
+        fake_dns.records["_dmarc.www.example.com", "TXT"] = [
+            '"v=DMARC1; p=none"',
+            '"v=DMARC1; p=reject"',
+        ]
+
+        records = managers.DomainManager().get_records("www.example.com", dmarc=True)
+
+        assert _dmarc_asked(fake_dns) == ["_dmarc.www.example.com"]
+        assert [r["queried_name"] for r in records["dmarc"]] == [
+            "_dmarc.www.example.com",
+            "_dmarc.www.example.com",
+        ]
+        assert records["status"]["dmarc"] == "ok"
+
+    def test_a_name_with_no_public_suffix_asks_only_its_own(self, fake_dns):
+        """registrable_domain() is None for a name under no public suffix:
+        there is no Organizational Domain to fall back to, and no
+        "_dmarc.None" to ask."""
+        records = managers.DomainManager().get_records(
+            "host.example.invalid", dmarc=True
+        )
+
+        assert _dmarc_asked(fake_dns) == ["_dmarc.host.example.invalid"]
+        assert records["dmarc"] == []
+        assert records["status"]["dmarc"] == "noanswer"
+
+
+class _AllAtOnce(FakeResolver):
+    """Holds the sweep's first `parties` queries until all of them are in
+    flight together. With fewer workers than fetchers one is left queued, the
+    barrier times out, and the held queries fail."""
+
+    def __init__(self, records, parties):
+        super().__init__(records)
+        self.barrier = threading.Barrier(parties, timeout=5)
+        self.arrived = 0
+        self.lock = threading.Lock()
+
+    def resolve(self, qname, rdtype="A", *args, **kwargs):
+        kind = dns.rdatatype.to_text(dns.rdatatype.RdataType.make(rdtype))
+        hold = False
+        if kind != "SOA":
+            with self.lock:
+                self.arrived += 1
+                hold = self.arrived <= self.barrier.parties
+        if hold:
+            self.barrier.wait()
+        return super().resolve(qname, rdtype, *args, **kwargs)
+
+
+def test_every_fetcher_gets_a_worker_of_its_own(monkeypatch):
+    """A name below its zone, with an address, has nine fetchers: NS, A,
+    AAAA, MX, CNAME, TXT, the zone's TXT, PTR and DMARC. Each runs at once, so
+    the DMARC query costs no extra round of waiting."""
+    fake = _AllAtOnce(dict(RECORDS), parties=9)
+    monkeypatch.setattr(managers, "_recursive_resolver", lambda: fake)
+
+    records = managers.DomainManager().get_records(
+        "www.example.com", ip="93.184.216.34", dmarc=True
+    )
+
+    assert "error" not in records["status"].values()
+    assert records["status"]["dmarc"] == "ok"
+
+
 # --- gather ----------------------------------------------------------------
 
 
@@ -372,6 +604,36 @@ def test_json_carries_resolved_ip_and_resolution(offline, outcome):
 
     assert body["resolved_ip"] is None
     assert body["resolution"] == outcome
+
+
+def test_only_a_domain_target_asks_for_dmarc(offline, monkeypatch):
+    """The visitor's own address gets no query it did not get before: the self
+    page still sweeps its PTR name, without _dmarc. Nor does an IP target's
+    PTR name, which is not a domain anyone asked about."""
+
+    async def fake_whois(target):
+        return {"source": "rdap", "name": target}
+
+    monkeypatch.setattr(main, "lookup_whois", fake_whois)
+    offline.records["201.14.235.118.in-addr.arpa", "PTR"] = ["visitor.example.net."]
+
+    self_body = client.get("/", headers=JSON_UA).json()
+    ip_body = client.get("/93.184.216.34", headers=JSON_UA).json()
+
+    # Both PTR names were swept, and neither was asked for a policy.
+    assert self_body["domain"]["queried_name"] == "visitor.example.net"
+    assert ip_body["domain"]["queried_name"] == "edge.example.net"
+    assert "dmarc" not in self_body["domain"]
+    assert "dmarc" not in ip_body["domain"]
+    assert _dmarc_asked(offline) == []
+
+    body = client.get("/example.com", headers=JSON_UA).json()
+
+    assert _dmarc_asked(offline) == ["_dmarc.example.com"]
+    assert body["domain"]["dmarc"] == [
+        {"text": DMARC_TEXT, "ttl": 300, "queried_name": "_dmarc.example.com"}
+    ]
+    assert body["domain"]["status"]["dmarc"] == "ok"
 
 
 def _dns_table_row(html: str, rdtype: str) -> list[str]:
@@ -462,6 +724,69 @@ def test_four_outcomes_render_four_different_pages(offline):
     }
 
 
+class TestDmarcOnThePage:
+    """The Mail fact and the DMARC table rows say what the query said: a
+    policy, no record, or a query that failed -- never one for another."""
+
+    def test_the_policy_is_a_mail_fact_and_a_table_row(self, offline):
+        html = client.get("/example.com", headers=BROWSER_UA).text
+
+        assert _facts_value(html, "Mail") == (
+            "default",
+            "SPF yes · DMARC p=none",
+        )
+        assert _dns_table_row(html, "DMARC") == [
+            "DMARC",
+            "_dmarc.example.com",
+            DMARC_TEXT,
+            "300",
+        ]
+
+    @pytest.mark.parametrize("outcome", ["nxdomain", "noanswer"])
+    def test_no_record_is_a_dash_and_no_row(self, offline, outcome):
+        offline.fail("_dmarc.example.com", outcome, "TXT")
+
+        html = client.get("/example.com", headers=BROWSER_UA).text
+
+        assert _facts_value(html, "Mail") == ("default", "SPF yes · DMARC —")
+        assert "<td>DMARC</td>" not in html
+
+    @pytest.mark.parametrize(
+        "outcome, text", [("timeout", "(timed out)"), ("servfail", "(server failure)")]
+    )
+    def test_a_failed_query_says_so(self, offline, outcome, text):
+        offline.fail("_dmarc.example.com", outcome, "TXT")
+
+        html = client.get("/example.com", headers=BROWSER_UA).text
+
+        assert _facts_value(html, "Mail") == ("warning", f"SPF yes · DMARC {text}")
+        assert _dns_table_row(html, "DMARC") == [
+            "DMARC",
+            "_dmarc.example.com",
+            text,
+            "",
+        ]
+
+    def test_an_inherited_record_is_named_for_the_domain_it_came_from(self, offline):
+        """The row stands under the _dmarc name that answered, and its VALUE
+        names that domain too: under 900px the NAME column is hidden, and the
+        record must not read as www.example.com's own (a zone row says
+        "(zone)" for the same reason). The name's own record, in the first
+        test, carries no such mark."""
+        html = client.get("/www.example.com", headers=BROWSER_UA).text
+
+        assert _facts_value(html, "Mail") == (
+            "default",
+            "SPF yes · DMARC p=none (example.com)",
+        )
+        assert _dns_table_row(html, "DMARC") == [
+            "DMARC",
+            "_dmarc.example.com",
+            f"{DMARC_TEXT} (example.com)",
+            "300",
+        ]
+
+
 # --- MCP ---------------------------------------------------------------------
 
 
@@ -512,3 +837,48 @@ async def test_mcp_four_outcomes_are_four_answers(offline):
         "nxdomain": ([], "nxdomain"),
         "noanswer": ([], "ok"),
     }
+
+
+@pytest.mark.parametrize(
+    "outcome, expected",
+    [
+        (
+            None,
+            [{"text": DMARC_TEXT, "ttl": 300, "queried_name": "_dmarc.example.com"}],
+        ),
+        ("noanswer", []),
+        ("nxdomain", []),
+        ("timeout", {"error": "timeout"}),
+        ("servfail", {"error": "servfail"}),
+    ],
+)
+async def test_mcp_answers_dmarc_instead_of_refusing_it(offline, outcome, expected):
+    """types=["dmarc"] is the record, an empty list, or {"error": status}:
+    never the "unsupported record types" refusal it used to be."""
+    if outcome:
+        offline.fail("_dmarc.example.com", outcome, "TXT")
+
+    payload = await mcp_server.dns_records("example.com", types=["dmarc"])
+
+    assert payload["records"] == {"dmarc": expected}
+
+
+def test_every_type_the_mcp_tool_names_is_in_a_domains_sweep(fake_dns):
+    """A type _RECORD_TYPES names but the sweep never returns would come back
+    missing from every answer, which a model relays as "none"."""
+    records = managers.DomainManager().get_records(
+        "example.com", ip="93.184.216.34", dmarc=True
+    )
+
+    assert set(mcp_server._RECORD_TYPES) <= set(records)
+
+
+async def test_mcp_asks_no_dmarc_of_an_ip_targets_ptr_name(offline):
+    """An IP's records are its PTR name's, a name nobody asked about: no
+    _dmarc query is spent on it, and the key is left out, as the tool's
+    description says, rather than sent back looking like an answer."""
+    payload = await mcp_server.dns_records("93.184.216.34", types=["dmarc"])
+
+    assert payload["queried_name"] == "edge.example.net"
+    assert payload["records"] == {}
+    assert _dmarc_asked(offline) == []

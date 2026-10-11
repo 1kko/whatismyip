@@ -79,7 +79,12 @@ RDAP registration data and the full TLS certificate, expanded.
   public resolvers with a bounded per-query budget, plus every CNAME hop the
   resolver followed to answer the A query (`cname_chain`, each with the TTL
   left in the resolver's cache) and the canonical name they end at
-  (`canonical_name`), read off that answer at no extra query.
+  (`canonical_name`), read off that answer at no extra query. A domain's sweep
+  also asks for its DMARC record: `_dmarc.<name>`, or its registrable domain's
+  when the name has none, as RFC 7489 discovery does — one TXT query, two at
+  most. The page's DNS column sums mail up in one row, such as
+  `SPF yes · DMARC p=none`: the policy as published (`p=none` asks for reports
+  only), never a grade.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
   match, protocol and cipher, and whether the certificate is trusted. An
   expired, self-signed, wrong-host or chain-incomplete certificate is still
@@ -610,6 +615,7 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `risk_level` | `none`, `low`, `medium` or `high` (see [IP reputation](#ip-reputation)); `?` when no list could be checked | the lists in memory (an A query for a domain) | both |
 | `risk_signals` | the ids of the lists the address is on, comma-separated, e.g. `tor_exit,datacenter` | the lists in memory (an A query for a domain) | both |
 | `abuse_score` | AbuseIPDB's abuse confidence, 0-100; `?` when AbuseIPDB did not answer, `-` without `ABUSEIPDB_API_KEY` | AbuseIPDB's API (cached a day) | ip |
+| `dmarc_policy` | `none`, `quarantine` or `reject`: the DMARC policy that governs the name, as published — its own `_dmarc` record's `p=`, or, for a name that inherits its registrable domain's record, that record's `sp=` when it has one; `-` with no record, or with two (RFC 7489 then applies neither); `?` when the `_dmarc` query failed (a failed A query leaves it standing: the record does not depend on the address) | an A query, then the DNS record sweep with `_dmarc` | domain |
 
 The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
 is `cert_expires` here, its `registration.expires` is `domain_expires`, and its
@@ -621,6 +627,9 @@ among the other lines would read as a clean bill of health the lists cannot
 give, and `resolution: ok` would be a line to skip on every read.
 `reverse_dns_confirmed` is left out of the block too, for its cost: it needs the
 record sweep of the PTR name, which the block skips.
+`dmarc_policy` is asked for by name only too: it needs the DNS record sweep,
+which the text block skips. It has no counterpart in the MCP tools, whose
+`dns_records` returns the record itself.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
 own address; `cert_*` and the domain-only fields are `-`, and so is
@@ -821,7 +830,8 @@ rate limit as `GET`.
     "txt": [{ "text": ["MS=ms93625004"], "ttl": 364 }],
     "spf": [],
     "ptr": [],
-    "status": { "a": "ok", "aaaa": "ok", "mx": "ok", "ns": "ok", "cname": "noanswer", "txt": "ok", "spf": "noanswer", "ptr": "nxdomain" }
+    "dmarc": [{ "text": "v=DMARC1; p=reject; fo=1; rua=mailto:dmarcmail@mail.nasa.gov,mailto:reports@dmarc.cyber.dhs.gov", "ttl": 600, "queried_name": "_dmarc.nasa.gov" }],
+    "status": { "a": "ok", "aaaa": "ok", "mx": "ok", "ns": "ok", "cname": "noanswer", "txt": "ok", "spf": "noanswer", "ptr": "nxdomain", "dmarc": "ok" }
   },
   "location": {
     "ip": "192.0.66.108",
@@ -886,7 +896,11 @@ rate limit as `GET`.
 `domain.status` says how each record type's query ended: `ok`, `noanswer` (the
 name has none of that type), `nxdomain` (the name does not exist), or a failure
 — `timeout`, `servfail`, `error` — in which case the empty list next to it
-means "could not find out", not "none". `resolved_ip` is the address the target
+means "could not find out", not "none". `dmarc` is the name's DMARC record
+(`_dmarc.<name>`, kept when it opens with `v=DMARC1`), or, when it has none,
+its registrable domain's; each record's `queried_name` says which name
+answered, and `status.dmarc` is the status of that last query. It is there
+for a domain target only. `resolved_ip` is the address the target
 resolved to, and `resolution` is how: that A query's status for a name (`ok`
 too when a name with no A record resolved through AAAA), or `literal` when the
 target is an IP, so a `null` address says why.
@@ -1074,7 +1088,7 @@ is unaffected.)
 | Tool | What it does |
 |---|---|
 | `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). `registration.age_days` and `tls.age_days` count the days since the registration was created and the certificate became valid, and the description calls a days-old domain worth a closer look, not a verdict. |
-| `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
+| `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR / DMARC sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. `dmarc` is a domain's `v=DMARC1` record, or its registrable domain's when it has none, each labelled with the `queried_name` that answered. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, the certificate's age in days (`age_days`), and whether it is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way. |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |

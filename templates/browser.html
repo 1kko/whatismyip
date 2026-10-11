@@ -266,7 +266,7 @@
                         <tr>
                             <td>{{ record.type }}</td>
                             <td>{{ record.name }}</td>
-                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{% if record.href %}<a class="lookup-link" href="{{ record.href }}" rel="nofollow">{{ record.value }}</a>{% else %}{{ record.value }}{% endif %}{% if record.from_zone %} <span class="tone-muted">(zone)</span>{% endif %}{% if record.hop_of %} <span class="tone-muted">(of {{ record.hop_of }})</span>{% endif %}</td>
+                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{% if record.href %}<a class="lookup-link" href="{{ record.href }}" rel="nofollow">{{ record.value }}</a>{% else %}{{ record.value }}{% endif %}{% if record.from_zone %} <span class="tone-muted">(zone)</span>{% endif %}{% if record.inherited_from %} <span class="tone-muted">({{ record.inherited_from }})</span>{% endif %}{% if record.hop_of %} <span class="tone-muted">(of {{ record.hop_of }})</span>{% endif %}</td>
                             <td>{{ record.ttl }}</td>
                         </tr>
                         {% else %}

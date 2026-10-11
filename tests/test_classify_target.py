@@ -307,7 +307,9 @@ def test_valid_targets_are_looked_up_as_before(target, canonical):
     else:
         resolver = mocks["resolver"].return_value
         resolver.resolve.assert_called_once_with(canonical, "A")
-        mocks["records"].assert_called_once_with(canonical, ip="93.184.216.34")
+        mocks["records"].assert_called_once_with(
+            canonical, ip="93.184.216.34", dmarc=True
+        )
         mocks["ssl"].assert_called_once_with(canonical, "93.184.216.34")
 
 

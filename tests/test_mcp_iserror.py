@@ -335,6 +335,20 @@ def test_one_failed_record_type_is_still_an_answer():
     assert payload["records"]["ns"] == ["a.iana-servers.net"]
 
 
+def test_a_dmarc_request_is_an_answer_not_a_refusal():
+    """The type the "caa" test above refuses is unknown to the server; "dmarc"
+    is not, and a failed _dmarc query is a gap in an answer."""
+    domain = {**GATHERED["domain"], "dmarc": [], "status": {"dmarc": "timeout"}}
+    with (
+        TestClient(app) as client,
+        patch("mcp_server.gather", _gathered(domain=domain)),
+    ):
+        payload = _answered(
+            _call(client, "dns_records", {"domain": "example.com", "types": ["dmarc"]})
+        )
+    assert payload["records"] == {"dmarc": {"error": "timeout"}}
+
+
 def test_a_name_that_does_not_exist_is_an_answer():
     gather = _gathered(
         domain={"a": [], "mx": [], "status": {}},
