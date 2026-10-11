@@ -1069,6 +1069,12 @@ database and the reputation lists in memory. Annotations are hints a client may
 ignore, not a promise it enforces; without them the spec has a client assume
 every tool may write.
 
+`initialize` (and `server/discover` for a 2026-07-28 client) also carries
+`instructions`: the reputation note and `whoami_caller`'s caveat, from the
+same two constants the tool descriptions and results use, so the copies
+cannot drift. Most clients ignore `instructions`, which is why each tool
+description keeps its own caveat.
+
 ### What `whoami_caller` actually reports
 
 The address that opened the MCP connection — which is **not always yours**, and

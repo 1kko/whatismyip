@@ -98,6 +98,12 @@ def test_initialize_handshake():
         assert info["icons"] == [
             {"src": MCP_ICON_URL, "mimeType": "image/png", "sizes": ["512x512"]}
         ]
+        # Server-level instructions, for the clients that read them: the two
+        # caveats the tools already carry, from the same constants, so the
+        # copies cannot drift. No sentence of their own.
+        instructions = result["instructions"]
+        assert mcp_server._NOT_SAFE in instructions
+        assert mcp_server._CALLER_ORIGIN in instructions
 
 
 def test_mcp_initialize_reports_the_deployed_version():
@@ -121,6 +127,24 @@ def test_a_2026_client_reads_the_same_card_from_server_discover():
         assert info["title"] == MCP_SERVER_TITLE
         assert info["websiteUrl"] == MCP_WEBSITE_URL
         assert info["icons"][0]["src"] == MCP_ICON_URL
+
+
+def test_whoami_caller_and_instructions_share_one_caveat():
+    """The description is where every client reads the caveat; instructions is
+    where the few that honour it read it once per session. One constant, so
+    neither copy can be edited without the other, on both wires."""
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        listed = _rpc(client, "tools/list").json()["result"]["tools"]
+        tools = {tool["name"]: tool for tool in listed}
+        description = tools["whoami_caller"]["description"]
+        assert mcp_server._CALLER_ORIGIN in description
+        # The rest of what the docstring said survives the move to __doc__,
+        # the privacy promise above all.
+        assert "the caller's own address is not sent to anyone" in description
+        discover = _modern_rpc(client, "server/discover").json()["result"]
+        assert mcp_server._CALLER_ORIGIN in discover["instructions"]
+        assert mcp_server._NOT_SAFE in discover["instructions"]
 
 
 def test_tools_list_exposes_the_five_tools():

@@ -658,6 +658,14 @@ below by text:
   is not in the image. `tests/test_mcp_registry.py` fails when the two
   disagree, so change both together. They are constants, not env: the
   registry card names this host, and `PUBLIC_BASE_URL` defaults to `""`.
+- `instructions` is `_INSTRUCTIONS`: `_NOT_SAFE` and `_CALLER_ORIGIN` joined,
+  no sentence of its own. `whoami_caller`'s description is set as `__doc__`
+  from `_CALLER_ORIGIN` and the tool registered right after the function,
+  where its decorator stood (a docstring is a literal and cannot read a
+  constant), so the description and `instructions` cannot drift and
+  `tools/list` keeps its order (`test_tools_list_exposes_the_five_tools`
+  pins it). Most clients ignore `instructions`; the descriptions keep their
+  caveats.
 - `compact_location` carries `precision` and `country_source` and nulls
   `lat`/`lon`/`time_zone` unless `precision` is `city`: the HTTP JSON keeps
   the numbers, the model gets only what the grade supports (a centroid's
