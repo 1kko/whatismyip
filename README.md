@@ -128,6 +128,10 @@ RDAP registration data and the full TLS certificate, expanded.
   browser's WebRTC traffic uses, and compares it with the address the page saw,
   per address family, so a dual-stack visitor is not reported as leaking. The
   comparison happens in the browser; nothing is sent to this server.
+- **Phone-sized screens** — under 900px the search box and the subdomain
+  filter are 16px, so iOS Safari does not zoom in when one takes focus (the
+  viewport keeps pinch-zoom on), and the `/` keyboard badge is hidden where
+  there is no hover; the shortcut itself stays for an attached keyboard.
 - Self-hosted fonts and a `default-src 'self'` Content-Security-Policy with a
   per-request nonce. The single allowlisted remote origin is
   `tile.openstreetmap.org` in `img-src`. STUN is not a fetch and no CSP
