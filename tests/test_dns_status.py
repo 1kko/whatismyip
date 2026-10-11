@@ -724,6 +724,69 @@ def test_four_outcomes_render_four_different_pages(offline):
     }
 
 
+class TestDmarcOnThePage:
+    """The Mail fact and the DMARC table rows say what the query said: a
+    policy, no record, or a query that failed -- never one for another."""
+
+    def test_the_policy_is_a_mail_fact_and_a_table_row(self, offline):
+        html = client.get("/example.com", headers=BROWSER_UA).text
+
+        assert _facts_value(html, "Mail") == (
+            "default",
+            "SPF yes · DMARC p=none",
+        )
+        assert _dns_table_row(html, "DMARC") == [
+            "DMARC",
+            "_dmarc.example.com",
+            DMARC_TEXT,
+            "300",
+        ]
+
+    @pytest.mark.parametrize("outcome", ["nxdomain", "noanswer"])
+    def test_no_record_is_a_dash_and_no_row(self, offline, outcome):
+        offline.fail("_dmarc.example.com", outcome, "TXT")
+
+        html = client.get("/example.com", headers=BROWSER_UA).text
+
+        assert _facts_value(html, "Mail") == ("default", "SPF yes · DMARC —")
+        assert "<td>DMARC</td>" not in html
+
+    @pytest.mark.parametrize(
+        "outcome, text", [("timeout", "(timed out)"), ("servfail", "(server failure)")]
+    )
+    def test_a_failed_query_says_so(self, offline, outcome, text):
+        offline.fail("_dmarc.example.com", outcome, "TXT")
+
+        html = client.get("/example.com", headers=BROWSER_UA).text
+
+        assert _facts_value(html, "Mail") == ("warning", f"SPF yes · DMARC {text}")
+        assert _dns_table_row(html, "DMARC") == [
+            "DMARC",
+            "_dmarc.example.com",
+            text,
+            "",
+        ]
+
+    def test_an_inherited_record_is_named_for_the_domain_it_came_from(self, offline):
+        """The row stands under the _dmarc name that answered, and its VALUE
+        names that domain too: under 900px the NAME column is hidden, and the
+        record must not read as www.example.com's own (a zone row says
+        "(zone)" for the same reason). The name's own record, in the first
+        test, carries no such mark."""
+        html = client.get("/www.example.com", headers=BROWSER_UA).text
+
+        assert _facts_value(html, "Mail") == (
+            "default",
+            "SPF yes · DMARC p=none (example.com)",
+        )
+        assert _dns_table_row(html, "DMARC") == [
+            "DMARC",
+            "_dmarc.example.com",
+            f"{DMARC_TEXT} (example.com)",
+            "300",
+        ]
+
+
 # --- MCP ---------------------------------------------------------------------
 
 

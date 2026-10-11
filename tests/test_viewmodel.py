@@ -8,9 +8,11 @@ from rdap import _normalize_rdap_domain, _normalize_rdap_ip, normalize_whois
 from viewmodel import (
     DASH,
     _age_days,
+    _parse_dmarc,
     build_view,
     cert_age,
     country_flag,
+    dmarc_policy,
     fcrdns_state,
     format_distance,
     registration_age,
@@ -1799,3 +1801,151 @@ class TestYoungDomainTag:
         old = build_view(DOMAIN_RESPONSE, is_self=False)
         assert young["description"] == old["description"]
         assert "REGISTERED" not in young["description"]
+
+
+class TestParseDmarc:
+    """Read for display only, and leniently: what a domain publishes is shown
+    as published, never graded."""
+
+    def test_the_four_tags_are_read(self):
+        assert _parse_dmarc(
+            "v=DMARC1; p=quarantine; sp=reject; pct=50; rua=mailto:d@example.com"
+        ) == {
+            "p": "quarantine",
+            "sp": "reject",
+            "pct": "50",
+            "rua": "mailto:d@example.com",
+        }
+
+    def test_case_spaces_and_stray_semicolons_are_tolerated(self):
+        assert _parse_dmarc(" V = DMARC1 ;;P = Reject ; SP=None;") == {
+            "p": "reject",
+            "sp": "none",
+        }
+
+    def test_a_record_joined_from_255_byte_strings_reads_whole(self):
+        head = "v=DMARC1; p=reject; rua=mailto:dmarc-reports@exam"
+        assert _parse_dmarc(head + "ple.com")["rua"] == (
+            "mailto:dmarc-reports@example.com"
+        )
+
+    def test_unknown_tags_and_junk_are_skipped(self):
+        assert _parse_dmarc("v=DMARC1; p=none; adkim=s; foo=bar; junk; =x") == {
+            "p": "none"
+        }
+
+    def test_a_policy_that_is_not_one_is_dropped(self):
+        assert _parse_dmarc("v=DMARC1; p=rejected; sp=") == {}
+
+    def test_the_first_of_a_repeated_tag_wins(self):
+        assert _parse_dmarc("v=DMARC1; p=none; p=reject") == {"p": "none"}
+
+    def test_text_that_is_not_dmarc_reads_as_nothing(self):
+        assert _parse_dmarc("v=spf1 -all") == {}
+        # DMARC1 must match exactly (RFC 7489 §6.3): receivers ignore this one.
+        assert _parse_dmarc("v=dmarc1; p=reject") == {}
+        assert _parse_dmarc("p=reject; v=DMARC1") == {}
+        assert _parse_dmarc("") == {}
+
+
+def _dmarc_domain(*texts, source="_dmarc.example.com", queried="example.com"):
+    return {
+        "queried_name": queried,
+        "dmarc": [{"text": t, "ttl": 300, "queried_name": source} for t in texts],
+        "status": {"dmarc": "ok"},
+    }
+
+
+class TestDmarcPolicy:
+    def test_the_names_own_record_governs_by_its_p(self):
+        domain = _dmarc_domain("v=DMARC1; p=reject; sp=none")
+        assert dmarc_policy(domain) == {
+            "tag": "p",
+            "policy": "reject",
+            "pct": None,
+            "inherited_from": None,
+        }
+
+    def test_an_inherited_record_governs_a_subdomain_by_its_sp(self):
+        """RFC 7489 §6.3: sp= is the policy for the domain's subdomains."""
+        domain = _dmarc_domain("v=DMARC1; p=reject; sp=none", queried="www.example.com")
+        assert dmarc_policy(domain) == {
+            "tag": "sp",
+            "policy": "none",
+            "pct": None,
+            "inherited_from": "example.com",
+        }
+
+    def test_an_inherited_record_without_sp_governs_by_its_p(self):
+        domain = _dmarc_domain("v=DMARC1; p=quarantine", queried="www.example.com")
+        assert dmarc_policy(domain)["tag"] == "p"
+        assert dmarc_policy(domain)["policy"] == "quarantine"
+
+    def test_pct_is_kept_only_when_it_narrows_the_policy(self):
+        assert dmarc_policy(_dmarc_domain("v=DMARC1; p=reject; pct=25"))["pct"] == "25"
+        assert dmarc_policy(_dmarc_domain("v=DMARC1; p=reject; pct=100"))["pct"] is None
+
+    def test_a_record_with_no_policy_has_none(self):
+        domain = _dmarc_domain("v=DMARC1; rua=mailto:d@example.com")
+        assert dmarc_policy(domain)["policy"] is None
+
+    def test_two_records_are_no_policy(self):
+        """RFC 7489 §6.6.3 ends policy discovery when a name has two."""
+        domain = _dmarc_domain("v=DMARC1; p=none", "v=DMARC1; p=reject")
+        assert dmarc_policy(domain) is None
+
+    def test_no_record_is_no_policy(self):
+        assert dmarc_policy({"dmarc": [], "status": {"dmarc": "nxdomain"}}) is None
+        assert dmarc_policy({}) is None
+        assert dmarc_policy(None) is None
+
+
+def _mail_fact(domain):
+    column = build_view(dict(DOMAIN_RESPONSE, domain=domain), is_self=False)
+    rows = {row["label"]: row for row in column["facts"][1]["rows"]}
+    return rows["Mail"]["value"], rows["Mail"]["tone"]
+
+
+SPF = [{"text": "v=spf1 -all", "ttl": 300}]
+
+
+class TestMailRow:
+    def test_spf_and_the_policy_on_one_line(self):
+        domain = {**_dmarc_domain("v=DMARC1; p=reject"), "spf": SPF}
+        assert _mail_fact(domain) == ("SPF yes · DMARC p=reject", "default")
+
+    def test_p_none_is_an_answer_not_a_warning(self):
+        """p=none asks receivers for reports only: monitoring, not a fault."""
+        domain = {**_dmarc_domain("v=DMARC1; p=none"), "spf": SPF}
+        assert _mail_fact(domain) == ("SPF yes · DMARC p=none", "default")
+
+    def test_an_inherited_policy_names_the_domain_it_came_from(self):
+        domain = _dmarc_domain(
+            "v=DMARC1; p=reject; sp=quarantine; pct=50", queried="www.example.com"
+        )
+        assert _mail_fact(domain) == (
+            "SPF — · DMARC sp=quarantine pct=50 (example.com)",
+            "default",
+        )
+
+    def test_no_record_is_a_dash(self):
+        domain = {"spf": SPF, "dmarc": [], "status": {"dmarc": "nxdomain"}}
+        assert _mail_fact(domain) == ("SPF yes · DMARC —", "default")
+
+    def test_neither_is_a_single_dash(self):
+        domain = {"spf": [], "dmarc": [], "status": {"spf": "noanswer"}}
+        assert _mail_fact(domain) == ("—", "default")
+
+    def test_a_failed_query_says_so_and_warns(self):
+        domain = {"spf": SPF, "dmarc": [], "status": {"dmarc": "timeout"}}
+        assert _mail_fact(domain) == ("SPF yes · DMARC (timed out)", "warning")
+        domain = {"spf": [], "dmarc": [], "status": {"spf": "servfail"}}
+        assert _mail_fact(domain) == ("SPF (server failure) · DMARC —", "warning")
+
+    def test_two_records_are_counted_not_read(self):
+        domain = _dmarc_domain("v=DMARC1; p=none", "v=DMARC1; p=reject")
+        assert _mail_fact(domain) == ("SPF — · DMARC 2 records", "default")
+
+    def test_a_record_without_a_policy_says_so(self):
+        domain = _dmarc_domain("v=DMARC1; rua=mailto:d@example.com")
+        assert _mail_fact(domain) == ("SPF — · DMARC no p= tag", "default")

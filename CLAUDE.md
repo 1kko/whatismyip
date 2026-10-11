@@ -234,7 +234,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `mcp_server.py` reuses its certificate helpers without a cycle. The one
   decision that needs `lookup` — which values link to their own lookup —
   comes in as the `link_for` argument (`main.lookup_href`); the default
-  `None` links nothing.
+  `None` links nothing. `dmarc_policy()` is the one reading of a name's
+  DMARC record (the Mail row in the DNS column): exactly one record, and an
+  inherited one's `sp=` for a subdomain.
 - `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
   and `coordinate_precision`, the one `city`/`country` rule for a fix.
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
@@ -425,7 +427,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   record, `_dmarc.<registrable_domain()>` once — the public suffix list's
   answer, never the SOA zone. A failed first query never falls back, a failed
   fallback is the status, and each record's `queried_name` says which name
-  answered.
+  answered. The page's DNS table lists each record under that name
+  (`main._dmarc_rows`); an inherited one carries `inherited_from` and ends
+  VALUE with that domain in parentheses, as a zone row ends with `(zone)`,
+  since NAME is hidden under 900px.
 
 #### GeoIP Databases
 

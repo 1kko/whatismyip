@@ -82,7 +82,9 @@ RDAP registration data and the full TLS certificate, expanded.
   (`canonical_name`), read off that answer at no extra query. A domain's sweep
   also asks for its DMARC record: `_dmarc.<name>`, or its registrable domain's
   when the name has none, as RFC 7489 discovery does — one TXT query, two at
-  most.
+  most. The page's DNS column sums mail up in one row, such as
+  `SPF yes · DMARC p=none`: the policy as published (`p=none` asks for reports
+  only), never a grade.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
   match, protocol and cipher, and whether the certificate is trusted. An
   expired, self-signed, wrong-host or chain-incomplete certificate is still
