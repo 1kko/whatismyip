@@ -30,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from mapgeom import build_canvas
 from rdap import rdap_breaker, refresh_rdap_bootstrap
-from viewmodel import build_view, dns_failure_text, whois_display, whois_fill
+from viewmodel import build_view, dns_failure_text, dns_names, whois_display, whois_fill
 from concurrency import LookupBusy, lookup_gate
 from config import (
     ABUSEIPDB_CACHE_TTL,
@@ -324,10 +324,41 @@ def _record_value(kind: str, record) -> str:
     return str(record)
 
 
+def _zone_of(kind: str, record: object, zone: str) -> str | None:
+    """The zone a DNS row was answered by, or None for the name's own record.
+
+    get_records asks NS of the zone apex always, and MX of the zone only when
+    the name has none of its own, labelling those rows `from_zone`. A failed
+    query (record None) follows the same rule: a failed NS was still asked of
+    the zone; a failed MX cannot say which of the two MX queries raised.
+    """
+    if kind == "NS":
+        return zone
+    if kind == "MX" and isinstance(record, dict) and record.get("from_zone"):
+        return str(record["from_zone"])
+    return None
+
+
 def _dns_rows(response_data: dict) -> list[dict]:
-    """Flatten the DNS record dict into table rows."""
+    """Flatten the DNS record dict into table rows.
+
+    NAME is the name each record was asked of: the queried name (an IP
+    target's PTR name), or the zone for the rows the zone answered. A zone row
+    whose zone differs from the queried name carries `from_zone: True`, which
+    the template renders as a "(zone)" marker; every other row has no such key
+    (tests pin that dict as it is). A CNAME hop row keeps its hop's owner name.
+    """
     domain = response_data.get("domain") or {}
-    address = response_data.get("address", "")
+    queried_name, zone = dns_names(domain, response_data.get("address", ""))
+
+    def row(kind: str, record: object, value: str, ttl) -> dict:
+        out = {"type": kind, "name": queried_name, "value": value, "ttl": ttl}
+        source = _zone_of(kind, record, zone)
+        if source:
+            out["name"] = source
+            if source != queried_name:
+                out["from_zone"] = True
+        return out
 
     def failed(kind: str, key: str) -> list[dict]:
         # A query that failed gets a row saying so; left out, it would read
@@ -335,9 +366,7 @@ def _dns_rows(response_data: dict) -> list[dict]:
         text = dns_failure_text(domain, key)
         if not text:
             return []
-        return [
-            {"type": kind, "name": address, "value": text, "ttl": "", "tone": "warning"}
-        ]
+        return [{**row(kind, None, text, ""), "tone": "warning"}]
 
     rows = []
     for kind, key in (
@@ -349,12 +378,12 @@ def _dns_rows(response_data: dict) -> list[dict]:
     ):
         for record in domain.get(key) or []:
             rows.append(
-                {
-                    "type": kind,
-                    "name": address,
-                    "value": _record_value(kind, record),
-                    "ttl": record.get("ttl", "") if isinstance(record, dict) else "",
-                }
+                row(
+                    kind,
+                    record,
+                    _record_value(kind, record),
+                    record.get("ttl", "") if isinstance(record, dict) else "",
+                )
             )
         rows.extend(failed(kind, key))
 
@@ -363,26 +392,29 @@ def _dns_rows(response_data: dict) -> list[dict]:
     if chain:
         # One row per hop the resolver followed for the A answer, under the
         # hop's own owner name (written without the trailing dot, like the
-        # address in the other rows) and with the TTL the resolver had left
-        # for it. The first hop is the `cname` record, so that single row is
-        # not drawn on top of it.
+        # other rows' names) and with the TTL the resolver had left for it.
+        # The first hop is the `cname` record, so that single row is not drawn
+        # on top of it. Not through row(), which would name it queried_name.
         for hop in chain:
-            rows.append(
-                {
-                    "type": "CNAME",
-                    "name": str(hop.get("name", "")).rstrip("."),
-                    "value": str(hop.get("target", "")),
-                    "ttl": hop.get("ttl", ""),
-                }
-            )
+            owner = str(hop.get("name", "")).rstrip(".")
+            hop_row = {
+                "type": "CNAME",
+                "name": owner,
+                "value": str(hop.get("target", "")),
+                "ttl": hop.get("ttl", ""),
+            }
+            if owner != queried_name:
+                # Under 900px NAME is hidden, so VALUE says whose hop this is.
+                hop_row["hop_of"] = owner
+            rows.append(hop_row)
     elif cname:
         rows.append(
-            {
-                "type": "CNAME",
-                "name": address,
-                "value": _record_value("CNAME", cname),
-                "ttl": cname.get("ttl", "") if isinstance(cname, dict) else "",
-            }
+            row(
+                "CNAME",
+                cname,
+                _record_value("CNAME", cname),
+                cname.get("ttl", "") if isinstance(cname, dict) else "",
+            )
         )
     rows.extend(failed("CNAME", "cname"))
     return rows

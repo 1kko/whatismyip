@@ -338,9 +338,15 @@ def test_the_page_lists_every_hop_and_says_whose_location_it_shows(offline):
     ASN it shows are that name's."""
     html = client.get(f"/{QNAME}", headers=BROWSER_UA).text
 
+    owner = HOPS[0][0].rstrip(".")
     assert _dns_rows_of(html, "CNAME") == [
         ["CNAME", "www.microsoft.com", HOPS[0][0], "300"],
-        ["CNAME", HOPS[0][0].rstrip("."), HOPS[1][0], "60"],
+        [
+            "CNAME",
+            owner,
+            f'{HOPS[1][0]} <span class="tone-muted">(of {owner})</span>',
+            "60",
+        ],
     ]
     assert _dns_rows_of(html, "A") == [["A", QNAME, EDGE_IP, "20"]]
     via = _geoip_rows_of(html)["Resolves via"]

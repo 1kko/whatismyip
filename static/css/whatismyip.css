@@ -429,6 +429,18 @@ table.records--dns td:nth-child(4) {
   color: var(--text-secondary);
 }
 
+/* The DNS table's caption: the name the records were asked of -- the queried
+   name, or an IP target's PTR name -- once, and the zone its NS and fallback
+   MX came from when that differs. Under 900px the NAME column is hidden, so
+   this is the only place the name is printed. */
+.records__caption {
+  padding: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
 /* API example inside the Raw JSON accordion */
 .api-note { margin: 0 0 10px; color: var(--text-secondary); font-size: 13px; }
 .code {
@@ -771,8 +783,11 @@ table.records--dns td:nth-child(4) {
   table.records td:first-child { width: 90px; }
   table.records--dns th:nth-child(1),
   table.records--dns td:nth-child(1) { width: 48px; }
+  /* The name is in the caption. A 96px column repeating it on every row of a
+     ~312px table was most of a 6,600px page; zone rows keep their "(zone)"
+     marker, so nothing the column said is lost. */
   table.records--dns th:nth-child(2),
-  table.records--dns td:nth-child(2) { width: 96px; padding-right: 10px; }
+  table.records--dns td:nth-child(2) { display: none; }
   table.records--dns th:nth-child(4),
   table.records--dns td:nth-child(4) { width: 52px; }
 }

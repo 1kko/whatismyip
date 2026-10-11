@@ -114,6 +114,11 @@ RDAP registration data and the full TLS certificate, expanded.
   followed, each under its own name and with its own TTL. When the address was
   found under another name, the GeoIP card ends with a "Resolves via" row
   naming it, so its location and ASN are not read as the queried name's own.
+- **DNS records panel** — one caption names the name the records were asked of
+  (an IP's PTR name) and, when it differs, the zone its NS and fallback MX came
+  from; rows the zone answered are marked `(zone)`. On a phone the NAME column
+  folds into that caption, so the value gets the width; a CNAME hop past the
+  first ends with `(of <its name>)` there.
 - **Fingerprint panel** (self view only) — around 27 browser signals plus an
   entropy estimate, computed in the browser and never sent to the server.
 - **WebRTC leak test** (in the fingerprint panel, opt-in) — asks one STUN server

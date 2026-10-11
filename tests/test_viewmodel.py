@@ -159,6 +159,56 @@ class TestHero:
         assert view["city_line"] == ""
 
 
+class TestDnsCaption:
+    """The DNS table's caption names the name the sweep was of and the zone its
+    NS and fallback MX came from. Two new keys: `domain` itself never reaches
+    the template (main.render_page passes `view` and `dns_rows`)."""
+
+    def test_a_subdomain_names_itself_and_its_zone(self):
+        response = {
+            **DOMAIN_RESPONSE,
+            "address": "www.google.com",
+            "domain": {
+                **DOMAIN_RESPONSE["domain"],
+                "queried_name": "www.google.com",
+                "zone": "google.com",
+            },
+        }
+        view = build_view(response, is_self=False)
+        assert view["dns_queried_name"] == "www.google.com"
+        assert view["dns_zone"] == "google.com"
+
+    def test_an_ip_names_the_ptr_name_the_sweep_was_of(self):
+        # lookup._run_legs sweeps an IP's PTR name, and get_records reports
+        # that name, trailing dot stripped, as queried_name.
+        response = {
+            **IP_RESPONSE,
+            "domain": {
+                **IP_RESPONSE["domain"],
+                "queried_name": "dns.google",
+                "zone": "dns.google",
+            },
+        }
+        view = build_view(response, is_self=False)
+        assert view["dns_queried_name"] == "dns.google"
+        assert view["dns_zone"] == "dns.google"
+
+    def test_a_response_without_the_names_falls_back_to_the_address(self):
+        # An IP with no PTR gets domain={} from gather(), and older fixtures
+        # carry neither key. Both name the address twice, which the template
+        # reads as "no zone to mention".
+        view = build_view(IP_RESPONSE, is_self=False)
+        assert view["dns_queried_name"] == "8.8.8.8"
+        assert view["dns_zone"] == "8.8.8.8"
+
+        for domain in (None, {}):
+            view = build_view({**IP_RESPONSE, "domain": domain}, is_self=False)
+            assert (view["dns_queried_name"], view["dns_zone"]) == (
+                "8.8.8.8",
+                "8.8.8.8",
+            )
+
+
 class TestFacts:
     def test_ip_columns(self):
         titles = [

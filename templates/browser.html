@@ -246,13 +246,20 @@
                     {% endif %}
                     {% elif item.id == 'dns' %}
                     <table class="records records--dns">
+                        {# The name once, here, instead of once per row: under 900px
+                           the NAME column is hidden (whatismyip.css). The zone is
+                           named when NS and the fallback MX came from somewhere
+                           other than the queried name, and those rows say "(zone)"
+                           at every width. The NAME <td> must stay attribute-free:
+                           tests match it as a bare <td>. #}
+                        <caption class="records__caption">records for {{ view.dns_queried_name }}{% if view.dns_zone != view.dns_queried_name %} · NS/MX from zone {{ view.dns_zone }}{% endif %}</caption>
                         <thead><tr><th>TYPE</th><th>NAME</th><th>VALUE</th><th>TTL</th></tr></thead>
                         <tbody>
                         {% for record in dns_rows %}
                         <tr>
                             <td>{{ record.type }}</td>
                             <td>{{ record.name }}</td>
-                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{{ record.value }}</td>
+                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{{ record.value }}{% if record.from_zone %} <span class="tone-muted">(zone)</span>{% endif %}{% if record.hop_of %} <span class="tone-muted">(of {{ record.hop_of }})</span>{% endif %}</td>
                             <td>{{ record.ttl }}</td>
                         </tr>
                         {% else %}
