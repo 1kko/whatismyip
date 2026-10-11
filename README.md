@@ -530,6 +530,7 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `ip` | the address a domain resolves to; an IP itself; on `/`, yours; `?` when the A query failed (`timeout`, `servfail`, `error`), as is every field below that is read from the address | A query (domains) | both |
 | `resolution` | how a domain's A query ended: `ok`, `nxdomain`, `noanswer`, `timeout`, `servfail` or `error` — the reason behind a `?` or `-` `ip`; by name only, never in the text block | A query | domain |
 | `reverse_dns` | PTR name | reverse DNS | IP |
+| `reverse_dns_confirmed` | `confirmed` when one of the PTR name's A records (AAAA for an IPv6 address) is the address, `unconfirmed` when none is; `-` with no PTR, `?` when that A/AAAA query failed; on `/` always `-` | reverse DNS and the record sweep of the PTR name | IP |
 | `country_code` | ISO 3166-1 alpha-2 | GeoIP (local) | both |
 | `country_name` | | GeoIP (local) | both |
 | `city` | | GeoIP (local) | both |
@@ -552,9 +553,13 @@ is `cert_expires` here, and its `registration.expires` is `domain_expires`.
 when asked for by name; the text block leaves them out: a bare `risk_level: none`
 among the other lines would read as a clean bill of health the lists cannot
 give, and `resolution: ok` would be a line to skip on every read.
+`reverse_dns_confirmed` is left out of the block too, for its cost: it needs the
+record sweep of the PTR name, which the block skips.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
-own address; `cert_*` and the domain-only fields are `-`.
+own address; `cert_*` and the domain-only fields are `-`, and so is
+`reverse_dns_confirmed`: `?fields=` on `/` makes no sweep of your PTR name (the
+page, which does, shows the verdict).
 Registration fields describe the registrable domain (`www.github.com` uses
 `github.com`'s registrar and expiry). The full JSON and MCP `lookup` response
 include the `registrable_domain` label; this flat form does not.
@@ -578,7 +583,10 @@ A value is never left blank:
   connectivity)` for a name with only an AAAA record. A monitor reading
   `cert_days_remaining` therefore sees `?`/`null` with a reason during an
   outage, never a missing certificate. `?fields=ip,resolution` names the reason
-  in text too: `?` then `timeout`.
+  in text too: `?` then `timeout`. `reverse_dns_confirmed` is `?` when its PTR
+  name's A/AAAA query ends in `timeout`, `servfail` or `error` (reason: `the PTR
+  name's A/AAAA query failed`); `nxdomain` and `noanswer` there are answers, and
+  read `unconfirmed`.
 
 An unknown field is refused with `400` before any lookup runs:
 

@@ -472,7 +472,10 @@ the TLS tags.
   off its PTR and the sweep of the PTR name already fetched, never a query of
   its own: `unknown` when that A/AAAA query failed, never `unconfirmed`. The
   page's PTR row says `→ confirmed` or `→ does not point back`, never spoofed:
-  CDNs and shared hosts fail the check legitimately
+  CDNs and shared hosts fail the check legitimately.
+  `?fields=reverse_dns_confirmed` stays out of the text block
+  (`textfmt._NOT_IN_BLOCK`), where every IP lookup would pay for the sweep,
+  and is `-` on `/`, since `main._self_fields` sweeps nothing
 - An untrusted TLS certificate is still returned, with `trusted: false` and `verify_error`; an unreachable port 443 or failed handshake is `{"error", "reason"}`; `None` only when no handshake was attempted
 - A browser gets `templates/error.html` for a 400, 403, 429 or 503, with the
   same status as the JSON (`main.render_error`); every other client gets the
