@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {#- --bg in static/css/whatismyip.css; tests/test_page.py keeps the two equal. #}
+    <meta name="theme-color" content="#0B0D12">
+    <meta name="color-scheme" content="dark">
     <title>{{ view.title }}</title>
     <meta name="description" content="{{ view.description }}">
     {%- set page_url = api_base ~ view.canonical_path %}

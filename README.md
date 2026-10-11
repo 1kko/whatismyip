@@ -96,7 +96,12 @@ RDAP registration data and the full TLS certificate, expanded.
 
 ### The page
 
-- Server-rendered (Jinja2, no client-side templating), dark theme only.
+- Server-rendered (Jinja2, no client-side templating), dark theme only. The
+  browser's address bar and tab bar take the page background (`theme-color`).
+- **Installable** — "Install app" or "Add to Home Screen" adds an app named
+  WhatIsMyIP that opens on your own address, with a shortcut to the privacy
+  page. There is no service worker and nothing works offline: every launch is a
+  fresh lookup, like a visit.
 - **Map** — all projection math is server-side and unit-tested. The server emits
   tile URLs with pixel offsets and a projected great-circle polyline for two
   fixed canvases (desktop band and mobile card); the browser only paints them.
