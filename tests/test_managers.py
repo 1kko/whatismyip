@@ -567,3 +567,29 @@ class TestIsValidDomain:
         assert manager.is_valid_domain("nasa.gov")
         assert manager.is_valid_domain("foo.dev")
         assert not manager.is_valid_domain("admin.php")
+
+
+class TestRegistrableDomain:
+    """The ICANN-view floor shared by DNS and registration lookups."""
+
+    def test_a_name_below_its_registrable_domain(self):
+        manager = managers.DomainManager()
+        assert manager.registrable_domain("www.example.com") == "example.com"
+        assert manager.registrable_domain("a.b.example.co.uk") == "example.co.uk"
+
+    def test_the_registrable_domain_is_itself(self):
+        manager = managers.DomainManager()
+        assert manager.registrable_domain("example.com") == "example.com"
+
+    def test_a_public_suffix_asked_directly_is_itself_not_none(self):
+        manager = managers.DomainManager()
+        assert manager.registrable_domain("co.uk") == "co.uk"
+
+    def test_a_private_suffix_is_an_operators_registration(self):
+        manager = managers.DomainManager()
+        assert manager.registrable_domain("foo.github.io") == "github.io"
+
+    def test_an_address_or_an_unparseable_string_is_none(self):
+        manager = managers.DomainManager()
+        for value in ("192.0.2.1", "2001:db8::1", "", "//", "example.invalid"):
+            assert manager.registrable_domain(value) is None
