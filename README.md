@@ -121,6 +121,15 @@ RDAP registration data and the full TLS certificate, expanded.
   from; rows the zone answered are marked `(zone)`. On a phone the NAME column
   folds into that caption, so the value gets the width; a CNAME hop past the
   first ends with `(of <its name>)` there.
+- **Lookup links** — every hostname and address the page shows (the DNS
+  table's values, rDNS and PTR, the `A →` tag, the WHOIS name servers, the
+  subdomain list) links to its own lookup, so a trail from a domain to its
+  mail host to that host's address needs no copy and paste. Only what
+  `/{value}` would answer is linked, a name in its canonical spelling (lower
+  case, A-label): a private or reserved address, a name without a public
+  suffix and a special-use name (`.onion`, `home.arpa`) stay text. The links
+  carry `rel="nofollow"`, and each click is an ordinary lookup under the rate
+  limit.
 - **Fingerprint panel** (self view only) — around 27 browser signals plus an
   entropy estimate, computed in the browser and never sent to the server.
 - **WebRTC leak test** (in the fingerprint panel, opt-in) — asks one STUN server
@@ -713,7 +722,9 @@ while still running on the snapshot shipped with the `tld` package, and
 ### `GET /robots.txt`, `GET /favicon.ico`
 
 `/robots.txt` is plain text that keeps crawlers off `?subdomains=` links, which
-can cost a crt.sh round trip each. `/favicon.ico` is a `301` to
+can cost a crt.sh round trip each. The page's own lookup links (DNS values,
+rDNS, name servers, subdomains) carry `rel="nofollow"` instead, so a crawler is
+not led from one full lookup to the next. `/favicon.ico` is a `301` to
 `/static/favicon.ico`. Neither is looked up as a domain, and like `/static/`
 neither counts against the rate limit.
 
