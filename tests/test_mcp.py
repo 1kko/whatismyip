@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import config
+import eppstatus
 import lookup
 import main
 from main import app
@@ -148,6 +149,15 @@ def test_lookup_tool_returns_a_compact_result():
         assert payload["geo"]["time_zone"] == "America/New_York"
         assert payload["network"]["asn_number"] == 15133
         assert payload["registration"]["registrar"].startswith("RESERVED")
+        registration = payload["registration"]
+        assert registration["status"] == ["client delete prohibited"]  # raw, as before
+        assert registration["status_explained"] == [
+            {
+                "code": "clientDeleteProhibited",
+                "meaning": eppstatus.STATUS_MEANINGS["clientDeleteProhibited"][0],
+                "severity": "success",
+            }
+        ]
         # Render-only data must never reach an LLM context.
         for forbidden in ("map", "distance_km", "origin"):
             assert forbidden not in payload
@@ -924,3 +934,42 @@ class TestRegistrationShaping:
         assert out["queried_name"] == "www.admin.ch"
         assert out["registrable_domain"] == "admin.ch"
         assert "error" not in out and "registered" not in out
+
+    def test_status_is_explained_beside_the_raw_list(self):
+        from mcp_server import compact_registration
+
+        line = "clientHold https://icann.org/epp#clientHold"
+        out = compact_registration(
+            {"source": "whois", "registrar": "x", "status": [line, "connect"]}
+        )
+        assert out["status"] == [line, "connect"]
+        assert out["status_explained"] == [
+            {
+                "code": "clientHold",
+                "meaning": eppstatus.STATUS_MEANINGS["clientHold"][0],
+                "severity": "danger",
+            },
+            {"code": "connect", "meaning": None, "severity": None},
+        ]
+
+    def test_a_domain_without_statuses_gets_an_empty_list(self):
+        from mcp_server import compact_registration
+
+        out = compact_registration({"source": "rdap", "registrar": "Example Registrar"})
+        assert out["status"] == [] and out["status_explained"] == []
+
+    def test_an_ip_allocation_gets_no_epp_gloss(self):
+        from mcp_server import compact_registration
+
+        out = compact_registration(
+            {"source": "rdap", "name": "GOGL", "rir": "arin", "status": ["active"]}
+        )
+        assert out["status"] == ["active"]
+        assert "status_explained" not in out
+
+    def test_the_lookup_description_explains_the_gloss(self):
+        import mcp_server
+
+        doc = " ".join(mcp_server.lookup.__doc__.split())
+        assert "status_explained" in doc
+        assert "clientHold" in doc and "RFC 8056" in doc

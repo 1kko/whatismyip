@@ -36,6 +36,7 @@ from config import (
     SUBDOMAIN_MCP_MAX_LIMIT,
     WHOIS_TIMEOUT_SECONDS,
 )
+from eppstatus import explain_status
 from lookup import (
     InvalidTargetError,
     PrivateAddressError,
@@ -177,6 +178,13 @@ def compact_registration(whois: dict | None) -> dict:
     if whois.get("thin"):
         out["thin"] = True
         out["note"] = "WHOIS answered with no details beyond the name"
+    # A domain's statuses are EPP codes in one of three spellings (eppstatus.py)
+    # and mean nothing to a model as given: each gets its code, meaning and
+    # severity beside the raw list, which stays the registry's own words. An IP
+    # allocation's statuses are RDAP's words for a network ("active"), not EPP
+    # codes, so an IP record (no registrar key) gets no gloss.
+    if "registrar" in whois:
+        out["status_explained"] = explain_status(whois.get("status"))
     return out
 
 
@@ -334,6 +342,16 @@ async def lookup(target: str) -> dict[str, Any]:
     many users, it has had in the last `window_days`. The confidence counts
     toward the level as a weight of the same size. It summarises user reports,
     so relay it as "AbuseIPDB's confidence is N%", with `url` for the reports.
+
+    `registration.status` is the registry's own words for a domain's EPP status
+    codes, in whichever spelling it uses; `registration.status_explained` gives
+    each as its EPP code with a one-line `meaning` and a `severity`: `success`
+    for a lock such as clientTransferProhibited (a common setting, not a
+    problem), `warning` for inactive (no name servers), `danger` for clientHold,
+    serverHold, pendingDelete and redemptionPeriod (the name is out of the DNS
+    or about to be dropped), `default` otherwise, and null for a registry's own
+    word outside RFC 8056 (DENIC's "connect"). An IP allocation's statuses are
+    not EPP codes and get no `status_explained`.
     """
     try:
         data = await _bounded_gather(target)

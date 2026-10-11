@@ -200,8 +200,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `subdomains.get_subdomains()` (registered only under `SUBDOMAIN_ENABLED`),
   and `whoami_caller` over `lookup.lookup_location()` and
   `lookup.ip_reputation()`. Each reshapes its data for an LLM context (the
-  `compact_*` functions). `build_mcp`, `McpDispatch`, `McpBarePathRoute` and
-  `McpDisabled` are the mount plumbing `main.py` wires.
+  `compact_*` functions). `compact_registration` adds `status_explained`
+  (`eppstatus.explain_status`: `[{code, meaning, severity}]`) beside a domain's
+  raw `status`; an IP allocation, an error and `registered: false` carry none.
+  A new output key is not a listing change, so `server.json` is not bumped for
+  it. `build_mcp`, `McpDispatch`, `McpBarePathRoute` and `McpDisabled` are the
+  mount plumbing `main.py` wires.
 - `viewmodel.py`: `build_view()` turns a response dict into what
   `templates/browser.html` renders. Pure, with no I/O, and it imports only
   `config`, `eppstatus`, `reputation.grade` and the standard library, so
