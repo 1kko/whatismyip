@@ -706,8 +706,8 @@ class TestRegistrationShaping:
     """`not registered` is an answer, not a failure, and the distinction costs
     more here than in the browser: handed `error`, a model reports that the
     lookup broke and suggests retrying; handed `registered: false`, it can say
-    the name has no registration -- which is simply what a subdomain is. Same
-    reasoning as dns_records refusing to return {} for a type it never queried.
+    the registrable domain has no registration. A subdomain gets the covering
+    domain's labelled record instead.
     """
 
     def test_a_real_failure_is_still_an_error(self):

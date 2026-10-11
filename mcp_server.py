@@ -138,9 +138,8 @@ def compact_registration(whois: dict | None) -> dict:
     # "not registered" is an answer, not a failure, and the distinction matters
     # more to a model than to a person: told `error`, it reports that the lookup
     # broke and the user should try again; told `registered: false`, it can say
-    # the name has no registration -- which is simply what a subdomain looks
-    # like. Same reasoning as dns_records refusing to return {} for a record
-    # type this server never queried.
+    # the registrable domain has no registration. Same reasoning as dns_records
+    # refusing to return {} for a record type this server never queried.
     if error == NOT_REGISTERED:
         return {"registered": False, "name": whois.get("name"), **names}
     if error:
