@@ -284,7 +284,13 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    of `.arpa`, which PTR names live in. The check is not in
    `is_valid_domain`, which `main._suspicious_path_is_ordinary` reads: the
    probe verdict for these paths must not change. A browser gets
-   `main.render_refused_target`'s error page instead of the JSON
+   `main.render_refused_target`'s error page instead of the JSON, with copy
+   chosen by `code` for `cgnat`, `documentation`/`benchmarking` and
+   `6to4`/`teredo`/`nat64` (`_carried_ipv4` names the IPv4 address inside,
+   offered as the next lookup only when `is_safe_ip` passes it); a hostname
+   keeps its own sentence whatever block it resolved into, the other
+   `_LOCAL_NETWORKS` blocks keep the local-network sentence, and
+   `static/js/app.js`'s `isLocalAddress` mirrors that list unchanged
 3. **IP Resolution**: a domain's A record, or its AAAA record when it has no A
    (an IPv6-only host), from the public resolvers; the address must pass
    `is_safe_ip` too

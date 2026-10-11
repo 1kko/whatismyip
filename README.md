@@ -961,6 +961,14 @@ small page with the search box instead: the `403` page says only the sentence
 above, the `429` page adds "Try again later", a private address such as
 `192.168.0.1` gets an explanation of local network addresses and a link to `/`,
 and a `.onion` or `home.arpa` name gets the reason it has no public answer.
+The page's copy follows `code`: a CGNAT address (`100.64.0.0/10`) is
+explained as the carrier sharing one public address among its customers, a
+documentation or benchmarking address as never routed, and a 6to4, Teredo or
+NAT64 address names the IPv4 address it carries, offered as the lookup to
+make instead when that address is public itself. A domain that resolves into
+one of these blocks keeps the "resolves to a private or reserved IP address"
+page. The search box's own hint still treats `100.64.0.0/10` as local, like
+the other ranges a router or a VPN answers on.
 `/mcp` always answers JSON.
 
 ## MCP (Model Context Protocol)
