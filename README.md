@@ -56,6 +56,11 @@ RDAP registration data and the full TLS certificate, expanded.
   Both sources are normalised to one shape and cached for 6 hours (5 minutes
   for a failure). An IP address has no WHOIS fallback. An RDAP server that fails
   three times in a row is skipped for 10 minutes.
+  The page reads a domain's status codes out, whichever spelling the registry
+  used: `clientTransferProhibited` is "transfer lock set by the registrar (a
+  common setting)". A hold or pending delete (`clientHold`, `serverHold`,
+  `pendingDelete`, `redemptionPeriod`) is one red tag on the hero. The JSON's
+  `whois.status` keeps the registry's own words.
   A hostname such as `www.github.com` gets the registration that covers it,
   `github.com`'s, with `queried_name` and `registrable_domain` identifying both
   names. `not registered` therefore means the registrable domain has no record.

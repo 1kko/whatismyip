@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 from config import SUBDOMAIN_ENABLED
+from eppstatus import explain_status
 from reputation import grade
 
 # Mirrors rdap.NOT_REGISTERED rather than importing it: `rdap` pulls in whoisit,
@@ -611,6 +612,23 @@ def _reputation_tags(response: dict, informational: bool) -> list[dict]:
     ]
 
 
+def _status_tags(whois_data: dict | None) -> list[dict]:
+    """One red tag when a domain's registry status says the name is out of the
+    DNS or about to be dropped (clientHold, serverHold, pendingDelete,
+    redemptionPeriod): the code itself, which the WHOIS accordion glosses. It
+    names the status, not a verdict, and it is no reputation signal:
+    reputation.grade() never sees it."""
+    whois_data = whois_data or {}
+    if "registrar" not in whois_data:
+        return []
+    codes = [
+        entry["code"]
+        for entry in explain_status(whois_data.get("status"))
+        if entry["severity"] == "danger"
+    ]
+    return [{"text": " · ".join(codes), "tone": "danger"}] if codes else []
+
+
 def _tags(response: dict, is_ip: bool) -> list[dict]:
     location = response.get("location") or {}
     domain = response.get("domain") or {}
@@ -640,6 +658,7 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
         tags.append({"text": f"TLS {problem}", "tone": "danger"})
     elif ssl_data.get("trusted"):
         tags.append({"text": "TLS valid", "tone": "success"})
+    tags += _status_tags(response.get("whois"))
     return tags + _reputation_tags(response, informational=False)
 
 
@@ -719,6 +738,24 @@ def _whois_value(key: str, value: Any) -> str:
     return str(value)
 
 
+def _status_text(record: dict) -> str:
+    """The Status row. For a domain, each registry status as its EPP code with
+    its meaning -- "clientTransferProhibited — transfer lock set by the
+    registrar (a common setting)" -- whichever of the three spellings the
+    source used, and a code outside RFC 8056 (DENIC's "connect") as the bare
+    word. An IP allocation's statuses are RDAP's words for a network
+    ("active"), not EPP codes, so they are rendered as they are. Entries are
+    separated with ";" because the meanings themselves read as prose."""
+    if "registrar" not in record:
+        # rdap._normalize_rdap_ip sets no registrar key; both domain shapes do.
+        return _whois_value("status", record.get("status"))
+    parts = [
+        f"{entry['code']} — {entry['meaning']}" if entry["meaning"] else entry["code"]
+        for entry in explain_status(record.get("status"))
+    ]
+    return "; ".join(parts) if parts else DASH
+
+
 def _covering_registration(whois_data: dict) -> str | None:
     """Return the registrable domain when its record covers another name."""
     registrable = whois_data.get("registrable_domain")
@@ -744,7 +781,10 @@ def whois_display(whois_data: dict | None) -> dict:
     if covering:
         out["Registration of"] = covering
     for key, label in _WHOIS_ROWS:
-        text = _whois_value(key, whois_data.get(key))
+        if key == "status":
+            text = _status_text(whois_data)
+        else:
+            text = _whois_value(key, whois_data.get(key))
         if text and text != DASH:
             out[label] = text
     return out

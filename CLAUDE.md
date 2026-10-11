@@ -204,8 +204,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `McpDisabled` are the mount plumbing `main.py` wires.
 - `viewmodel.py`: `build_view()` turns a response dict into what
   `templates/browser.html` renders. Pure, with no I/O, and it imports only
-  `config`, `reputation.grade` and the standard library, so `mcp_server.py`
-  reuses its certificate helpers without a cycle.
+  `config`, `eppstatus`, `reputation.grade` and the standard library, so
+  `mcp_server.py` reuses its certificate helpers without a cycle.
 - `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
   and `coordinate_precision`, the one `city`/`country` rule for a fix.
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
@@ -395,6 +395,18 @@ A port-43 record with nothing beyond `source` and `name` gets `thin: True`.
 The page says `no details`, MCP adds `thin` and a note, and flat registration
 fields stay `-`. Thin records are cached for `WHOIS_CACHE_ERROR_TTL` (5 min)
 so a registry can be retried; full records retain the 6-hour TTL.
+
+A record's `status` stays the registry's own words; the page folds them with
+`eppstatus.explain_status` (`viewmodel._status_text`, `viewmodel._status_tags`).
+A domain's codes render as `clientTransferProhibited — transfer lock set by the
+registrar (a common setting)`, several joined with `; `, a code outside RFC 8056
+(`connect`) as itself, and a `danger` code (`clientHold`, `serverHold`,
+`pendingDelete`, `redemptionPeriod`) earns one red hero tag named for the code
+(`clientHold · pendingDelete` when there are two). A record without a
+`registrar` key is an IP allocation, whose RDAP words (`active`) are not EPP
+codes and are shown as they are. The tag is not a reputation signal:
+`reputation.grade` never sees it, and `_summary()` (link previews) reads only
+the TLS tags.
 
 #### Error Handling
 
