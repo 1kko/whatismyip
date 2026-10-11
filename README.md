@@ -699,6 +699,7 @@ rate limit as `GET`.
     "ip": "192.0.66.108",
     "country_code": "US",
     "country_name": "United States",
+    "country_source": "located",
     "city_name": "San Francisco",
     "subdivision_name": "California",
     "subdivision_code": "CA",
@@ -784,6 +785,17 @@ read at all, `ssl` is `{"error": "port 443 unreachable"}` or
 or `timed out`. `map` is `null` when the target has no resolvable coordinates, and
 `distance_km`/`origin` are `null` whenever there is no route to draw — including
 `GET /`, where the visitor *is* the target.
+
+`location.precision` says how far to trust `lat`/`lon`: `city` when GeoLite2's
+accuracy radius is within 200 km, `country` when the fix is a country centroid
+(GeoLite2 places 8.8.8.8 at 37.751, -97.822 with a 1,000 km radius; a block it
+has no coordinates for gets the gazetteer's centroid), and `null` when there
+are no coordinates at all. `location.country_source` is `located`, or
+`registered` when GeoLite2 had only the country the block is registered in
+(1.1.1.1 is registered in AU and located nowhere), and `null` when no country
+was found or only the bundled country snapshot answered (before the first
+GeoLite2 download). The numbers themselves are the same whatever the grade;
+only the two markers were added.
 
 ### IP reputation
 

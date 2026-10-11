@@ -3,7 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from geo import CITY_ZOOM, COUNTRY_ZOOM, Gazetteer, haversine_km, normalize_city
+from geo import (
+    CITY_ZOOM,
+    COUNTRY_ZOOM,
+    MAX_CITY_ACCURACY_KM,
+    Gazetteer,
+    coordinate_precision,
+    haversine_km,
+    normalize_city,
+)
 
 CITIES = Path("static/geo/cities.json")
 COUNTRIES = Path("static/geo/countries.json")
@@ -107,6 +115,45 @@ class TestResolve:
     def test_zoom_constants(self):
         assert CITY_ZOOM == 10
         assert COUNTRY_ZOOM == 4
+
+
+class TestCoordinatePrecision:
+    """One rule for how far coordinates can be trusted, shared by the
+    gazetteer and lookup.lookup_location. GeoLite2 gives a city record a
+    20-200 km radius and a country centroid 1000 km: 8.8.8.8 is 37.751,
+    -97.822, the middle of Kansas, and nothing more precise than "the US"."""
+
+    def test_a_tight_radius_is_city_level(self):
+        assert (
+            coordinate_precision({"lat": 37.386, "lon": -122.084, "accuracy_km": 20})
+            == "city"
+        )
+
+    def test_the_threshold_is_inclusive(self):
+        assert (
+            coordinate_precision(
+                {"lat": 1.0, "lon": 1.0, "accuracy_km": MAX_CITY_ACCURACY_KM}
+            )
+            == "city"
+        )
+
+    def test_a_coarse_radius_is_country_level(self):
+        assert (
+            coordinate_precision({"lat": 37.751, "lon": -97.822, "accuracy_km": 1000})
+            == "country"
+        )
+
+    def test_coordinates_without_a_radius_are_country_level(self):
+        # The gazetteer's own centroids carry no radius; a fix that cannot say
+        # how good it is is not called a city.
+        assert (
+            coordinate_precision({"lat": 37.751, "lon": -97.822, "accuracy_km": None})
+            == "country"
+        )
+
+    def test_no_coordinates_is_none(self):
+        assert coordinate_precision({"lat": None, "lon": None}) is None
+        assert coordinate_precision({}) is None
 
 
 class TestHaversine:

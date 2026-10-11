@@ -401,6 +401,7 @@ class GeoIpManager:
             "ip": ip,
             "country_code": NO_COUNTRY,
             "country_name": None,
+            "country_source": None,
             "city_name": "",
             "subdivision_name": "",
             "subdivision_code": "",
@@ -441,7 +442,10 @@ class GeoIpManager:
         Geo-blocking judges the country set here. A record without a located
         country falls back to the country its block is registered in, the
         substitution geoip2fast's own builder made, so no address that had a
-        country under geoip2fast loses it."""
+        country under geoip2fast loses it. `country_source` says which key
+        answered ("located" or "registered"), so the page and MCP can say
+        "registered in AU" for 1.1.1.1, whose record has no location at all,
+        instead of presenting Australia as where it is."""
         try:
             record, prefix_len = reader.get_with_prefix_len(ip)
         except Exception:
@@ -449,11 +453,15 @@ class GeoIpManager:
         if not record:
             return
         location["cidr"] = _network(ip, prefix_len)
-        for key in ("country", "registered_country"):
+        for key, source in (
+            ("country", "located"),
+            ("registered_country", "registered"),
+        ):
             country = record.get(key) or {}
             if country.get("iso_code"):
                 location["country_code"] = country["iso_code"]
                 location["country_name"] = _english_name(country) or country["iso_code"]
+                location["country_source"] = source
                 break
         loc = record.get("location") or {}
         if loc.get("latitude") is not None and loc.get("longitude") is not None:

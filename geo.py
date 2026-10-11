@@ -47,6 +47,23 @@ def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
 
 
+def coordinate_precision(location: dict[str, Any]) -> str | None:
+    """How far a location's coordinates can be trusted.
+
+    "city" when GeoLite2's accuracy radius is within MAX_CITY_ACCURACY_KM,
+    "country" when the fix is coarser -- a country centroid: GeoLite2 places
+    8.8.8.8 at 37.751, -97.822 with a 1000 km radius, the middle of Kansas --
+    or carries no radius at all, and None when there are no coordinates. The
+    one rule for the gazetteer, lookup.lookup_location and everything that
+    reads either, so the page, the JSON and MCP never disagree about it.
+    """
+    if location.get("lat") is None or location.get("lon") is None:
+        return None
+    accuracy_km = location.get("accuracy_km")
+    precise = accuracy_km is not None and accuracy_km <= MAX_CITY_ACCURACY_KM
+    return "city" if precise else "country"
+
+
 class Gazetteer:
     def __init__(
         self, cities: dict[str, list[float]], countries: dict[str, list[float]]
@@ -76,13 +93,11 @@ class Gazetteer:
 
         lat, lon = location.get("lat"), location.get("lon")
         if lat is not None and lon is not None:
-            accuracy_km = location.get("accuracy_km")
-            precise = accuracy_km is not None and accuracy_km <= MAX_CITY_ACCURACY_KM
             return {
                 "lat": lat,
                 "lon": lon,
-                "precision": "city" if precise else "country",
-                "accuracy_km": accuracy_km,
+                "precision": coordinate_precision(location),
+                "accuracy_km": location.get("accuracy_km"),
             }
 
         country = (location.get("country_code") or "").strip().upper()

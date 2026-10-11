@@ -339,3 +339,62 @@ class TestRegistrationTarget:
         assert rdap == ["example.com"]
         assert result["whois"]["queried_name"] == "www.example.com"
         assert result["whois"]["registrable_domain"] == "example.com"
+
+
+@pytest.mark.asyncio
+async def test_lookup_location_grades_the_coordinates(monkeypatch):
+    """Every reader of a location -- gather() for the page, the JSON and
+    ?fields=, the self page, the MCP tools -- gets it through here, so this is
+    where the coordinates get their grade. GeoLite2 gives a city record a
+    20-200 km radius and a country centroid 1000 km (8.8.8.8: 37.751,
+    -97.822); a block it has no coordinates for (1.1.1.1) gets none."""
+    records = {
+        "89.160.20.112": {"lat": 59.31, "lon": 14.1027, "accuracy_km": 50},
+        "8.8.8.8": {"lat": 37.751, "lon": -97.822, "accuracy_km": 1000},
+        "1.1.1.1": {"lat": None, "lon": None, "accuracy_km": None},
+    }
+    monkeypatch.setattr(
+        lookup.geo_ip_manager,
+        "fetch_location",
+        lambda ip: {"ip": ip, "country_code": "XX", **records[ip]},
+    )
+    assert (await lookup.lookup_location("89.160.20.112"))["precision"] == "city"
+    assert (await lookup.lookup_location("8.8.8.8"))["precision"] == "country"
+    assert (await lookup.lookup_location("1.1.1.1"))["precision"] is None
+
+
+@pytest.mark.asyncio
+async def test_gather_carries_the_precision_and_country_source(monkeypatch):
+    monkeypatch.setattr(lookup.domain_manager, "is_valid_domain", lambda d: False)
+    monkeypatch.setattr(lookup.domain_manager, "is_ipv4", lambda d: True)
+    monkeypatch.setattr(
+        lookup.domain_manager, "perform_reverse_lookup", lambda ip: None
+    )
+    monkeypatch.setattr(lookup.domain_manager, "get_records", lambda *a, **k: {})
+    monkeypatch.setattr(
+        lookup.geo_ip_manager,
+        "fetch_location",
+        lambda ip: {
+            "ip": ip,
+            "country_code": "US",
+            "country_name": "United States",
+            "country_source": "located",
+            "lat": 37.751,
+            "lon": -97.822,
+            "accuracy_km": 1000,
+        },
+    )
+
+    async def fake_whois(target):
+        return {"source": "rdap", "name": target}
+
+    monkeypatch.setattr(lookup, "lookup_whois", fake_whois)
+
+    result = await lookup.gather("8.8.8.8")
+    assert result["location"]["precision"] == "country"
+    assert result["location"]["country_source"] == "located"
+    # The numbers are untouched: only a grade was added.
+    assert (result["location"]["lat"], result["location"]["accuracy_km"]) == (
+        37.751,
+        1000,
+    )
