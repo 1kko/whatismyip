@@ -312,42 +312,65 @@ def cached_whois(target: str) -> dict | None:
     return _whois_cache.get(_whois_key(target))
 
 
+def registration_target(key: str) -> str:
+    """Return the name to ask the registry about and cache under.
+
+    Domain registrations attach to the ICANN-view registrable domain. If the
+    public suffix data cannot be read, keep registration lookup available by
+    asking about the supplied name.
+    """
+    if is_ip(key):
+        return key
+    try:
+        fld = domain_manager.registrable_domain(key)
+    except Exception as e:
+        logging.warning(
+            "No registrable domain for %s (%s); asking for it as given",
+            sanitize_log_input(key),
+            type(e).__name__,
+        )
+        return key
+    return fld if fld and fld != key else key
+
+
 async def lookup_whois(target: str) -> dict:
     """Registration data for a domain or IP. RDAP first (fast, structured JSON),
     falling back to port-43 WHOIS for TLDs RDAP does not serve; an IP has no
-    fallback. Both sources are normalised to one shape (see rdap.py) and cached
-    under the same key."""
+    fallback. Domain records describe their registrable domain and carry the
+    queried and registrable names; IP records keep their existing shape."""
     key = _whois_key(target)
-    cached = _whois_cache.get(key)
+    name = registration_target(key)
+    labels = {} if is_ip(name) else {"queried_name": key, "registrable_domain": name}
+    cached = _whois_cache.get(name)
     if cached is not None:
-        return cached
+        return {**cached, **labels}
 
     result = None
     try:
         result = await asyncio.wait_for(
-            run_in(registration_pool, lookup_rdap, target),
+            run_in(registration_pool, lookup_rdap, name),
             timeout=RDAP_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        logging.info("RDAP timed out for %s", sanitize_log_input(target))
+        logging.info("RDAP timed out for %s", sanitize_log_input(name))
     except Exception:
-        logging.exception("RDAP errored for %s", sanitize_log_input(target))
+        logging.exception("RDAP errored for %s", sanitize_log_input(name))
 
     # lookup_rdap returns None when RDAP cannot answer (unsupported TLD, query
     # error, breaker open). Never port-43 for an address: python-whois answers
     # an IP with the registration of its PTR hostname's domain, the ISP's
     # domain record presented as the allocation.
-    if result is None and is_ip(target):
+    if result is None and is_ip(name):
         result = {"error": RIR_RDAP_UNAVAILABLE}
     # Only for a domain do we pay for the slow port-43 round-trip.
     if result is None:
-        result = await _whois_fallback(target)
+        result = await _whois_fallback(name)
     if not result:
         result = {"error": "WHOIS lookup failed"}
 
     failed = isinstance(result, dict) and result.get("error")
-    _whois_cache.set(key, result, WHOIS_CACHE_ERROR_TTL if failed else WHOIS_CACHE_TTL)
-    return result
+    _whois_cache.set(name, result, WHOIS_CACHE_ERROR_TTL if failed else WHOIS_CACHE_TTL)
+    return {**result, **labels}
 
 
 async def lookup_location(ip: str) -> dict:

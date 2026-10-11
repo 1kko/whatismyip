@@ -127,7 +127,11 @@ class TestLookupWhoisRouting:
 
         monkeypatch.setattr(lookup.whois, "whois", boom)
         out = asyncio.run(main.lookup_whois("google.com"))
-        assert out == canonical
+        assert out == {
+            **canonical,
+            "queried_name": "google.com",
+            "registrable_domain": "google.com",
+        }
 
     def test_rdap_miss_falls_back_to_whois(self, monkeypatch):
         monkeypatch.setattr(lookup, "lookup_rdap", lambda target: None)

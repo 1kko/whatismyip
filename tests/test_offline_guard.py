@@ -61,7 +61,7 @@ async def test_an_unmocked_lookup_reports_failures_not_absence():
     assert ip["location"]["ip"] == "8.8.8.8"  # GeoIP is local
 
     assert domain["resolution"] == "servfail"
-    assert domain["whois"] == {"error": "WHOIS lookup failed"}
+    assert domain["whois"]["error"] == "WHOIS lookup failed"
     assert domain["ssl"] is None  # no verified address, so no handshake
     assert set(domain["domain"]["status"].values()) == {"servfail"}
 
