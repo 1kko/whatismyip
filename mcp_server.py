@@ -21,15 +21,20 @@ from contextvars import ContextVar
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp.server.caching import CacheHint
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, Icon, TextContent, ToolAnnotations
 
 from concurrency import LookupBusy, LookupGate
 from config import (
     APP_VERSION,
     MCP_ALLOWED_HOSTS,
     MCP_ALLOWED_ORIGINS,
+    MCP_ICON_URL,
     MCP_LOOKUP_CONCURRENCY,
+    MCP_SERVER_DESCRIPTION,
+    MCP_SERVER_TITLE,
+    MCP_WEBSITE_URL,
     RDAP_TIMEOUT_SECONDS,
     SUBDOMAIN_ENABLED,
     SUBDOMAIN_MCP_DEFAULT_LIMIT,
@@ -62,10 +67,76 @@ from viewmodel import (
     fcrdns_state,
 )
 
+# Said wherever a reputation answer has no signal in it. A model relays "no
+# signals" as "this address is safe" unless told otherwise, and the lists
+# checked know nothing about most addresses that do harm.
+_NOT_SAFE = (
+    "Not on any list checked. That is not a statement that the address is safe "
+    "or trustworthy: these lists cover a few kinds of network, not behaviour."
+)
+
+
+# Whose address whoami_caller reports. These are the tool description's own
+# sentences, with "that"/"this" resolved to the tool's name so they stand alone
+# in `instructions`: the description and `instructions` both read this
+# constant, so the two copies cannot drift.
+_CALLER_ORIGIN = (
+    "Whose address whoami_caller reports depends on where the client runs, and "
+    "the difference matters. A local client (Claude Code, Cursor, Claude "
+    "Desktop) connects from the user's own machine, so it IS the user's "
+    "address. A hosted client (claude.ai, ChatGPT) connects from the provider's "
+    "servers, so it is a datacenter and tells you nothing about the user. "
+    'Either way, report it as the origin of this connection rather than as "your '
+    'IP address".'
+)
+
+# Server-level instructions, for the clients that read them once per session.
+# Most ignore them, which is why the tool descriptions keep their own caveats.
+# No sentence of its own: the two caveats that matter at session level, from
+# the constants the descriptions and results already carry.
+_INSTRUCTIONS = "\n\n".join((_NOT_SAFE, _CALLER_ORIGIN))
+
+# How long a client may keep tools/list (SEP-2549 ttlMs, carried only on the
+# 2026-07-28 wire). A day: the list changes only when a deploy renames or
+# removes a tool or flips SUBDOMAIN_ENABLED, and a client that cached it sees
+# that up to a day late, which is accepted. "public": there is no
+# authentication, so every caller gets the same list and may share a cache.
+TOOLS_LIST_TTL_MS = 24 * 60 * 60 * 1000
+
 # `version` is initialize's serverInfo.version, "" unless given. The deployed
 # commit, as /healthz reports it, rather than server.json's registry version:
 # server.json is not in the image, and the commit is what finds the build.
-mcp = MCPServer("whatismyip", version=APP_VERSION)
+# title, description, website_url and the icon are server.json's card, from
+# config so the two stay equal (tests/test_mcp_registry.py).
+mcp = MCPServer(
+    "whatismyip",
+    title=MCP_SERVER_TITLE,
+    description=MCP_SERVER_DESCRIPTION,
+    instructions=_INSTRUCTIONS,
+    website_url=MCP_WEBSITE_URL,
+    icons=[Icon(src=MCP_ICON_URL, mime_type="image/png", sizes=["512x512"])],
+    version=APP_VERSION,
+    cache_hints={"tools/list": CacheHint(ttl_ms=TOOLS_LIST_TTL_MS, scope="public")},
+)
+
+# Without annotations the spec has a client assume readOnlyHint=false and
+# destructiveHint=true: five write tools on a server that only looks things
+# up. Hints a client may ignore, not guarantees. open_world_hint says whether
+# the tool reaches another system: four do (DNS, RDAP/WHOIS, a TLS handshake,
+# crt.sh); whoami_caller reads the GeoIP database and the reputation lists in
+# memory and sends nothing anywhere.
+_READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
+_READ_ONLY_LOCAL = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
 
 
 def _fail(message: str, **extra: Any) -> CallToolResult:
@@ -218,15 +289,6 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
     }
 
 
-# Said wherever a reputation answer has no signal in it. A model relays "no
-# signals" as "this address is safe" unless told otherwise, and the lists
-# checked know nothing about most addresses that do harm.
-_NOT_SAFE = (
-    "Not on any list checked. That is not a statement that the address is safe "
-    "or trustworthy: these lists cover a few kinds of network, not behaviour."
-)
-
-
 def compact_reputation(reputation: dict | None) -> dict | None:
     """The lists an address is on, the ones it is not on, and the ones that
     could not be checked, with the grade from the first. None when the feature
@@ -321,7 +383,7 @@ async def _bounded_gather(target: str, legs: frozenset[str] | None = None) -> di
         )
 
 
-@mcp.tool()
+@mcp.tool(title="Look up an IP or domain", annotations=_READ_ONLY)
 async def lookup(target: str) -> dict[str, Any]:
     """Look up everything known about a domain name or IP address: its
     geolocation, network/ASN owner, registration (RDAP/WHOIS) details, and a
@@ -427,7 +489,7 @@ async def lookup(target: str) -> dict[str, Any]:
 _RECORD_TYPES = ("a", "aaaa", "mx", "ns", "cname", "txt", "spf", "ptr")
 
 
-@mcp.tool()
+@mcp.tool(title="DNS records", annotations=_READ_ONLY)
 async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, Any]:
     """DNS records for a domain: A, AAAA, MX, NS, CNAME, TXT, SPF, PTR — the
     exact set this server queries. Pass `types` (lowercase, a subset of those) to
@@ -510,7 +572,7 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     }
 
 
-@mcp.tool()
+@mcp.tool(title="TLS certificate", annotations=_READ_ONLY)
 async def ssl_certificate(domain: str) -> dict[str, Any]:
     """The TLS certificate a domain serves on port 443: issuer, subject,
     every SAN, the validity window, and how many days remain before it
@@ -614,7 +676,9 @@ async def subdomains(
 # server that does not offer this, rather than one that offers it and always
 # fails. The decorator form cannot express that.
 if SUBDOMAIN_ENABLED:
-    mcp.tool()(subdomains)
+    mcp.tool(title="Subdomains from Certificate Transparency", annotations=_READ_ONLY)(
+        subdomains
+    )
 
 
 def registered_tool_names() -> list[str]:
@@ -671,25 +735,8 @@ class CallerIPMiddleware:
         await self.app(scope, receive, send)
 
 
-@mcp.tool()
 async def whoami_caller() -> dict[str, Any]:
-    """The IP address and location of whatever opened this MCP connection.
-
-    Whose address that is depends on where the client runs, and the difference
-    matters. A local client (Claude Code, Cursor, Claude Desktop) connects from
-    the user's own machine, so this IS the user's address. A hosted client
-    (claude.ai, ChatGPT) connects from the provider's servers, so this is a
-    datacenter and tells you nothing about the user.
-
-    Either way, report it as the origin of this connection rather than as "your
-    IP address". Usually you cannot tell from here which case you are in; when
-    the address is on a datacenter list, the note says it is likely a hosted
-    client. If the user needs certainty, have them open https://ip.1kko.com in
-    a browser. `reputation` is as in `lookup`: "none" is never "safe". It has
-    no AbuseIPDB part: the caller's own address is not sent to anyone. `geo`
-    is graded as in `lookup`: at `precision` "country" only the country is
-    reliable, and the coordinates and time zone are null.
-    """
+    # Described by the __doc__ set below, not a docstring: see there.
     ip = _caller_ip.get()
     if ip == "unknown":
         return _fail("Caller address unavailable")
@@ -736,6 +783,25 @@ async def whoami_caller() -> dict[str, Any]:
     if reputation:
         payload["reputation"] = compact_reputation(reputation)
     return payload
+
+
+# The description is set as __doc__ and the tool registered afterwards, the way
+# subdomains is, because a docstring is a literal and cannot read
+# _CALLER_ORIGIN, which `instructions` also carries. The SDK reads __doc__ as it
+# does for every other tool. Registered at the place the decorator stood, so
+# tools/list keeps its order.
+whoami_caller.__doc__ = (
+    "The IP address and location of whatever opened this MCP connection.\n\n"
+    f"{_CALLER_ORIGIN}\n\n"
+    "Usually you cannot tell from here which case you are in; when the address "
+    "is on a datacenter list, the note says it is likely a hosted client. If the "
+    "user needs certainty, have them open https://ip.1kko.com in a browser. "
+    '`reputation` is as in `lookup`: "none" is never "safe". It has no AbuseIPDB '
+    "part: the caller's own address is not sent to anyone. `geo` is graded as in "
+    '`lookup`: at `precision` "country" only the country is reliable, and the '
+    "coordinates and time zone are null."
+)
+mcp.tool(title="Caller address", annotations=_READ_ONLY_LOCAL)(whoami_caller)
 
 
 def build_mcp():

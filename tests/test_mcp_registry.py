@@ -161,6 +161,18 @@ class TestServerJson:
         assert repository["url"] == "https://github.com/1kko/whatismyip"
         assert repository["source"] == "github"
 
+    def test_initialize_reports_the_same_card_as_the_registry_entry(self):
+        """server.json is not in the image, so the running server cannot read
+        it: config.MCP_* carries the same values, and this is the one place the
+        two copies meet. A registry card and an initialize response that
+        disagree look like two different servers."""
+        server = _server()
+        assert mcp_server.mcp.title == server["title"]
+        assert mcp_server.mcp.description == server["description"]
+        assert mcp_server.mcp.website_url == server["websiteUrl"]
+        (icon,) = mcp_server.mcp.icons
+        assert [icon.model_dump(by_alias=True, exclude_none=True)] == server["icons"]
+
 
 class TestPublishWorkflow:
     def test_runs_only_when_dispatched(self):

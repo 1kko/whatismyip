@@ -18,6 +18,12 @@ import eppstatus
 import lookup
 import main
 import mcp_server
+from config import (
+    MCP_ICON_URL,
+    MCP_SERVER_DESCRIPTION,
+    MCP_SERVER_TITLE,
+    MCP_WEBSITE_URL,
+)
 from main import app
 
 MCP_HEADERS = {
@@ -46,6 +52,36 @@ def _rpc(client, method, params=None, id_=2):
     return client.post("/mcp", json=body, headers=MCP_HEADERS)
 
 
+MODERN_VERSION = "2026-07-28"
+# The per-request envelope of that revision, which has no initialize: every
+# request names its protocol version and client capabilities in params._meta.
+MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": MODERN_VERSION,
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
+def _modern_rpc(client, method, params=None, id_=2):
+    """One 2026-07-28 request. The transport routes on the MCP-Protocol-Version
+    header (a handshake-era value, or none, takes the initialize path instead)
+    and the SDK's inbound ladder requires Mcp-Method to match the body."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": id_,
+        "method": method,
+        "params": {**(params or {}), "_meta": MODERN_META},
+    }
+    return client.post(
+        "/mcp",
+        json=body,
+        headers={
+            **MCP_HEADERS,
+            "MCP-Protocol-Version": MODERN_VERSION,
+            "Mcp-Method": method,
+        },
+    )
+
+
 def test_initialize_handshake():
     with TestClient(app) as client:
         response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
@@ -53,6 +89,21 @@ def test_initialize_handshake():
         result = response.json()["result"]
         assert result["serverInfo"]["name"] == "whatismyip"
         assert "tools" in result["capabilities"]
+        # The card a client shows for this server: the same one as server.json
+        # (tests/test_mcp_registry.py ties the two), not a bare name.
+        info = result["serverInfo"]
+        assert info["title"] == MCP_SERVER_TITLE
+        assert info["description"] == MCP_SERVER_DESCRIPTION
+        assert info["websiteUrl"] == MCP_WEBSITE_URL
+        assert info["icons"] == [
+            {"src": MCP_ICON_URL, "mimeType": "image/png", "sizes": ["512x512"]}
+        ]
+        # Server-level instructions, for the clients that read them: the two
+        # caveats the tools already carry, from the same constants, so the
+        # copies cannot drift. No sentence of their own.
+        instructions = result["instructions"]
+        assert mcp_server._NOT_SAFE in instructions
+        assert mcp_server._CALLER_ORIGIN in instructions
 
 
 def test_mcp_initialize_reports_the_deployed_version():
@@ -66,18 +117,88 @@ def test_mcp_initialize_reports_the_deployed_version():
     assert server_info["version"]
 
 
+def test_a_2026_client_reads_the_same_card_from_server_discover():
+    """A 2026-07-28 client never sends initialize. It reads the server's card
+    from server/discover, and every result after that carries serverInfo in
+    _meta, so the card has to be right there too."""
+    with TestClient(app) as client:
+        result = _modern_rpc(client, "server/discover").json()["result"]
+        info = result["_meta"]["io.modelcontextprotocol/serverInfo"]
+        assert info["title"] == MCP_SERVER_TITLE
+        assert info["websiteUrl"] == MCP_WEBSITE_URL
+        assert info["icons"][0]["src"] == MCP_ICON_URL
+
+
+def test_whoami_caller_and_instructions_share_one_caveat():
+    """The description is where every client reads the caveat; instructions is
+    where the few that honour it read it once per session. One constant, so
+    neither copy can be edited without the other, on both wires."""
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        listed = _rpc(client, "tools/list").json()["result"]["tools"]
+        tools = {tool["name"]: tool for tool in listed}
+        description = tools["whoami_caller"]["description"]
+        assert mcp_server._CALLER_ORIGIN in description
+        # The rest of what the docstring said survives the move to __doc__,
+        # the privacy promise above all.
+        assert "the caller's own address is not sent to anyone" in description
+        discover = _modern_rpc(client, "server/discover").json()["result"]
+        assert mcp_server._CALLER_ORIGIN in discover["instructions"]
+        assert mcp_server._NOT_SAFE in discover["instructions"]
+
+
 def test_tools_list_exposes_the_five_tools():
     with TestClient(app) as client:
         client.post("/mcp", json=INIT, headers=MCP_HEADERS)
         response = _rpc(client, "tools/list")
-        names = {tool["name"] for tool in response.json()["result"]["tools"]}
-        assert names == {
+        listed = response.json()["result"]["tools"]
+        # Registration order, which is also the order of the page's mcp-tools
+        # tag (registered_tool_names()). TestPageToolList only compares the
+        # page with tools/list, so a registration moved elsewhere in
+        # mcp_server.py shows up here and nowhere else.
+        assert [tool["name"] for tool in listed] == [
             "lookup",
             "dns_records",
             "ssl_certificate",
-            "whoami_caller",
             "subdomains",
-        }
+            "whoami_caller",
+        ]
+        # Without annotations the spec has a client assume readOnlyHint=false
+        # and destructiveHint=true: five write tools on a server that only
+        # looks things up. Hints a client may ignore, not guarantees.
+        for tool in listed:
+            name = tool["name"]
+            assert tool["title"], name
+            assert tool["annotations"]["readOnlyHint"] is True, name
+            assert tool["annotations"]["destructiveHint"] is False, name
+            assert tool["annotations"]["idempotentHint"] is True, name
+            # whoami_caller reads the GeoIP database and the lists in memory
+            # and sends nothing anywhere; every other tool asks another system.
+            assert tool["annotations"]["openWorldHint"] is (name != "whoami_caller"), (
+                name
+            )
+
+
+def test_tools_list_tells_a_2026_client_how_long_to_keep_it():
+    """SEP-2549 cache hints ride only the 2026-07-28 wire: the handshake-era
+    tools/list that _rpc sends has no ttlMs field to carry them, which is why
+    the hint is read through the per-request envelope and the handshake-era
+    list is checked to carry none. A day, and shared: there is no
+    authentication, so every caller gets the same list. The cost is that a
+    renamed or removed tool, or SUBDOMAIN_ENABLED=false, reaches a client that
+    cached the list up to a day late."""
+    with TestClient(app) as client:
+        result = _modern_rpc(client, "tools/list").json()["result"]
+        assert result["ttlMs"] == 86_400_000
+        assert result["ttlMs"] == mcp_server.TOOLS_LIST_TTL_MS
+        assert result["cacheScope"] == "public"
+        assert "lookup" in {tool["name"] for tool in result["tools"]}
+        # A handshake-era client (2025-11-25 and earlier, which is every client
+        # today) gets no hint: its tools/list has no field to carry one.
+        legacy = _rpc(client, "tools/list").json()["result"]
+        assert "ttlMs" not in legacy
+        assert "cacheScope" not in legacy
+        assert "lookup" in {tool["name"] for tool in legacy["tools"]}
 
 
 def test_bad_host_header_is_rejected():

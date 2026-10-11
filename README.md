@@ -1061,6 +1061,26 @@ the payload also carries `code`, the same block name as the HTTP `400`
 it, such as one DNS type timing out, the registration lookup failing inside
 `lookup`, or a stale subdomain list, is a normal result that carries the gap.
 
+Every tool is annotated read-only (`readOnlyHint: true`, `destructiveHint:
+false`, `idempotentHint: true`) and carries a display `title`. `openWorldHint`
+is `true` for the four that ask another system (DNS, RDAP/WHOIS, a TLS
+handshake, crt.sh) and `false` for `whoami_caller`, which reads only the GeoIP
+database and the reputation lists in memory. Annotations are hints a client may
+ignore, not a promise it enforces; without them the spec has a client assume
+every tool may write.
+
+`initialize` (and `server/discover` for a 2026-07-28 client) also carries
+`instructions`: the reputation note and `whoami_caller`'s caveat, from the
+same two constants the tool descriptions and results use, so the copies
+cannot drift. Most clients ignore `instructions`, which is why each tool
+description keeps its own caveat.
+
+`tools/list` carries a cache hint for 2026-07-28 clients (`ttlMs` of one day,
+`cacheScope: public`, since there is no authentication and every caller gets
+the same list). A renamed or removed tool, or `SUBDOMAIN_ENABLED=false`,
+reaches a client that cached the list up to a day late. Clients on 2025-11-25
+or earlier get no hint: their `tools/list` has no field to carry one.
+
 ### What `whoami_caller` actually reports
 
 The address that opened the MCP connection — which is **not always yours**, and
@@ -1140,6 +1160,13 @@ connected client would notice:
 
 Do not add a prerelease suffix such as `1.0.0-1`. SemVer sorts it below
 `1.0.0`, so the registry would not mark it as the latest version.
+
+The `title`, `description`, `websiteUrl` and icon in `server.json` are also
+what `initialize` reports in `serverInfo` (and `server/discover` for a
+2026-07-28 client), from `MCP_SERVER_TITLE`, `MCP_SERVER_DESCRIPTION`,
+`MCP_WEBSITE_URL` and `MCP_ICON_URL` in `config.py`: the image has no
+`server.json`, so `tests/test_mcp_registry.py` fails when the two disagree.
+Change both in the same pull request.
 
 ### Configuration
 

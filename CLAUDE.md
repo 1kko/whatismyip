@@ -644,6 +644,36 @@ below by text:
   `version`, or `unknown`. The SDK sends `""` when none is given. It is not
   `server.json`'s registry version, which is not in the image and is bumped
   only when the listing changes.
+- Every tool is registered with `title=` and `annotations=`: `_READ_ONLY`
+  (`read_only_hint=True, destructive_hint=False, idempotent_hint=True,
+  open_world_hint=True`) for the four that reach another system, and
+  `_READ_ONLY_LOCAL` (`open_world_hint=False`) for `whoami_caller`, which
+  reads only the mmdb and the lists in memory. Without annotations the spec's
+  defaults (`readOnlyHint=false`, `destructiveHint=true`) present five write
+  tools. Hints, not guarantees. `server.json` lists no tools, so it does not
+  change.
+- `MCPServer(...)` also gets `title`, `description`, `website_url` and
+  `icons` from `config.MCP_SERVER_TITLE`, `MCP_SERVER_DESCRIPTION`,
+  `MCP_WEBSITE_URL` and `MCP_ICON_URL`: the same card as `server.json`, which
+  is not in the image. `tests/test_mcp_registry.py` fails when the two
+  disagree, so change both together. They are constants, not env: the
+  registry card names this host, and `PUBLIC_BASE_URL` defaults to `""`.
+- `instructions` is `_INSTRUCTIONS`: `_NOT_SAFE` and `_CALLER_ORIGIN` joined,
+  no sentence of its own. `whoami_caller`'s description is set as `__doc__`
+  from `_CALLER_ORIGIN` and the tool registered right after the function,
+  where its decorator stood (a docstring is a literal and cannot read a
+  constant), so the description and `instructions` cannot drift and
+  `tools/list` keeps its order (`test_tools_list_exposes_the_five_tools`
+  pins it). Most clients ignore `instructions`; the descriptions keep their
+  caveats.
+- `cache_hints` lets a 2026-07-28 client keep `tools/list` for
+  `TOOLS_LIST_TTL_MS` (a day, `public`); the handshake-era wire (2025-11-25
+  and earlier) has no `ttlMs` field, so the test reads the hint through the
+  per-request envelope (`_modern_rpc` in `tests/test_mcp.py`: `params._meta`
+  with the protocol version and client capabilities, plus
+  `MCP-Protocol-Version` and `Mcp-Method` headers; `server/discover` stands
+  in for `initialize`) and checks that the `_rpc` list carries none. A
+  renamed or removed tool reaches a caching client up to a day late.
 - `compact_location` carries `precision` and `country_source` and nulls
   `lat`/`lon`/`time_zone` unless `precision` is `city`: the HTTP JSON keeps
   the numbers, the model gets only what the grade supports (a centroid's
@@ -1076,7 +1106,8 @@ Test files:
   limits, rate bucket),
   `test_mcp_iserror.py` (`isError` on outright failures),
   `test_mcp_manual_ban.py` (only a manual ban applies), `test_mcp_registry.py`
-  (`server.json`, its publish workflow, the page's tool list)
+  (`server.json`, its publish workflow, the page's tool list, and the
+  `initialize` card that must match `server.json`)
 - Ops: `test_healthz_degraded.py` (`degraded` and its reasons,
   `healthcheck.py`), `test_deploy_version.py` (`/healthz` `version`),
   `test_dependabot_config.py` (the pip groups and their order, security
