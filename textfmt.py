@@ -20,7 +20,7 @@ from mcp_server import (
     compact_reputation,
     compact_ssl,
 )
-from viewmodel import DASH, DNS_FAILURE_TEXT
+from viewmodel import DASH, DNS_FAILURE_TEXT, fcrdns_state
 
 _BOTH = frozenset({"domain", "ip"})
 _DOMAIN = frozenset({"domain"})
@@ -39,6 +39,8 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     # domain's only; an IP's "literal" says nothing, and / has none.
     "resolution": (frozenset({"resolve"}), _DOMAIN),
     "reverse_dns": (frozenset({"ptr"}), _IP),
+    # The sweep of the PTR name is what it compares the address with.
+    "reverse_dns_confirmed": (frozenset({"ptr", "dns"}), _IP),
     "country_code": (frozenset({"geo"}), _BOTH),
     "country_name": (frozenset({"geo"}), _BOTH),
     "city": (frozenset({"geo"}), _BOTH),
@@ -63,8 +65,17 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
 # all three read "-", and abuse_score does without ABUSEIPDB_API_KEY too.
 # resolution stays out too: the block already says "?" where it matters, and
 # "resolution: ok" is one more line for every reader to skip.
+# reverse_dns_confirmed is left out for its cost: in the block, every IP lookup
+# would pay for the sweep of its PTR name, which nothing else there reads.
 _RISK_FIELDS = ("risk_level", "risk_signals")
-_NOT_IN_BLOCK = frozenset({*_RISK_FIELDS, "abuse_score", "resolution"})
+_NOT_IN_BLOCK = frozenset(
+    {*_RISK_FIELDS, "abuse_score", "resolution", "reverse_dns_confirmed"}
+)
+
+# viewmodel.fcrdns_state()'s two answers. "no_ptr" is "-" (there is no PTR to
+# confirm) and "unknown" is "?": the PTR name's A/AAAA query failed.
+_FCRDNS_ANSWERS = frozenset({"confirmed", "unconfirmed"})
+_FCRDNS_FAILED = "the PTR name's A/AAAA query failed"
 
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires")
 
@@ -80,7 +91,9 @@ _NAME_LEGS = frozenset({"whois", "dns"})
 # a registration lookup that broke, a gating A query that ended in a
 # managers.DNS_FAILURES status (every field read from the address), a TLS leg
 # that read no certificate (the cert_* fields), a reputation list that could
-# not be checked. nxdomain and noanswer are answers, and stay "-".
+# not be checked, and the PTR name's A/AAAA query behind reverse_dns_confirmed
+# when it ended in one of those statuses. nxdomain and noanswer are answers:
+# they stay "-", and for reverse_dns_confirmed they are "unconfirmed".
 MISSING = "-"
 UNKNOWN = "?"
 
@@ -166,11 +179,15 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     registration = compact_registration(data.get("whois"))
     tls = compact_ssl(data.get("ssl")) or {}
     reputation = compact_reputation(data.get("reputation")) or {}
+    fcrdns = fcrdns_state(
+        data.get("reverse_dns"), data.get("domain"), data.get("address") or ""
+    )
     values = {
         "target": data.get("address"),
         "ip": data.get("resolved_ip"),
         "resolution": data.get("resolution"),
         "reverse_dns": data.get("reverse_dns"),
+        "reverse_dns_confirmed": fcrdns if fcrdns in _FCRDNS_ANSWERS else None,
         "country_code": geo["country_code"],
         "country_name": geo["country_name"],
         "city": geo["city"],
@@ -237,6 +254,10 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         for name, (legs, kinds) in FIELDS.items():
             if "tls" in legs and kind in kinds:
                 errors[name] = str(tls_error)
+    # The PTR name's A/AAAA query failed: whether it points back is unknown,
+    # which "unconfirmed" would misstate.
+    if fcrdns == "unknown" and kind in FIELDS["reverse_dns_confirmed"][1]:
+        errors["reverse_dns_confirmed"] = _FCRDNS_FAILED
     return values, errors
 
 

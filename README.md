@@ -80,7 +80,9 @@ RDAP registration data and the full TLS certificate, expanded.
   match, protocol and cipher, and whether the certificate is trusted. An
   expired, self-signed, wrong-host or chain-incomplete certificate is still
   shown, with the reason it fails.
-- **Reverse DNS** for IP addresses.
+- **Reverse DNS** for IP addresses, and whether the PTR name resolves back to
+  the address (forward-confirmed reverse DNS, what mail servers check): read off
+  the record sweep of that name the lookup already makes, so it costs no query.
 - **Reputation** — which public lists an address is on: Spamhaus DROP and
   ASN-DROP, Tor exits, and X4BNet's VPN and datacenter ranges, each with its
   source and the date of the copy read, and a level (none/low/medium/high)
@@ -528,6 +530,7 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `ip` | the address a domain resolves to; an IP itself; on `/`, yours; `?` when the A query failed (`timeout`, `servfail`, `error`), as is every field below that is read from the address | A query (domains) | both |
 | `resolution` | how a domain's A query ended: `ok`, `nxdomain`, `noanswer`, `timeout`, `servfail` or `error` — the reason behind a `?` or `-` `ip`; by name only, never in the text block | A query | domain |
 | `reverse_dns` | PTR name | reverse DNS | IP |
+| `reverse_dns_confirmed` | `confirmed` when one of the PTR name's A records (AAAA for an IPv6 address) is the address, `unconfirmed` when none is; `-` with no PTR, `?` when that A/AAAA query failed; on `/` always `-` | reverse DNS and the record sweep of the PTR name | IP |
 | `country_code` | ISO 3166-1 alpha-2 | GeoIP (local) | both |
 | `country_name` | | GeoIP (local) | both |
 | `city` | | GeoIP (local) | both |
@@ -550,9 +553,13 @@ is `cert_expires` here, and its `registration.expires` is `domain_expires`.
 when asked for by name; the text block leaves them out: a bare `risk_level: none`
 among the other lines would read as a clean bill of health the lists cannot
 give, and `resolution: ok` would be a line to skip on every read.
+`reverse_dns_confirmed` is left out of the block too, for its cost: it needs the
+record sweep of the PTR name, which the block skips.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
-own address; `cert_*` and the domain-only fields are `-`.
+own address; `cert_*` and the domain-only fields are `-`, and so is
+`reverse_dns_confirmed`: `?fields=` on `/` makes no sweep of your PTR name (the
+page, which does, shows the verdict).
 Registration fields describe the registrable domain (`www.github.com` uses
 `github.com`'s registrar and expiry). The full JSON and MCP `lookup` response
 include the `registrable_domain` label; this flat form does not.
@@ -576,7 +583,10 @@ A value is never left blank:
   connectivity)` for a name with only an AAAA record. A monitor reading
   `cert_days_remaining` therefore sees `?`/`null` with a reason during an
   outage, never a missing certificate. `?fields=ip,resolution` names the reason
-  in text too: `?` then `timeout`.
+  in text too: `?` then `timeout`. `reverse_dns_confirmed` is `?` when its PTR
+  name's A/AAAA query ends in `timeout`, `servfail` or `error` (reason: `the PTR
+  name's A/AAAA query failed`); `nxdomain` and `noanswer` there are answers, and
+  read `unconfirmed`.
 
 An unknown field is refused with `400` before any lookup runs:
 
@@ -995,7 +1005,7 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). |
+| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way. |

@@ -841,6 +841,90 @@ class TestFieldsRunOnlyTheirLegs:
         assert _ran(mocks) == set()
 
 
+def _ptr_sweep(a=("8.8.4.4", "8.8.8.8"), a_status="ok"):
+    """The sweep of 8.8.8.8's PTR name, as DomainManager.get_records() returns
+    it: {"ip", "ttl"} dicts, and each type's dns_status() under "status"."""
+    return {
+        "queried_name": "dns.google",
+        "a": [{"ip": ip, "ttl": 300} for ip in a],
+        "aaaa": [],
+        "status": {"a": a_status, "aaaa": "noanswer"},
+    }
+
+
+class TestReverseDnsConfirmed:
+    """?fields=reverse_dns_confirmed: whether an IP's PTR name resolves back to
+    it, read off the PTR and the sweep of that name, with no query of its own."""
+
+    def test_it_runs_the_ptr_and_the_sweep_of_its_name_alone(self):
+        with _legs() as mocks:
+            mocks["records"].return_value = _ptr_sweep()
+            response = client.get("/8.8.8.8?fields=reverse_dns_confirmed", headers=CURL)
+        assert response.json() == {"reverse_dns_confirmed": "confirmed"}
+        assert _ran(mocks) == {"reverse", "records"}
+        mocks["records"].assert_called_once_with("dns.google", ip="8.8.8.8")
+
+    def test_a_ptr_name_that_points_elsewhere_is_unconfirmed(self):
+        with _legs() as mocks:
+            mocks["records"].return_value = _ptr_sweep(a=["216.239.32.10"])
+            response = client.get(
+                "/8.8.8.8?fields=reverse_dns,reverse_dns_confirmed&format=text",
+                headers=CURL,
+            )
+        assert response.text == "dns.google\nunconfirmed\n"
+
+    def test_a_failed_forward_query_is_a_question_mark_not_unconfirmed(self):
+        with _legs() as mocks:
+            mocks["records"].return_value = _ptr_sweep(a=[], a_status="timeout")
+            text = client.get(
+                "/8.8.8.8?fields=reverse_dns_confirmed&format=text", headers=CURL
+            )
+            body = client.get("/8.8.8.8?fields=reverse_dns_confirmed", headers=CURL)
+        assert text.text == "?\n"
+        assert body.json() == {
+            "reverse_dns_confirmed": None,
+            "errors": {"reverse_dns_confirmed": "the PTR name's A/AAAA query failed"},
+        }
+
+    def test_no_ptr_is_a_dash_and_sweeps_nothing(self):
+        with _legs() as mocks:
+            mocks["reverse"].return_value = None
+            response = client.get(
+                "/8.8.8.8?fields=reverse_dns_confirmed&format=text", headers=CURL
+            )
+        assert response.text == "-\n"
+        mocks["records"].assert_not_called()
+
+    def test_a_domain_gets_a_dash_and_costs_nothing(self):
+        with _legs() as mocks:
+            response = client.get(
+                "/example.com?fields=reverse_dns_confirmed&format=text", headers=CURL
+            )
+        assert response.text == "-\n"
+        assert _ran(mocks) == set()
+
+    def test_it_stays_out_of_the_text_block(self):
+        """In the block it would add the PTR name's sweep to every IP lookup."""
+        with _legs() as mocks:
+            mocks["records"].return_value = _ptr_sweep()
+            response = client.get("/8.8.8.8?format=text", headers=CURL)
+        assert [key for key, _ in _block(response)] == IP_KEYS
+        mocks["records"].assert_not_called()
+
+    def test_on_the_self_route_it_is_a_dash_and_sweeps_nothing(self):
+        """_self_fields sweeps no PTR name, so `/` answers "-" (the README says
+        so); the self page, which does sweep it, shows the verdict."""
+        with _legs() as mocks:
+            mocks["records"].return_value = _ptr_sweep()
+            text = client.get(
+                "/?fields=reverse_dns_confirmed&format=text", headers=CURL
+            )
+            body = client.get("/?fields=reverse_dns_confirmed", headers=CURL)
+        assert text.text == "-\n"
+        assert body.json() == {"reverse_dns_confirmed": None}
+        mocks["records"].assert_not_called()
+
+
 # --- lookup.gather(legs=) -----------------------------------------------------------
 
 
