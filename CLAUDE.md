@@ -666,6 +666,14 @@ below by text:
   `tools/list` keeps its order (`test_tools_list_exposes_the_five_tools`
   pins it). Most clients ignore `instructions`; the descriptions keep their
   caveats.
+- `cache_hints` lets a 2026-07-28 client keep `tools/list` for
+  `TOOLS_LIST_TTL_MS` (a day, `public`); the handshake-era wire (2025-11-25
+  and earlier) has no `ttlMs` field, so the test reads the hint through the
+  per-request envelope (`_modern_rpc` in `tests/test_mcp.py`: `params._meta`
+  with the protocol version and client capabilities, plus
+  `MCP-Protocol-Version` and `Mcp-Method` headers; `server/discover` stands
+  in for `initialize`) and checks that the `_rpc` list carries none. A
+  renamed or removed tool reaches a caching client up to a day late.
 - `compact_location` carries `precision` and `country_source` and nulls
   `lat`/`lon`/`time_zone` unless `precision` is `city`: the HTTP JSON keeps
   the numbers, the model gets only what the grade supports (a centroid's

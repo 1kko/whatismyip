@@ -21,6 +21,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp.server.caching import CacheHint
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, Icon, TextContent, ToolAnnotations
 
@@ -95,6 +96,13 @@ _CALLER_ORIGIN = (
 # the constants the descriptions and results already carry.
 _INSTRUCTIONS = "\n\n".join((_NOT_SAFE, _CALLER_ORIGIN))
 
+# How long a client may keep tools/list (SEP-2549 ttlMs, carried only on the
+# 2026-07-28 wire). A day: the list changes only when a deploy renames or
+# removes a tool or flips SUBDOMAIN_ENABLED, and a client that cached it sees
+# that up to a day late, which is accepted. "public": there is no
+# authentication, so every caller gets the same list and may share a cache.
+TOOLS_LIST_TTL_MS = 24 * 60 * 60 * 1000
+
 # `version` is initialize's serverInfo.version, "" unless given. The deployed
 # commit, as /healthz reports it, rather than server.json's registry version:
 # server.json is not in the image, and the commit is what finds the build.
@@ -108,6 +116,7 @@ mcp = MCPServer(
     website_url=MCP_WEBSITE_URL,
     icons=[Icon(src=MCP_ICON_URL, mime_type="image/png", sizes=["512x512"])],
     version=APP_VERSION,
+    cache_hints={"tools/list": CacheHint(ttl_ms=TOOLS_LIST_TTL_MS, scope="public")},
 )
 
 # Without annotations the spec has a client assume readOnlyHint=false and

@@ -179,6 +179,28 @@ def test_tools_list_exposes_the_five_tools():
             )
 
 
+def test_tools_list_tells_a_2026_client_how_long_to_keep_it():
+    """SEP-2549 cache hints ride only the 2026-07-28 wire: the handshake-era
+    tools/list that _rpc sends has no ttlMs field to carry them, which is why
+    the hint is read through the per-request envelope and the handshake-era
+    list is checked to carry none. A day, and shared: there is no
+    authentication, so every caller gets the same list. The cost is that a
+    renamed or removed tool, or SUBDOMAIN_ENABLED=false, reaches a client that
+    cached the list up to a day late."""
+    with TestClient(app) as client:
+        result = _modern_rpc(client, "tools/list").json()["result"]
+        assert result["ttlMs"] == 86_400_000
+        assert result["ttlMs"] == mcp_server.TOOLS_LIST_TTL_MS
+        assert result["cacheScope"] == "public"
+        assert "lookup" in {tool["name"] for tool in result["tools"]}
+        # A handshake-era client (2025-11-25 and earlier, which is every client
+        # today) gets no hint: its tools/list has no field to carry one.
+        legacy = _rpc(client, "tools/list").json()["result"]
+        assert "ttlMs" not in legacy
+        assert "cacheScope" not in legacy
+        assert "lookup" in {tool["name"] for tool in legacy["tools"]}
+
+
 def test_bad_host_header_is_rejected():
     """transport_security must allowlist the real hostname.
 

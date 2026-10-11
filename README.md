@@ -1075,6 +1075,12 @@ same two constants the tool descriptions and results use, so the copies
 cannot drift. Most clients ignore `instructions`, which is why each tool
 description keeps its own caveat.
 
+`tools/list` carries a cache hint for 2026-07-28 clients (`ttlMs` of one day,
+`cacheScope: public`, since there is no authentication and every caller gets
+the same list). A renamed or removed tool, or `SUBDOMAIN_ENABLED=false`,
+reaches a client that cached the list up to a day late. Clients on 2025-11-25
+or earlier get no hint: their `tools/list` has no field to carry one.
+
 ### What `whoami_caller` actually reports
 
 The address that opened the MCP connection — which is **not always yours**, and
