@@ -50,14 +50,16 @@ from rdap import NOT_REGISTERED
 from security import client_ip_from_scope
 from subdomains import get_subdomains, invalid_target_reason
 
-# Certificate parsing already exists in viewmodel.py, which is pure and
-# stdlib-only, so there is no cycle and no reason to restate it here.
+# Certificate parsing and the FCrDNS verdict already exist in viewmodel.py,
+# which is pure and stdlib-only, so there is no cycle and no reason to restate
+# them here.
 from viewmodel import (
     _cert_expiry,
     _cert_issuer,
     _cert_san,
     _cert_subject_cn,
     _cert_validation,
+    fcrdns_state,
 )
 
 # `version` is initialize's serverInfo.version, "" unless given. The deployed
@@ -330,6 +332,15 @@ async def lookup(target: str) -> dict[str, Any]:
     nothing beyond the name. Report that no details were published, rather
     than saying the name is unregistered or the lookup failed.
 
+    For an IP address, `reverse_dns_confirmed` says whether `reverse_dns`
+    resolves back to it (forward-confirmed reverse DNS, what mail servers
+    check): "confirmed" when one of that name's A records (AAAA for IPv6) is
+    the address, "unconfirmed" when none is, "no_ptr" when the address has no
+    PTR, and "unknown" when the name's A/AAAA query failed, which means the
+    check could not be made, not that it failed. CDNs and shared hosting are
+    unconfirmed legitimately: say the name "does not point back", never that
+    it is spoofed or forged. Null for a domain.
+
     `reputation` (for a domain, of the address it resolves to) names the
     public lists the address is on: Spamhaus DROP/ASN-DROP, Tor exits, VPN and
     datacenter ranges, each with its source and the date of the copy read, and
@@ -370,10 +381,15 @@ async def lookup(target: str) -> dict[str, Any]:
         return _fail("Lookup failed")
 
     loc = data["location"] or {}
+    reverse_dns = data["reverse_dns"] or loc.get("reverse_dns")
     result = {
         "target": data["address"],
         "ip": data["resolved_ip"],
-        "reverse_dns": data["reverse_dns"] or loc.get("reverse_dns"),
+        "reverse_dns": reverse_dns,
+        # Read off the sweep of the PTR name gather() already made: no query.
+        "reverse_dns_confirmed": fcrdns_state(
+            reverse_dns, data["domain"], data["address"]
+        ),
         "geo": compact_location(loc),
         "network": compact_network(loc),
         "registration": compact_registration(data["whois"]),

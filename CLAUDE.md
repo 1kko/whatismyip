@@ -475,7 +475,8 @@ the TLS tags.
   CDNs and shared hosts fail the check legitimately.
   `?fields=reverse_dns_confirmed` stays out of the text block
   (`textfmt._NOT_IN_BLOCK`), where every IP lookup would pay for the sweep,
-  and is `-` on `/`, since `main._self_fields` sweeps nothing
+  and is `-` on `/`, since `main._self_fields` sweeps nothing. MCP `lookup`
+  returns the state itself as `reverse_dns_confirmed`, null for a domain
 - An untrusted TLS certificate is still returned, with `trusted: false` and `verify_error`; an unreachable port 443 or failed handshake is `{"error", "reason"}`; `None` only when no handshake was attempted
 - A browser gets `templates/error.html` for a 400, 403, 429 or 503, with the
   same status as the JSON (`main.render_error`); every other client gets the

@@ -6,14 +6,17 @@ runs the lifespan when used as a context manager; without it the first request
 fails with "RuntimeError: Task group is not initialized".
 """
 
+import re
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 import config
 import eppstatus
 import lookup
 import main
+import mcp_server
 from main import app
 
 MCP_HEADERS = {
@@ -161,6 +164,120 @@ def test_lookup_tool_returns_a_compact_result():
         # Render-only data must never reach an LLM context.
         for forbidden in ("map", "distance_km", "origin"):
             assert forbidden not in payload
+
+
+# gather() for 8.8.8.8: its PTR name, dns.google., and the sweep of that name,
+# whose A records include the address.
+FAKE_IP_LOOKUP = {
+    "address": "8.8.8.8",
+    "domain": {
+        "queried_name": "dns.google",
+        "a": [{"ip": "8.8.4.4", "ttl": 300}, {"ip": "8.8.8.8", "ttl": 300}],
+        "aaaa": [],
+        "mx": [],
+        "ns": [],
+        "txt": [],
+        "status": {"a": "ok", "aaaa": "noanswer"},
+    },
+    "location": {
+        "ip": "8.8.8.8",
+        "country_code": "US",
+        "country_name": "United States",
+        "asn_number": 15169,
+        "asn_name": "GOOGLE",
+        "reverse_dns": "dns.google.",
+    },
+    "whois": {"source": "rdap", "name": "GOGL", "registrant": "Google LLC"},
+    "ssl": None,
+    "resolved_ip": "8.8.8.8",
+    "resolution": "literal",
+    "reverse_dns": "dns.google.",
+}
+
+
+def _lookup_payload(gathered, target):
+    async def fake_gather(_target):
+        return gathered
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "lookup", "arguments": {"target": target}},
+            )
+    return response.json()["result"]["structuredContent"]
+
+
+def _ip_lookup(a_records, a_status="ok", reverse_dns="dns.google."):
+    domain = {
+        **FAKE_IP_LOOKUP["domain"],
+        "a": [{"ip": ip, "ttl": 300} for ip in a_records],
+        "status": {"a": a_status, "aaaa": "noanswer"},
+    }
+    return {
+        **FAKE_IP_LOOKUP,
+        "domain": domain if reverse_dns else {},
+        "location": {**FAKE_IP_LOOKUP["location"], "reverse_dns": reverse_dns},
+        "reverse_dns": reverse_dns,
+    }
+
+
+@pytest.mark.parametrize(
+    ("gathered", "expected"),
+    [
+        (_ip_lookup(["8.8.4.4", "8.8.8.8"]), "confirmed"),
+        (_ip_lookup(["216.239.32.10"]), "unconfirmed"),
+        (_ip_lookup([], a_status="timeout"), "unknown"),
+        (_ip_lookup([], reverse_dns=None), "no_ptr"),
+    ],
+    ids=["confirmed", "unconfirmed", "unknown", "no_ptr"],
+)
+def test_lookup_says_whether_an_ips_ptr_points_back(gathered, expected):
+    payload = _lookup_payload(gathered, "8.8.8.8")
+    assert payload["reverse_dns"] == gathered["reverse_dns"]
+    assert payload["reverse_dns_confirmed"] == expected
+
+
+def test_lookup_has_no_ptr_verdict_for_a_domain():
+    """A domain's sweep is of the domain itself, not of a PTR name."""
+    payload = _lookup_payload(FAKE_LOOKUP, "example.com")
+    assert "reverse_dns_confirmed" in payload
+    assert payload["reverse_dns_confirmed"] is None
+
+
+def test_fields_and_mcp_give_the_same_verdict():
+    """?fields=reverse_dns_confirmed and the lookup tool read one verdict off
+    the same gather() result."""
+
+    async def fake_gather(_target, legs=None):
+        return _ip_lookup(["216.239.32.10"])
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with (
+            patch("mcp_server.gather", fake_gather),
+            patch("main.gather", fake_gather),
+        ):
+            tool = _rpc(
+                client,
+                "tools/call",
+                {"name": "lookup", "arguments": {"target": "8.8.8.8"}},
+            )
+            fields = client.get(
+                "/8.8.8.8?fields=reverse_dns_confirmed",
+                headers={"user-agent": "curl/8.0"},
+            )
+    verdict = tool.json()["result"]["structuredContent"]["reverse_dns_confirmed"]
+    assert verdict == fields.json()["reverse_dns_confirmed"] == "unconfirmed"
+
+
+def test_the_lookup_description_explains_the_verdict():
+    doc = " ".join(mcp_server.lookup.__doc__.split())
+    assert "reverse_dns_confirmed" in doc
+    assert re.search(r'"unknown" when .*query failed', doc)
+    assert "does not point back" in doc
 
 
 # GeoLite2's answer for 8.8.8.8: the US centroid, ± 1000 km, no city, and a
