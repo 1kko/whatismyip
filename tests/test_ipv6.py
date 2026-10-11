@@ -718,7 +718,14 @@ def _js(names, expression):
     return json.loads(out.stdout)
 
 
-SEARCH = ["IPV4", "DOMAIN", "PROBE_SUFFIX", "ipv6Host", "isLookupTarget"]
+SEARCH = [
+    "IPV4",
+    "DOMAIN",
+    "PROBE_SUFFIX",
+    "PROBE_PATH",
+    "ipv6Host",
+    "isLookupTarget",
+]
 
 CANDIDATES = [
     V6,
@@ -779,6 +786,100 @@ def test_the_search_box_strips_a_url_around_an_ipv6_address_like_the_server():
     js = _js(["normalizeLookupTarget"], expression)
     assert js == [lookup.normalize_lookup_target(v) for v in values]
     assert js[:4] == ["2001:db8::1"] * 4
+
+
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_the_search_box_puts_a_name_in_the_servers_canonical_spelling():
+    values = [
+        "NASA.GOV.",
+        "https://NASA.GOV./path?q=1",
+        "münchen.de",
+        "straße.de",
+        "한국.kr",
+        "도메인.한국",
+        "_dmarc.example.com",
+        "nasa.gov。",
+        "münchen．de",
+        "８。８。８。８",
+        "８.８",
+        "０ｘ７ｆ.１",
+        "8.8.8.8.",
+        "[2001:DB8::1]:8443",
+        "example.com..",
+        "A..B.COM",
+        "example.com:443",
+        "user@example.com",
+    ]
+    expression = f"{json.dumps(values)}.map(normalizeLookupTarget)"
+    js = _js(["normalizeLookupTarget"], expression)
+    expected = [lookup.normalize_lookup_target(value) for value in values]
+    # The browser URL parser expands numeric shorthand to another address
+    # (８.８ -> 8.0.0.8), so the box preserves it for isLookupTarget to refuse.
+    expected[10:12] = ["８.８", "０ｘ７ｆ.１"]
+    assert js == expected
+
+
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_the_search_box_accepts_canonical_names_and_refuses_numeric_shorthand():
+    values = [
+        "nasa.gov.",
+        "münchen.de",
+        "straße.de",
+        "도메인.한국",
+        "８。８。８。８",
+        "８.８",
+        "０ｘ７ｆ.１",
+        "example.com..",
+        "a..b.com",
+        "admin.php.",
+        "münchen.de\\x.com",
+        "münchen%41.de",
+    ]
+    expression = (
+        f"{json.dumps(values)}.map((value) => "
+        "isLookupTarget(normalizeLookupTarget(value)))"
+    )
+    assert _js(SEARCH + ["normalizeLookupTarget"], expression) == [
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+
+
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_the_search_box_blocks_reachable_probe_paths_but_allows_a_real_domain():
+    values = [
+        ".env",
+        "foo.env",
+        "foo.envbackup",
+        "admin.qqq",
+        "administrator.qqq",
+        "wp-login.qqq",
+        "admin.example.com",
+        "wp-login.example.com",
+        "example.env.com",
+    ]
+    expression = f"{json.dumps(values)}.map(isLookupTarget)"
+    assert _js(SEARCH, expression) == [
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+        True,
+        True,
+    ]
 
 
 @pytest.mark.skipif(NODE is None, reason="needs node")
