@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 import config
@@ -1766,6 +1767,47 @@ class TestWebManifest:
         for path in sources:
             text = path.read_text(encoding="utf-8")
             assert "serviceWorker.register" not in text, path
+
+
+def _head_meta(html, name):
+    """The content of every <meta name=...> in the page's <head>."""
+    head = html.split("</head>")[0]
+    return re.findall(rf'<meta name="{re.escape(name)}" content="([^"]*)">', head)
+
+
+# One page per template: the self page (browser.html, whose <head> every lookup
+# shares), an error page (error.html, which 403, 429 and 503 also render) and
+# /privacy (privacy.html).
+THEMED_PAGES = {
+    "self page": "/",
+    "error page": "/192.168.0.1",
+    "privacy page": "/privacy",
+}
+
+
+class TestThemeColor:
+    """Android Chrome's address bar and Safari's tab bar take their colour from
+    <meta name="theme-color">. With none, they stayed light above a dark page."""
+
+    @pytest.mark.parametrize(
+        "path", list(THEMED_PAGES.values()), ids=list(THEMED_PAGES)
+    )
+    def test_theme_color_is_the_page_background(self, path):
+        response = client.get(path, headers=BROWSER_UA)
+        assert response.headers["content-type"].startswith("text/html")
+        # Exactly one: a second, stale theme-color would win or lose by order.
+        (colour,) = _head_meta(response.text, "theme-color")
+        assert colour.upper() == REQUIRED_TOKENS["--bg"].upper()
+
+    @pytest.mark.parametrize(
+        "path", list(THEMED_PAGES.values()), ids=list(THEMED_PAGES)
+    )
+    def test_color_scheme_is_dark(self, path):
+        """Scrollbars and other unstyled controls follow it, and so does an
+        error page whose stylesheet a banned address cannot fetch. One value:
+        the CSS has no light branch (test_no_light_mode_branch)."""
+        response = client.get(path, headers=BROWSER_UA)
+        assert _head_meta(response.text, "color-scheme") == ["dark"]
 
 
 # gather() is patched throughout this class. tests/test_page.py has no mocking

@@ -643,6 +643,14 @@ below by text:
   or its My IP shortcut, is one self lookup, the same as a visit; `/privacy` is
   a fixed answer outside the lookup budget. `start_url` carries no
   `?utm_source=`.
+- All three templates carry `<meta name="theme-color" content="#0B0D12">` and
+  `<meta name="color-scheme" content="dark">` under the viewport meta. Android
+  Chrome's address bar and Safari's tab bar take the first; the second draws
+  scrollbars and other unstyled controls dark, also on an error page whose
+  stylesheet a banned address cannot fetch. One value each, because the CSS
+  has no light branch (`TestDesignTokens.test_no_light_mode_branch`); a light
+  theme would add `media="(prefers-color-scheme: ...)"` variants.
+  `TestThemeColor` pins both on all three templates.
 
 #### MCP endpoint
 
@@ -1089,7 +1097,7 @@ Test files:
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
   security headers, fingerprint panel, `?subdomains=`, lookup links, the font
-  subsets and preloads, web manifest), `test_negotiation.py`
+  subsets and preloads, web manifest, theme-color), `test_negotiation.py`
   (`?format=`/Accept/user-agent), `test_text_format.py`
   (`?format=text`, `?fields=`), `test_error_pages.py` (`error.html` for browsers),
   `test_open_graph.py` (link previews), `test_privacy_page.py` (`/privacy`),
