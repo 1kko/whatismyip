@@ -78,6 +78,7 @@ from mcp_server import (
 )
 from models import GeoRulesUpdate
 from lookup import (
+    EMAIL_LIKE_TARGET,
     InvalidTargetError,
     PrivateAddressError,
     abuseipdb_client,
@@ -89,6 +90,7 @@ from lookup import (
     geo_ip_manager,
     ip_reputation,
     is_safe_ip,
+    loggable_target,
     lookup_location,
     lookup_whois,
     normalize_lookup_target,
@@ -646,8 +648,9 @@ def render_refused_target(
     path would otherwise let a link put words on this page.
 
     A .onion or home.arpa name (InvalidTargetError with code "special_use_name")
-    gets its reason, in config's words; every other invalid target the fixed
-    "not a domain name" text.
+    gets its reason, in config's words; a target with an "@" in it, the
+    EMAIL_LIKE_TARGET message and nothing of what was typed; every other
+    invalid target the fixed "not a domain name" text.
 
     The copy follows exc.code where the local-network sentence would mislead:
     CGNAT (the carrier's shared space, not the visitor's own network),
@@ -666,6 +669,15 @@ def render_refused_target(
                 "Not a public name",
                 f"{exc.message[:1].upper()}{exc.message[1:]}, so there is "
                 "nothing public to look up.",
+            )
+        if exc.message == EMAIL_LIKE_TARGET:
+            # The same words the JSON and the search box use, and nothing of
+            # the target: not the name before the @, nor the domain after it.
+            return render_error(
+                request,
+                400,
+                "Not a domain name or IP address",
+                f"That {EMAIL_LIKE_TARGET}.",
             )
         return render_error(
             request,
@@ -1094,9 +1106,18 @@ def _suspicious_path_is_ordinary(request_path: str) -> bool:
     Static assets are exempt outright: `static/geo/*.json` matches the
     detector's `\\.json$` rule, and banning a visitor for loading the page's own
     data would be absurd.
+
+    "/<host>:<digits>" is judged by its host: the route cuts the port before
+    the lookup (lookup.normalize_lookup_target), so "/admin.example.com:8443"
+    is as ordinary as "/admin.example.com" and "/wp-login.php:443" as much a
+    probe as "/wp-login.php". Only a port: a path with an "@" in it gets no
+    such reading.
     """
     if whitelist_manager.is_static(request_path):
         return True
+    with_port = re.fullmatch(r"(/[^:]+):[0-9]+", request_path)
+    if with_port:
+        request_path = with_port.group(1)
     if not whitelist_manager.is_lookup(request_path):
         return False
     target = request_path.lstrip("/")
@@ -2039,7 +2060,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     logging.info(
         "client=%s lookup=%s",
         sanitize_log_input(client_ip),
-        sanitize_log_input(domain_ip),
+        # A target with an "@" in it is logged as a marker: see loggable_target.
+        loggable_target(domain_ip),
     )
 
     fmt = negotiate(request)

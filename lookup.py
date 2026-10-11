@@ -93,6 +93,14 @@ class InvalidTargetError(Exception):
         self.message = message
 
 
+# InvalidTargetError's message for a target with an "@" in it: an email
+# address, or a URL's user:password@host. The code stays "invalid_target", which
+# README documents as "not a target at all"; main.render_refused_target picks
+# its page by comparing the message with this constant, and static/js/app.js
+# keeps a copy, word for word, for the search box.
+EMAIL_LIKE_TARGET = "looks like an email address; enter the domain after the @"
+
+
 class TTLCache:
     """Tiny time-bounded cache. Read/written only from the event-loop thread, so
     it needs no lock; eviction is FIFO once it reaches maxsize."""
@@ -126,6 +134,24 @@ _whois_cache = TTLCache()
 def sanitize_log_input(value: str) -> str:
     """Remove control characters from log inputs to prevent log injection."""
     return value.replace("\n", "").replace("\r", "").replace("\x00", "")
+
+
+# What the request log writes in place of a target with an "@" in it.
+EMAIL_LIKE_LOG_MARKER = "<email-like>"
+
+
+def loggable_target(target: str) -> str:
+    """A lookup target as the request log may keep it.
+
+    A target with an "@" in it is refused (EMAIL_LIKE_TARGET), and what it
+    carries is nothing the log needs: the name before the @ of somebody's
+    email address, or a URL's password. The log keeps a week of lines and
+    ships them to the collector, so such a target is written as a fixed
+    marker; every other one as sanitize_log_input leaves it.
+    """
+    if "@" in target:
+        return EMAIL_LIKE_LOG_MARKER
+    return sanitize_log_input(target)
 
 
 _IDNA_DOTS = str.maketrans({"。": ".", "．": ".", "｡": "."})
@@ -171,13 +197,25 @@ def normalize_lookup_target(raw: str) -> str:
     (which parses URLs via get_tld) would accept "https://host/path" but the raw
     string would then be handed to DNS/WHOIS/SSL, which cannot resolve it.
 
-    A URL writes an IPv6 host in brackets, with any port after them
-    ("[2001:db8::1]:8443"), so the brackets and the port go too. The remaining
-    host is lower case, has one DNS-root dot removed, and uses UTS 46 A-labels.
+    A port goes too, after any host: "example.com:443" and "8.8.8.8:53" lose it
+    to the single colon before it, and a URL's bracketed IPv6 host
+    ("[2001:db8::1]:8443") loses the brackets and the port. A bare IPv6 address
+    has two colons or more and is never cut. A "user@" in front of the host
+    is not cut off: the domain after it is not what was asked about. The
+    remaining host is lower case, has one DNS-root dot removed, and uses UTS 46
+    A-labels.
     """
     target = (raw or "").strip()
     target = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", target)
     target = re.split(r"[/?#]", target, maxsplit=1)[0]
+    # "host:port". Before anything below rewrites the host (the bracket case,
+    # the trailing-dot strip), so "nasa.gov.:443" still comes out whole in one
+    # pass. ASCII digits only: str.isdigit() also says yes to Arabic-Indic
+    # digits, which app.js's \d does not match.
+    if target.count(":") == 1:
+        host, _, port = target.rpartition(":")
+        if host and port.isascii() and port.isdigit():
+            target = host
     # "[host]" or "[host]:port", parsed by hand: CodeQL flags the regex for
     # this (an unanchored reading of it backtracks on a run of "[").
     if target.startswith("["):
@@ -653,6 +691,11 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
             raise InvalidTargetError(
                 target, code="special_use_name", message=SPECIAL_USE_NAMES[suffix]
             )
+        # No hostname or address has an "@" in it. Refused with a reason
+        # rather than cut to the domain after the @, which would answer a
+        # question nobody asked.
+        if "@" in target:
+            raise InvalidTargetError(target, message=EMAIL_LIKE_TARGET)
         raise InvalidTargetError(target)
     if kind != "domain":
         # One spelling per address, ipaddress's (RFC 5952 for IPv6), so the

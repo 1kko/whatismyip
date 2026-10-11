@@ -6,7 +6,10 @@ function normalizeLookupTarget(raw) {
   const target = raw
     .trim()
     .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "")
-    .split(/[/?#]/)[0];
+    .split(/[/?#]/)[0]
+    // "host:port" -> "host", as lookup.normalize_lookup_target does: a single
+    // colon with digits after it. A bare IPv6 address has two colons or more.
+    .replace(/^([^:]+):\d+$/, "$1");
   // A URL writes an IPv6 host in brackets, with any port after them.
   const bracketed = target.match(/^\[([^\]]*)\](?::\d*)?$/);
   const host = bracketed ? bracketed[1] : target;
@@ -28,8 +31,8 @@ function normalizeLookupTarget(raw) {
   }
   name = labels.join(".");
   if (/[^\x00-\x7f]/.test(name)) {
-    // Keep ports, user parts, escapes and controls away from the URL parser:
-    // it would silently reinterpret them even though the server refuses them.
+    // Keep user parts, escapes and controls away from the URL parser: it
+    // would silently reinterpret them even though the server refuses them.
     if (/[\x00-\x7f]/.test(name.replace(/[a-z0-9._-]/g, ""))) {
       return host;
     }
@@ -71,6 +74,9 @@ const DOMAIN = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{
 // it would earn the visitor a 24 hour ban from this page's own form. These are
 // the extensions in the server's detector that also pass DOMAIN.
 const PROBE_SUFFIX = /\.(php|aspx?|json|xml|sql|bak|conf|config|ini|log)$/i;
+// lookup.EMAIL_LIKE_TARGET, word for word: the server refuses an email address
+// rather than looking up the domain after the @, and says so in these words.
+const EMAIL_LIKE_TARGET = "looks like an email address; enter the domain after the @";
 // The detector also sees reachable single-segment shapes such as /admin,
 // /wp-* and .env. Nested names can be legitimate public-suffix domains (for
 // example admin.example.com), so the guard below preserves that shape.
@@ -106,6 +112,22 @@ function isLookupTarget(value) {
   const labels = value.split(".");
   const nestedDomain = labels.length >= 3 && !value.toLowerCase().endsWith(".env");
   return !PROBE_PATH.test(value) || nestedDomain;
+}
+
+// What the search box says instead of navigating, or null when `target` may
+// be looked up. An email address is answered here, before the generic check,
+// with the server's own words: the request would only come back refused.
+function lookupTargetError(target) {
+  if (!target) {
+    return "Enter a domain or an IP address.";
+  }
+  if (target.includes("@")) {
+    return `That ${EMAIL_LIKE_TARGET}.`;
+  }
+  if (!isLookupTarget(target)) {
+    return `"${target}" is not a domain or an IP address.`;
+  }
+  return null;
 }
 
 // A router's address is the commonest thing typed in here, and the server
@@ -185,12 +207,9 @@ input.addEventListener("input", clearError);
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   const target = normalizeLookupTarget(input.value);
-  if (!target) {
-    showError("Enter a domain or an IP address.");
-    return;
-  }
-  if (!isLookupTarget(target)) {
-    showError(`"${target}" is not a domain or an IP address.`);
+  const problem = lookupTargetError(target);
+  if (problem) {
+    showError(problem);
     return;
   }
   if (isLocalAddress(target)) {

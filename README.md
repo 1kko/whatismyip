@@ -432,8 +432,9 @@ cache before it asks the registry.
 ### `GET /{domain_or_ip}`
 
 Information about the given domain or IP. A pasted URL is normalised to its host,
-so `https://example.com/path?q=1` and `example.com` behave identically. A domain
-name is put in one canonical spelling before any lookup: lower case, without a
+so `https://example.com/path?q=1` and `example.com` behave identically.
+`host:port` is cut to its host too: `example.com:443` is looked up as
+`example.com`, and `8.8.8.8:53` as `8.8.8.8`. A domain name is put in one canonical spelling before any lookup: lower case, without a
 trailing root dot, and with each non-ASCII label encoded as its UTS 46 A-label.
 `NASA.GOV`, `nasa.gov.` and `nasa.gov` are one lookup; `straße.de` is returned
 as `xn--strae-oqa.de`. That spelling is used for `address`, MCP `target` and
@@ -468,6 +469,13 @@ is rejected with `400` before any lookup runs:
 
 ```json
 {"error": "not a domain name or IP address", "code": "invalid_target"}
+```
+
+An email address is refused the same way rather than cut to the domain after
+its `@`, which would answer a different question; only the message differs:
+
+```json
+{"error": "looks like an email address; enter the domain after the @", "code": "invalid_target"}
 ```
 
 A name under `.onion` (RFC 7686) or `home.arpa` (RFC 8375) is a hostname with a
@@ -580,7 +588,7 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 
 | Field | Value | Lookup it runs | Applies to |
 | --- | --- | --- | --- |
-| `target` | the target after URL host extraction and canonical name spelling (see `GET /{domain_or_ip}`) | none | both |
+| `target` | the target after URL host extraction (a pasted URL or `host:port` is cut to its host) and canonical name spelling (see `GET /{domain_or_ip}`) | none | both |
 | `ip` | the address a domain resolves to; an IP itself; on `/`, yours; `?` when the A query failed (`timeout`, `servfail`, `error`), as is every field below that is read from the address | A query (domains) | both |
 | `resolution` | how a domain's A query ended: `ok`, `nxdomain`, `noanswer`, `timeout`, `servfail` or `error` — the reason behind a `?` or `-` `ip`; by name only, never in the text block | A query | domain |
 | `reverse_dns` | PTR name | reverse DNS | IP |
@@ -1377,11 +1385,16 @@ A lookup target is a single path segment, so `/admin.php` and `/nasa.gov` are
 the same shape and the pattern alone cannot separate a probe from a lookup.
 What separates them is whether the segment has a **public suffix**: a request
 that matches a pattern is banned unless its target is a real domain or IP.
+A port after the target is judged by its host, since the lookup drops it:
+`/admin.example.com:8443` is a lookup and `/wp-login.php:443` a probe. A path
+with an `@` in it gets no such reading.
 
 ```
 /.env  /admin  /admin.php  /wp-login.php  /config.json   -> 403 + 24h ban
 /path/.env  /.git/config  /wp-admin/install.php          -> 403 + 24h ban
+/.env:443  /wp-login.php:443  /admin@example.com         -> 403 + 24h ban
 /nasa.gov  /example.dev  /example.zip  /8.8.8.8          -> 200, ordinary lookup
+/admin.example.com:8443  /api.envoy.com:443              -> 200, ordinary lookup
 /static/geo/countries.json                               -> 200, static asset
 ```
 
@@ -1530,8 +1543,10 @@ whatismyip/
 ## Logging
 
 Console plus a rotating `service.log` (daily rotation, 7-day retention). Every
-lookup is logged as `client={client_ip} lookup={target}`, and security events
-carry the country:
+lookup is logged as `client={client_ip} lookup={target}`. A target with an `@` in
+it is refused, and that line writes it as `lookup=<email-like>`, so an email
+address or a URL's password stays out of it; uvicorn's access line and the
+request's trace still carry the path as sent. Security events carry the country:
 
 ```
 2026-08-20 11:22:24,296 - main.py:571 - security_middleware - SECURITY: Banned 203.0.113.7 (CN) for suspicious request: /.env

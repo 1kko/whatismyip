@@ -8,6 +8,7 @@ given -- and came back as an empty 200 page tagged DOMAIN. Those failures were
 """
 
 import contextlib
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import dns.name
@@ -22,6 +23,12 @@ API_UA = {"user-agent": "curl/8"}
 BROWSER_UA = {"user-agent": "Mozilla/5.0 Chrome/120"}
 
 INVALID_BODY = {"error": "not a domain name or IP address", "code": "invalid_target"}
+# Same code: README documents invalid_target as "not a target at all", and an
+# email address is not one. Only the message says which mistake it was.
+EMAIL_BODY = {
+    "error": "looks like an email address; enter the domain after the @",
+    "code": "invalid_target",
+}
 PRIVATE_DETAIL = "Private or reserved IP addresses are not allowed"
 PRIVATE_10 = (
     "10.0.0.1 is in 10.0.0.0/8, private-use network (RFC 1918), not a public address"
@@ -185,6 +192,21 @@ async def test_gather_refuses_an_invalid_target_before_any_lookup(target):
     _assert_nothing_went_out(mocks)
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["user@example.com", "jane.doe@example.org:443", "user:secret@example.com"],
+)
+async def test_gather_refuses_an_email_address_with_its_own_message(target):
+    # Not cut to the domain after the @: that would answer a question nobody
+    # asked. A URL's user:password@ lands here too.
+    with _legs() as mocks:
+        with pytest.raises(lookup.InvalidTargetError) as raised:
+            await lookup.gather(target)
+    assert raised.value.code == "invalid_target"
+    assert raised.value.message == lookup.EMAIL_LIKE_TARGET
+    _assert_nothing_went_out(mocks)
+
+
 # --- HTTP ---------------------------------------------------------------------
 
 
@@ -197,7 +219,7 @@ async def test_gather_refuses_an_invalid_target_before_any_lookup(target):
         "/localhost",
         "/test-xss",
         "/wpad.dat",
-        "/example.com:443",
+        "/example.com:abc",
         "/example.com..",
         "/a..b.com",
     ],
@@ -207,6 +229,23 @@ def test_invalid_target_is_a_400_with_no_outbound_call(path):
         response = client.get(path, headers=API_UA)
     assert response.status_code == 400
     assert response.json() == INVALID_BODY
+    _assert_nothing_went_out(mocks)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/user@example.com",
+        "/jane.doe@example.org:443",
+        "/user:secret@example.com",
+        "/user@example.com?fields=target",
+    ],
+)
+def test_an_email_address_is_a_400_with_its_own_message(path):
+    with _legs() as mocks:
+        response = client.get(path, headers=API_UA)
+    assert response.status_code == 400
+    assert response.json() == EMAIL_BODY
     _assert_nothing_went_out(mocks)
 
 
@@ -272,6 +311,25 @@ def test_valid_targets_are_looked_up_as_before(target, canonical):
         mocks["ssl"].assert_called_once_with(canonical, "93.184.216.34")
 
 
+@pytest.mark.parametrize(
+    "path, target",
+    [
+        ("/example.com:443", "example.com"),
+        ("/google.com:443?format=json", "google.com"),
+        ("/www.example.com:8443", "www.example.com"),
+        ("/8.8.8.8:53", "8.8.8.8"),
+    ],
+)
+def test_a_port_after_the_host_is_dropped_before_the_lookup(path, target):
+    # classify_target("example.com:443") is still "invalid" (pinned above):
+    # normalize_lookup_target cuts the port before anything classifies it.
+    with _legs() as mocks:
+        response = client.get(path, headers=API_UA)
+    assert response.status_code == 200
+    assert response.json()["address"] == target
+    mocks["whois"].assert_called_once_with(target)
+
+
 def test_the_page_titles_the_canonical_name():
     with _legs():
         html = client.get("/NASA.GOV.", headers=BROWSER_UA).text
@@ -328,6 +386,79 @@ def test_invalid_targets_do_not_escalate_to_a_ban():
     assert statuses == [400] * 5
     assert after == 200
     assert not main.ip_ban_manager.is_banned("8.8.8.8")
+
+
+def test_port_and_email_targets_do_not_escalate_to_a_ban():
+    # WhitelistManager.lookup_patterns has no ":" or "@", so to the security
+    # middleware these are not lookups; but no detector rule matches them
+    # either, so each is one ordinary hit on the rate limit, as before.
+    with _legs():
+        statuses = [
+            client.get(path, headers=API_UA).status_code
+            for path in ("/example.com:443", "/user@example.com") * 2
+        ]
+        after = client.get("/example.com", headers=API_UA).status_code
+    assert statuses == [200, 400] * 2
+    assert after == 200
+    assert not main.ip_ban_manager.is_banned("8.8.8.8")
+
+
+@pytest.mark.parametrize(
+    "target, logged",
+    [
+        ("example.com", "example.com"),
+        ("8.8.8.8", "8.8.8.8"),
+        ("foo\r\nbar.com", "foobar.com"),
+        ("user@example.com", "<email-like>"),
+        ("user:secret@example.com", "<email-like>"),
+    ],
+)
+def test_loggable_target(target, logged):
+    assert lookup.loggable_target(target) == logged
+
+
+def test_the_request_log_keeps_nothing_of_an_email_address(caplog):
+    caplog.set_level(logging.INFO)
+    with _legs():
+        client.get("/jane.doe@example.org", headers=API_UA)
+        client.get("/user:secret@example.com", headers=API_UA)
+        client.get("/example.com:443", headers=API_UA)
+    # The service logs through the root logger. The test client's own request
+    # lines (logger "httpx") carry the URL, and are not the service's log.
+    lines = [r.getMessage() for r in caplog.records if r.name == "root"]
+    assert lines.count("client=8.8.8.8 lookup=<email-like>") == 2
+    assert "client=8.8.8.8 lookup=example.com" in lines
+    for leak in ("jane.doe", "example.org", "secret"):
+        assert not any(leak in line for line in lines), leak
+
+
+@pytest.mark.parametrize(
+    "path, banned",
+    [
+        # A probe keeps its 24-hour ban with a port or a "user@" in it: the
+        # detector reads the path as sent, before the route cuts anything.
+        ("/wp-login.php:443", True),
+        ("/.env:443", True),
+        ("/admin.php:80", True),
+        # A real host whose name trips a rule is spared with a port as without
+        # one: main._suspicious_path_is_ordinary runs the public-suffix check
+        # on the host of "/<host>:<digits>", and WhitelistManager.lookup_patterns
+        # and the detector's rules stay as they were.
+        ("/admin.example.com:8443", False),
+        ("/api.envoy.com:443", False),
+        ("/admin.example.com", False),
+        # That is for ":<digits>" only: an "@" path gets no such check.
+        ("/admin@example.com", True),
+        # A port or an "@" alone trips no rule.
+        ("/example.com:443", False),
+        ("/user@example.com", False),
+    ],
+)
+def test_a_port_does_not_change_what_the_detector_bans(path, banned):
+    with _legs():
+        status = client.get(path, headers=API_UA).status_code
+    assert main.ip_ban_manager.is_banned("8.8.8.8") is banned
+    assert (status == 403) is banned
 
 
 # --- self lookup from a private client ----------------------------------------
@@ -421,6 +552,28 @@ def test_mcp_lookup_echoes_the_canonical_target():
         payload = _call_tool(mcp_client, "lookup", {"target": "straße.de."})
     assert payload["target"] == "xn--strae-oqa.de"
     mocks["whois"].assert_called_once_with("xn--strae-oqa.de")
+
+
+def test_mcp_lookup_answers_for_the_host_of_a_url_with_a_port():
+    """The tool's description promises a pasted URL; one with a port came back
+    isError "not a domain name or IP address"."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "lookup",
+            "arguments": {"target": "https://nasa.gov:8443/path"},
+        },
+    }
+    with TestClient(app) as mcp_client, _legs() as mocks:
+        mcp_client.post("/mcp", json=MCP_INIT, headers=MCP_HEADERS)
+        response = mcp_client.post("/mcp", json=body, headers=MCP_HEADERS)
+    result = response.json()["result"]
+    assert result["isError"] is False
+    assert result["structuredContent"]["target"] == "nasa.gov"
+    mocks["whois"].assert_called_once_with("nasa.gov")
+    mocks["resolver"].return_value.resolve.assert_any_call("nasa.gov", "A")
 
 
 # --- special-use names: a public suffix nothing public answers for -----------
@@ -677,3 +830,15 @@ def test_a_special_use_name_with_subdomains_only_is_refused_by_the_gate(path):
     assert "special-use name" in response.json()["detail"]
     _assert_nothing_went_out(mocks)
     mocks["subdomains"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "tool, argument",
+    [("lookup", "target"), ("dns_records", "domain"), ("ssl_certificate", "domain")],
+)
+def test_mcp_tools_refuse_an_email_address_with_its_own_message(tool, argument):
+    with TestClient(app) as mcp_client, _legs() as mocks:
+        mcp_client.post("/mcp", json=MCP_INIT, headers=MCP_HEADERS)
+        payload = _call_tool(mcp_client, tool, {argument: "jane.doe@example.org"})
+    assert payload == {"error": EMAIL_BODY["error"]}
+    _assert_nothing_went_out(mocks)

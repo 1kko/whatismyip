@@ -111,7 +111,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `SuspiciousPatternDetector`, `WhitelistManager`, `GeoBlockManager`, and
   `get_client_ip` / `client_ip_from_scope` (proxy headers are trusted only from
   `TRUSTED_PROXIES`, or from private, loopback and link-local peers when that is
-  unset). `main.security_middleware` applies them.
+  unset). `main.security_middleware` applies them, and
+  `main._suspicious_path_is_ordinary` spares a path a detector rule matched
+  only when its target has a public suffix or is an IPv4 address; a
+  `/<host>:<digits>` path is judged by its host (the lookup drops the port),
+  a path with an `@` never is. `WhitelistManager.lookup_patterns` and the
+  detector rules stay as they are.
 - `rdap.py`: `lookup_rdap` (whoisit) and `normalize_whois` (python-whois's
   port-43 output) both produce one canonical dict (`CANONICAL_FIELDS`).
   `bootstrap_rdap` loads IANA's registry with whoisit's bundled override table
@@ -278,7 +283,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 
 1. **Format Negotiation**: `negotiate()` picks the response format: `?format=html|json|text` first (unknown value -> 400), then an `Accept` header that names `text/html`/`application/json`/`text/plain` (q-values honoured), and only when `Accept` is absent or `*/*` the user-agent (`BrowserDetector`: browsers get HTML; PowerShell, despite its `Mozilla/5.0`, gets JSON). `text` is `textfmt.py`'s: the bare client IP on `/`, a `key: value` block on `/{domain_ip}`; `?fields=` (either route; JSON unless text was negotiated) runs only the `gather(legs=)` the named fields need. Both lookup routes send `Vary: Accept, User-Agent` and `Cache-Control: no-store`, errors included
 2. **Classification**: `lookup.normalize_lookup_target` cuts a pasted URL to
-   its host and gives a name its canonical spelling (lower case, no trailing
+   its host (the scheme, everything from `/`, `?` or `#`, and a port:
+   `example.com:443`, `[2001:db8::1]:8443`; one colon only, so never a bare
+   IPv6 address's last group) and gives a name its canonical spelling (lower case, no trailing
    root dot, UTS 46 A-labels); `lookup.classify_target` then calls it a domain,
    `ipv4`, `ipv6` or `invalid` before any network work; an invalid target is a
    `400` (`InvalidTargetError`), and so is a private or reserved address
@@ -293,7 +300,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    IDNA 2003 name dnspython queries, not only the raw text); never the rest
    of `.arpa`, which PTR names live in. The check is not in
    `is_valid_domain`, which `main._suspicious_path_is_ordinary` reads: the
-   probe verdict for these paths must not change. A browser gets
+   probe verdict for these paths must not change.
+   A target with an `@` in it (an email address, a URL's `user:password@`)
+   keeps the code `invalid_target`, with `lookup.EMAIL_LIKE_TARGET` as its
+   message, which `static/js/app.js` copies word for word. A browser gets
    `main.render_refused_target`'s error page instead of the JSON, with copy
    chosen by `code` for `cgnat`, `documentation`/`benchmarking` and
    `6to4`/`teredo`/`nat64` (`_carried_ipv4` names the IPv4 address inside,
@@ -314,7 +324,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    `ssl`, `headers`, `map`, `distance_km`, `origin`, `elapsed_ms`, plus
    `reputation` and `subdomains` when present) and returns it as JSON or
    renders it through `render_page` and `viewmodel.build_view()`
-6. **Logging**: every lookup is logged as `client={client_ip} lookup={target}`
+6. **Logging**: every lookup is logged as `client={client_ip} lookup={target}`,
+   with `<email-like>` in place of a target that has an `@` in it
+   (`lookup.loggable_target`)
 
 ### Key Technical Details
 
@@ -516,7 +528,10 @@ Configured at `main` module scope:
 - Console and file logging (`service.log`, in the working directory)
 - `TimedRotatingFileHandler`: daily rotation, `LOG_RETENTION_DAYS` (7) kept;
   `/privacy` reads the same constant
-- Request format: `client={client_ip} lookup={target}`
+- Request format: `client={client_ip} lookup={target}`; a target with an `@`
+  in it is refused and written as `<email-like>` (`lookup.loggable_target`), so
+  an email address or a URL's password stays out of the line. uvicorn's access
+  line and the OTel trace still carry the path as sent
 
 #### Link previews
 
