@@ -754,6 +754,14 @@ class DomainManager:
         records = {
             "queried_name": domain,
             "zone": base_domain,
+            # Where the A answer (the AAAA answer when the A query raised)
+            # was found: the CNAME hops the resolver followed, in order, and
+            # the name they end at, written like queried_name. Read off that
+            # answer, so they cost no query; null and [] when neither query
+            # answered, and status["a"] says why. `cname` below stays the
+            # first hop, from its own query.
+            "canonical_name": None,
+            "cname_chain": [],
             "mx": [],
             "ns": [],
             "cname": None,
@@ -780,21 +788,43 @@ class DomainManager:
                 [{"hostname": t.to_text(), "ttl": answer.rrset.ttl} for t in targets]
             ), "ok"
 
-        def fetch_a() -> tuple[list, str]:
+        def chain_of(answer) -> tuple[list[dict], str]:
+            """The CNAME hops dnspython followed inside `answer`, each with the
+            TTL the resolver had left for it, and the canonical name they end
+            at. The TTLs are the resolver's cached view, not the zone's."""
+            hops = [
+                {
+                    "name": rrset.name.to_text(),
+                    "target": rrset[0].target.to_text(),
+                    "ttl": rrset.ttl,
+                }
+                for rrset in answer.chaining_result.cnames
+            ]
+            if not hops:
+                # No hop: the name is its own canonical name. dnspython spells
+                # it as an A-label even when asked a U-label, so it is written
+                # as queried_name is, and the two compare equal.
+                return hops, domain
+            canonical = answer.canonical_name.to_text(omit_final_dot=True).lower()
+            return hops, canonical
+
+        def fetch_a() -> tuple[list, str, tuple[list[dict], str] | None]:
             try:
                 answer = _recursive_resolver().resolve(domain, "A")
             except Exception as e:
-                return [], dns_status(e)
-            return [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer], "ok"
+                return [], dns_status(e), None
+            rows = [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer]
+            return rows, "ok", chain_of(answer)
 
-        def fetch_aaaa() -> tuple[list, str]:
+        def fetch_aaaa() -> tuple[list, str, tuple[list[dict], str] | None]:
             # Asked over IPv4 like every other type: the public resolvers are
             # IPv4 addresses, and this server has no IPv6 route to use anyway.
             try:
                 answer = _recursive_resolver().resolve(domain, "AAAA")
             except Exception as e:
-                return [], dns_status(e)
-            return [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer], "ok"
+                return [], dns_status(e), None
+            rows = [{"ip": str(r), "ttl": answer.rrset.ttl} for r in answer]
+            return rows, "ok", chain_of(answer)
 
         def mx_answer():
             """The queried name's own MX; failing that, the zone's, and whose."""
@@ -910,8 +940,14 @@ class DomainManager:
             f_ptr = pool.submit(fetch_ptr, ip) if ip else None
 
             records["ns"], status["ns"] = f_ns.result()
-            records["a"], status["a"] = f_a.result()
-            records["aaaa"], status["aaaa"] = f_aaaa.result()
+            records["a"], status["a"], a_chain = f_a.result()
+            records["aaaa"], status["aaaa"], aaaa_chain = f_aaaa.result()
+            # The A answer's chain; the AAAA answer's only when the A query
+            # raised (an IPv6-only name behind a CNAME). Same name, same
+            # resolver, so either is the chain the address was found under.
+            chain = a_chain if a_chain is not None else aaaa_chain
+            if chain is not None:
+                records["cname_chain"], records["canonical_name"] = chain
             records["mx"], status["mx"] = f_mx.result()
             records["cname"], status["cname"] = f_cname.result()
             records["txt"], records["spf"], status["txt"] = f_txt.result()

@@ -32,6 +32,12 @@ class FakeAnswer:
 
     def __init__(self, rrset):
         self.rrset = rrset
+        # What dnspython derives from the CNAME hops it followed: none here,
+        # so the answer's own name is the canonical name.
+        self.chaining_result = dns.message.ChainingResult(
+            rrset.name, rrset, rrset.ttl, []
+        )
+        self.canonical_name = rrset.name
 
     def __iter__(self):
         return iter(self.rrset)

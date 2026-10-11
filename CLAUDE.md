@@ -334,7 +334,14 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - NS, the zone's SPF, and MX for a name with none of its own come from the zone
   apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
   turned naver.co.kr into co.kr), floored at the registrable domain. Zone MX
-  rows carry `from_zone`; the response names `queried_name` and `zone`
+  rows carry `from_zone`; the response names `queried_name` and `zone`, and,
+  read off the A answer (the AAAA answer when the A query raised) at no query
+  of its own, `cname_chain` (each hop's `name`, `target` and `ttl`, in the
+  order the resolver followed them, the TTLs being what its cache had left)
+  and `canonical_name` (the name the hops end at, lowercase and without the
+  trailing dot like `queried_name`, and `queried_name` itself when there is
+  no hop; `null` with an empty chain when neither query answered, and
+  `status.a` says why). `cname` stays the first hop, from its own query
 - `zone_apex`'s floor comes from `tld.get_fld(..., search_private=False)`,
   which reads `tld`'s separate public-only list
   (`data/tld/res/effective_tld_names_public_only.dat.txt`). `TldNamesManager`
@@ -869,7 +876,8 @@ Test files:
 - Lookup behaviour: `test_classify_target.py` (refused before any network
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
   `test_dns_status.py` (a failed
-  query is never "no records"), `test_zone_apex.py` (NS/MX/SPF from the zone
+  query is never "no records"), `test_cname_chain.py` (the CNAME chain and
+  canonical name read off the A answer), `test_zone_apex.py` (NS/MX/SPF from the zone
   apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
   floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
   255 bytes), `test_resolver_unification.py` (one resolver set and budget),

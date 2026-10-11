@@ -72,7 +72,10 @@ RDAP registration data and the full TLS certificate, expanded.
   loaded, and turns `degraded` when one is missing or its build has gone stale,
   so a silent fallback or a frozen feed is visible from outside.
 - **DNS** — A, AAAA, MX, NS, CNAME, TXT, SPF and PTR, queried concurrently against
-  public resolvers with a bounded per-query budget.
+  public resolvers with a bounded per-query budget, plus every CNAME hop the
+  resolver followed to answer the A query (`cname_chain`, each with the TTL
+  left in the resolver's cache) and the canonical name they end at
+  (`canonical_name`), read off that answer at no extra query.
 - **TLS** — issuer, subject, SANs, validity window, days remaining, hostname
   match, protocol and cipher, and whether the certificate is trusted. An
   expired, self-signed, wrong-host or chain-incomplete certificate is still
@@ -702,6 +705,8 @@ rate limit as `GET`.
     "mx": [{ "preference": 0, "hostname": "nasa-gov.mail.protection.outlook.com.", "ttl": 600, "ip": "52.101.8.50" }],
     "ns": [{ "hostname": "a12-64.akam.net.", "ttl": 600, "ip": "184.26.160.64" }],
     "cname": null,
+    "canonical_name": "nasa.gov",
+    "cname_chain": [],
     "txt": [{ "text": ["MS=ms93625004"], "ttl": 364 }],
     "spf": [],
     "ptr": [],
