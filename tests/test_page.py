@@ -587,7 +587,7 @@ class TestDnsRows:
 
         mx = re.search(r"<tr>\s*<td>MX</td>.*?</tr>", table, re.S).group(0)
         assert "<td>example.com</td>" in mx
-        assert '10 mail.example.com. <span class="tone-muted">(zone)</span>' in mx
+        assert '10 mail.example.com.</a> <span class="tone-muted">(zone)</span>' in mx
         ns = re.search(r"<tr>\s*<td>NS</td>.*?</tr>", table, re.S).group(0)
         assert "<td>example.com</td>" in ns
         assert "(zone)" in ns
@@ -701,7 +701,14 @@ class TestDnsRows:
         row = re.search(r"<tr>\s*<td>CNAME</td>.*?</tr>", html, re.S)
         assert row, "no CNAME row in the DNS table"
         cells = re.findall(r"<td>(.*?)</td>", row.group(0), re.S)
-        assert cells == ["CNAME", "www.example.com", "example.com.", "300"]
+        # The target is a lookup of its own, so the VALUE cell is its link.
+        assert cells == [
+            "CNAME",
+            "www.example.com",
+            '<a class="lookup-link" href="/example.com" rel="nofollow">'
+            "example.com.</a>",
+            "300",
+        ]
         # Jinja autoescapes the quotes, so a leaked repr shows up either way.
         assert "{'cname'" not in html
         assert "{&#39;cname&#39;" not in html
@@ -1469,7 +1476,12 @@ class TestSubdomainPanel:
         list_markup = html.split('id="subdomains-list"')[1].split("</ul>")[0]
         # Counted on the anchor, not the bare name: each entry now renders its
         # name twice, once in the href and once as the link text.
-        assert list_markup.count('<a href="/h0.example.com">') == 1
+        assert (
+            list_markup.count(
+                '<a class="lookup-link" href="/h0.example.com" rel="nofollow">'
+            )
+            == 1
+        )
         assert "h499.example.com" not in list_markup
         assert "500" in html
 
@@ -1494,7 +1506,8 @@ class TestSubdomainPanel:
                 ).text
         list_markup = html.split('id="subdomains-list"')[1].split("</ul>")[0]
         assert (
-            '<a href="/api-watch.example.com">api-watch.example.com</a>' in list_markup
+            '<a class="lookup-link" href="/api-watch.example.com" rel="nofollow">'
+            "api-watch.example.com</a>" in list_markup
         )
 
     def test_the_summary_hint_reports_the_count_once_loaded(self):
@@ -1825,3 +1838,141 @@ class TestReverseDnsVerdict:
             '<span class="kv-value tone-success">host.example.net. → confirmed</span>'
             in html
         )
+
+
+# --- lookup links --------------------------------------------------------------
+# A domain page with every kind of value the page links, and the ones it must
+# not: a second A record in private space, an NS host with no public suffix, a
+# TXT record, and an AAAA query that failed. The registration's second name
+# server is in upper case, as RDAP hands them over.
+LINKED = {
+    **GATHERED,
+    "address": "naver.com",
+    "domain": {
+        "a": [{"ip": "223.130.192.248", "ttl": 300}, {"ip": "10.0.0.1", "ttl": 300}],
+        "mx": [
+            {
+                "preference": 10,
+                "hostname": "mx1.mail.naver.com.",
+                "ttl": 300,
+                "ip": "223.130.202.36",
+            }
+        ],
+        "ns": [
+            {"hostname": "ns1.naver.com.", "ttl": 20675, "ip": "61.247.220.6"},
+            {"hostname": "ns1.corp.internal.", "ttl": 20675, "ip": None},
+        ],
+        "txt": [{"text": ["google-site-verification=fK9dDF"], "ttl": 300}],
+        "cname": None,
+        "status": {"a": "ok", "aaaa": "timeout", "mx": "ok", "ns": "ok", "txt": "ok"},
+    },
+    "location": {**GATHERED["location"], "reverse_dns": "www.naver.com."},
+    "whois": {
+        "registrar": "Example Registrar",
+        "name_servers": ["ns1.naver.com", "NS2.NAVER.COM"],
+    },
+    "resolved_ip": "223.130.192.248",
+}
+
+
+def _page(gathered: dict, path: str) -> str:
+    with patch("main.gather", new_callable=AsyncMock, return_value=dict(gathered)):
+        return client.get(path, headers=BROWSER_UA).text
+
+
+def _link(href: str, text: str) -> str:
+    return f'<a class="lookup-link" href="{href}" rel="nofollow">{text}</a>'
+
+
+def _dns_values(html: str, rdtype: str) -> list[str]:
+    """The VALUE cell of every `rdtype` row of the DNS table, markup included."""
+    table = re.search(r'<table class="records records--dns">.*?</table>', html, re.S)
+    assert table, "no DNS table"
+    rows = re.findall(rf"<tr>\s*<td>{rdtype}</td>.*?</tr>", table.group(0), re.S)
+    assert rows, f"no {rdtype} row in the DNS table"
+    return [re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)[2].strip() for row in rows]
+
+
+class TestLookupLinks:
+    """Every hostname and address the page prints is a link to its own
+    lookup, so a trail from a domain to its mail host to that host's address
+    needs no copy and paste -- but only where GET /{value} would answer
+    (main.lookup_href), and always rel="nofollow": robots.txt disallows
+    ?subdomains= alone, and without it a crawler would walk from one full
+    lookup (RDAP, DNS, TLS, no-store) to the next without end."""
+
+    def test_dns_hosts_and_addresses_link_to_their_own_lookup(self):
+        html = _page(LINKED, "/naver.com")
+        assert _dns_values(html, "NS")[0] == _link("/ns1.naver.com", "ns1.naver.com.")
+        assert _dns_values(html, "A")[0] == _link("/223.130.192.248", "223.130.192.248")
+
+    def test_the_mx_link_is_the_host_without_the_preference(self):
+        html = _page(LINKED, "/naver.com")
+        assert _dns_values(html, "MX") == [
+            _link("/mx1.mail.naver.com", "10 mx1.mail.naver.com.")
+        ]
+        assert 'href="/10' not in html
+
+    def test_a_private_address_and_a_name_without_a_public_suffix_stay_text(self):
+        html = _page(LINKED, "/naver.com")
+        assert _dns_values(html, "A")[1] == "10.0.0.1"
+        assert _dns_values(html, "NS")[1] == "ns1.corp.internal."
+
+    def test_txt_and_failed_rows_are_not_links(self):
+        html = _page(LINKED, "/naver.com")
+        assert _dns_values(html, "TXT") == ["google-site-verification=fK9dDF"]
+        assert _dns_values(html, "AAAA") == ["(timed out)"]
+
+    def test_every_lookup_link_is_nofollow(self):
+        html = _page(LINKED, "/naver.com")
+        # Any anchor whose class list names lookup-link, the hero's tag included.
+        anchors = re.findall(r'<a [^>]*class="[^"]*\blookup-link\b[^"]*"[^>]*>', html)
+        assert anchors
+        assert all('rel="nofollow"' in anchor for anchor in anchors)
+
+    def test_the_json_and_the_text_answers_carry_no_link(self):
+        """Only the template reads _dns_rows and the view model: the API's
+        answers are the ones they always were."""
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(LINKED)):
+            body = client.get("/naver.com", headers=JSON_UA)
+            text = client.get("/naver.com?format=text", headers=JSON_UA)
+        assert body.headers["content-type"].startswith("application/json")
+        assert "href" not in body.text
+        assert text.headers["content-type"].startswith("text/plain")
+        assert "href" not in text.text
+        assert "lookup-link" not in text.text
+
+    def test_a_cname_hop_links_its_target_and_keeps_its_owner_marker(self):
+        """The hop's target is the link; "(of <owner>)" stays a muted span
+        after the anchor, as "(zone)" does."""
+        chained = {
+            **LINKED,
+            "address": "www.example.com",
+            "domain": {
+                "cname": {"cname": "alias.example.net.", "ttl": 300},
+                "cname_chain": [
+                    {
+                        "name": "www.example.com.",
+                        "target": "alias.example.net.",
+                        "ttl": 300,
+                    },
+                    {
+                        "name": "alias.example.net.",
+                        "target": "edge.example.net.",
+                        "ttl": 60,
+                    },
+                ],
+            },
+        }
+        html = _page(chained, "/www.example.com")
+        assert _dns_values(html, "CNAME") == [
+            _link("/alias.example.net", "alias.example.net."),
+            _link("/edge.example.net", "edge.example.net.")
+            + ' <span class="tone-muted">(of alias.example.net)</span>',
+        ]
+
+    def test_lookup_links_share_one_quiet_style(self):
+        css = CSS.read_text(encoding="utf-8")
+        assert "table.records a.lookup-link" in css
+        assert ".lookup-link:focus-visible" in css
+        assert ".subdomains__list a {" not in css

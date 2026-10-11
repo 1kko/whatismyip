@@ -379,7 +379,13 @@ def _dns_table_row(html: str, rdtype: str) -> list[str]:
     assert table, "no DNS table"
     row = re.search(rf"<tr>\s*<td>{rdtype}</td>.*?</tr>", table.group(0), re.S)
     assert row, f"no {rdtype} row in the DNS table"
-    return [c.strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", row.group(0), re.S)]
+    # Each cell's text: a value that is a lookup target is wrapped in its link
+    # (tests/test_page.py::TestLookupLinks pins that markup), and this file is
+    # about what the cells say.
+    return [
+        re.sub(r"<[^>]+>", "", c).strip()
+        for c in re.findall(r"<td[^>]*>(.*?)</td>", row.group(0), re.S)
+    ]
 
 
 def _facts_value(html: str, label: str) -> str:

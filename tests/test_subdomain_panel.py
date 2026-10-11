@@ -324,6 +324,65 @@ def test_the_full_list_link_is_the_json_route():
     ]
 
 
+# A stand-in for the few DOM calls renderSubdomainPanel makes, so the list it
+# draws can be read back in node: every element it creates is kept in `made`.
+STUB_DOM = """
+  const made = [];
+  const element = (tag) => {
+    const el = {
+      tag,
+      children: [],
+      attributes: {},
+      textContent: "",
+      className: "",
+      value: "",
+      appendChild(child) { this.children.push(child); return child; },
+      append(...items) { this.children.push(...items); },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      addEventListener() {},
+      querySelector() { return element("span"); },
+    };
+    made.push(el);
+    return el;
+  };
+  globalThis.document = { createElement: element };
+"""
+
+
+@needs_node
+def test_every_name_app_js_draws_is_a_nofollow_lookup_link():
+    """renderSubdomainPanel run over the stand-in DOM: the list app.js draws in
+    place of the server's carries the same class and rel. Googlebot runs
+    scripts, and robots.txt stops at ?subdomains= alone, so a list without
+    rel="nofollow" would walk a crawler from one full lookup to the next."""
+    anchors = _js(
+        "(() => {"
+        + STUB_DOM
+        + """
+          renderSubdomainPanel(
+            element("div"),
+            element("p"),
+            { names: ["a.example.com", "b.example.com"], count: 2 },
+            "example.com",
+          );
+          return made
+            .filter((el) => el.tag === "a")
+            .map((el) => [el.className, el.rel, el.href, el.textContent]);
+        })()""",
+        "SUBDOMAIN_RENDER_CAP",
+        "filterSubdomains",
+        "formatCount",
+        "subdomainNotes",
+        "subdomainCountText",
+        "fullListHref",
+        "renderSubdomainPanel",
+    )
+    assert anchors == [
+        ["lookup-link", "nofollow", "/a.example.com", "a.example.com"],
+        ["lookup-link", "nofollow", "/b.example.com", "b.example.com"],
+    ]
+
+
 # --- app.js wiring, by source text ---------------------------------------------
 
 
@@ -367,6 +426,14 @@ def test_the_counter_is_hidden_from_the_live_region():
     source = APP_JS.read_text(encoding="utf-8")
     handler = source.split('subdomainAccordion.addEventListener("toggle"')[1]
     assert 'elapsed.setAttribute("aria-hidden", "true")' in handler
+
+
+def test_each_drawn_name_is_a_nofollow_lookup_link():
+    """The same rule as test_every_name_app_js_draws_is_a_nofollow_lookup_link,
+    by source text, so it holds where node is not installed."""
+    draw = _function("renderSubdomainPanel").split("const draw = () => {")[1]
+    assert 'link.className = "lookup-link"' in draw
+    assert 'link.rel = "nofollow"' in draw
 
 
 def test_copy_all_copies_the_matches_not_the_rendered_rows():

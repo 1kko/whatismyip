@@ -223,8 +223,10 @@
                           {# Each name links to its own lookup. Safe as an href without
                              further escaping: normalization in subdomains.py admits only
                              [a-z0-9._-], so a name cannot carry a scheme, a slash or a
-                             quote. urlencode is belt-and-braces if that rule ever widens. #}
-                          {% for name in view.subdomains_shown %}<li><a href="/{{ name|urlencode }}">{{ name }}</a></li>{% endfor %}
+                             quote. urlencode is belt-and-braces if that rule ever widens.
+                             rel="nofollow" as on every lookup link on the page: robots.txt
+                             disallows ?subdomains= alone. #}
+                          {% for name in view.subdomains_shown %}<li><a class="lookup-link" href="/{{ name|urlencode }}" rel="nofollow">{{ name }}</a></li>{% endfor %}
                       </ul>
                       {# ?subdomains=only answers JSON even to a browser navigation,
                          so this opens the whole loaded list in the browser's own
@@ -259,7 +261,7 @@
                         <tr>
                             <td>{{ record.type }}</td>
                             <td>{{ record.name }}</td>
-                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{{ record.value }}{% if record.from_zone %} <span class="tone-muted">(zone)</span>{% endif %}{% if record.hop_of %} <span class="tone-muted">(of {{ record.hop_of }})</span>{% endif %}</td>
+                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{% if record.href %}<a class="lookup-link" href="{{ record.href }}" rel="nofollow">{{ record.value }}</a>{% else %}{{ record.value }}{% endif %}{% if record.from_zone %} <span class="tone-muted">(zone)</span>{% endif %}{% if record.hop_of %} <span class="tone-muted">(of {{ record.hop_of }})</span>{% endif %}</td>
                             <td>{{ record.ttl }}</td>
                         </tr>
                         {% else %}

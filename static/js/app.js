@@ -571,10 +571,14 @@ function renderSubdomainPanel(body, line, data, target) {
     // certificates and are not ours to trust as markup. The href is built
     // with encodeURIComponent for the same reason -- normalization already
     // restricts names to [a-z0-9._-], but nothing here should depend on
-    // that rule staying narrow.
+    // that rule staying narrow. The class and rel browser.html gives its own
+    // list: rel="nofollow" keeps a crawler that runs scripts from walking
+    // from one lookup to the next.
     for (const name of shown) {
       const item = document.createElement("li");
       const link = document.createElement("a");
+      link.className = "lookup-link";
+      link.rel = "nofollow";
       link.href = `/${encodeURIComponent(name)}`;
       link.textContent = name;
       item.appendChild(link);

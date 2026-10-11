@@ -534,9 +534,16 @@ def test_the_page_tags_an_ipv6_address_as_ipv6(offline):
 def test_the_page_lists_aaaa_records(offline):
     response = client.get("/v6only.example.com", headers=CHROME)
     assert response.status_code == 200
-    rows = re.findall(
-        r"<tr>\s*<td>(\w+)</td>\s*<td>[^<]*</td>\s*<td[^>]*>([^<]*)</td>", response.text
-    )
+    # The VALUE cell wraps an address in its lookup link (test_page.py's
+    # TestLookupLinks); this test is about the row's text.
+    rows = [
+        (rdtype, re.sub(r"<[^>]+>", "", value))
+        for rdtype, value in re.findall(
+            r"<tr>\s*<td>(\w+)</td>\s*<td>[^<]*</td>\s*<td[^>]*>(.*?)</td>",
+            response.text,
+            re.S,
+        )
+    ]
     assert ("AAAA", V6) in rows
 
 
