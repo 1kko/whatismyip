@@ -2,12 +2,18 @@
 
 All pure and deterministic: no network. Live RDAP shapes are captured as
 fixtures so the mapping is pinned even when the registries are unreachable.
+
+whoisit's bootstrap registry is module-global state. Synthetic registries are
+cleared before and after each test that loads one.
 """
 
 import asyncio
 import datetime
+import json
+import time
 
 import pytest
+import whoisit
 
 import lookup
 import main
@@ -45,6 +51,36 @@ RDAP_IP = {
     "last_changed_date": datetime.datetime(2023, 12, 28, 17, 24, tzinfo=UTC),
     "entities": {"registrant": [{"name": "Google LLC"}]},
 }
+
+
+def _registry_json(timestamp: int) -> str:
+    return json.dumps(
+        {
+            "timestamp": timestamp,
+            "asn": {"services": [[["1-10"], ["https://rdap.example.net/"]]]},
+            "dns": {
+                "services": [
+                    [["com"], ["https://rdap.verisign.com/com/v1/"]],
+                    [["kr"], ["https://rdap.nic.or.kr/"]],
+                ]
+            },
+            "ipv4": {"services": [[["192.0.2.0/24"], ["https://rdap.example.net/"]]]},
+            "ipv6": {"services": [[["2001:db8::/32"], ["https://rdap.example.net/"]]]},
+            "object": {"services": [[["EXAMPLE"], ["https://rdap.example.net/"]]]},
+        }
+    )
+
+
+@pytest.fixture
+def clean_whoisit():
+    whoisit.clear_bootstrapping()
+    yield
+    whoisit.clear_bootstrapping()
+
+
+@pytest.fixture
+def stale_registry(clean_whoisit):
+    whoisit.load_bootstrap_data(_registry_json(0), overrides=True)
 
 
 class TestIsIp:
@@ -155,6 +191,67 @@ class TestLookupWhoisRouting:
         asyncio.run(main.lookup_whois("example.com"))
         asyncio.run(main.lookup_whois("example.com"))
         assert calls["n"] == 1  # second call served from cache
+
+
+class TestRdapOverrides:
+    def test_the_table_routes_tlds_iana_omits(self, stale_registry):
+        assert rdap._rdap_host("admin.ch", "domain") == "rdap.nic.ch"
+        assert rdap._rdap_host("github.io", "domain") == (
+            "rdap.identitydigital.services"
+        )
+        assert rdap._rdap_host("example.de", "domain") == "rdap.denic.de"
+        assert rdap._rdap_host("example.com", "domain") == "rdap.verisign.com"
+        assert rdap._rdap_host("kisa.or.kr", "domain") == "rdap.nic.or.kr"
+
+    def test_without_the_table_the_same_name_is_unsupported(self, clean_whoisit):
+        whoisit.load_bootstrap_data(_registry_json(0), overrides=False)
+        with pytest.raises(whoisit.errors.UnsupportedError):
+            rdap._rdap_host("admin.ch", "domain")
+
+    def test_a_first_bootstrap_asks_whoisit_for_the_table(
+        self, clean_whoisit, monkeypatch
+    ):
+        calls = []
+
+        def fake_bootstrap(**kwargs):
+            calls.append(dict(kwargs))
+            whoisit.load_bootstrap_data(_registry_json(int(time.time())), **kwargs)
+
+        monkeypatch.setattr(whoisit, "bootstrap", fake_bootstrap)
+        assert rdap.bootstrap_rdap() is True
+        assert calls == [{"overrides": True}]
+        assert rdap._rdap_host("admin.ch", "domain") == "rdap.nic.ch"
+
+    @pytest.mark.parametrize(
+        "target, registrar",
+        [("admin.ch", "cyon AG"), ("github.io", "MarkMonitor Inc.")],
+    )
+    def test_a_name_iana_omits_is_asked_over_rdap_not_port_43(
+        self, stale_registry, monkeypatch, target, registrar
+    ):
+        asked = []
+
+        def fake_domain(name, **kwargs):
+            asked.append(name)
+            return {
+                "name": name,
+                "handle": "",
+                "status": ["active"],
+                "nameservers": [f"ns1.{name}", f"ns2.{name}"],
+                "dnssec": True,
+                "entities": {"registrar": [{"name": registrar}]},
+            }
+
+        def no_port43(*args, **kwargs):
+            raise AssertionError("port 43 must not be asked when RDAP answers")
+
+        monkeypatch.setattr(whoisit, "domain", fake_domain)
+        monkeypatch.setattr(lookup.whois, "whois", no_port43)
+        out = asyncio.run(lookup.lookup_whois(target))
+        assert asked == [target]
+        assert out["source"] == "rdap"
+        assert out["registrar"] == registrar
+        assert out["status"] == ["active"]
 
 
 if __name__ == "__main__":

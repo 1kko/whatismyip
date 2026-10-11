@@ -49,12 +49,13 @@ RDAP registration data and the full TLS certificate, expanded.
 
 ### Lookups
 
-- **Registration** — RDAP first (structured JSON, sub-second), falling back to
-  port-43 WHOIS for the TLDs RDAP does not serve. Both sources are normalised to
-  one shape and cached for 6 hours (5 minutes for a failure). An IP address has
-  no WHOIS fallback: when its RIR's RDAP server does not answer, the lookup says
-  so instead of showing the registration of the address's reverse-DNS domain.
-  An RDAP server that fails three times in a row is skipped for 10 minutes.
+- **Registration** — RDAP first (structured JSON, sub-second), routed through
+  IANA's bootstrap files plus the override table bundled with whoisit. This
+  covers registries IANA omits, including .ch, .li, .de, .io, .me and .us.
+  Port-43 WHOIS is used only when no RDAP server exists or RDAP does not answer.
+  Both sources are normalised to one shape and cached for 6 hours (5 minutes
+  for a failure). An IP address has no WHOIS fallback. An RDAP server that fails
+  three times in a row is skipped for 10 minutes.
   A hostname such as `www.github.com` gets the registration that covers it,
   `github.com`'s, with `queried_name` and `registrable_domain` identifying both
   names. `not registered` therefore means the registrable domain has no record.

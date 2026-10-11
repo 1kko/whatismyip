@@ -3,9 +3,10 @@
 RDAP (RFC 9082/9083) is the IETF successor to port-43 WHOIS: a single HTTPS GET
 that returns structured JSON instead of free-form text. It is faster (usually
 <1s vs the ~11s some registrars take on port 43) and needs no fragile text
-parsing. Coverage is not total though — most gTLDs publish an RDAP endpoint in
-the IANA bootstrap registry, but many ccTLDs (.kr among them) do not, so those
-still go through python-whois.
+parsing. Coverage is not total though. IANA's bootstrap registry maps most
+gTLDs and many ccTLDs to an RDAP server, and whoisit's bundled override table
+adds registries IANA omits or misstates, including .ch, .li, .de, .io, .me and
+.us. A TLD in neither still goes through python-whois.
 
 Both sources are normalised into one canonical dict so the API and the template
 never have to care which one answered:
@@ -131,13 +132,13 @@ def is_ip(target: str) -> bool:
 
 def bootstrap_rdap(force: bool = False) -> bool:
     """Load (or refresh) the IANA bootstrap registry whoisit uses to map a TLD
-    or IP block to its authoritative RDAP server. Idempotent and thread-safe;
-    returns True when the registry is ready, False if it could not be fetched
-    (callers then fall back to WHOIS)."""
+    or IP block to its authoritative RDAP server, with whoisit's bundled
+    override table enabled. Idempotent and thread-safe; returns whether the
+    registry is ready."""
     with _bootstrap_lock:
         try:
             if force or not whoisit.is_bootstrapped():
-                whoisit.bootstrap()
+                whoisit.bootstrap(overrides=True)
             return whoisit.is_bootstrapped()
         except Exception:
             logging.warning("RDAP bootstrap failed; WHOIS fallback stays in use")
@@ -317,7 +318,7 @@ def lookup_rdap(target: str) -> dict | None:
     try:
         host = _rdap_host(target, "ip" if ip_target else "domain")
     except whoisit.errors.UnsupportedError:
-        # TLD/allocation has no RDAP endpoint — expected for many ccTLDs.
+        # No endpoint in IANA's files or whoisit's bundled override table.
         return None
     except Exception:
         logging.info("RDAP has no server for %s", target)

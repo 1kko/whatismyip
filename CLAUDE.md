@@ -109,8 +109,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   unset). `main.security_middleware` applies them.
 - `rdap.py`: `lookup_rdap` (whoisit) and `normalize_whois` (python-whois's
   port-43 output) both produce one canonical dict (`CANONICAL_FIELDS`).
+  `bootstrap_rdap` loads IANA's registry with whoisit's bundled override table
+  enabled for RDAP servers IANA omits, including .ch/.li/.de/.io/.me/.us.
   `rdap_breaker` (a `CircuitBreaker`) skips an RDAP host after repeated
-  failures; `refresh_rdap_bootstrap` keeps IANA's bootstrap registry current.
+  failures; `refresh_rdap_bootstrap` keeps the registry current.
 - `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of
   `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
 - `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
