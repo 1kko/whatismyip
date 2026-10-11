@@ -615,6 +615,7 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `risk_level` | `none`, `low`, `medium` or `high` (see [IP reputation](#ip-reputation)); `?` when no list could be checked | the lists in memory (an A query for a domain) | both |
 | `risk_signals` | the ids of the lists the address is on, comma-separated, e.g. `tor_exit,datacenter` | the lists in memory (an A query for a domain) | both |
 | `abuse_score` | AbuseIPDB's abuse confidence, 0-100; `?` when AbuseIPDB did not answer, `-` without `ABUSEIPDB_API_KEY` | AbuseIPDB's API (cached a day) | ip |
+| `dmarc_policy` | `none`, `quarantine` or `reject`: the DMARC policy that governs the name, as published — its own `_dmarc` record's `p=`, or, for a name that inherits its registrable domain's record, that record's `sp=` when it has one; `-` with no record, or with two (RFC 7489 then applies neither); `?` when the `_dmarc` query failed (a failed A query leaves it standing: the record does not depend on the address) | an A query, then the DNS record sweep with `_dmarc` | domain |
 
 The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
 is `cert_expires` here, its `registration.expires` is `domain_expires`, and its
@@ -626,6 +627,9 @@ among the other lines would read as a clean bill of health the lists cannot
 give, and `resolution: ok` would be a line to skip on every read.
 `reverse_dns_confirmed` is left out of the block too, for its cost: it needs the
 record sweep of the PTR name, which the block skips.
+`dmarc_policy` is asked for by name only too: it needs the DNS record sweep,
+which the text block skips. It has no counterpart in the MCP tools, whose
+`dns_records` returns the record itself.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
 own address; `cert_*` and the domain-only fields are `-`, and so is

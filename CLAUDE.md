@@ -187,7 +187,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - `textfmt.py`: `?format=text` and `?fields=`. The field table (names are
   `mcp_server`'s compact_* shapes, flattened; each field lists the `gather()`
   legs it needs and the target kinds it applies to) and the text/flat-JSON
-  rendering. Pure: `main.py` runs the lookup. `-` is "no value", `?` is "the
+  rendering. Pure: `main.py` runs the lookup. `dmarc_policy` reads
+  `viewmodel.dmarc_policy()`, so the field and the page's Mail row agree.
+  `-` is "no value", `?` is "the
   lookup failed": `field_values` marks the registration fields for a broken
   RDAP/WHOIS lookup, every field read from the address (chosen by leg, so a
   new field follows; `_NAME_LEGS`, whois and the dns sweep, ask about the
