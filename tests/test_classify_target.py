@@ -22,6 +22,36 @@ API_UA = {"user-agent": "curl/8"}
 BROWSER_UA = {"user-agent": "Mozilla/5.0 Chrome/120"}
 
 INVALID_BODY = {"error": "not a domain name or IP address", "code": "invalid_target"}
+PRIVATE_DETAIL = "Private or reserved IP addresses are not allowed"
+PRIVATE_10 = (
+    "10.0.0.1 is in 10.0.0.0/8, private-use network (RFC 1918), not a public address"
+)
+CGNAT_1 = (
+    "100.64.0.1 is in 100.64.0.0/10, shared address space for carrier-grade NAT "
+    "(RFC 6598), not a public address"
+)
+
+# One address per code lookup.special_purpose() answers with, plus a refused
+# address in none of its rows (IPv6 unassigned space).
+REFUSED_BLOCKS = [
+    ("10.0.0.1", "private"),
+    ("100.64.0.1", "cgnat"),
+    ("127.0.0.1", "loopback"),
+    ("169.254.169.254", "link_local"),
+    ("192.0.2.1", "documentation"),
+    ("198.18.0.1", "benchmarking"),
+    ("224.0.0.1", "multicast"),
+    ("0.0.0.1", "this_network"),
+    ("192.0.0.1", "ietf_protocol"),
+    ("255.255.255.255", "broadcast"),
+    ("240.0.0.1", "reserved"),
+    ("fc00::1", "ula"),
+    ("fec0::1", "site_local"),
+    ("2002:808:808::1", "6to4"),
+    ("2001::1", "teredo"),
+    ("64:ff9b::808:808", "nat64"),
+    ("4000::1", "reserved"),
+]
 
 client = TestClient(app, client=("8.8.8.8", 41234))
 
@@ -197,16 +227,18 @@ def test_invalid_target_with_subdomains_include_contacts_nothing():
     mocks["subdomains"].assert_not_called()
 
 
-@pytest.mark.parametrize("path", ["/::1", "/fe80::1"])
-def test_a_private_ipv6_target_is_a_400_with_no_outbound_call(path):
+@pytest.mark.parametrize(
+    "path, code", [("/::1", "loopback"), ("/fe80::1", "link_local")]
+)
+def test_a_private_ipv6_target_is_a_400_with_no_outbound_call(path, code):
     # IPv6 is looked up now (tests/test_ipv6.py), so a private one gets the
     # private-address 400 an IPv4 one does, before anything goes out.
     with _legs() as mocks:
         response = client.get(path, headers=API_UA)
     assert response.status_code == 400
-    assert response.json() == {
-        "detail": "Private or reserved IP addresses are not allowed"
-    }
+    body = response.json()
+    assert body["detail"] == PRIVATE_DETAIL
+    assert body["code"] == code
     _assert_nothing_went_out(mocks)
 
 
@@ -247,13 +279,40 @@ def test_the_page_titles_the_canonical_name():
     assert '<h1 class="ip mono">nasa.gov</h1>' in html
 
 
-def test_private_address_keeps_its_own_400():
+@pytest.mark.parametrize(
+    "address, error, code",
+    [
+        ("10.0.0.1", PRIVATE_10, "private"),
+        # The backlog's completion check: curl -s ip.1kko.com/100.64.0.1.
+        ("100.64.0.1", CGNAT_1, "cgnat"),
+    ],
+)
+def test_private_address_keeps_its_own_400(address, error, code):
     with _legs() as mocks:
-        response = client.get("/10.0.0.1", headers=API_UA)
+        response = client.get(f"/{address}", headers=API_UA)
     assert response.status_code == 400
-    assert response.json() == {
-        "detail": "Private or reserved IP addresses are not allowed"
-    }
+    assert response.json() == {"detail": PRIVATE_DETAIL, "error": error, "code": code}
+    _assert_nothing_went_out(mocks)
+
+
+@pytest.mark.parametrize("address, code", REFUSED_BLOCKS)
+def test_a_refused_address_names_its_block_without_any_outbound_call(address, code):
+    """`detail` is the API every client has read since the first release;
+    `error` and `code` are added beside it, and the table is consulted after
+    is_safe_ip refused the address, so still nothing goes out."""
+    with _legs() as mocks:
+        response = client.get(f"/{address}", headers=API_UA)
+        text = client.get(f"/{address}?format=text", headers=API_UA)
+    assert response.status_code == 400
+    body = response.json()
+    assert body["detail"] == PRIVATE_DETAIL
+    assert body["code"] == code
+    assert body["error"].startswith(f"{address} is in ")
+    assert body["error"].endswith(", not a public address")
+    assert set(body) == {"detail", "error", "code"}
+    # ?format=text answers the same sentence, as one line with the same status.
+    assert text.status_code == 400
+    assert text.text == f"error: {body['error']}\n"
     _assert_nothing_went_out(mocks)
 
 

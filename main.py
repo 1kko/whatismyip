@@ -1408,6 +1408,20 @@ def _invalid_field(exc: InvalidFieldError, fmt: str) -> Response:
     )
 
 
+# The JSON 400 for a refused address. `detail` is the API: clients have read
+# it since the first release and the tests pin it byte for byte, so it never
+# changes and stays the first key. `error` and `code` (lookup.refused_address)
+# name the IANA block the address is in, beside it.
+_PRIVATE_DETAIL = "Private or reserved IP addresses are not allowed"
+
+
+def _refused_json(exc: PrivateAddressError) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={"detail": _PRIVATE_DETAIL, "error": exc.message, "code": exc.code},
+    )
+
+
 def _busy(request: Request, fmt: str) -> Response:
     """The 503 for a lookup the gate turned away (concurrency.LookupBusy), in
     the format its answer would have had.
@@ -1667,11 +1681,10 @@ async def _target_fields(target: str, names: list[str] | None, fmt: str):
         return JSONResponse(
             status_code=400, content={"error": exc.message, "code": exc.code}
         )
-    except PrivateAddressError:
-        message = "Private or reserved IP addresses are not allowed"
+    except PrivateAddressError as exc:
         if fmt == "text":
-            return _text_error(message)
-        raise HTTPException(status_code=400, detail=message) from None
+            return _text_error(exc.message)
+        return _refused_json(exc)
     return _fields_response(data, names, kind, fmt, block=block)
 
 
@@ -1925,10 +1938,7 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
             return JSONResponse(
                 status_code=400, content={"error": exc.message, "code": exc.code}
             )
-        raise HTTPException(
-            status_code=400,
-            detail="Private or reserved IP addresses are not allowed",
-        ) from None
+        return _refused_json(exc)
     except LookupBusy:
         origin_task.cancel()
         if subdomain_task is not None:

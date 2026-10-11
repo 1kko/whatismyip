@@ -272,7 +272,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    root dot, UTS 46 A-labels); `lookup.classify_target` then calls it a domain,
    `ipv4`, `ipv6` or `invalid` before any network work; an invalid target is a
    `400` (`InvalidTargetError`), and so is a private or reserved address
-   (`PrivateAddressError`, from `is_safe_ip`). A hostname under
+   (`PrivateAddressError`, from `is_safe_ip`): its JSON keeps `detail`
+   unchanged and adds `error` and `code`, the IANA block from
+   `lookup.special_purpose` (`main._refused_json`), and text answers the
+   `error` sentence. A hostname under
    `config.SPECIAL_USE_SUFFIXES` (`onion`, `home.arpa`: on the PSL, so
    `is_valid_domain` says yes) is `invalid` too, and `gather()` raises
    `InvalidTargetError(code="special_use_name")` with the reason from

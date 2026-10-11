@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from lookup import PrivateAddressError
+from lookup import refused_address
 from main import app, ip_ban_manager, rate_limiter
 
 CLIENT_IP = "8.8.8.8"
@@ -44,7 +44,9 @@ CHROME = {
 }
 CURL = {"user-agent": "curl/8.7.1", "accept": "*/*"}
 
-PRIVATE_BYTES = b'{"detail":"Private or reserved IP addresses are not allowed"}'
+# `detail` is the API: pinned byte for byte, first in the body. `error` and
+# `code` -- the address's IANA block, from lookup.refused_address -- follow it.
+PRIVATE_PREFIX = b'{"detail":"Private or reserved IP addresses are not allowed"'
 INVALID_BYTES = b'{"error":"not a domain name or IP address","code":"invalid_target"}'
 DENIED_BYTES = b'{"error":"Access denied due to the policy"}'
 TOO_MANY_BYTES = b'{"error":"Too many requests"}'
@@ -106,6 +108,22 @@ def _vary(response):
     return {t.strip().lower() for t in response.headers.get("vary", "").split(",")}
 
 
+def _assert_refused_json(response, code):
+    assert response.status_code == 400
+    assert _is_json(response)
+    assert response.content.startswith(PRIVATE_PREFIX)
+    body = json.loads(response.content)
+    assert set(body) == {"detail", "error", "code"}
+    assert body["code"] == code
+    assert body["error"].endswith(", not a public address")
+    # A returned JSONResponse, no longer a raised HTTPException: still the
+    # lookup route's answer, so still varied on what negotiate() reads and
+    # never cached (security_headers_middleware matches the endpoint).
+    assert {"accept", "user-agent"} <= _vary(response)
+    assert response.headers["cache-control"] == "no-store"
+    return body
+
+
 # --- 400: a private or reserved address --------------------------------------
 
 
@@ -122,9 +140,7 @@ class TestPrivateAddress:
 
     def test_an_api_client_gets_the_json_it_always_did(self):
         response = client.get("/192.168.0.1", headers=CURL)
-        assert response.status_code == 400
-        assert _is_json(response)
-        assert response.content == PRIVATE_BYTES
+        _assert_refused_json(response, "private")
 
     @pytest.mark.parametrize(
         "address",
@@ -159,7 +175,7 @@ class TestPrivateAddress:
         with patch(
             "main.gather",
             new_callable=AsyncMock,
-            side_effect=PrivateAddressError("router.example.com"),
+            side_effect=refused_address("router.example.com", "192.168.50.1"),
         ):
             page = client.get("/router.example.com", headers=CHROME)
             data = client.get("/router.example.com", headers=CURL)
@@ -167,20 +183,20 @@ class TestPrivateAddress:
         assert "router.example.com resolves to a private or reserved" in (
             _visible_text(page.text)
         )
-        assert data.status_code == 400
-        assert data.content == PRIVATE_BYTES
+        body = _assert_refused_json(data, "private")
+        assert body["error"].startswith(
+            "router.example.com resolves to 192.168.50.1, in 192.168.0.0/16, "
+        )
 
     def test_format_json_from_a_browser_gets_json(self):
         response = client.get("/192.168.0.1?format=json", headers=CHROME)
-        assert response.status_code == 400
-        assert response.content == PRIVATE_BYTES
+        _assert_refused_json(response, "private")
 
     def test_accept_json_from_a_browser_gets_json(self):
         """A fetch() from the page itself."""
         headers = {**CHROME, "accept": "application/json"}
         response = client.get("/192.168.0.1", headers=headers)
-        assert response.status_code == 400
-        assert response.content == PRIVATE_BYTES
+        _assert_refused_json(response, "private")
 
     def test_the_page_keeps_the_lookup_cache_headers(self):
         response = client.get("/192.168.0.1", headers=CHROME)

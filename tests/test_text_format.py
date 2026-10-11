@@ -307,8 +307,15 @@ class TestTargetText:
         ("path", "line"),
         [
             ("/localhost", "error: not a domain name or IP address\n"),
-            ("/10.0.0.1", "error: Private or reserved IP addresses are not allowed\n"),
-            ("/::1", "error: Private or reserved IP addresses are not allowed\n"),
+            (
+                "/10.0.0.1",
+                "error: 10.0.0.1 is in 10.0.0.0/8, private-use network (RFC 1918), "
+                "not a public address\n",
+            ),
+            (
+                "/::1",
+                "error: ::1 is in ::1/128, loopback (RFC 4291), not a public address\n",
+            ),
         ],
     )
     def test_errors_are_one_line_of_text_with_the_same_status(self, path, line):
@@ -325,7 +332,7 @@ class TestTargetText:
         assert response.status_code == 400
         assert response.text.startswith("error: subdomains must be one of")
 
-    def test_json_errors_are_unchanged(self):
+    def test_json_errors_keep_detail_and_name_the_block(self):
         with _legs():
             invalid = client.get("/localhost", headers=CURL)
             private = client.get("/10.0.0.1", headers=CURL)
@@ -334,8 +341,25 @@ class TestTargetText:
             "code": "invalid_target",
         }
         assert private.json() == {
-            "detail": "Private or reserved IP addresses are not allowed"
+            "detail": "Private or reserved IP addresses are not allowed",
+            "error": (
+                "10.0.0.1 is in 10.0.0.0/8, private-use network (RFC 1918), "
+                "not a public address"
+            ),
+            "code": "private",
         }
+
+    def test_fields_on_a_refused_address_carries_the_block_too(self):
+        """?fields= goes through _target_fields, a different except block from
+        get_ip_info's; the answer must be the same 400."""
+        with _legs() as mocks:
+            response = client.get("/100.64.0.1?fields=ip,asn_number", headers=CURL)
+        assert response.status_code == 400
+        body = response.json()
+        assert body["detail"] == "Private or reserved IP addresses are not allowed"
+        assert body["code"] == "cgnat"
+        assert "RFC 6598" in body["error"]
+        assert _ran(mocks) == set()
 
 
 # --- ?fields= --------------------------------------------------------------------

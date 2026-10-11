@@ -110,6 +110,10 @@ def test_domain_resolving_there_is_refused_without_tls(ip):
         resolver.return_value.resolve.return_value = [ip]
         response = client.get("/internal.example.com")
     assert response.status_code == 400
+    body = response.json()
+    assert body["detail"] == "Private or reserved IP addresses are not allowed"
+    assert body["code"] == ("multicast" if ip == "224.0.0.1" else "cgnat")
+    assert body["error"].startswith(f"internal.example.com resolves to {ip}, in ")
     records_mock.assert_not_called()
     ssl_mock.assert_not_called()
 
