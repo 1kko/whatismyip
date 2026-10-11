@@ -26,6 +26,7 @@ whoisit = "^4.0.4"
 mcp = "^2.2.0"
 dnspython = "^2.8"
 cryptography = "^50.0.0"
+idna = "^3.18"
 
 
 [tool.poetry.group.dev.dependencies]

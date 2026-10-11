@@ -1011,8 +1011,8 @@ def build_view(
             SITE_DESCRIPTION if is_self else _summary(response, address, is_ip)
         ),
         # The page's path under the public base URL, for og:url and the
-        # canonical link. Hostnames are case-insensitive, and gather() keeps
-        # the case it was given, so /NASA.gov and /nasa.gov are one page.
+        # canonical link. gather() already supplies the canonical spelling;
+        # lower() is harmless defense for a synthetic response in a test.
         "canonical_path": "" if is_self else quote(address.lower(), safe=""),
         "tags": _tags(response, is_ip),
         "flag": country_flag(location.get("country_code")),

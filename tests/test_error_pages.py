@@ -206,6 +206,12 @@ class TestInvalidTarget:
         assert response.status_code == 400
         assert "call-1-800" not in response.text
 
+    def test_a_name_uts46_refuses_is_not_echoed_either(self):
+        response = client.get("/münchen..de", headers=CHROME)
+        assert response.status_code == 400
+        assert "Not a domain name or IP address" in _visible_text(response.text)
+        assert "nchen" not in response.text
+
     def test_an_api_client_gets_the_json_it_always_did(self):
         response = client.get("/%7Btarget%7D", headers=CURL)
         assert response.status_code == 400

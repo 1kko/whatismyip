@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from fastapi.testclient import TestClient
 
+import lookup
 import managers
 from main import app
 from managers import SSLManager
@@ -398,6 +399,34 @@ class TestUntrustedCertificate:
             r.levelno == logging.INFO and "unable to get local issuer" in r.getMessage()
             for r in caplog.records
         )
+
+
+class TestCanonicalServerName:
+    @pytest.mark.parametrize(
+        "typed, canonical",
+        [
+            ("EXAMPLE.COM.", HOST),
+            ("Example.com", HOST),
+            ("münchen.de", "xn--mnchen-3ya.de"),
+            ("straße.de", "xn--strae-oqa.de"),
+        ],
+    )
+    async def test_the_handshake_names_the_canonical_host(self, typed, canonical):
+        resolver = MagicMock()
+        resolver.resolve.return_value = [IP]
+        with (
+            scripted_tls(_tls_socket(peercert=VERIFIED_PEERCERT)) as seen,
+            patch("lookup.lookup_whois", new=AsyncMock(return_value={})),
+            patch("lookup._recursive_resolver", return_value=resolver),
+            patch.object(lookup.domain_manager, "get_records", return_value={}),
+        ):
+            data = await lookup.gather(typed)
+        assert data["address"] == canonical
+        assert len(seen.contexts) == 1
+        assert seen.sockets[-1].connect.call_args.args == ((IP, 443),)
+        sni = seen.contexts[0].wrap_socket.call_args.kwargs["server_hostname"]
+        assert sni == canonical
+        assert data["ssl"]["trusted"] is True
 
 
 class TestUnreachable:

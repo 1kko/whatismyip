@@ -77,7 +77,9 @@ REJECTED = [
 
 # The route reduces a pasted URL to its host before the gate sees it (see
 # normalize_lookup_target), so a URL is not a rejected target there.
-HTTP_REJECTED = [target for target in REJECTED if "/" not in target]
+HTTP_REJECTED = [
+    target for target in REJECTED if "/" not in target and target.isascii()
+]
 
 ACCEPTED = [
     "example.com",
@@ -206,6 +208,26 @@ class TestHttpGate:
         assert response.status_code == 200
         assert response.json()["subdomains"]["names"] == [f"www.{target}"]
         f.assert_called_once_with(target)
+
+    @pytest.mark.parametrize(
+        "typed, canonical",
+        [
+            ("münchen.de", "xn--mnchen-3ya.de"),
+            ("straße.de", "xn--strae-oqa.de"),
+        ],
+    )
+    def test_an_idn_reaches_the_gate_as_its_a_label(self, typed, canonical):
+        gate = AsyncMock(wraps=subdomains.get_subdomains)
+        with patch("main.get_subdomains", gate):
+            with patch.object(
+                subdomains, "_fetch_sync", return_value=_rows(canonical)
+            ) as fetch:
+                response = self.client.get(f"/{typed}?subdomains=only", headers=JSON_UA)
+        assert response.status_code == 200
+        assert response.json()["address"] == canonical
+        assert response.json()["subdomains"]["names"] == [f"www.{canonical}"]
+        gate.assert_awaited_once_with(canonical)
+        fetch.assert_called_once_with(canonical)
 
 
 def _call_subdomains_tool(client, domain: str) -> dict:

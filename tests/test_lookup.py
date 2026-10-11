@@ -24,10 +24,67 @@ def test_normalize_lookup_target_is_idempotent():
         "http://[2001:db8::1]:8443/path",
         "[[2001:db8::1]",
         "",
+        "NASA.GOV.",
+        "münchen.de",
+        "straße.de",
+        "_dmarc.example.com",
+        "８。８。８。８",
+        "８.８",
+        "nasa.gov。",
+        "münchen．de",
+        "nasa.gov｡",
+        "example.com..",
+        "a..b.com",
     ):
         once = lookup.normalize_lookup_target(raw)
         twice = lookup.normalize_lookup_target(once)
         assert once == twice
+
+
+@pytest.mark.parametrize(
+    "typed, canonical",
+    [
+        ("NASA.GOV.", "nasa.gov"),
+        ("Example.COM", "example.com"),
+        ("münchen.de", "xn--mnchen-3ya.de"),
+        ("MÜNCHEN.DE", "xn--mnchen-3ya.de"),
+        ("straße.de", "xn--strae-oqa.de"),
+        ("한국.kr", "xn--3e0b707e.kr"),
+        ("_dmarc.example.com", "_dmarc.example.com"),
+        ("8.8.8.8.", "8.8.8.8"),
+        ("８。８。８。８", "8.8.8.8"),
+        ("2001:DB8::1", "2001:db8::1"),
+        ("nasa.gov。", "nasa.gov"),
+        ("münchen．de", "xn--mnchen-3ya.de"),
+        ("nasa.gov｡", "nasa.gov"),
+    ],
+)
+def test_canonical_hostname_gives_one_spelling(typed, canonical):
+    assert lookup.canonical_hostname(typed) == canonical
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "a..b.com",
+        "A..B.COM",
+        "example.com..",
+        "a" * 64 + ".com",
+        "nasa.gov.。",
+    ],
+)
+def test_canonical_hostname_leaves_an_invalid_label_alone(typed):
+    assert lookup.canonical_hostname(typed) == typed
+    assert lookup.classify_target(typed) == "invalid"
+
+
+def test_normalize_lookup_target_applies_the_canonical_spelling():
+    assert lookup.normalize_lookup_target("https://NASA.GOV./path?q=1") == "nasa.gov"
+    assert lookup.normalize_lookup_target("straße.de") == "xn--strae-oqa.de"
+    assert lookup.normalize_lookup_target("８。８。８。８") == "8.8.8.8"
+    assert lookup.normalize_lookup_target("８.８") == "8.8"
+    assert lookup.classify_target(lookup.normalize_lookup_target("８.８")) == "invalid"
+    assert lookup.normalize_lookup_target("[2001:DB8::1]:8443") == "2001:db8::1"
 
 
 def test_is_safe_ip_rejects_private_and_garbage():

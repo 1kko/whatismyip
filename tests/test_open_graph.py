@@ -271,8 +271,8 @@ class TestLookupPage:
         assert _og(head, "image").startswith("https://ip.1kko.com/static/")
 
     def test_canonical_is_the_normalised_target_without_the_query(self):
-        """A host's case and ?format= do not make it a different page.
-        gather() keeps the case it was given, so the canonical folds it."""
+        """A synthetic mixed-case address and ?format= still identify one page.
+        Real gather() responses already carry the canonical spelling."""
         upper = {**NASA, "address": "NASA.gov"}
         with mocked_lookups(upper):
             head = _head(
