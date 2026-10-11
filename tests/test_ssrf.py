@@ -6,6 +6,7 @@ MagicDNS answers at 100.100.100.100 -- and multicast. A domain whose A record
 pointed there got a TLS handshake from the server on port 443.
 """
 
+import ipaddress
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -51,7 +52,15 @@ def test_reserved_space_stays_rejected(ip):
 
 @pytest.mark.parametrize(
     "ip",
-    ["8.8.8.8", "1.1.1.1", "168.126.63.1", "93.184.216.34", "2001:4860:4860::8888"],
+    [
+        "8.8.8.8",
+        "1.1.1.1",
+        "168.126.63.1",
+        "93.184.216.34",
+        "2001:4860:4860::8888",
+        "192.0.0.9",  # IANA's exceptions inside 192.0.0.0/24: public anycast
+        "192.0.0.10",
+    ],
 )
 def test_public_unicast_still_passes(ip):
     assert lookup.is_safe_ip(ip) is True
@@ -120,3 +129,50 @@ async def test_gather_opens_no_socket_for_a_domain_resolving_there(ip, monkeypat
         with pytest.raises(lookup.PrivateAddressError):
             await lookup.gather("internal.example.com")
     sock.assert_not_called()
+
+
+# --- The block table only labels what is_safe_ip refused -----------------------
+
+
+@pytest.mark.parametrize(
+    "network, code",
+    [(str(network), code) for network, code, _, _ in lookup._SPECIAL_PURPOSE],
+)
+def test_every_row_of_the_block_table_is_refused_end_to_end(network, code):
+    """special_purpose() names the block an address fell in after is_safe_ip
+    refused it. Were a row to cover an address is_safe_ip lets through, the
+    table would have become a second opinion on the SSRF boundary."""
+    block = ipaddress.ip_network(network)
+    assert lookup.is_safe_ip(str(block[0])) is False, (network, code)
+    assert lookup.is_safe_ip(str(block[-1])) is False, (network, code)
+
+
+@pytest.mark.parametrize("ip", ["192.0.0.9", "192.0.0.10"])
+async def test_the_registry_exceptions_never_reach_the_table(ip):
+    """192.0.0.9 and 192.0.0.10 sit inside the table's 192.0.0.0/24 row, but
+    is_safe_ip passes them (public anycast) and gather() takes them on: the
+    table is read only after is_safe_ip refused an address, so a row can
+    never refuse one by itself. An IP's "resolve" leg is the literal itself,
+    so nothing is asked of anyone."""
+    assert ipaddress.ip_address(ip) in ipaddress.ip_network("192.0.0.0/24")
+    assert lookup.is_safe_ip(ip) is True
+    data = await lookup.gather(ip, legs={"resolve"})
+    assert data["resolved_ip"] == ip
+    assert data["resolution"] == "literal"
+
+
+@pytest.mark.parametrize("ip", UNNAMED_NON_GLOBAL)
+async def test_gather_names_the_block_a_domain_resolved_to(ip, monkeypatch):
+    """_run_legs raises for the address a domain resolved to, naming that
+    address and its block; the target in str(exc) stays the domain."""
+    monkeypatch.setattr(lookup, "lookup_whois", AsyncMock(return_value={}))
+    monkeypatch.setattr(lookup.domain_manager, "is_valid_domain", lambda d: True)
+    monkeypatch.setattr(lookup.domain_manager, "get_records", MagicMock())
+    resolver = MagicMock()
+    resolver.resolve.return_value = [ip]
+    monkeypatch.setattr(lookup, "_recursive_resolver", lambda: resolver)
+    with pytest.raises(lookup.PrivateAddressError) as info:
+        await lookup.gather("internal.example.com")
+    assert str(info.value) == "internal.example.com"
+    assert info.value.code == ("multicast" if ip == "224.0.0.1" else "cgnat")
+    assert info.value.message.startswith(f"internal.example.com resolves to {ip}, in ")

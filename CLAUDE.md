@@ -140,7 +140,16 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   domain and the answer carries both names), `lookup_location` and
   `ip_reputation`. Raises
   `PrivateAddressError` and `InvalidTargetError` rather than `HTTPException`
-  so it stays free of FastAPI. `gather(legs=)` runs only the named legs
+  so it stays free of FastAPI; both carry `code` and `message`.
+  `refused_address(target, address)` builds a `PrivateAddressError` from
+  `special_purpose(address)`, the IANA special-purpose block table
+  (`_SPECIAL_PURPOSE`: `private`, `cgnat`, `loopback`, `link_local`,
+  `documentation`, `benchmarking`, `multicast`, `this_network`,
+  `ietf_protocol`, `broadcast`, `reserved`, `ula`, `site_local`, `6to4`,
+  `teredo`, `nat64`), which labels an address only after `is_safe_ip`
+  refused it and is never a second allowlist (`tests/test_ssrf.py` ties
+  every row to `is_safe_ip`); an address in no row is `reserved`.
+  `gather(legs=)` runs only the named legs
   (`LEGS`); the default (None) runs them all, and the page, the full JSON and
   MCP all use the default. Builds the manager singletons (`geo_ip_manager`,
   `tld_names_manager`, `domain_manager`, `reputation_manager`,
