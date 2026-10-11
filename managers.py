@@ -57,6 +57,7 @@ from config import (
     TLD_LIST_URL,
     TLD_MAX_AGE_DAYS,
     TLD_NAMES_DIR,
+    TLS_CONNECT_TIMEOUT_SECONDS,
 )
 
 # MaxMind's licensed direct-download endpoint. It returns a .tar.gz (Basic auth
@@ -1142,13 +1143,27 @@ class SSLManager:
 
     @staticmethod
     def _connect(verified_ip: str) -> socket.socket:
+        """A TCP connection to port 443, with the handshake budget set on it.
+
+        The connect runs under TLS_CONNECT_TIMEOUT_SECONDS: a reachable host
+        answers a SYN in one round trip, and a port that drops it (a mail-only
+        host, a DNS server, a parked name) used to hold the whole lookup for
+        the handshake's 5 s. The handshake budget, TIMEOUT_SECONDS, goes on
+        before returning: SSLSocket copies the socket's timeout when
+        wrap_socket is called, so it has to be in place by then.
+
+        socket.socket() + connect, not socket.create_connection: that calls
+        getaddrinfo even for an IP literal, and the tests booby-trap name
+        resolution to prove the TLS leg never resolves anything.
+        """
         sock = socket.socket()
-        sock.settimeout(TIMEOUT_SECONDS)
+        sock.settimeout(TLS_CONNECT_TIMEOUT_SECONDS)
         try:
             sock.connect((verified_ip, 443))
         except OSError:
             sock.close()
             raise
+        sock.settimeout(TIMEOUT_SECONDS)
         return sock
 
     @staticmethod

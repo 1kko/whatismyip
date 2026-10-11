@@ -97,7 +97,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   - `DomainManager`: `is_valid_domain` (does the target have a public suffix),
     `zone_apex`, `get_records` (the record sweep) and `perform_reverse_lookup`
     (PTR)
-  - `SSLManager.get_ssl_info`: the certificate, read from a verified IP
+  - `SSLManager.get_ssl_info`: the certificate, read from a verified IP.
+    `_connect` gives the TCP connect `TLS_CONNECT_TIMEOUT_SECONDS` (3 s) and
+    then sets `TIMEOUT_SECONDS` (5 s) for the handshake before returning, since
+    `SSLSocket` copies the socket's timeout at `wrap_socket` time; a port that
+    drops the SYN is `{"error": "port 443 unreachable", "reason": "timed out"}`
+    after the connect budget. `_untrusted` reuses `_connect`
   - `HeaderManager`: strips proxy/forwarding headers from the echoed headers
   - module functions: `_recursive_resolver` (every DNS query goes through it),
     `dns_status`, `_with_host_ips`
@@ -794,7 +799,8 @@ Test files:
   apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
   floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
   255 bytes), `test_resolver_unification.py` (one resolver set and budget),
-  `test_tls_reasons.py` (why a certificate fails), `test_rdap_budget.py`
+  `test_tls_reasons.py` (why a certificate fails, the TLS connect and handshake
+  budgets), `test_rdap_budget.py`
   (RDAP/WHOIS cost, no port-43 for an IP), `test_concurrency_gate.py` (gate
   503s, what takes no slot, pool isolation), `test_subdomain_targets.py`
   (which targets may reach crt.sh), `test_reputation.py` (list parsers,
