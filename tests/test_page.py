@@ -1386,6 +1386,16 @@ class TestDesignTokens:
                 assert href in sources, (template, href)
                 assert Path(href.lstrip("/")).is_file(), href
 
+    def test_no_template_preloads_a_mono_font(self):
+        """Measured on Fast 3G against a local server (the PR has the
+        numbers): preloading the hero's SemiBold mono brought that file in
+        about a second sooner but delayed whatismyip.css, and with it the
+        first paint, by about 100 ms, so the lookup page preloads Inter only,
+        like error.html and privacy.html."""
+        for template in TEMPLATES:
+            preloads = FONT_PRELOAD.findall(template.read_text(encoding="utf-8"))
+            assert not any("JetBrainsMono" in href for href in preloads), template
+
 
 def _media_blocks(css, query):
     """The bodies of every `@media (<query>) { ... }` block in the stylesheet,
