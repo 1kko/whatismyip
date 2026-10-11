@@ -81,10 +81,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 **Modules:**
 - `config.py`: the environment-driven constants (timeouts, cache TTLs, file
   paths, rate-limit/ban settings, geo-block defaults, trusted proxies, map
-  canvases, feature switches). It calls `load_dotenv()` and imports nothing
-  app-local, so every module can import it without a cycle. Two settings are
-  read elsewhere: `ADMIN_API_KEY` in `main.py`, and `GEO_CITIES_FILE` /
-  `GEO_COUNTRIES_FILE` in `geo.py`.
+  canvases, the young-domain tag's threshold, feature switches). It calls
+  `load_dotenv()` and imports nothing app-local, so every module can import it
+  without a cycle. Two settings are read elsewhere: `ADMIN_API_KEY` in
+  `main.py`, and `GEO_CITIES_FILE` / `GEO_COUNTRIES_FILE` in `geo.py`.
 - `managers.py` — one wrapper per data source:
   - `GeoIpManager`: GeoLite2-City (country, city, coordinates) and GeoLite2-ASN
     (carrier) lookups over memory-mapped mmdb files, refreshed every 3 days
@@ -468,6 +468,24 @@ registrar (a common setting)`, several joined with `; `, a code outside RFC 8056
 codes and are shown as they are. The tag is not a reputation signal:
 `reputation.grade` never sees it, and `_summary()` (link previews) reads only
 the TLS tags.
+
+A registration's age is derived, never fetched: `viewmodel.registration_age`
+(days since `created` and since `updated`) and `viewmodel.cert_age` (days since
+the certificate's `notBefore`) count whole UTC days through
+`viewmodel._age_days`. It reads a datetime or an ISO 8601 string, takes a naive
+time as UTC, counts a time up to a day ahead as 0 (python-whois's naive
+registry-local times) and answers None, never an exception, for anything else.
+The WHOIS panel's `Age` row ("6 days (updated 2 days ago)") is a domain's
+only. As for the Status row, a record without a `registrar` key is an IP
+allocation, so IP lookups and the self page (`whois_fill`) read as they did.
+The hero tags a domain registered fewer than `YOUNG_DOMAIN_DAYS` (30) days
+ago with an amber `REGISTERED N DAYS AGO`; 0 turns the tag off. A certificate's
+age is never tagged, since ACME renews every few weeks, and `_summary()` reads
+only the `TLS` tags, so link previews do not change.
+`?fields=domain_age_days` and `cert_age_days` and MCP `registration.age_days`
+and `tls.age_days` carry the same numbers (`mcp_server.compact_registration` /
+`compact_ssl`, which `textfmt.field_values` reads); `domain_age_days` is `-`
+for an IP, whose registration is its network's.
 
 #### Error Handling
 
@@ -1081,7 +1099,7 @@ and importing `main` makes no network call. The suite runs offline, and
 Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
   tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering, the
-  FCrDNS verdict),
+  FCrDNS verdict, registration and certificate ages),
   `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
   forced bootstrap refresh behavior, JSContact names, thin records, EPP status
   codes in `eppstatus`),

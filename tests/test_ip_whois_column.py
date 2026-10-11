@@ -9,7 +9,7 @@ deterministic: no network.
 import datetime
 
 import rdap
-from viewmodel import DASH, build_view, geoip_rows, whois_display
+from viewmodel import DASH, build_view, geoip_rows, whois_display, whois_fill
 
 UTC = datetime.timezone.utc
 
@@ -121,6 +121,21 @@ class TestWhoisAccordion:
         assert out["Parent handle"] == "NET-8-0-0-0-0"
         assert out["Updated"] == "2024-03-05 09:41 UTC"
         assert out["RIR"] == "ARIN"
+
+    def test_an_address_block_gets_no_age_row(self):
+        """The Age row is a domain's, so an IP lookup and the self page read
+        as they did. A domain's record is told by its registrar key, as for
+        the Status row: _normalize_rdap_ip sets none, whatever its `rir`
+        (empty when whoisit could not name the registry)."""
+        young = dict(
+            WHOISIT_IP,
+            registration_date=datetime.datetime.now(UTC) - datetime.timedelta(days=3),
+        )
+        for rir in ("arin", ""):
+            record = rdap._normalize_rdap_ip(dict(young, rir=rir), "8.8.8.8")
+            assert "registrar" not in record
+            assert "Age" not in whois_display(record)
+            assert "Age" not in [row["label"] for row in whois_fill(record)["rows"]]
 
     def test_domain_record_is_unaffected(self):
         record = {

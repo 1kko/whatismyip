@@ -1,14 +1,19 @@
 import datetime
+import re
 
 import pytest
 
+import viewmodel
 from rdap import _normalize_rdap_domain, _normalize_rdap_ip, normalize_whois
 from viewmodel import (
     DASH,
+    _age_days,
     build_view,
+    cert_age,
     country_flag,
     fcrdns_state,
     format_distance,
+    registration_age,
     reputation_view,
     ssl_rows,
     whois_display,
@@ -1541,3 +1546,256 @@ class TestLookupLinks:
             ]
             == []
         )
+
+
+# --- registration and certificate age (#23) ----------------------------------
+
+# Ages are counted against this fixed clock where the function takes `now`.
+# whois_display and build_view read the real clock, so their dates are built
+# relative to it: N days before now floors to exactly N whole days.
+NOW = datetime.datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
+
+
+def _days_ago(days: float) -> datetime.datetime:
+    return datetime.datetime.now(UTC) - datetime.timedelta(days=days)
+
+
+def _domain_record(**fields) -> dict:
+    """A domain's canonical record. Both domain shapes always carry a
+    `registrar` key, None included, and the WHOIS panel tells a domain's
+    record from an address block's by it, for the Age row as for Status."""
+    return {"source": "rdap", "registrar": "Example Registrar", **fields}
+
+
+class TestAgeDays:
+    """viewmodel._age_days: whole days in UTC, and None rather than an
+    exception for anything it cannot read."""
+
+    def test_an_aware_datetime(self):
+        assert _age_days(datetime.datetime(2026, 9, 15, 12, 0, tzinfo=UTC), NOW) == 25
+
+    def test_a_naive_datetime_is_read_as_utc(self):
+        # python-whois hands back naive datetimes.
+        assert _age_days(datetime.datetime(2026, 9, 15, 12, 0), NOW) == 25
+
+    def test_another_timezone_is_converted(self):
+        seoul = datetime.timezone(datetime.timedelta(hours=9))
+        created = datetime.datetime(2026, 9, 15, 21, 0, tzinfo=seoul)
+        assert _age_days(created, NOW) == 25
+
+    def test_an_iso_string(self):
+        # The odd WHOIS record hands back a string, which _year already allows.
+        assert _age_days("2026-09-15T12:00:00Z", NOW) == 25
+        assert _age_days("2026-09-15", NOW) == 25
+
+    def test_anything_unreadable_has_no_age(self):
+        for value in ("before Aug-1996", "", None, 12345):
+            assert _age_days(value, NOW) is None
+
+    def test_up_to_a_day_ahead_counts_as_today(self):
+        """A registry's naive local time east of UTC lands a few hours ahead."""
+        ahead = datetime.datetime(2026, 10, 10, 20, 0, tzinfo=UTC)
+        assert _age_days(ahead, NOW) == 0
+
+    def test_further_ahead_is_bad_data_not_a_negative_age(self):
+        assert _age_days(datetime.datetime(2026, 10, 12, tzinfo=UTC), NOW) is None
+
+    def test_the_default_clock_is_now(self):
+        assert _age_days(_days_ago(6)) == 6
+
+
+class TestRegistrationAndCertAge:
+    def test_registration_age_counts_created_and_updated(self):
+        record = {
+            "source": "rdap",
+            "created": datetime.datetime(2026, 9, 15, 12, 0, tzinfo=UTC),
+            "updated": datetime.datetime(2026, 10, 8, 12, 0, tzinfo=UTC),
+        }
+        assert registration_age(record, NOW) == (25, 2)
+
+    def test_no_record_has_no_age(self):
+        for record in (
+            None,
+            {},
+            {"error": "WHOIS lookup timed out"},
+            {"error": "not registered"},
+        ):
+            assert registration_age(record, NOW) == (None, None)
+
+    def test_cert_age_reads_getpeercerts_not_before(self):
+        assert cert_age({"notBefore": "Sep 30 12:00:00 2026 GMT"}, NOW) == 10
+        # OpenSSL pads a one-digit day with a space.
+        assert cert_age({"notBefore": "Oct  9 12:00:00 2026 GMT"}, NOW) == 1
+
+    def test_cert_age_without_a_readable_date_is_none(self):
+        for ssl_data in (
+            None,
+            {},
+            {"notBefore": "garbage"},
+            {"error": "port 443 unreachable", "reason": "timed out"},
+        ):
+            assert cert_age(ssl_data, NOW) is None
+
+    def test_valid_from_still_reads_as_before(self):
+        """The SSL panel's date now parses through the same helper as
+        cert_age; a malformed value is still shown as it came."""
+        rows = {r["label"]: r["value"] for r in ssl_rows(FULL_SSL, "example.com")}
+        assert rows["Valid from"] == "2026-06-01"
+        broken = dict(FULL_SSL, notBefore="garbage")
+        rows = {r["label"]: r["value"] for r in ssl_rows(broken, "example.com")}
+        assert rows["Valid from"] == "garbage"
+
+
+class TestWhoisAgeRow:
+    """The WHOIS panel's Age row: the arithmetic a reader would otherwise do
+    on Created and Updated."""
+
+    def test_age_follows_updated_with_the_update_beside_it(self):
+        record = _domain_record(
+            name="example.com",
+            created=_days_ago(6),
+            updated=_days_ago(2),
+            expires=datetime.datetime(2027, 9, 14, 4, 0, tzinfo=UTC),
+        )
+        out = whois_display(record)
+        assert out["Age"] == "6 days (updated 2 days ago)"
+        labels = list(out)
+        assert labels.index("Age") == labels.index("Updated") + 1
+        assert labels.index("Age") < labels.index("Expires")
+
+    def test_without_an_update_the_age_stands_alone(self):
+        assert whois_display(_domain_record(created=_days_ago(6)))["Age"] == "6 days"
+
+    def test_one_day_and_today_read_as_words(self):
+        record = _domain_record(created=_days_ago(1), updated=_days_ago(0))
+        assert whois_display(record)["Age"] == "1 day (updated today)"
+
+    def test_an_old_name_counts_in_thousands(self):
+        # google.com, created in 1997 and updated in 2024.
+        age = whois_display(DOMAIN_RESPONSE["whois"])["Age"]
+        assert re.fullmatch(r"\d{1,3}(,\d{3})+ days \(updated [\d,]+ days ago\)", age)
+
+    def test_no_row_without_a_readable_created_date(self):
+        """A date that cannot be read leaves the row out instead of raising;
+        the Created row still shows what the registry sent."""
+        out = whois_display(
+            _domain_record(source="whois", name="example.uk", created="before Aug-1996")
+        )
+        assert "Age" not in out
+        assert out["Created"] == "before Aug-1996"
+        assert "Age" not in whois_display(_domain_record(updated=_days_ago(2)))
+
+    def test_the_whois_fallbacks_list_dates_still_age(self):
+        """python-whois's lists are folded to their first value upstream
+        (rdap._first), so the row counts from one date. The record's
+        registrar is None here: the key alone makes it a domain's."""
+        raw = {
+            "domain_name": "example.com",
+            "creation_date": [_days_ago(6), _days_ago(5)],
+            "updated_date": [_days_ago(2)],
+        }
+        out = whois_display(normalize_whois(raw, "example.com"))
+        assert out["Age"] == "6 days (updated 2 days ago)"
+
+
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def _asn1(when: datetime.datetime) -> str:
+    """A time in getpeercert()'s print form, 'Oct  9 12:00:00 2026 GMT'. Not
+    strftime: its %b follows the process locale (managers._asn1_time)."""
+    return f"{_MONTHS[when.month - 1]} {when.day:2d} {when:%H:%M:%S} {when.year} GMT"
+
+
+def _registered(days_ago: float) -> dict:
+    """DOMAIN_RESPONSE with its registration created `days_ago` days ago."""
+    whois = dict(DOMAIN_RESPONSE["whois"], created=_days_ago(days_ago))
+    return dict(DOMAIN_RESPONSE, whois=whois)
+
+
+def _registered_tags(response: dict) -> list[str]:
+    tags = build_view(response, is_self=False)["tags"]
+    return [tag["text"] for tag in tags if tag["text"].startswith("REGISTERED")]
+
+
+class TestYoungDomainTag:
+    """The hero's amber tag for a domain registered days ago."""
+
+    @pytest.fixture(autouse=True)
+    def threshold(self, monkeypatch):
+        # A developer's .env may set YOUNG_DOMAIN_DAYS; these boundaries are 30's.
+        monkeypatch.setattr(viewmodel, "YOUNG_DOMAIN_DAYS", 30)
+
+    def test_a_name_registered_25_days_ago_is_tagged_amber(self):
+        view = build_view(_registered(25), is_self=False)
+        assert {"text": "REGISTERED 25 DAYS AGO", "tone": "warning"} in view["tags"]
+
+    def test_29_days_is_tagged_and_30_is_not(self):
+        assert _registered_tags(_registered(29)) == ["REGISTERED 29 DAYS AGO"]
+        assert _registered_tags(_registered(30)) == []
+
+    def test_today_and_one_day_read_as_words(self):
+        assert _registered_tags(_registered(2 / 24)) == ["REGISTERED TODAY"]
+        assert _registered_tags(_registered(1 + 1 / 24)) == ["REGISTERED 1 DAY AGO"]
+
+    def test_a_registry_clock_hours_ahead_is_today_and_days_ahead_is_no_tag(self):
+        """python-whois hands back a registry's local time as a naive datetime,
+        read as UTC: a name registered minutes ago in Seoul reads nine hours
+        ahead. That is today, not a negative age; two days ahead is bad data,
+        and no tag rather than an exception."""
+        seoul = datetime.datetime.now(UTC) + datetime.timedelta(hours=9)
+        whois = dict(DOMAIN_RESPONSE["whois"], created=seoul.replace(tzinfo=None))
+        assert _registered_tags(dict(DOMAIN_RESPONSE, whois=whois)) == [
+            "REGISTERED TODAY"
+        ]
+        assert _registered_tags(_registered(-2)) == []
+
+    def test_an_old_name_is_not_tagged(self):
+        # google.com, created in 1997.
+        assert _registered_tags(DOMAIN_RESPONSE) == []
+
+    def test_an_old_name_updated_yesterday_is_not_tagged(self):
+        """A name caught at an expiry auction keeps its old created date. The
+        WHOIS panel's Age row keeps the fresh update beside it; the tag goes by
+        created alone."""
+        whois = dict(DOMAIN_RESPONSE["whois"], updated=_days_ago(1))
+        assert _registered_tags(dict(DOMAIN_RESPONSE, whois=whois)) == []
+        assert whois_display(whois)["Age"].endswith(" (updated 1 day ago)")
+
+    def test_zero_turns_the_tag_off(self, monkeypatch):
+        monkeypatch.setattr(viewmodel, "YOUNG_DOMAIN_DAYS", 0)
+        assert _registered_tags(_registered(2 / 24)) == []
+
+    def test_an_unreadable_or_missing_date_is_no_tag(self):
+        for created in ("before Aug-1996", None):
+            whois = dict(DOMAIN_RESPONSE["whois"], created=created)
+            assert _registered_tags(dict(DOMAIN_RESPONSE, whois=whois)) == []
+
+    def test_no_registration_is_no_tag(self):
+        for whois in (
+            {"error": "WHOIS lookup timed out"},
+            {"error": "not registered"},
+            None,
+        ):
+            assert _registered_tags(dict(DOMAIN_RESPONSE, whois=whois)) == []
+
+    def test_an_ip_lookup_is_never_tagged(self):
+        whois = {"source": "rdap", "rir": "arin", "created": _days_ago(3)}
+        assert _registered_tags(dict(IP_RESPONSE, whois=whois)) == []
+
+    def test_a_young_certificate_changes_no_tag(self):
+        """ACME renews every few weeks, so nearly every certificate is young:
+        a tag for it would sit on nearly every page and say nothing."""
+        issued = dict(FULL_SSL, notBefore=_asn1(_days_ago(1)))
+        assert cert_age(issued) == 1
+        young = build_view(dict(DOMAIN_RESPONSE, ssl=issued), is_self=False)
+        old = build_view(dict(DOMAIN_RESPONSE, ssl=FULL_SSL), is_self=False)
+        assert young["tags"] == old["tags"]
+
+    def test_the_link_preview_does_not_mention_it(self):
+        """_summary() reads only the TLS tags, so og:description is the same
+        for a name registered yesterday as for one registered in 1997."""
+        young = build_view(_registered(1), is_self=False)
+        old = build_view(DOMAIN_RESPONSE, is_self=False)
+        assert young["description"] == old["description"]
+        assert "REGISTERED" not in young["description"]

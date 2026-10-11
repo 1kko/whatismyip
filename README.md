@@ -64,6 +64,10 @@ RDAP registration data and the full TLS certificate, expanded.
   A hostname such as `www.github.com` gets the registration that covers it,
   `github.com`'s, with `queried_name` and `registrable_domain` identifying both
   names. `not registered` therefore means the registrable domain has no record.
+  The WHOIS panel counts a domain's age in days, with how long ago its record
+  was last updated beside it, and the page tags a domain registered fewer than
+  `YOUNG_DOMAIN_DAYS` (30) days ago: many phishing names are days old, so the
+  tag is a reason to look closer, not a verdict.
 - **GeoIP** — country, real coordinates, the precise city and an accuracy radius
   from GeoLite2-City, and the carrier from GeoLite2-ASN, both memory-mapped and
   refreshed every 3 days. Until the first download lands, the country-only
@@ -352,6 +356,9 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # STUN server for the opt-in WebRTC leak test; empty removes the test
 # WEBRTC_STUN_URL=stun:stun.cloudflare.com:3478
 
+# Tag a domain registered fewer than this many days ago on the page; 0 turns it off
+# YOUNG_DOMAIN_DAYS=30
+
 # Geographic blocking (optional)
 # GEO_MODE=disabled                  # disabled, allowlist, or blocklist
 # GEO_BLOCKED_COUNTRIES=CN,RU,KP     # comma-separated ISO 3166-1 alpha-2
@@ -546,9 +553,11 @@ cidr: 192.0.64.0/18
 registrar: get.gov
 registrant: National Aeronautics and Space Administration
 domain_expires: 2027-07-31
+domain_age_days: 10599
 cert_issuer: Let's Encrypt
 cert_expires: 2026-11-09
 cert_days_remaining: 31
+cert_age_days: 58
 ```
 
 `?fields=` names the values you want, comma-separated, on either route, and runs
@@ -585,15 +594,19 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `registrar` | | RDAP/WHOIS | domain |
 | `registrant` | the registrant, or for an IP the network's holder | RDAP/WHOIS | both |
 | `domain_expires` | registration expiry, `YYYY-MM-DD` | RDAP/WHOIS | domain |
+| `domain_age_days` | whole days since the registration was created, `0` on its first day; integer in JSON; `-` when the record has no readable creation date | RDAP/WHOIS | domain |
 | `cert_issuer` | the issuing CA's organisation; `?` when no certificate could be read: port 443 unreachable, the handshake failed, or an IPv6-only host this server cannot reach | TLS handshake on 443 | domain |
 | `cert_expires` | `YYYY-MM-DD`; `?` as for `cert_issuer` | TLS handshake on 443 | domain |
 | `cert_days_remaining` | days left, negative once expired; integer in JSON; `?` as for `cert_issuer` | TLS handshake on 443 | domain |
+| `cert_age_days` | whole days since the certificate became valid (`notBefore`); integer in JSON; `?` as for `cert_issuer` | TLS handshake on 443 | domain |
 | `risk_level` | `none`, `low`, `medium` or `high` (see [IP reputation](#ip-reputation)); `?` when no list could be checked | the lists in memory (an A query for a domain) | both |
 | `risk_signals` | the ids of the lists the address is on, comma-separated, e.g. `tor_exit,datacenter` | the lists in memory (an A query for a domain) | both |
 | `abuse_score` | AbuseIPDB's abuse confidence, 0-100; `?` when AbuseIPDB did not answer, `-` without `ABUSEIPDB_API_KEY` | AbuseIPDB's API (cached a day) | ip |
 
 The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
-is `cert_expires` here, and its `registration.expires` is `domain_expires`.
+is `cert_expires` here, its `registration.expires` is `domain_expires`, and its
+`registration.age_days` and `tls.age_days` are `domain_age_days` and
+`cert_age_days`.
 `resolution`, `risk_level`, `risk_signals` and `abuse_score` are answered only
 when asked for by name; the text block leaves them out: a bare `risk_level: none`
 among the other lines would read as a clean bill of health the lists cannot
@@ -1052,9 +1065,9 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). |
+| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). `registration.age_days` and `tls.age_days` count the days since the registration was created and the certificate became valid, and the description calls a days-old domain worth a closer look, not a verdict. |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
-| `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
+| `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, the certificate's age in days (`age_days`), and whether it is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way. |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |
 

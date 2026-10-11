@@ -7,6 +7,7 @@ fails with "RuntimeError: Task group is not initialized".
 """
 
 import asyncio
+import datetime
 import re
 from unittest.mock import AsyncMock, patch
 
@@ -25,6 +26,7 @@ from config import (
     MCP_WEBSITE_URL,
 )
 from main import app
+from managers import _asn1_time
 
 MCP_HEADERS = {
     "Content-Type": "application/json",
@@ -881,6 +883,70 @@ def test_ssl_certificate_reports_the_expiry_clock():
         assert payload["days_remaining"] > 0
 
 
+def _days_ago(days: float) -> datetime.datetime:
+    return datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
+
+
+AGED_CERT = {
+    "issuer": ((("organizationName", "Let's Encrypt"),),),
+    "subject": ((("commonName", "example.com"),),),
+    "notBefore": _asn1_time(_days_ago(10)),
+    "notAfter": "Dec 31 23:59:59 2099 GMT",
+    "protocol": "TLSv1.3",
+    "trusted": True,
+}
+
+
+def test_lookup_tool_reports_registration_and_certificate_age():
+    """A model handed only dates has to do the arithmetic to notice that a
+    name is days old; age_days does it for it."""
+    gathered = {
+        **FAKE_LOOKUP,
+        "whois": {**FAKE_LOOKUP["whois"], "created": _days_ago(25)},
+        "ssl": AGED_CERT,
+    }
+
+    async def fake_gather(target, legs=None):
+        return gathered
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "lookup", "arguments": {"target": "example.com"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["registration"]["age_days"] == 25
+        assert payload["tls"]["age_days"] == 10
+
+
+def test_ssl_certificate_reports_the_certificate_age():
+    async def fake_gather(target, legs=None):
+        return {**FAKE_LOOKUP, "ssl": AGED_CERT, "resolved_ip": "93.184.216.34"}
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            response = _rpc(
+                client,
+                "tools/call",
+                {"name": "ssl_certificate", "arguments": {"domain": "example.com"}},
+            )
+        payload = response.json()["result"]["structuredContent"]
+        assert payload["age_days"] == 10
+        assert payload["not_before"] == AGED_CERT["notBefore"]
+
+
+def test_a_certificate_without_a_readable_start_has_no_age():
+    from mcp_server import compact_ssl
+
+    unstarted = {k: v for k, v in AGED_CERT.items() if k != "notBefore"}
+    assert compact_ssl(unstarted)["age_days"] is None
+    assert compact_ssl({**AGED_CERT, "notBefore": "garbage"})["age_days"] is None
+
+
 def test_ssl_certificate_without_a_certificate_is_an_error():
     async def fake_gather(target, legs=None):
         return {**FAKE_LOOKUP, "ssl": None}
@@ -1172,6 +1238,26 @@ class TestRegistrationShaping:
         assert out["registrar"] == "Example Registrar"
         assert "registered" not in out
         assert "error" not in out
+
+    def test_age_days_counts_whole_days_since_created(self):
+        from mcp_server import compact_registration
+
+        created = _days_ago(25)
+        out = compact_registration({"source": "rdap", "created": created})
+        assert out["age_days"] == 25
+        assert out["created"] == created.isoformat()
+
+    def test_age_days_reads_an_iso_string_and_is_null_otherwise(self):
+        """The WHOIS fallback can hand back a string; one that is not ISO 8601
+        has no age rather than a guessed one."""
+        from mcp_server import compact_registration
+
+        iso = _days_ago(3).isoformat()
+        out = compact_registration({"source": "whois", "created": iso})
+        assert out["age_days"] == 3
+        for created in ("before Aug-1996", None):
+            out = compact_registration({"source": "whois", "created": created})
+            assert out["age_days"] is None
 
     def test_a_record_names_the_registration_that_answered(self):
         from mcp_server import compact_registration
