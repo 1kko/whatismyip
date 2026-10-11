@@ -30,7 +30,7 @@ idna = "^3.18"
 
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.16.7"
+ruff = "^0.16.10"
 pytest = "^9.1.1"
 pip-audit = "^2.10.1"
 pytest-asyncio = "^1.4.0"
