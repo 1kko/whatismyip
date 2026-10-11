@@ -143,23 +143,48 @@ GATHER_TOOLS = [
     ("ssl_certificate", "domain"),
 ]
 
+PRIVATE_10 = (
+    "10.0.0.1 is in 10.0.0.0/8, private-use network (RFC 1918), not a public address"
+)
+CGNAT_1 = (
+    "100.64.0.1 is in 100.64.0.0/10, shared address space for carrier-grade NAT "
+    "(RFC 6598), not a public address"
+)
+
 
 @pytest.mark.parametrize("tool, argument", GATHER_TOOLS)
 @pytest.mark.parametrize(
-    "exc, message",
+    "exc, payload",
     [
         (
-            lookup.PrivateAddressError("10.0.0.1"),
-            "Private or reserved addresses are not allowed",
+            lookup.refused_address("10.0.0.1", "10.0.0.1"),
+            {"error": PRIVATE_10, "code": "private"},
         ),
-        (lookup.InvalidTargetError("foo bar"), "not a domain name or IP address"),
-        (TimeoutError(), "Lookup timed out"),
+        # A bare PrivateAddressError carries its defaults through unchanged.
+        (
+            lookup.PrivateAddressError("10.0.0.1"),
+            {"error": "not a public address", "code": "reserved"},
+        ),
+        (
+            lookup.InvalidTargetError("foo bar"),
+            {"error": "not a domain name or IP address"},
+        ),
+        (TimeoutError(), {"error": "Lookup timed out"}),
     ],
 )
-def test_a_refused_or_timed_out_target_is_a_failed_call(tool, argument, exc, message):
+def test_a_refused_or_timed_out_target_is_a_failed_call(tool, argument, exc, payload):
     with TestClient(app) as client, patch("mcp_server.gather", _raising(exc)):
-        payload = _failed(_call(client, tool, {argument: "example.com"}))
-    assert payload == {"error": message}
+        assert _failed(_call(client, tool, {argument: "example.com"})) == payload
+
+
+@pytest.mark.parametrize("tool, argument", GATHER_TOOLS)
+def test_a_refused_address_names_its_block_through_the_real_pipeline(tool, argument):
+    """No patch on gather(): is_safe_ip refuses the address before any leg
+    runs, so the suite's offline defaults are never reached, and the table
+    labels that answer. `code` is the same name the HTTP 400 carries."""
+    with TestClient(app) as client:
+        payload = _failed(_call(client, tool, {argument: "100.64.0.1"}))
+    assert payload == {"error": CGNAT_1, "code": "cgnat"}
 
 
 @pytest.mark.parametrize("tool, argument", GATHER_TOOLS)

@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import ipaddress
+
 import pytest
 
 import lookup
@@ -398,3 +400,116 @@ async def test_gather_carries_the_precision_and_country_source(monkeypatch):
         37.751,
         1000,
     )
+
+
+# --- special_purpose: the IANA block a refused address is in --------------------
+
+
+@pytest.mark.parametrize(
+    "ip, code",
+    [
+        ("0.0.0.1", "this_network"),
+        ("10.0.0.1", "private"),
+        ("172.16.0.1", "private"),
+        ("192.168.0.1", "private"),
+        ("100.64.0.1", "cgnat"),
+        ("127.0.0.1", "loopback"),
+        ("::1", "loopback"),
+        ("169.254.169.254", "link_local"),
+        ("fe80::1", "link_local"),
+        ("192.0.0.1", "ietf_protocol"),
+        ("192.0.2.1", "documentation"),
+        ("198.51.100.1", "documentation"),
+        ("203.0.113.1", "documentation"),
+        ("2001:db8::1", "documentation"),
+        ("198.18.0.1", "benchmarking"),
+        ("2001:2::1", "benchmarking"),
+        ("224.0.0.1", "multicast"),
+        ("ff02::1", "multicast"),
+        ("240.0.0.1", "reserved"),
+        ("255.255.255.255", "broadcast"),
+        ("fc00::1", "ula"),
+        ("fd12:3456::1", "ula"),
+        ("fec0::1", "site_local"),
+        ("2002:808:808::1", "6to4"),
+        ("2001::1", "teredo"),
+        ("64:ff9b::808:808", "nat64"),
+    ],
+)
+def test_special_purpose_names_the_block(ip, code):
+    block = lookup.special_purpose(ip)
+    assert block.code == code
+    assert block.network is not None
+    assert block.rfc.startswith("RFC ")
+    assert ipaddress.ip_address(ip) in ipaddress.ip_network(block.network)
+
+
+def test_the_longest_prefix_wins():
+    # 255.255.255.255 is inside 240.0.0.0/4 too; the /32 names it better.
+    assert lookup.special_purpose("255.255.255.255").code == "broadcast"
+    assert lookup.special_purpose("255.255.255.254").code == "reserved"
+
+
+@pytest.mark.parametrize(
+    "ip", ["::", "4000::1", "100::1", "64:ff9b:1::1", "2001:10::1"]
+)
+def test_a_refused_address_in_no_row_falls_back_to_reserved(ip):
+    """IPv6's unspecified, unassigned, discard-only, local-use NAT64 and ORCHID
+    space: is_safe_ip refuses them, and the table has no better name."""
+    assert lookup.is_safe_ip(ip) is False
+    assert lookup.special_purpose(ip) == lookup.SpecialPurpose(
+        "reserved", "reserved address space", None, None
+    )
+
+
+def test_special_purpose_unwraps_an_ipv4_mapped_address():
+    # The same first rule as is_safe_ip: ::ffff:a.b.c.d is a.b.c.d.
+    assert lookup.special_purpose("::ffff:10.0.0.1").code == "private"
+
+
+def test_special_purpose_tolerates_a_string_that_is_not_an_address():
+    # is_safe_ip refuses garbage too, and _run_legs may hand it on.
+    assert lookup.special_purpose("not-an-ip").code == "reserved"
+
+
+# --- PrivateAddressError: code and message, like InvalidTargetError -------------
+
+
+def test_private_address_error_has_defaults_like_invalid_target_error():
+    exc = lookup.PrivateAddressError("10.0.0.1")
+    assert str(exc) == "10.0.0.1"
+    assert exc.code == "reserved"
+    assert exc.message == "not a public address"
+
+
+def test_refused_address_names_the_block_for_a_direct_target():
+    exc = lookup.refused_address("100.64.0.1", "100.64.0.1")
+    assert exc.code == "cgnat"
+    assert exc.message == (
+        "100.64.0.1 is in 100.64.0.0/10, shared address space for carrier-grade "
+        "NAT (RFC 6598), not a public address"
+    )
+
+
+def test_refused_address_names_the_resolved_address_for_a_domain():
+    exc = lookup.refused_address("router.example.com", "192.168.50.1")
+    assert exc.code == "private"
+    assert exc.message == (
+        "router.example.com resolves to 192.168.50.1, in 192.168.0.0/16, "
+        "private-use network (RFC 1918), not a public address"
+    )
+    assert str(exc) == "router.example.com"
+
+
+def test_refused_address_without_a_row_says_reserved():
+    exc = lookup.refused_address("4000::1", "4000::1")
+    assert exc.code == "reserved"
+    assert exc.message == "4000::1 is in reserved address space, not a public address"
+
+
+@pytest.mark.asyncio
+async def test_gather_raises_the_block_of_a_direct_address():
+    with pytest.raises(lookup.PrivateAddressError) as info:
+        await lookup.gather("198.18.0.1")
+    assert info.value.code == "benchmarking"
+    assert info.value.message.startswith("198.18.0.1 is in 198.18.0.0/15, ")

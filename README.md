@@ -379,8 +379,30 @@ trailing root dot, and with each non-ASCII label encoded as its UTS 46 A-label.
 `NASA.GOV`, `nasa.gov.` and `nasa.gov` are one lookup; `straße.de` is returned
 as `xn--strae-oqa.de`. That spelling is used for `address`, MCP `target` and
 `domain`, `?fields=target`, DNS, TLS SNI and the page title. Its registrable
-domain is used for RDAP/WHOIS and the registration cache. Private and reserved
-addresses are rejected with `400`.
+domain is used for RDAP/WHOIS and the registration cache.
+
+A private or reserved address is rejected with `400`. `detail` is the
+sentence clients have always read; `error` says which IANA special-purpose
+block the address is in, and `code` is that block's name:
+
+```json
+{
+  "detail": "Private or reserved IP addresses are not allowed",
+  "error": "100.64.0.1 is in 100.64.0.0/10, shared address space for carrier-grade NAT (RFC 6598), not a public address",
+  "code": "cgnat"
+}
+```
+
+`code` is one of `private` (RFC 1918), `cgnat` (100.64.0.0/10, RFC 6598),
+`loopback`, `link_local`, `documentation` (TEST-NET-1/2/3, 2001:db8::/32),
+`benchmarking` (198.18.0.0/15, 2001:2::/48), `multicast`, `this_network`
+(0.0.0.0/8), `ietf_protocol` (192.0.0.0/24), `broadcast`, `ula` (fc00::/7),
+`site_local` (fec0::/10), `6to4`, `teredo`, `nat64`, or `reserved` for
+anything else that is refused (240.0.0.0/4, IPv6's unassigned space). For a
+domain, `error` names the address it resolved to. Which addresses are refused
+is decided by `is_safe_ip` alone, documented in
+[SECURITY.md](SECURITY.md#ssrf-and-dns-rebinding); the block name is a label
+on that answer, not a second rule.
 
 A target that is neither a domain name under a public suffix nor an IP address
 is rejected with `400` before any lookup runs:
@@ -560,7 +582,9 @@ An unknown field is refused with `400` before any lookup runs:
 A text client gets each of the route's `400`s — `invalid_field`,
 `invalid_target`, `special_use_name`, a private address, a bad `?subdomains=`
 — as one line with the same status code, e.g.
-`error: not a domain name or IP address`. `?format=text` and `?fields=` are
+`error: not a domain name or IP address`. For a private or reserved address
+the line is its `error` sentence, naming the block. `?format=text` and
+`?fields=` are
 query parameters, so they pass through the same bans, geo rules and rate limit as
 any other lookup.
 
@@ -913,7 +937,7 @@ other users' free text. A timeout, an error or a spent quota puts AbuseIPDB in
 | Code | Meaning |
 | --- | --- |
 | `200` | success |
-| `400` | private or reserved address, not a domain name or IP address, a `.onion` or `home.arpa` name (`special_use_name`), or an invalid `format`, `fields` or `subdomains` parameter |
+| `400` | private or reserved address (the body also carries `code`, the address's IANA block, and `error`), not a domain name or IP address, a `.onion` or `home.arpa` name (`special_use_name`), or an invalid `format`, `fields` or `subdomains` parameter |
 | `403` | banned IP, geo-blocked, or suspicious request |
 | `404` | unknown endpoint — also the answer to a wrong admin API key |
 | `413` | `POST /mcp` body over `MCP_MAX_BODY_BYTES` |
@@ -937,6 +961,14 @@ small page with the search box instead: the `403` page says only the sentence
 above, the `429` page adds "Try again later", a private address such as
 `192.168.0.1` gets an explanation of local network addresses and a link to `/`,
 and a `.onion` or `home.arpa` name gets the reason it has no public answer.
+The page's copy follows `code`: a CGNAT address (`100.64.0.0/10`) is
+explained as the carrier sharing one public address among its customers, a
+documentation or benchmarking address as never routed, and a 6to4, Teredo or
+NAT64 address names the IPv4 address it carries, offered as the lookup to
+make instead when that address is public itself. A domain that resolves into
+one of these blocks keeps the "resolves to a private or reserved IP address"
+page. The search box's own hint still treats `100.64.0.0/10` as local, like
+the other ranges a router or a VPN answers on.
 `/mcp` always answers JSON.
 
 ## MCP (Model Context Protocol)
@@ -966,7 +998,9 @@ is unaffected.)
 
 A call that could not answer at all (a private or malformed target, a timeout,
 no TLS handshake, the CT source unavailable) comes back with `isError: true` and
-`{"error": "..."}` as its structured content. A call that answered with a gap in
+`{"error": "..."}` as its structured content. For a private or reserved address
+the payload also carries `code`, the same block name as the HTTP `400`
+(`cgnat`, `private`, `documentation`, …). A call that answered with a gap in
 it, such as one DNS type timing out, the registration lookup failing inside
 `lookup`, or a stale subdomain list, is a normal result that carries the gap.
 

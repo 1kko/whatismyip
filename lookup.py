@@ -14,7 +14,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Collection
-from typing import Any
+from typing import Any, NamedTuple
 
 import idna
 import whois
@@ -51,7 +51,23 @@ class PrivateAddressError(Exception):
 
     Raised instead of HTTPException so this module stays free of FastAPI:
     main.py turns it into a 400, mcp_server.py turns it into {"error": ...}.
+
+    Same contract as InvalidTargetError: `code` is the machine-readable half
+    of the answer -- the IANA special-purpose block the address is in, from
+    special_purpose() -- and `message` the sentence. refused_address() builds
+    both from the refused address; the defaults are for a caller that knows
+    no more than the target.
     """
+
+    def __init__(
+        self,
+        target: str,
+        code: str = "reserved",
+        message: str = "not a public address",
+    ):
+        super().__init__(target)
+        self.code = code
+        self.message = message
 
 
 class InvalidTargetError(Exception):
@@ -220,6 +236,106 @@ def is_safe_ip(ip_str: str) -> bool:
         if ip.sixtofour is not None or ip in _NAT64:
             return False
     return _is_public_unicast(ip)
+
+
+class SpecialPurpose(NamedTuple):
+    """One answer from special_purpose(): the block a refused address is in."""
+
+    code: str
+    name: str
+    rfc: str | None
+    network: str | None
+
+
+# IANA's special-purpose address registries, as far as is_safe_ip refuses
+# them: one row per block, (network, code, name, RFC). A label for the 400,
+# never part of the decision -- is_safe_ip alone says what is refused, and
+# tests/test_ssrf.py checks that both ends of every row here are. An address
+# in no row is `reserved`; the registry's exceptions (192.0.0.9, 192.0.0.10)
+# pass is_safe_ip and never get here.
+_SPECIAL_PURPOSE = tuple(
+    (ipaddress.ip_network(cidr), code, name, rfc)
+    for cidr, code, name, rfc in (
+        ("0.0.0.0/8", "this_network", "this network", "RFC 791"),
+        ("10.0.0.0/8", "private", "private-use network", "RFC 1918"),
+        (
+            "100.64.0.0/10",
+            "cgnat",
+            "shared address space for carrier-grade NAT",
+            "RFC 6598",
+        ),
+        ("127.0.0.0/8", "loopback", "loopback", "RFC 1122"),
+        ("169.254.0.0/16", "link_local", "link-local", "RFC 3927"),
+        ("172.16.0.0/12", "private", "private-use network", "RFC 1918"),
+        ("192.0.0.0/24", "ietf_protocol", "IETF protocol assignments", "RFC 6890"),
+        ("192.0.2.0/24", "documentation", "documentation (TEST-NET-1)", "RFC 5737"),
+        ("192.168.0.0/16", "private", "private-use network", "RFC 1918"),
+        ("198.18.0.0/15", "benchmarking", "network benchmarking", "RFC 2544"),
+        ("198.51.100.0/24", "documentation", "documentation (TEST-NET-2)", "RFC 5737"),
+        ("203.0.113.0/24", "documentation", "documentation (TEST-NET-3)", "RFC 5737"),
+        ("224.0.0.0/4", "multicast", "multicast", "RFC 5771"),
+        ("240.0.0.0/4", "reserved", "reserved for future use", "RFC 1112"),
+        ("255.255.255.255/32", "broadcast", "limited broadcast", "RFC 919"),
+        ("::1/128", "loopback", "loopback", "RFC 4291"),
+        ("64:ff9b::/96", "nat64", "NAT64 well-known prefix", "RFC 6052"),
+        ("2001::/32", "teredo", "Teredo tunnelling", "RFC 4380"),
+        ("2001:2::/48", "benchmarking", "network benchmarking", "RFC 5180"),
+        ("2001:db8::/32", "documentation", "documentation", "RFC 3849"),
+        ("2002::/16", "6to4", "6to4 tunnelling", "RFC 3056"),
+        ("fc00::/7", "ula", "unique local address", "RFC 4193"),
+        ("fe80::/10", "link_local", "link-local", "RFC 4291"),
+        ("fec0::/10", "site_local", "deprecated site-local", "RFC 3879"),
+        ("ff00::/8", "multicast", "multicast", "RFC 4291"),
+    )
+)
+_RESERVED = SpecialPurpose("reserved", "reserved address space", None, None)
+
+
+def special_purpose(ip_str: str) -> SpecialPurpose:
+    """The IANA special-purpose block an address is_safe_ip has refused is in.
+
+    A name for the 400, nothing more: is_safe_ip decides alone, and this is
+    asked only about an address it said no to. The longest matching prefix
+    wins (255.255.255.255 is broadcast, not 240.0.0.0/4), an IPv4-mapped
+    address is the IPv4 address it carries (is_safe_ip's first rule), and an
+    address in no row -- IPv6's unspecified, unassigned and discard-only
+    space, or a string that is not an address at all -- is `reserved`.
+    """
+    try:
+        address = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return _RESERVED
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    best = None
+    for network, code, name, rfc in _SPECIAL_PURPOSE:
+        if address not in network:
+            continue
+        if best is None or network.prefixlen > best[0].prefixlen:
+            best = (network, code, name, rfc)
+    if best is None:
+        return _RESERVED
+    network, code, name, rfc = best
+    return SpecialPurpose(code, name, rfc, str(network))
+
+
+def refused_address(target: str, address: str) -> PrivateAddressError:
+    """The PrivateAddressError for `address`, which is_safe_ip has just
+    refused, with its block named. `target` is what was asked for: the
+    address itself, or the domain whose A/AAAA record pointed at it. Built
+    only after is_safe_ip said no; special_purpose() labels that answer and
+    never makes it.
+    """
+    block = special_purpose(address)
+    if block.network is None:
+        where = f"in {block.name}"
+    else:
+        where = f"in {block.network}, {block.name} ({block.rfc})"
+    if target == address:
+        message = f"{address} is {where}, not a public address"
+    else:
+        message = f"{target} resolves to {address}, {where}, not a public address"
+    return PrivateAddressError(target, block.code, message)
 
 
 geo_ip_manager = GeoIpManager()
@@ -547,7 +663,7 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
             address = address.ipv4_mapped
         target = str(address)
         if not is_safe_ip(target):
-            raise PrivateAddressError(target)
+            raise refused_address(target, target)
 
     # Only after the checks above, so a refused target costs no slot and is
     # still refused, not turned away as busy, while the gate is full.
@@ -632,7 +748,7 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
                     f"; AAAA: {aaaa_miss}" if aaaa_miss is not None else "",
                 )
             if resolved_ip and not is_safe_ip(resolved_ip):
-                raise PrivateAddressError(target)
+                raise refused_address(target, resolved_ip)
 
             # The record sweep and the TLS handshake are independent.
             domain_data, ssl_data = await asyncio.gather(

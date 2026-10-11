@@ -514,6 +514,33 @@ _LOCAL_NETWORKS = tuple(
     )
 )
 
+# The copy render_refused_target picks by lookup.PrivateAddressError.code, for
+# the blocks the local-network sentence would get wrong. The other
+# _LOCAL_NETWORKS blocks keep that sentence, and everything else "reserved".
+_TRANSITION_NAMES = {
+    "6to4": ("6to4", "RFC 3056"),
+    "teredo": ("Teredo", "RFC 4380"),
+    "nat64": ("NAT64", "RFC 6052"),
+}
+
+
+def _carried_ipv4(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address, code: str
+) -> str | None:
+    """The IPv4 address a 6to4, Teredo or NAT64 address carries. Teredo
+    carries two, the server's and (obfuscated) the client's; the client's is
+    the host's. render_refused_target offers it as the lookup to make instead
+    only when is_safe_ip passes it."""
+    if address.version != 6:
+        return None
+    if code == "6to4" and address.sixtofour is not None:
+        return str(address.sixtofour)
+    if code == "teredo" and address.teredo is not None:
+        return str(address.teredo[1])
+    if code == "nat64":
+        return str(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
+    return None
+
 
 def render_refused_target(
     request: Request, target: str, exc: PrivateAddressError | InvalidTargetError
@@ -528,6 +555,12 @@ def render_refused_target(
     A .onion or home.arpa name (InvalidTargetError with code "special_use_name")
     gets its reason, in config's words; every other invalid target the fixed
     "not a domain name" text.
+
+    The copy follows exc.code where the local-network sentence would mislead:
+    CGNAT (the carrier's shared space, not the visitor's own network),
+    documentation and benchmarking blocks, and 6to4/Teredo/NAT64, which
+    carry an IPv4 address: offered as the lookup to make instead when
+    is_safe_ip passes it, named as not public either when it does not.
     """
     if isinstance(exc, InvalidTargetError):
         if exc.code == "special_use_name":
@@ -558,6 +591,50 @@ def render_refused_target(
             "Not a public address",
             f"{target} resolves to a private or reserved IP address, so there is "
             "nothing public to look up.",
+        )
+    code = exc.code
+    if code == "cgnat":
+        return render_error(
+            request,
+            400,
+            f"{address} is a CGNAT address",
+            "Carrier-grade NAT (CGNAT, RFC 6598): your ISP shares one public "
+            "address among many customers and gives each of them an address "
+            "from 100.64.0.0/10 instead, which only means something inside the "
+            "carrier's network. From the internet you appear as that shared "
+            "public address, the one the home page shows.",
+        )
+    if code in ("documentation", "benchmarking"):
+        purpose = (
+            "documentation and examples"
+            if code == "documentation"
+            else "network benchmarking"
+        )
+        return render_error(
+            request,
+            400,
+            "Not a public address",
+            f"{address} is in a block set aside for {purpose}, which is never "
+            "routed on the public internet, so there is nothing to look up.",
+        )
+    if code in _TRANSITION_NAMES:
+        name, rfc = _TRANSITION_NAMES[code]
+        inner = _carried_ipv4(address, code)
+        if inner and not is_safe_ip(inner):
+            # is_safe_ip decides here too: never send the visitor to a lookup
+            # that would be refused in turn.
+            advice = f"The IPv4 address it carries, {inner}, is not public either."
+        elif inner:
+            advice = f"Look up the IPv4 address it carries instead: {inner}."
+        else:
+            advice = "Look up the IPv4 address it carries instead."
+        return render_error(
+            request,
+            400,
+            f"{address} is a {name} address",
+            f"{name} ({rfc}) carries an IPv4 address inside an IPv6 one, so this "
+            "is a transition mechanism's address rather than a host's, and no "
+            f"registry or reverse-DNS zone answers for it. {advice}",
         )
     if any(address in network for network in _LOCAL_NETWORKS):
         return render_error(
@@ -1408,6 +1485,20 @@ def _invalid_field(exc: InvalidFieldError, fmt: str) -> Response:
     )
 
 
+# The JSON 400 for a refused address. `detail` is the API: clients have read
+# it since the first release and the tests pin it byte for byte, so it never
+# changes and stays the first key. `error` and `code` (lookup.refused_address)
+# name the IANA block the address is in, beside it.
+_PRIVATE_DETAIL = "Private or reserved IP addresses are not allowed"
+
+
+def _refused_json(exc: PrivateAddressError) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={"detail": _PRIVATE_DETAIL, "error": exc.message, "code": exc.code},
+    )
+
+
 def _busy(request: Request, fmt: str) -> Response:
     """The 503 for a lookup the gate turned away (concurrency.LookupBusy), in
     the format its answer would have had.
@@ -1667,11 +1758,10 @@ async def _target_fields(target: str, names: list[str] | None, fmt: str):
         return JSONResponse(
             status_code=400, content={"error": exc.message, "code": exc.code}
         )
-    except PrivateAddressError:
-        message = "Private or reserved IP addresses are not allowed"
+    except PrivateAddressError as exc:
         if fmt == "text":
-            return _text_error(message)
-        raise HTTPException(status_code=400, detail=message) from None
+            return _text_error(exc.message)
+        return _refused_json(exc)
     return _fields_response(data, names, kind, fmt, block=block)
 
 
@@ -1925,10 +2015,7 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
             return JSONResponse(
                 status_code=400, content={"error": exc.message, "code": exc.code}
             )
-        raise HTTPException(
-            status_code=400,
-            detail="Private or reserved IP addresses are not allowed",
-        ) from None
+        return _refused_json(exc)
     except LookupBusy:
         origin_task.cancel()
         if subdomain_task is not None:

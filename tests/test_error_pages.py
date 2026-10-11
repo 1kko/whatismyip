@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from lookup import PrivateAddressError
+from lookup import refused_address
 from main import app, ip_ban_manager, rate_limiter
 
 CLIENT_IP = "8.8.8.8"
@@ -44,7 +44,9 @@ CHROME = {
 }
 CURL = {"user-agent": "curl/8.7.1", "accept": "*/*"}
 
-PRIVATE_BYTES = b'{"detail":"Private or reserved IP addresses are not allowed"}'
+# `detail` is the API: pinned byte for byte, first in the body. `error` and
+# `code` -- the address's IANA block, from lookup.refused_address -- follow it.
+PRIVATE_PREFIX = b'{"detail":"Private or reserved IP addresses are not allowed"'
 INVALID_BYTES = b'{"error":"not a domain name or IP address","code":"invalid_target"}'
 DENIED_BYTES = b'{"error":"Access denied due to the policy"}'
 TOO_MANY_BYTES = b'{"error":"Too many requests"}'
@@ -106,6 +108,22 @@ def _vary(response):
     return {t.strip().lower() for t in response.headers.get("vary", "").split(",")}
 
 
+def _assert_refused_json(response, code):
+    assert response.status_code == 400
+    assert _is_json(response)
+    assert response.content.startswith(PRIVATE_PREFIX)
+    body = json.loads(response.content)
+    assert set(body) == {"detail", "error", "code"}
+    assert body["code"] == code
+    assert body["error"].endswith(", not a public address")
+    # A returned JSONResponse, no longer a raised HTTPException: still the
+    # lookup route's answer, so still varied on what negotiate() reads and
+    # never cached (security_headers_middleware matches the endpoint).
+    assert {"accept", "user-agent"} <= _vary(response)
+    assert response.headers["cache-control"] == "no-store"
+    return body
+
+
 # --- 400: a private or reserved address --------------------------------------
 
 
@@ -122,9 +140,7 @@ class TestPrivateAddress:
 
     def test_an_api_client_gets_the_json_it_always_did(self):
         response = client.get("/192.168.0.1", headers=CURL)
-        assert response.status_code == 400
-        assert _is_json(response)
-        assert response.content == PRIVATE_BYTES
+        _assert_refused_json(response, "private")
 
     @pytest.mark.parametrize(
         "address",
@@ -135,8 +151,6 @@ class TestPrivateAddress:
             "192.168.0.1",
             "127.0.0.1",
             "169.254.169.254",
-            "100.64.0.1",  # CGNAT: carriers, and Tailscale's MagicDNS
-            "100.127.255.254",
         ],
     )
     def test_every_local_range_gets_the_local_network_explanation(self, address):
@@ -144,9 +158,9 @@ class TestPrivateAddress:
         assert response.status_code == 400
         assert f"{address} is a local network address" in _visible_text(response.text)
 
-    @pytest.mark.parametrize("address", ["240.0.0.1", "224.0.0.1", "192.0.2.1"])
+    @pytest.mark.parametrize("address", ["240.0.0.1", "224.0.0.1", "4000::1"])
     def test_a_reserved_address_is_not_called_local(self, address):
-        """Multicast, class E and the documentation range are refused too, but
+        """Multicast, class E and IPv6's unassigned space are refused too, but
         telling the visitor they are on their own network would be wrong."""
         response = client.get(f"/{address}", headers=CHROME)
         assert response.status_code == 400
@@ -154,12 +168,115 @@ class TestPrivateAddress:
         assert "local network" not in text
         assert f"{address} is a reserved IP address" in text
 
+    @pytest.mark.parametrize("address", ["100.64.0.1", "100.127.255.254"])
+    def test_a_cgnat_address_is_explained_as_the_carrier_sharing_one_address(
+        self, address
+    ):
+        """Someone who types 100.64.x is usually asking "am I behind CGNAT?".
+        The search box still calls the range local (app.js's isLocalAddress
+        and _LOCAL_NETWORKS keep it); the page answers the question."""
+        response = client.get(f"/{address}", headers=CHROME)
+        assert response.status_code == 400
+        text = _visible_text(response.text)
+        assert f"{address} is a CGNAT address" in text
+        assert "shares one public address" in text
+        assert "reserved" not in text
+        assert "local network" not in text
+
+    @pytest.mark.parametrize(
+        "address, purpose",
+        [
+            ("192.0.2.1", "documentation"),
+            ("198.51.100.7", "documentation"),
+            ("2001:db8::1", "documentation"),
+            ("198.18.0.1", "benchmarking"),
+        ],
+    )
+    def test_a_documentation_or_benchmarking_address_is_never_routed(
+        self, address, purpose
+    ):
+        response = client.get(f"/{address}", headers=CHROME)
+        assert response.status_code == 400
+        text = _visible_text(response.text)
+        assert f"{address} is in a block set aside for" in text
+        assert purpose in text
+        assert "never routed" in text
+        assert "local network" not in text
+
+    @pytest.mark.parametrize(
+        "address, name, inner",
+        [
+            ("2002:808:808::1", "6to4", "8.8.8.8"),
+            # RFC 4380's layout with client 8.8.8.8: server 65.54.227.120 in
+            # clear, the client's address inverted in the last 32 bits.
+            ("2001:0:4136:e378:8000:63bf:f7f7:f7f7", "Teredo", "8.8.8.8"),
+            ("64:ff9b::808:808", "NAT64", "8.8.8.8"),
+        ],
+    )
+    def test_a_transition_address_points_at_the_ipv4_address_inside(
+        self, address, name, inner
+    ):
+        """Teredo carries two addresses; the client's is the host's."""
+        response = client.get(f"/{address}", headers=CHROME)
+        assert response.status_code == 400
+        text = _visible_text(response.text)
+        assert f"{address} is a {name} address" in text
+        assert f"Look up the IPv4 address it carries instead: {inner}." in text
+
+    @pytest.mark.parametrize(
+        "address, name, inner",
+        [
+            # RFC 4380's own example: its client is a documentation address.
+            ("2001:0:4136:e378:8000:63bf:3fff:fdd2", "Teredo", "192.0.2.45"),
+            ("64:ff9b::a00:1", "NAT64", "10.0.0.1"),
+            ("2002:c0a8:101::1", "6to4", "192.168.1.1"),
+            # Synthetic: server 0.0.0.0, client 255.255.255.254.
+            ("2001::1", "Teredo", "255.255.255.254"),
+        ],
+    )
+    def test_a_transition_address_never_points_at_a_refused_one(
+        self, address, name, inner
+    ):
+        """is_safe_ip decides what the page offers as the next lookup, as it
+        decides everything else: an address inside that it would refuse is
+        named, never offered, and nothing on the way raises."""
+        response = client.get(f"/{address}", headers=CHROME)
+        assert response.status_code == 400
+        text = _visible_text(response.text)
+        assert f"{address} is a {name} address" in text
+        assert f"The IPv4 address it carries, {inner}, is not public either." in text
+        assert "Look up the IPv4 address" not in text
+
+    @pytest.mark.parametrize(
+        "address, code",
+        [
+            ("100.64.0.1", "cgnat"),
+            ("192.0.2.1", "documentation"),
+            ("2002:808:808::1", "6to4"),
+        ],
+    )
+    def test_a_domain_resolving_into_a_named_block_keeps_the_hostname_copy(
+        self, address, code
+    ):
+        """The copy by code is for an address given as the target. A name whose
+        record points into one of those blocks keeps the hostname sentence the
+        backlog leaves alone: no block name, no address to try instead."""
+        exc = refused_address("internal.example.com", address)
+        assert exc.code == code
+        with patch("main.gather", new_callable=AsyncMock, side_effect=exc):
+            response = client.get("/internal.example.com", headers=CHROME)
+        assert response.status_code == 400
+        text = _visible_text(response.text)
+        assert "internal.example.com resolves to a private or reserved" in text
+        for copy in ("CGNAT", "set aside for", "Look up the IPv4", "not public either"):
+            assert copy not in text
+
     def test_a_domain_resolving_to_a_private_address_says_so(self):
         """router.asus.com is the real-world case: it answers 192.168.50.1."""
         with patch(
             "main.gather",
             new_callable=AsyncMock,
-            side_effect=PrivateAddressError("router.example.com"),
+            side_effect=refused_address("router.example.com", "192.168.50.1"),
         ):
             page = client.get("/router.example.com", headers=CHROME)
             data = client.get("/router.example.com", headers=CURL)
@@ -167,20 +284,20 @@ class TestPrivateAddress:
         assert "router.example.com resolves to a private or reserved" in (
             _visible_text(page.text)
         )
-        assert data.status_code == 400
-        assert data.content == PRIVATE_BYTES
+        body = _assert_refused_json(data, "private")
+        assert body["error"].startswith(
+            "router.example.com resolves to 192.168.50.1, in 192.168.0.0/16, "
+        )
 
     def test_format_json_from_a_browser_gets_json(self):
         response = client.get("/192.168.0.1?format=json", headers=CHROME)
-        assert response.status_code == 400
-        assert response.content == PRIVATE_BYTES
+        _assert_refused_json(response, "private")
 
     def test_accept_json_from_a_browser_gets_json(self):
         """A fetch() from the page itself."""
         headers = {**CHROME, "accept": "application/json"}
         response = client.get("/192.168.0.1", headers=headers)
-        assert response.status_code == 400
-        assert response.content == PRIVATE_BYTES
+        _assert_refused_json(response, "private")
 
     def test_the_page_keeps_the_lookup_cache_headers(self):
         response = client.get("/192.168.0.1", headers=CHROME)

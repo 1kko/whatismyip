@@ -818,6 +818,14 @@ defenses then apply to the address:
    `fec0::/10`. The registry's own exceptions pass on purpose: `192.0.0.9`
    and `192.0.0.10` are public anycast services, not internal space.
 
+   The `400` for a refused address names the block it fell in (`code`:
+   `private`, `cgnat`, `loopback`, … from `lookup.special_purpose`; see
+   README's `GET /{domain_or_ip}`). The table behind it,
+   `lookup._SPECIAL_PURPOSE`, is a label put on `is_safe_ip`'s answer after
+   the fact, never a second list that decides what is refused:
+   `tests/test_ssrf.py` checks that both ends of every row in it are refused
+   by `is_safe_ip`.
+
    Three kinds of IPv6 address carry an IPv4 address inside them, and
    `is_safe_ip` decides them itself rather than trusting the registry's
    verdict on the wrapper:

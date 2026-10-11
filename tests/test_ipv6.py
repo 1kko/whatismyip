@@ -581,7 +581,9 @@ def test_a_private_ipv6_address_is_the_same_400_as_ipv4_for_an_api_client(offlin
     response = client.get("/::1", headers=CURL)
     assert response.status_code == 400
     assert response.json() == {
-        "detail": "Private or reserved IP addresses are not allowed"
+        "detail": "Private or reserved IP addresses are not allowed",
+        "error": "::1 is in ::1/128, loopback (RFC 4291), not a public address",
+        "code": "loopback",
     }
 
 

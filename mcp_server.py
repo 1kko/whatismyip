@@ -305,8 +305,10 @@ async def lookup(target: str) -> dict[str, Any]:
     summary of its TLS certificate. Accepts "example.com", "8.8.8.8",
     "2001:4860:4860::8888", or a pasted URL. Use this first; the other tools
     go deeper on one aspect. Private and reserved addresses are refused, and
-    so are .onion and home.arpa names, which nothing public answers for. A
-    name is looked up and returned as `target` in one spelling: lower case,
+    so are .onion and home.arpa names, which nothing public answers for. For
+    a private or reserved address, the failed call's `code` names its IANA
+    block (`private`, `cgnat`, `loopback`, `documentation`, `multicast`, ...).
+    A name is looked up and returned as `target` in one spelling: lower case,
     no trailing dot, and an internationalised name as its UTS 46 A-label
     (`straße.de` as `xn--strae-oqa.de`). `dns_records` and `ssl_certificate`
     echo `domain` the same way.
@@ -355,8 +357,8 @@ async def lookup(target: str) -> dict[str, Any]:
     """
     try:
         data = await _bounded_gather(target)
-    except PrivateAddressError:
-        return _fail("Private or reserved addresses are not allowed")
+    except PrivateAddressError as exc:
+        return _fail(exc.message, code=exc.code)
     except InvalidTargetError as exc:
         return _fail(exc.message)
     except TimeoutError:
@@ -430,8 +432,8 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
 
     try:
         data = await _bounded_gather(domain)
-    except PrivateAddressError:
-        return _fail("Private or reserved addresses are not allowed")
+    except PrivateAddressError as exc:
+        return _fail(exc.message, code=exc.code)
     except InvalidTargetError as exc:
         return _fail(exc.message)
     except TimeoutError:
@@ -481,8 +483,8 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
     """
     try:
         data = await _bounded_gather(domain)
-    except PrivateAddressError:
-        return _fail("Private or reserved addresses are not allowed")
+    except PrivateAddressError as exc:
+        return _fail(exc.message, code=exc.code)
     except InvalidTargetError as exc:
         return _fail(exc.message)
     except TimeoutError:

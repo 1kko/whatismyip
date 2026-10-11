@@ -140,7 +140,16 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   domain and the answer carries both names), `lookup_location` and
   `ip_reputation`. Raises
   `PrivateAddressError` and `InvalidTargetError` rather than `HTTPException`
-  so it stays free of FastAPI. `gather(legs=)` runs only the named legs
+  so it stays free of FastAPI; both carry `code` and `message`.
+  `refused_address(target, address)` builds a `PrivateAddressError` from
+  `special_purpose(address)`, the IANA special-purpose block table
+  (`_SPECIAL_PURPOSE`: `private`, `cgnat`, `loopback`, `link_local`,
+  `documentation`, `benchmarking`, `multicast`, `this_network`,
+  `ietf_protocol`, `broadcast`, `reserved`, `ula`, `site_local`, `6to4`,
+  `teredo`, `nat64`), which labels an address only after `is_safe_ip`
+  refused it and is never a second allowlist (`tests/test_ssrf.py` ties
+  every row to `is_safe_ip`); an address in no row is `reserved`.
+  `gather(legs=)` runs only the named legs
   (`LEGS`); the default (None) runs them all, and the page, the full JSON and
   MCP all use the default. Builds the manager singletons (`geo_ip_manager`,
   `tld_names_manager`, `domain_manager`, `reputation_manager`,
@@ -263,7 +272,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    root dot, UTS 46 A-labels); `lookup.classify_target` then calls it a domain,
    `ipv4`, `ipv6` or `invalid` before any network work; an invalid target is a
    `400` (`InvalidTargetError`), and so is a private or reserved address
-   (`PrivateAddressError`, from `is_safe_ip`). A hostname under
+   (`PrivateAddressError`, from `is_safe_ip`): its JSON keeps `detail`
+   unchanged and adds `error` and `code`, the IANA block from
+   `lookup.special_purpose` (`main._refused_json`), and text answers the
+   `error` sentence. A hostname under
    `config.SPECIAL_USE_SUFFIXES` (`onion`, `home.arpa`: on the PSL, so
    `is_valid_domain` says yes) is `invalid` too, and `gather()` raises
    `InvalidTargetError(code="special_use_name")` with the reason from
@@ -272,7 +284,13 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    of `.arpa`, which PTR names live in. The check is not in
    `is_valid_domain`, which `main._suspicious_path_is_ordinary` reads: the
    probe verdict for these paths must not change. A browser gets
-   `main.render_refused_target`'s error page instead of the JSON
+   `main.render_refused_target`'s error page instead of the JSON, with copy
+   chosen by `code` for `cgnat`, `documentation`/`benchmarking` and
+   `6to4`/`teredo`/`nat64` (`_carried_ipv4` names the IPv4 address inside,
+   offered as the next lookup only when `is_safe_ip` passes it); a hostname
+   keeps its own sentence whatever block it resolved into, the other
+   `_LOCAL_NETWORKS` blocks keep the local-network sentence, and
+   `static/js/app.js`'s `isLocalAddress` mirrors that list unchanged
 3. **IP Resolution**: a domain's A record, or its AAAA record when it has no A
    (an IPv6-only host), from the public resolvers; the address must pass
    `is_safe_ip` too
@@ -495,7 +513,9 @@ Configured at `main` module scope:
   can't build an output schema from a bare `dict`, so the response never gets
   `structuredContent`.
 - A call that failed outright returns `_fail()`: a `CallToolResult` with
-  `isError` set and `{"error": ...}` as `structuredContent`. The annotation
+  `isError` set and `{"error": ...}` as `structuredContent` (plus `code`,
+  through `_fail`'s `**extra`, for a refused address:
+  `_fail(exc.message, code=exc.code)` in the three `gather()` tools). The annotation
   stays `dict[str, Any]` anyway: the SDK refuses `dict | CallToolResult`, and
   skips output validation for an isError result. A gap inside an answer (one
   DNS type, the registration leg, `registered: false`, `stale: true`) stays a
