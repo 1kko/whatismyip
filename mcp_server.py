@@ -291,8 +291,23 @@ def compact_reputation(reputation: dict | None) -> dict | None:
 # RDAP makes one 3.5s request, python-whois has a 5s socket timeout, and both
 # run on a pool of their own; `DomainManager.get_records()` (managers.py)
 # still opens up to 8 + 2 x DNS_HOST_RESOLVE_WORKERS threads per sweep.
+# The same ceiling bounds dns_records and ssl_certificate, which run only
+# their own legs (_DNS_LEGS, _TLS_LEGS): those legs have budgets of their own
+# (DNS_QUERY_LIFETIME per query; TLS_CONNECT_TIMEOUT_SECONDS for the TLS
+# connect, then TIMEOUT_SECONDS for the handshake), so the ceiling is a
+# backstop there, not the expected wait, and no second knob.
 _GATHER_CONCURRENCY = LookupGate("MCP", MCP_LOOKUP_CONCURRENCY)
 _GATHER_TIMEOUT_SECONDS = RDAP_TIMEOUT_SECONDS + WHOIS_TIMEOUT_SECONDS + 5
+
+# What each narrow tool reads of gather()'s answer, so what it asks for.
+# dns_records reads `domain` and the resolution that led to it; for an IP,
+# "dns" alone also runs the PTR the sweep needs (lookup._run_legs).
+# ssl_certificate reads `ssl`. Neither reads the registration, GeoIP or
+# reputation, so neither spends an RDAP query, the other's leg (a TLS
+# handshake, a DNS sweep) or an AbuseIPDB request on an answer it discards.
+# `lookup` reads everything and passes None.
+_DNS_LEGS = frozenset({"resolve", "dns"})
+_TLS_LEGS = frozenset({"resolve", "tls"})
 
 
 async def _bounded_gather(target: str, legs: frozenset[str] | None = None) -> dict:
@@ -433,6 +448,8 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     `resolution` is how the name reached `resolved_ip`: "ok", "nxdomain" (the
     name does not exist), "noanswer" (no A or AAAA record), "timeout",
     "servfail" or "error"; "literal" when the target is itself an IP.
+    Runs only the DNS queries: no registration lookup, TLS handshake or
+    reputation check is spent on it, so it is the cheap tool for a DNS question.
     """
     # `is not None`, not truthiness: types=[] means "narrow to nothing", which is
     # a different request from omitting the argument, and must not silently
@@ -453,7 +470,7 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
         wanted = list(_RECORD_TYPES)
 
     try:
-        data = await _bounded_gather(domain)
+        data = await _bounded_gather(domain, legs=_DNS_LEGS)
     except PrivateAddressError as exc:
         return _fail(exc.message, code=exc.code)
     except InvalidTargetError as exc:
@@ -502,9 +519,11 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
     (expired, self-signed, wrong host, incomplete chain) is still returned,
     with `trusted: false` and `verify_error` saying why; `error` means no
     certificate could be read at all, such as port 443 being unreachable.
+    Runs only the name's address lookup and the handshake: no registration
+    lookup or DNS record sweep is spent on it.
     """
     try:
-        data = await _bounded_gather(domain)
+        data = await _bounded_gather(domain, legs=_TLS_LEGS)
     except PrivateAddressError as exc:
         return _fail(exc.message, code=exc.code)
     except InvalidTargetError as exc:

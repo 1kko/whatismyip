@@ -575,6 +575,26 @@ class TestWhereItIsAsked:
         assert result["ip"] == IP
         assert api.calls == []
 
+    def test_not_by_the_narrow_mcp_tools(self, abuse, legs):
+        """dns_records and ssl_certificate ask gather() for their own legs
+        only, so an address asked of them costs no request from the daily
+        quota; the full lookup tool still spends its one."""
+        api = abuse().api
+
+        async def run():
+            dns = await mcp_server.dns_records(domain=IP)
+            tls = await mcp_server.ssl_certificate(domain=IP)
+            spent_before_lookup = list(api.calls)
+            full = await mcp_server.lookup(IP)
+            return dns, tls, spent_before_lookup, full
+
+        dns, tls, spent_before_lookup, full = asyncio.run(run())
+        assert dns["resolved_ip"] == IP
+        assert tls.is_error  # TLS is checked for domain names only
+        assert spent_before_lookup == []
+        assert api.asked() == [IP]
+        assert full["reputation"]["abuseipdb"]["abuse_confidence"] == 87
+
     def test_not_when_the_reputation_leg_is_not_asked_for(self, abuse, legs):
         api = abuse().api
         web.get(f"/{IP}?fields=country_code", headers=CURL)

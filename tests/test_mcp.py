@@ -708,6 +708,32 @@ async def test_a_narrowed_call_keeps_the_same_wall_clock_ceiling():
             )
 
 
+def test_each_tool_asks_gather_for_the_legs_it_reads():
+    """dns_records reads `domain`, ssl_certificate reads `ssl`, lookup reads
+    everything, and each asks gather() for exactly that (lookup.LEGS). A DNS
+    question costs no RDAP query, TLS handshake or AbuseIPDB request, and a
+    certificate question no DNS sweep; the answer shapes do not change."""
+    asked = []
+
+    async def fake_gather(target, legs=None):
+        asked.append(legs)
+        return FAKE_LOOKUP
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            for name, arguments in (
+                ("lookup", {"target": "example.com"}),
+                ("dns_records", {"domain": "example.com"}),
+                ("ssl_certificate", {"domain": "example.com"}),
+            ):
+                response = _rpc(
+                    client, "tools/call", {"name": name, "arguments": arguments}
+                )
+                assert response.status_code == 200
+    assert asked == [None, {"resolve", "dns"}, {"resolve", "tls"}]
+
+
 def test_ssl_certificate_reports_the_expiry_clock():
     cert = {
         "issuer": ((("organizationName", "Let's Encrypt"),),),

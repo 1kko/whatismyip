@@ -624,12 +624,13 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
     starts that task itself and awaits it alongside this one.
 
     `legs` narrows the work to the named parts of LEGS, for a caller that wants
-    a few values rather than the whole picture (?fields= on the HTTP routes).
-    None, the default, runs every leg; the page, the full JSON and the MCP tools
-    all pass nothing. A leg that did not run comes back as None ({} for
-    "location"). Every leg but "whois" touches the address, so a domain is still
-    resolved and its address still refused if it is private before any of them
-    runs, whichever were asked for.
+    a few values rather than the whole picture (?fields= on the HTTP routes,
+    the MCP dns_records and ssl_certificate tools). None, the default, runs
+    every leg; the page, the full JSON and the MCP `lookup` tool pass nothing.
+    A leg that did not run comes back as None ({} for "location"). Every leg
+    but "whois" touches the address, so a domain is still resolved and its
+    address still refused if it is private before any of them runs, whichever
+    were asked for.
 
     The legs run while a slot at the lookup gate is held (concurrency.py),
     shared with the self page and the MCP tools; concurrency.LookupBusy when
