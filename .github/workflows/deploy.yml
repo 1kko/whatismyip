@@ -58,6 +58,7 @@ jobs:
     timeout-minutes: 15
     env:
       HEALTHZ_URL: https://ip.1kko.com/healthz
+      MCP_URL: https://ip.1kko.com/mcp
     steps:
       - name: Check the commit is still main's head
         id: target
@@ -132,10 +133,30 @@ jobs:
           # is what makes a green run mean production serves ${EXPECTED}.
           # /healthz is single-line JSON and "version" is its first such key
           # (main.healthz keeps it ahead of the nested objects), so grep is
-          # enough without jq or python3 on the runner.
+          # enough without jq or python3 on the runner. Some shared egress is
+          # denied by the /healthz policy; only when that request is
+          # unreachable, ask MCP initialize for this server's version instead.
           served_version() {
-            curl --fail --silent --max-time 10 "$HEALTHZ_URL" \
-              | grep -o '"version":"[^"]*"' | head -n 1 | cut -d '"' -f 4
+            local response server_info
+            if response=$(curl --fail --silent --max-time 10 "$HEALTHZ_URL"); then
+              printf '%s\n' "$response" \
+                | grep -o '"version":"[^"]*"' | head -n 1 | cut -d '"' -f 4
+              return
+            fi
+
+            response=$(curl --fail --silent --max-time 10 \
+              --header 'Content-Type: application/json' \
+              --header 'Accept: application/json, text/event-stream' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"deploy-verifier","version":"0"}}}' \
+              "$MCP_URL") || return
+            server_info=$(printf '%s\n' "$response" \
+              | grep -Eo '"serverInfo"[[:space:]]*:[[:space:]]*\{[^}]*\}' \
+              | head -n 1) || return
+            printf '%s\n' "$server_info" \
+              | grep -Eq '"name"[[:space:]]*:[[:space:]]*"whatismyip"' || return
+            printf '%s\n' "$server_info" \
+              | grep -Eo '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
+              | head -n 1 | cut -d '"' -f 4
           }
           if [ "$BEFORE" = "$EXPECTED" ]; then
             echo "::notice::Production already reported ${EXPECTED} before this deploy, so this only confirms it is still served, not that a new container replaced it."
