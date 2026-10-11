@@ -9,6 +9,7 @@ someone else's chat. Every lookup is mocked; no test here touches the network.
 """
 
 import copy
+import datetime
 import re
 from contextlib import contextmanager
 from html import unescape
@@ -19,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+import viewmodel
 from main import BrowserDetector, app
 from viewmodel import build_view
 
@@ -242,6 +244,34 @@ class TestLookupPage:
             == "nasa.gov · AS2635 Automattic, Inc · United States · TLS valid"
         )
         assert _meta(head, "name", "description") == _og(head, "description")
+
+    def test_a_young_domain_is_tagged_and_aged_but_previews_the_same(self, monkeypatch):
+        """A name registered 25 days ago gets the amber hero tag and an Age
+        row in the WHOIS panel, and its preview text is word for word what an
+        old name's is."""
+        monkeypatch.setattr(viewmodel, "YOUNG_DOMAIN_DAYS", 30)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        young = copy.deepcopy(NASA)
+        young["whois"] = {
+            "source": "rdap",
+            "registrar": "Example Registrar",
+            "created": now - datetime.timedelta(days=25),
+            "updated": now - datetime.timedelta(days=2),
+        }
+        with mocked_lookups(young):
+            response = client.get("/nasa.gov", headers={"user-agent": CHROME})
+        assert (
+            '<span class="tag tone-warning">REGISTERED 25 DAYS AGO</span>'
+            in response.text
+        )
+        assert (
+            '<tr><td>Age</td><td colspan="3">25 days (updated 2 days ago)</td></tr>'
+            in response.text
+        )
+        # Word for word the preview of the same page for an old name.
+        head = _head(response)
+        assert _og(head, "description") == _og(_head(_get("/nasa.gov")), "description")
+        assert "REGISTERED" not in head
 
     def test_an_ip_lookup_has_no_tls_segment(self):
         ip = {

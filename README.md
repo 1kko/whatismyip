@@ -65,7 +65,9 @@ RDAP registration data and the full TLS certificate, expanded.
   `github.com`'s, with `queried_name` and `registrable_domain` identifying both
   names. `not registered` therefore means the registrable domain has no record.
   The WHOIS panel counts a domain's age in days, with how long ago its record
-  was last updated beside it.
+  was last updated beside it, and the page tags a domain registered fewer than
+  `YOUNG_DOMAIN_DAYS` (30) days ago: many phishing names are days old, so the
+  tag is a reason to look closer, not a verdict.
 - **GeoIP** — country, real coordinates, the precise city and an accuracy radius
   from GeoLite2-City, and the carrier from GeoLite2-ASN, both memory-mapped and
   refreshed every 3 days. Until the first download lands, the country-only
@@ -353,6 +355,9 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 
 # STUN server for the opt-in WebRTC leak test; empty removes the test
 # WEBRTC_STUN_URL=stun:stun.cloudflare.com:3478
+
+# Tag a domain registered fewer than this many days ago on the page; 0 turns it off
+# YOUNG_DOMAIN_DAYS=30
 
 # Geographic blocking (optional)
 # GEO_MODE=disabled                  # disabled, allowlist, or blocklist

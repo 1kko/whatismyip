@@ -81,10 +81,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 **Modules:**
 - `config.py`: the environment-driven constants (timeouts, cache TTLs, file
   paths, rate-limit/ban settings, geo-block defaults, trusted proxies, map
-  canvases, feature switches). It calls `load_dotenv()` and imports nothing
-  app-local, so every module can import it without a cycle. Two settings are
-  read elsewhere: `ADMIN_API_KEY` in `main.py`, and `GEO_CITIES_FILE` /
-  `GEO_COUNTRIES_FILE` in `geo.py`.
+  canvases, the young-domain tag's threshold, feature switches). It calls
+  `load_dotenv()` and imports nothing app-local, so every module can import it
+  without a cycle. Two settings are read elsewhere: `ADMIN_API_KEY` in
+  `main.py`, and `GEO_CITIES_FILE` / `GEO_COUNTRIES_FILE` in `geo.py`.
 - `managers.py` — one wrapper per data source:
   - `GeoIpManager`: GeoLite2-City (country, city, coordinates) and GeoLite2-ASN
     (carrier) lookups over memory-mapped mmdb files, refreshed every 3 days
@@ -478,6 +478,10 @@ registry-local times) and answers None, never an exception, for anything else.
 The WHOIS panel's `Age` row ("6 days (updated 2 days ago)") is a domain's
 only. As for the Status row, a record without a `registrar` key is an IP
 allocation, so IP lookups and the self page (`whois_fill`) read as they did.
+The hero tags a domain registered fewer than `YOUNG_DOMAIN_DAYS` (30) days
+ago with an amber `REGISTERED N DAYS AGO`; 0 turns the tag off. A certificate's
+age is never tagged, since ACME renews every few weeks, and `_summary()` reads
+only the `TLS` tags, so link previews do not change.
 
 #### Error Handling
 

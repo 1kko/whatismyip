@@ -3,6 +3,7 @@ import re
 
 import pytest
 
+import viewmodel
 from rdap import _normalize_rdap_domain, _normalize_rdap_ip, normalize_whois
 from viewmodel import (
     DASH,
@@ -1695,3 +1696,106 @@ class TestWhoisAgeRow:
         }
         out = whois_display(normalize_whois(raw, "example.com"))
         assert out["Age"] == "6 days (updated 2 days ago)"
+
+
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def _asn1(when: datetime.datetime) -> str:
+    """A time in getpeercert()'s print form, 'Oct  9 12:00:00 2026 GMT'. Not
+    strftime: its %b follows the process locale (managers._asn1_time)."""
+    return f"{_MONTHS[when.month - 1]} {when.day:2d} {when:%H:%M:%S} {when.year} GMT"
+
+
+def _registered(days_ago: float) -> dict:
+    """DOMAIN_RESPONSE with its registration created `days_ago` days ago."""
+    whois = dict(DOMAIN_RESPONSE["whois"], created=_days_ago(days_ago))
+    return dict(DOMAIN_RESPONSE, whois=whois)
+
+
+def _registered_tags(response: dict) -> list[str]:
+    tags = build_view(response, is_self=False)["tags"]
+    return [tag["text"] for tag in tags if tag["text"].startswith("REGISTERED")]
+
+
+class TestYoungDomainTag:
+    """The hero's amber tag for a domain registered days ago."""
+
+    @pytest.fixture(autouse=True)
+    def threshold(self, monkeypatch):
+        # A developer's .env may set YOUNG_DOMAIN_DAYS; these boundaries are 30's.
+        monkeypatch.setattr(viewmodel, "YOUNG_DOMAIN_DAYS", 30)
+
+    def test_a_name_registered_25_days_ago_is_tagged_amber(self):
+        view = build_view(_registered(25), is_self=False)
+        assert {"text": "REGISTERED 25 DAYS AGO", "tone": "warning"} in view["tags"]
+
+    def test_29_days_is_tagged_and_30_is_not(self):
+        assert _registered_tags(_registered(29)) == ["REGISTERED 29 DAYS AGO"]
+        assert _registered_tags(_registered(30)) == []
+
+    def test_today_and_one_day_read_as_words(self):
+        assert _registered_tags(_registered(2 / 24)) == ["REGISTERED TODAY"]
+        assert _registered_tags(_registered(1 + 1 / 24)) == ["REGISTERED 1 DAY AGO"]
+
+    def test_a_registry_clock_hours_ahead_is_today_and_days_ahead_is_no_tag(self):
+        """python-whois hands back a registry's local time as a naive datetime,
+        read as UTC: a name registered minutes ago in Seoul reads nine hours
+        ahead. That is today, not a negative age; two days ahead is bad data,
+        and no tag rather than an exception."""
+        seoul = datetime.datetime.now(UTC) + datetime.timedelta(hours=9)
+        whois = dict(DOMAIN_RESPONSE["whois"], created=seoul.replace(tzinfo=None))
+        assert _registered_tags(dict(DOMAIN_RESPONSE, whois=whois)) == [
+            "REGISTERED TODAY"
+        ]
+        assert _registered_tags(_registered(-2)) == []
+
+    def test_an_old_name_is_not_tagged(self):
+        # google.com, created in 1997.
+        assert _registered_tags(DOMAIN_RESPONSE) == []
+
+    def test_an_old_name_updated_yesterday_is_not_tagged(self):
+        """A name caught at an expiry auction keeps its old created date. The
+        WHOIS panel's Age row keeps the fresh update beside it; the tag goes by
+        created alone."""
+        whois = dict(DOMAIN_RESPONSE["whois"], updated=_days_ago(1))
+        assert _registered_tags(dict(DOMAIN_RESPONSE, whois=whois)) == []
+        assert whois_display(whois)["Age"].endswith(" (updated 1 day ago)")
+
+    def test_zero_turns_the_tag_off(self, monkeypatch):
+        monkeypatch.setattr(viewmodel, "YOUNG_DOMAIN_DAYS", 0)
+        assert _registered_tags(_registered(2 / 24)) == []
+
+    def test_an_unreadable_or_missing_date_is_no_tag(self):
+        for created in ("before Aug-1996", None):
+            whois = dict(DOMAIN_RESPONSE["whois"], created=created)
+            assert _registered_tags(dict(DOMAIN_RESPONSE, whois=whois)) == []
+
+    def test_no_registration_is_no_tag(self):
+        for whois in (
+            {"error": "WHOIS lookup timed out"},
+            {"error": "not registered"},
+            None,
+        ):
+            assert _registered_tags(dict(DOMAIN_RESPONSE, whois=whois)) == []
+
+    def test_an_ip_lookup_is_never_tagged(self):
+        whois = {"source": "rdap", "rir": "arin", "created": _days_ago(3)}
+        assert _registered_tags(dict(IP_RESPONSE, whois=whois)) == []
+
+    def test_a_young_certificate_changes_no_tag(self):
+        """ACME renews every few weeks, so nearly every certificate is young:
+        a tag for it would sit on nearly every page and say nothing."""
+        issued = dict(FULL_SSL, notBefore=_asn1(_days_ago(1)))
+        assert cert_age(issued) == 1
+        young = build_view(dict(DOMAIN_RESPONSE, ssl=issued), is_self=False)
+        old = build_view(dict(DOMAIN_RESPONSE, ssl=FULL_SSL), is_self=False)
+        assert young["tags"] == old["tags"]
+
+    def test_the_link_preview_does_not_mention_it(self):
+        """_summary() reads only the TLS tags, so og:description is the same
+        for a name registered yesterday as for one registered in 1997."""
+        young = build_view(_registered(1), is_self=False)
+        old = build_view(DOMAIN_RESPONSE, is_self=False)
+        assert young["description"] == old["description"]
+        assert "REGISTERED" not in young["description"]

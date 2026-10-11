@@ -11,7 +11,7 @@ import ipaddress
 from typing import Any, Callable
 from urllib.parse import quote
 
-from config import SUBDOMAIN_ENABLED
+from config import SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
 from eppstatus import explain_status
 from reputation import grade
 
@@ -794,6 +794,18 @@ def _status_tags(whois_data: dict | None) -> list[dict]:
     return [{"text": " · ".join(codes), "tone": "danger"}] if codes else []
 
 
+def _young_domain_tag(whois_data: dict | None) -> dict | None:
+    """'REGISTERED 6 DAYS AGO', amber, for a domain registered fewer than
+    YOUNG_DOMAIN_DAYS ago. A young name is worth a closer look, which is all
+    the tag says: it is no verdict, and an old name proves nothing either. A
+    certificate's age is never tagged: ACME renews every few weeks, so nearly
+    every certificate is young."""
+    created, _ = registration_age(whois_data)
+    if created is None or created >= YOUNG_DOMAIN_DAYS:
+        return None
+    return {"text": f"REGISTERED {_ago(created)}".upper(), "tone": "warning"}
+
+
 def _tags(response: dict, is_ip: bool, link_for: LinkFor | None = None) -> list[dict]:
     location = response.get("location") or {}
     domain = response.get("domain") or {}
@@ -838,6 +850,9 @@ def _tags(response: dict, is_ip: bool, link_for: LinkFor | None = None) -> list[
     elif ssl_data.get("trusted"):
         tags.append({"text": "TLS valid", "tone": "success"})
     tags += _status_tags(response.get("whois"))
+    young = _young_domain_tag(response.get("whois"))
+    if young:
+        tags.append(young)
     return tags + _reputation_tags(response, informational=False)
 
 

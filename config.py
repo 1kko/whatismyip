@@ -340,6 +340,12 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 # a bare IP (i.e. there is no real domain to show).
 SITE_DOMAIN_FALLBACK = os.getenv("SITE_DOMAIN_FALLBACK", "ip.1kko.com")
 
+# The lookup page tags a domain registered fewer than this many days ago
+# ("REGISTERED 6 DAYS AGO"): many phishing and malware names are days old, so a
+# young one is worth a closer look. A reason to look, not a verdict. 0 turns the
+# tag off; the WHOIS panel's Age row and the age fields stay.
+YOUNG_DOMAIN_DAYS = max(int(os.getenv("YOUNG_DOMAIN_DAYS", "30")), 0)
+
 # The desktop hero text sits over the left half of the band, so the map is
 # focused right of centre and fitted into the free width beside it. Both canvases
 # fetch tiles at native zoom (tile_zoom_offset 0) so roads and place names stay
