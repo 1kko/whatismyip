@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 from config import SUBDOMAIN_ENABLED
+from eppstatus import explain_status
 from reputation import grade
 
 # Mirrors rdap.NOT_REGISTERED rather than importing it: `rdap` pulls in whoisit,
@@ -529,7 +530,9 @@ def _whois_column(whois_data: dict | None) -> dict:
     elif whois_data.get("thin"):
         status, tone = "no details", "muted"
     else:
-        status, tone = "available", "success"
+        # "record found", not "available": this Status is the lookup's, and
+        # "available" beside a name reads as "available to register".
+        status, tone = "record found", "success"
     # Separate from the status above: this one only asks whether there is a
     # usable record to draw values from, and there isn't in either failing case.
     no_record = bool(error) or not whois_data
@@ -586,6 +589,17 @@ def _certificate_column(ssl_data: dict | None) -> dict:
 # datacenter (weight 0, informational) plain.
 _LEVEL_TONES = {"high": "danger", "medium": "warning", "low": "warning"}
 
+# The level's word on the card. `none` is the band below `low`
+# (reputation.LEVELS[0]); printed as "Level None" beside "Listed on 1 of 5
+# lists" (an informational datacenter listing) it reads as "no level at all".
+# "no signals" says what it is. None, when no list could be read, stays
+# "unknown". The JSON and `?fields=risk_level` keep the word `none`.
+_LEVEL_TEXT = {"none": "no signals"}
+
+
+def _level_text(level: str | None) -> str:
+    return _LEVEL_TEXT.get(level, level or "unknown")
+
 
 def _signal_name(signal: dict) -> str:
     """A signal as a tag or hint names it: the list ("Tor exit"), or for
@@ -609,6 +623,23 @@ def _reputation_tags(response: dict, informational: bool) -> list[dict]:
         for signal in signals
         if informational or signal["weight"] > 0
     ]
+
+
+def _status_tags(whois_data: dict | None) -> list[dict]:
+    """One red tag when a domain's registry status says the name is out of the
+    DNS or about to be dropped (clientHold, serverHold, pendingDelete,
+    redemptionPeriod): the code itself, which the WHOIS accordion glosses. It
+    names the status, not a verdict, and it is no reputation signal:
+    reputation.grade() never sees it."""
+    whois_data = whois_data or {}
+    if "registrar" not in whois_data:
+        return []
+    codes = [
+        entry["code"]
+        for entry in explain_status(whois_data.get("status"))
+        if entry["severity"] == "danger"
+    ]
+    return [{"text": " · ".join(codes), "tone": "danger"}] if codes else []
 
 
 def _tags(response: dict, is_ip: bool) -> list[dict]:
@@ -640,6 +671,7 @@ def _tags(response: dict, is_ip: bool) -> list[dict]:
         tags.append({"text": f"TLS {problem}", "tone": "danger"})
     elif ssl_data.get("trusted"):
         tags.append({"text": "TLS valid", "tone": "success"})
+    tags += _status_tags(response.get("whois"))
     return tags + _reputation_tags(response, informational=False)
 
 
@@ -719,6 +751,24 @@ def _whois_value(key: str, value: Any) -> str:
     return str(value)
 
 
+def _status_text(record: dict) -> str:
+    """The Status row. For a domain, each registry status as its EPP code with
+    its meaning -- "clientTransferProhibited — transfer lock set by the
+    registrar (a common setting)" -- whichever of the three spellings the
+    source used, and a code outside RFC 8056 (DENIC's "connect") as the bare
+    word. An IP allocation's statuses are RDAP's words for a network
+    ("active"), not EPP codes, so they are rendered as they are. Entries are
+    separated with ";" because the meanings themselves read as prose."""
+    if "registrar" not in record:
+        # rdap._normalize_rdap_ip sets no registrar key; both domain shapes do.
+        return _whois_value("status", record.get("status"))
+    parts = [
+        f"{entry['code']} — {entry['meaning']}" if entry["meaning"] else entry["code"]
+        for entry in explain_status(record.get("status"))
+    ]
+    return "; ".join(parts) if parts else DASH
+
+
 def _covering_registration(whois_data: dict) -> str | None:
     """Return the registrable domain when its record covers another name."""
     registrable = whois_data.get("registrable_domain")
@@ -744,7 +794,10 @@ def whois_display(whois_data: dict | None) -> dict:
     if covering:
         out["Registration of"] = covering
     for key, label in _WHOIS_ROWS:
-        text = _whois_value(key, whois_data.get(key))
+        if key == "status":
+            text = _status_text(whois_data)
+        else:
+            text = _whois_value(key, whois_data.get(key))
         if text and text != DASH:
             out[label] = text
     return out
@@ -894,7 +947,7 @@ def reputation_view(reputation: dict | None) -> dict | None:
     rows = [
         {
             "label": "Level",
-            "value": (level or "unknown").capitalize(),
+            "value": _level_text(level).capitalize(),
             "tone": _LEVEL_TONES.get(level, "default" if level else "muted"),
         }
     ]

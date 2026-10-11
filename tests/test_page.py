@@ -1041,3 +1041,84 @@ class TestSubdomainRegistration:
         assert '<td>Registration of</td><td colspan="3">example.com</td>' in html
         assert "not registered" not in html
         assert "no registration record" not in html
+
+
+class TestWhoisColumnWording:
+    # gather()'s shape for an IP whose RIR answered: the WHOIS column reads it.
+    GATHERED_IP = {
+        "address": "8.8.8.8",
+        "domain": {},
+        "location": {"country_code": "US", "country_name": "United States"},
+        "whois": {
+            "source": "rdap",
+            "name": "GOGL",
+            "registrant": "Google LLC",
+            "network": "8.8.8.0/24",
+            "rir": "arin",
+            "status": ["active"],
+        },
+        "ssl": None,
+        "resolved_ip": "8.8.8.8",
+        "reverse_dns": None,
+    }
+
+    def test_a_found_record_is_not_called_available(self):
+        """The column's Status is the lookup's, and "available" beside an
+        address or a name reads as "available to register", so it says what
+        the lookup did. The accordion keeps an IP allocation's own word."""
+        with patch(
+            "main.gather", new_callable=AsyncMock, return_value=self.GATHERED_IP
+        ):
+            html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        assert 'class="kv-value tone-success">record found<' in html
+        assert ">available<" not in html
+        assert '<td>Status</td><td colspan="3">active</td>' in html
+
+
+class TestThePageGlossesAndTheJsonDoesNot:
+    """The item's contract in one place: the page rewords a domain's registry
+    status and the reputation level, and the JSON API keeps both as they were
+    (whois.status in the registry's spelling, reputation.level `none`)."""
+
+    PORT43 = "clientTransferProhibited https://icann.org/epp#clientTransferProhibited"
+    GATHERED_DOMAIN = {
+        **GATHERED,
+        "whois": {
+            "source": "whois",
+            "name": "example.com",
+            "registrar": "Example Registrar",
+            "status": [PORT43],
+        },
+        "reputation": {
+            "level": "none",
+            "signals": [],
+            "checked": [
+                {
+                    "id": "tor_exit",
+                    "label": "Tor exit",
+                    "source": "Tor Project",
+                    "as_of": "2026-10-09T06:13:20Z",
+                }
+            ],
+            "unavailable": [],
+            "attribution": [],
+        },
+    }
+
+    def test_the_page_rewords_and_the_json_does_not(self):
+        with patch(
+            "main.gather",
+            new_callable=AsyncMock,
+            return_value=dict(self.GATHERED_DOMAIN),
+        ):
+            html = client.get("/example.com", headers=BROWSER_UA).text
+            body = client.get("/example.com", headers=JSON_UA).json()
+        assert (
+            '<td>Status</td><td colspan="3">clientTransferProhibited — transfer '
+            "lock set by the registrar (a common setting)</td>"
+        ) in html
+        assert 'class="tone-default">No signals<' in html
+        assert ">None<" not in html
+        assert body["whois"]["status"] == [self.PORT43]
+        assert "status_explained" not in body["whois"]
+        assert body["reputation"]["level"] == "none"

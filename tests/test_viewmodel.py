@@ -1,10 +1,11 @@
 import datetime
 
-from rdap import normalize_whois
+from rdap import _normalize_rdap_domain, _normalize_rdap_ip, normalize_whois
 from viewmodel import (
     build_view,
     country_flag,
     format_distance,
+    reputation_view,
     ssl_rows,
     whois_display,
     whois_fill,
@@ -496,7 +497,10 @@ class TestWhoisDisplay:
         assert list(out)[0] == "Registration of"
         assert out["Registration of"] == "example.com"
         assert out["Name"] == "example.com"
-        assert out["Status"] == "client transfer prohibited"
+        assert out["Status"] == (
+            "clientTransferProhibited — transfer lock set by the registrar "
+            "(a common setting)"
+        )
 
     def test_the_names_own_record_has_no_such_row(self):
         record = {
@@ -824,7 +828,7 @@ class TestWhoisNotRegistered:
         assert failed["tone"] == "warning"
 
         ok = self._status({"registrar": "Example Registrar"})
-        assert ok["value"] == "available"
+        assert ok["value"] == "record found"  # the lookup's status, not the name's
         assert ok["tone"] == "success"
 
 
@@ -922,7 +926,9 @@ class TestWhoisThinRecord:
     def test_the_facts_column_has_a_fourth_state(self):
         thin = self._status(THIN_RECORD)
         assert (thin["value"], thin["tone"]) == ("no details", "muted")
-        assert self._status({"registrar": "Example Registrar"})["value"] == "available"
+        assert (
+            self._status({"registrar": "Example Registrar"})["value"] == "record found"
+        )
         assert self._status({"error": "not registered"})["value"] == "not registered"
         failed = self._status({"error": "WHOIS lookup timed out"})
         assert (failed["value"], failed["tone"]) == ("unavailable", "warning")
@@ -938,3 +944,185 @@ class TestWhoisThinRecord:
             "value": "no details",
             "tone": "muted",
         }
+
+
+class TestStatusRow:
+    """Two vocabularies reach the Status row -- RFC 8056's words from RDAP and
+    ICANN's port-43 line from python-whois -- and neither says what a code
+    means. Both render as the EPP code with its meaning."""
+
+    PORT43 = "clientTransferProhibited https://icann.org/epp#clientTransferProhibited"
+    GLOSSED = (
+        "clientTransferProhibited — transfer lock set by the registrar "
+        "(a common setting)"
+    )
+
+    def test_rdap_and_port_43_read_the_same(self):
+        via_rdap = _normalize_rdap_domain(
+            {"name": "x.com", "status": ["client transfer prohibited"]}, "x.com"
+        )
+        via_port43 = normalize_whois(
+            {"domain_name": "x.com", "status": [self.PORT43]}, "x.com"
+        )
+        assert whois_display(via_rdap)["Status"] == self.GLOSSED
+        assert whois_display(via_port43)["Status"] == self.GLOSSED
+
+    def test_a_registry_specific_word_shows_as_itself(self):
+        # DENIC answers "connect"; no table knows it, so it is not reworded.
+        record = normalize_whois(
+            {"domain_name": "heise.de", "status": "connect"}, "heise.de"
+        )
+        assert whois_display(record)["Status"] == "connect"
+
+    def test_several_codes_are_separated_by_semicolons(self):
+        record = {
+            "registrar": "Example Registrar",
+            "status": ["client hold", "server transfer prohibited"],
+        }
+        status = whois_display(record)["Status"]
+        assert status.startswith("clientHold — ")
+        assert "; serverTransferProhibited — transfer lock set by the registry" in (
+            status
+        )
+
+    def test_an_ip_allocations_status_is_not_an_epp_code(self):
+        # RIR RDAP says "active" of a network. Folded to EPP's "ok" and glossed
+        # with domain semantics it would be wrong, so an IP record keeps its
+        # words: the record has no registrar key, which is how it is told.
+        record = _normalize_rdap_ip(
+            {"name": "GOGL", "status": ["active"], "rir": "arin"}, "8.8.8.8"
+        )
+        assert whois_display(record)["Status"] == "active"
+
+    def test_the_other_rows_are_untouched(self):
+        record = _normalize_rdap_domain(
+            {
+                "name": "x.com",
+                "status": ["client hold"],
+                "nameservers": ["ns1.x.com", "ns2.x.com"],
+            },
+            "x.com",
+        )
+        out = whois_display(record)
+        assert out["Name servers"] == "ns1.x.com, ns2.x.com"
+        assert out["Source"] == "RDAP"
+
+
+class TestStatusTag:
+    """A hold or a pending delete is the one registry status a visitor needs
+    to see before opening the WHOIS accordion: the name is out of the DNS or
+    about to be dropped. The tag is the code, which the accordion glosses."""
+
+    @staticmethod
+    def _view(status, reputation=None):
+        # ssl=None: the fixture certificate has expired since it was written,
+        # and its "TLS expired" tag would be a second danger tag here.
+        whois = dict(DOMAIN_RESPONSE["whois"], status=status)
+        response = dict(DOMAIN_RESPONSE, whois=whois, ssl=None)
+        if reputation is not None:
+            response["reputation"] = reputation
+        return build_view(response, is_self=False)
+
+    def test_a_hold_earns_one_danger_tag_named_for_the_code(self):
+        assert {"text": "clientHold", "tone": "danger"} in self._view(["client hold"])[
+            "tags"
+        ]
+
+    def test_two_danger_codes_share_the_one_tag(self):
+        tags = self._view(["clientHold", "pending delete", "ok"])["tags"]
+        assert {"text": "clientHold · pendingDelete", "tone": "danger"} in tags
+        assert sum(tag["tone"] == "danger" for tag in tags) == 1
+
+    def test_a_lock_or_an_unknown_word_earns_no_tag(self):
+        for status in (["client transfer prohibited"], ["connect"], [], None):
+            tags = self._view(status)["tags"]
+            assert all(tag["tone"] != "danger" for tag in tags), status
+
+    def test_an_ip_target_never_gets_one(self):
+        # The hero's IP branch returns before any registry status is read: an
+        # allocation's own words, and even a record that would earn the tag on
+        # a domain page, earn none here.
+        for whois in (
+            {"source": "rdap", "name": "GOGL", "rir": "arin", "status": ["active"]},
+            {"source": "rdap", "registrar": "x", "status": ["server hold"]},
+        ):
+            view = build_view(dict(IP_RESPONSE, whois=whois), is_self=True)
+            assert all(tag["tone"] != "danger" for tag in view["tags"]), whois
+
+    def test_the_tag_is_not_a_reputation_signal(self):
+        # reputation.grade() sums the weights of `signals`; a hold is not one,
+        # so the card, its level and the list's own tag read the same with and
+        # without it.
+        tor = {
+            "id": "tor_exit",
+            "label": "Tor exit",
+            "source": "Tor Project",
+            "as_of": "2026-10-09T06:13:20Z",
+        }
+        reputation = {
+            "level": "medium",
+            "signals": [dict(tor, weight=50)],
+            "checked": [tor],
+            "unavailable": [],
+            "attribution": [],
+        }
+        held = self._view(["server hold"], reputation)
+        plain = self._view(["ok"], reputation)
+        assert {"text": "serverHold", "tone": "danger"} in held["tags"]
+        assert {"text": "Tor exit", "tone": "warning"} in plain["tags"]
+        assert held["reputation"] == plain["reputation"]
+        assert held["reputation"]["rows"][0]["value"] == "Medium"
+        assert [t for t in held["tags"] if t["text"] != "serverHold"] == plain["tags"]
+
+    def test_the_link_preview_does_not_change(self):
+        # _summary() reads only the TLS tags off the hero.
+        assert "serverHold" not in self._view(["server hold"])["description"]
+
+
+class TestReputationLevelWording:
+    """The Level row said "None" for reputation.LEVELS[0], which beside
+    "Listed on 1 of 5 lists" (an informational datacenter listing) reads as
+    "no level at all". The JSON keeps the word `none`; only the card changes."""
+
+    TOR = {
+        "id": "tor_exit",
+        "label": "Tor exit",
+        "source": "Tor Project",
+        "as_of": "2026-10-09T06:13:20Z",
+    }
+    DATACENTER = {
+        "id": "datacenter",
+        "label": "Datacenter",
+        "source": "X4BNet lists_vpn",
+        "as_of": "2026-10-09T06:13:20Z",
+    }
+
+    def _card(self, level, signals=()):
+        return reputation_view(
+            {
+                "level": level,
+                "signals": list(signals),
+                "checked": [] if level is None else [self.TOR, self.DATACENTER],
+                "unavailable": [],
+                "attribution": [],
+            }
+        )
+
+    def test_none_reads_as_no_signals(self):
+        card = self._card("none", [dict(self.DATACENTER, weight=0)])
+        assert card["rows"][0] == {
+            "label": "Level",
+            "value": "No signals",
+            "tone": "default",
+        }
+        assert card["summary"].startswith("Listed on 1 of the 2 lists checked")
+
+    def test_no_list_read_is_still_unknown(self):
+        card = self._card(None)
+        assert card["rows"][0]["value"] == "Unknown"
+        assert card["rows"][0]["tone"] == "muted"
+
+    def test_graded_levels_are_unchanged(self):
+        card = self._card("medium", [dict(self.TOR, weight=50)])
+        assert card["rows"][0]["value"] == "Medium"
+        assert card["rows"][0]["tone"] == "warning"

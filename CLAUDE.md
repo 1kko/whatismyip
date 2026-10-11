@@ -122,6 +122,15 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   failures. `refresh_rdap_bootstrap` saves and clears a week-old registry so
   whoisit actually fetches again, restores the saved copy on failure, and
   holds `_bootstrap_lock` while using the configured no-retry session.
+- `eppstatus.py`: the EPP status vocabulary, standard library only. `epp_code`
+  folds the three spellings a registry uses (RFC 8056's "client transfer
+  prohibited" from RDAP, ICANN's port-43 line "clientTransferProhibited
+  https://icann.org/epp#…" from python-whois, the bare camelCase code) to one
+  EPP code and passes anything else ("connect") through verbatim;
+  `STATUS_MEANINGS` is code → (one-line meaning, tone), with `danger` kept to
+  `clientHold`, `serverHold`, `pendingDelete` and `redemptionPeriod`;
+  `explain_status` is the `[{code, meaning, severity}]` list. `rdap.py` keeps
+  `status` raw; the fold happens where a status is rendered or explained.
 - `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of
   `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
 - `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
@@ -191,12 +200,16 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `subdomains.get_subdomains()` (registered only under `SUBDOMAIN_ENABLED`),
   and `whoami_caller` over `lookup.lookup_location()` and
   `lookup.ip_reputation()`. Each reshapes its data for an LLM context (the
-  `compact_*` functions). `build_mcp`, `McpDispatch`, `McpBarePathRoute` and
-  `McpDisabled` are the mount plumbing `main.py` wires.
+  `compact_*` functions). `compact_registration` adds `status_explained`
+  (`eppstatus.explain_status`: `[{code, meaning, severity}]`) beside a domain's
+  raw `status`; an IP allocation, an error and `registered: false` carry none.
+  A new output key is not a listing change, so `server.json` is not bumped for
+  it. `build_mcp`, `McpDispatch`, `McpBarePathRoute` and `McpDisabled` are the
+  mount plumbing `main.py` wires.
 - `viewmodel.py`: `build_view()` turns a response dict into what
   `templates/browser.html` renders. Pure, with no I/O, and it imports only
-  `config`, `reputation.grade` and the standard library, so `mcp_server.py`
-  reuses its certificate helpers without a cycle.
+  `config`, `eppstatus`, `reputation.grade` and the standard library, so
+  `mcp_server.py` reuses its certificate helpers without a cycle.
 - `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
   and `coordinate_precision`, the one `city`/`country` rule for a fix.
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
@@ -387,6 +400,18 @@ The page says `no details`, MCP adds `thin` and a note, and flat registration
 fields stay `-`. Thin records are cached for `WHOIS_CACHE_ERROR_TTL` (5 min)
 so a registry can be retried; full records retain the 6-hour TTL.
 
+A record's `status` stays the registry's own words; the page folds them with
+`eppstatus.explain_status` (`viewmodel._status_text`, `viewmodel._status_tags`).
+A domain's codes render as `clientTransferProhibited — transfer lock set by the
+registrar (a common setting)`, several joined with `; `, a code outside RFC 8056
+(`connect`) as itself, and a `danger` code (`clientHold`, `serverHold`,
+`pendingDelete`, `redemptionPeriod`) earns one red hero tag named for the code
+(`clientHold · pendingDelete` when there are two). A record without a
+`registrar` key is an IP allocation, whose RDAP words (`active`) are not EPP
+codes and are shown as they are. The tag is not a reputation signal:
+`reputation.grade` never sees it, and `_summary()` (link previews) reads only
+the TLS tags.
+
 #### Error Handling
 
 - A registration failure is `{"error": "..."}` in the response, never a 500
@@ -497,6 +522,7 @@ whatismyip/
 ├── managers.py          # GeoIp / TldNames / Domain / SSL / Header managers
 ├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking
 ├── rdap.py              # RDAP-first registration lookups + WHOIS normalisation, breaker
+├── eppstatus.py         # EPP status codes: one spelling (epp_code), a meaning and tone per code
 ├── models.py            # GeoRulesUpdate, the one Pydantic model
 ├── lookup.py            # transport-agnostic lookup pipeline (gather()), manager singletons
 ├── concurrency.py       # lookup gate (503 when full) + RDAP/WHOIS and crt.sh pools
@@ -674,6 +700,11 @@ stale (over `REPUTATION_MAX_AGE_HOURS`), missing or family-mismatched list is in
 `unavailable` with its reason, never silently dropped. The page, the MCP tool
 descriptions and `?fields=risk_level` (which stays out of the text block) all
 keep that distinction. The service's own ban list is never a signal.
+The page's Level row prints `none` as "No signals" and null as "Unknown"
+(`viewmodel._level_text`); the JSON, MCP and `?fields=risk_level` keep the word
+`none`. Likewise the WHOIS facts column says "record found", never "available",
+for a lookup that found a record: "available" beside a name reads as "available
+to register".
 
 **Tests.** `tests/conftest.py` sets `REPUTATION_ENABLED=false`, so no test can
 make a Spamhaus download (even one that starts a real scheduler) and every other
@@ -812,7 +843,8 @@ Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
   tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering),
   `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
-  forced bootstrap refresh behavior, JSContact names, thin records),
+  forced bootstrap refresh behavior, JSContact names, thin records, EPP status
+  codes in `eppstatus`),
   `test_managers.py` (GeoLite2 lookups, the country fallback, database
   sources and status, `TldNamesManager`, `is_valid_domain`), `test_lookup.py`
   (target normalisation, `is_safe_ip`, `gather()`), `test_subdomains.py`

@@ -56,6 +56,11 @@ RDAP registration data and the full TLS certificate, expanded.
   Both sources are normalised to one shape and cached for 6 hours (5 minutes
   for a failure). An IP address has no WHOIS fallback. An RDAP server that fails
   three times in a row is skipped for 10 minutes.
+  The page reads a domain's status codes out, whichever spelling the registry
+  used: `clientTransferProhibited` is "transfer lock set by the registrar (a
+  common setting)". A hold or pending delete (`clientHold`, `serverHold`,
+  `pendingDelete`, `redemptionPeriod`) is one red tag on the hero. The JSON's
+  `whois.status` keeps the registry's own words.
   A hostname such as `www.github.com` gets the registration that covers it,
   `github.com`'s, with `queried_name` and `registrable_domain` identifying both
   names. `not registered` therefore means the registrable domain has no record.
@@ -944,7 +949,7 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. |
+| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way. |
@@ -1351,6 +1356,7 @@ whatismyip/
 ├── managers.py          # GeoIP / suffix list / DNS / TLS / header managers
 ├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking
 ├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
+├── eppstatus.py         # EPP status codes: one spelling, a meaning per code
 ├── lookup.py            # transport-agnostic lookup pipeline (gather())
 ├── concurrency.py       # lookup concurrency gate and slow-leg thread pools
 ├── textfmt.py           # ?format=text and ?fields=
