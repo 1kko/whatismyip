@@ -14,11 +14,14 @@ import copy
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import dns.resolver
 import pytest
 from fastapi.testclient import TestClient
 
 import lookup
 import main
+import managers
+import textfmt
 from main import app
 
 CLIENT_IP = "8.8.8.8"
@@ -464,6 +467,264 @@ class TestFieldsOutput:
         assert response.status_code == 400
         assert "\x1b" not in response.text
         assert response.text.count("\n") == 1
+
+
+TIMEOUT = dns.resolver.LifetimeTimeout(timeout=3.0, errors=[])
+
+
+class TestAFailedAQueryIsAQuestionMark:
+    """`-` says the name has no address; a resolver that never answered says
+    nothing of the kind, and neither does anything read from that address."""
+
+    def test_the_block_marks_every_field_read_from_the_address(self):
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = TIMEOUT
+            # What SSLManager.get_ssl_info answers with no verified address.
+            mocks["ssl"].return_value = None
+            response = client.get("/example.com?format=text", headers=CURL)
+        assert response.status_code == 200
+        block = _block(response)
+        assert [key for key, _ in block] == DOMAIN_KEYS
+        values = dict(block)
+        assert values["target"] == "example.com"
+        assert values["ip"] == "?"
+        for name in (
+            "country_code",
+            "country_name",
+            "city",
+            "asn_number",
+            "asn_name",
+            "cidr",
+        ):
+            assert values[name] == "?", name
+        for name in ("cert_issuer", "cert_expires", "cert_days_remaining"):
+            assert values[name] == "?", name
+        # The registry is asked about the name, not the address.
+        assert values["registrar"] == "Example Registrar"
+        assert values["registrant"] == "Example Org"
+        assert values["domain_expires"] == "2027-07-31"
+        mocks["ssl"].assert_called_once_with("example.com", None)
+
+    @pytest.mark.parametrize(
+        ("status", "exc"),
+        [
+            ("timeout", TIMEOUT),
+            ("servfail", dns.resolver.NoNameservers()),
+            ("error", OSError("network is unreachable")),
+        ],
+    )
+    def test_json_is_null_with_the_status_as_the_reason(self, status, exc):
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = exc
+            mocks["ssl"].return_value = None
+            response = client.get(
+                "/example.com?fields=ip,cert_days_remaining", headers=CURL
+            )
+        assert response.json() == {
+            "ip": None,
+            "cert_days_remaining": None,
+            "errors": {"ip": status, "cert_days_remaining": status},
+        }
+
+    def test_the_registration_is_untouched(self):
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = TIMEOUT
+            response = client.get("/example.com?fields=registrar,ip", headers=CURL)
+        assert response.json() == {
+            "registrar": "Example Registrar",
+            "ip": None,
+            "errors": {"ip": "timeout"},
+        }
+
+    @pytest.mark.parametrize("answer", [dns.resolver.NXDOMAIN, dns.resolver.NoAnswer])
+    def test_a_name_with_no_address_is_still_a_dash(self, answer):
+        """The reverse of "a failure is not an empty list": an answer must not
+        be dressed up as a failure."""
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = answer
+            mocks["ssl"].return_value = None
+            text = client.get("/example.com?format=text", headers=CURL)
+            body = client.get(
+                "/example.com?fields=ip,country_code,cert_issuer", headers=CURL
+            ).json()
+        values = dict(_block(text))
+        assert values["ip"] == "-"
+        assert values["country_code"] == "-"
+        assert values["cert_issuer"] == "-"
+        assert body == {"ip": None, "country_code": None, "cert_issuer": None}
+
+    def test_a_timed_out_aaaa_fallback_is_a_failure_too(self):
+        """A said "no record", which sends gather() to AAAA; AAAA never
+        answered, so the address is unknown, not absent."""
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = [
+                dns.resolver.NoAnswer(),
+                TIMEOUT,
+            ]
+            mocks["ssl"].return_value = None
+            response = client.get("/example.com?fields=ip", headers=CURL)
+        assert response.json() == {"ip": None, "errors": {"ip": "timeout"}}
+
+    def test_an_ip_target_and_the_self_route_are_never_marked(self):
+        """An IP's resolution is "literal", and / has none."""
+        with _legs():
+            by_ip = client.get("/8.8.8.8?fields=ip,country_code", headers=CURL)
+            own = client.get("/?fields=ip,country_code", headers=CURL)
+        assert by_ip.json() == {"ip": "8.8.8.8", "country_code": "US"}
+        assert own.json() == {"ip": CLIENT_IP, "country_code": "US"}
+
+    def test_a_field_from_the_record_sweep_keeps_its_own_answer(self, monkeypatch):
+        """The record sweep asks about the name, not the address, and each
+        record type carries its own status: a failed A query leaves a field
+        read from the sweep to that status. No such field exists yet, so a
+        stand-in entry holds the rule for the first one."""
+        monkeypatch.setitem(
+            textfmt.FIELDS, "sweep_only", (frozenset({"dns"}), frozenset({"domain"}))
+        )
+        _, errors = textfmt.field_values(
+            {"address": "example.com", "resolution": "timeout"}, "domain"
+        )
+        assert errors["ip"] == "timeout"
+        assert "sweep_only" not in errors
+
+
+UNREACHABLE = {"error": "port 443 unreachable", "reason": "connection refused"}
+# What mcp_server._tls_failure makes of managers.TLS_SKIPPED_IPV6.
+V6_SKIPPED = "TLS not checked (IPv6-only host; this server has no IPv6 connectivity)"
+
+
+class TestAFailedTlsLegIsAQuestionMark:
+    """A port that never answered is not a host serving no certificate."""
+
+    def test_the_block_marks_the_certificate_fields_only(self):
+        with _legs() as mocks:
+            mocks["ssl"].return_value = dict(UNREACHABLE)
+            response = client.get("/example.com?format=text", headers=CURL)
+        values = dict(_block(response))
+        assert values["ip"] == DOMAIN_IP
+        assert values["country_code"] == "US"
+        assert values["registrar"] == "Example Registrar"
+        assert values["cert_issuer"] == "?"
+        assert values["cert_expires"] == "?"
+        assert values["cert_days_remaining"] == "?"
+
+    @pytest.mark.parametrize(
+        ("ssl", "reason"),
+        [
+            (UNREACHABLE, "port 443 unreachable (connection refused)"),
+            (
+                {"error": "TLS handshake failed", "reason": "timed out"},
+                "TLS handshake failed (timed out)",
+            ),
+            # Not attempted rather than failed, but the certificate is just as
+            # unknown: the contract's "?".
+            (managers.TLS_SKIPPED_IPV6, V6_SKIPPED),
+            # get_ssl_info's catch-all carries no reason, so no parentheses.
+            ({"error": "TLS lookup failed"}, "TLS lookup failed"),
+        ],
+    )
+    def test_json_carries_the_mcp_tools_wording(self, ssl, reason):
+        """The same words as the MCP ssl_certificate tool's error."""
+        with _legs() as mocks:
+            mocks["ssl"].return_value = dict(ssl)
+            response = client.get(
+                "/example.com?fields=ip,cert_issuer,cert_days_remaining", headers=CURL
+            )
+        assert response.json() == {
+            "ip": DOMAIN_IP,
+            "cert_issuer": None,
+            "cert_days_remaining": None,
+            "errors": {"cert_issuer": reason, "cert_days_remaining": reason},
+        }
+
+    def test_an_untrusted_certificate_is_still_an_answer(self):
+        """A certificate that failed verification was read: its issuer and
+        expiry are values, not "?". Whether it is trusted is for the full JSON
+        and the MCP tool to say."""
+        untrusted = {
+            **copy.deepcopy(CERT),
+            "trusted": False,
+            "verify_error": {
+                "code": 20,
+                "message": "unable to get local issuer certificate",
+                "reason": "chain_incomplete",
+            },
+            "hostname_match": True,
+        }
+        with _legs() as mocks:
+            mocks["ssl"].return_value = untrusted
+            response = client.get(
+                "/example.com?fields=cert_issuer,cert_expires", headers=CURL
+            )
+        assert response.json() == {
+            "cert_issuer": "Let's Encrypt",
+            "cert_expires": "2099-11-09",
+        }
+
+    def test_no_handshake_attempted_is_still_a_dash(self):
+        """None from get_ssl_info: there was no address to connect to. On /,
+        cert_* does not apply at all."""
+        with _legs() as mocks:
+            mocks["ssl"].return_value = None
+            domain = client.get(
+                "/example.com?fields=cert_issuer,cert_expires", headers=CURL
+            )
+            own = client.get("/?fields=cert_issuer&format=text", headers=CURL)
+        assert domain.json() == {"cert_issuer": None, "cert_expires": None}
+        assert own.text == "-\n"
+        assert _ran(mocks) == {"resolver", "ssl"}
+
+
+class TestResolutionField:
+    """`?fields=resolution`: why `ip` is "?" (or "-"), by name only."""
+
+    def test_it_says_how_the_a_query_ended(self):
+        with _legs() as mocks:
+            response = client.get("/example.com?fields=ip,resolution", headers=CURL)
+        assert response.json() == {"ip": DOMAIN_IP, "resolution": "ok"}
+        assert _ran(mocks) == {"resolver"}
+
+    def test_it_is_the_reason_behind_a_question_mark_not_one_itself(self):
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = TIMEOUT
+            body = client.get("/example.com?fields=ip,resolution", headers=CURL).json()
+            text = client.get(
+                "/example.com?fields=ip,resolution&format=text", headers=CURL
+            ).text
+        assert body == {
+            "ip": None,
+            "resolution": "timeout",
+            "errors": {"ip": "timeout"},
+        }
+        assert text == "?\ntimeout\n"
+
+    def test_a_name_with_no_address_says_so_without_an_error(self):
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = dns.resolver.NXDOMAIN
+            response = client.get("/example.com?fields=ip,resolution", headers=CURL)
+        assert response.json() == {"ip": None, "resolution": "nxdomain"}
+
+    def test_it_is_not_in_the_text_block(self):
+        with _legs():
+            response = client.get("/example.com?format=text", headers=CURL)
+        assert [key for key, _ in _block(response)] == DOMAIN_KEYS
+        assert textfmt.block_fields("domain") == DOMAIN_KEYS
+
+    def test_an_ip_and_the_self_route_answer_a_dash_for_nothing(self):
+        """An IP's "literal" is not shown: the field is a domain's, and a
+        field that does not apply to the target is "-" whatever gather()
+        left in the dict."""
+        with _legs() as mocks:
+            by_ip = client.get("/8.8.8.8?fields=resolution&format=text", headers=CURL)
+            own = client.get("/?fields=resolution&format=text", headers=CURL)
+        assert by_ip.text == "-\n"
+        assert own.text == "-\n"
+        assert _ran(mocks) == set()
+
+    def test_it_is_named_among_the_valid_fields(self):
+        with _legs():
+            response = client.get("/example.com?fields=bogus", headers=CURL)
+        assert "resolution" in response.json()["error"]
 
 
 class TestFieldsRunOnlyTheirLegs:

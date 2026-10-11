@@ -20,7 +20,7 @@ from mcp_server import (
     compact_reputation,
     compact_ssl,
 )
-from viewmodel import DASH
+from viewmodel import DASH, DNS_FAILURE_TEXT
 
 _BOTH = frozenset({"domain", "ip"})
 _DOMAIN = frozenset({"domain"})
@@ -34,6 +34,10 @@ _IP = frozenset({"ip"})
 FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "target": (frozenset(), _BOTH),
     "ip": (frozenset({"resolve"}), _BOTH),
+    # How the A query ended, so a "?" ip can be read: the gather() resolution
+    # ("ok", "nxdomain", "noanswer", "timeout", "servfail", "error"). A
+    # domain's only; an IP's "literal" says nothing, and / has none.
+    "resolution": (frozenset({"resolve"}), _DOMAIN),
     "reverse_dns": (frozenset({"ptr"}), _IP),
     "country_code": (frozenset({"geo"}), _BOTH),
     "country_name": (frozenset({"geo"}), _BOTH),
@@ -57,15 +61,26 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
 # among the other lines reads as a clean bill, which the lists cannot give; a
 # script that asks for it knows what it asked for. With REPUTATION_ENABLED=false
 # all three read "-", and abuse_score does without ABUSEIPDB_API_KEY too.
+# resolution stays out too: the block already says "?" where it matters, and
+# "resolution: ok" is one more line for every reader to skip.
 _RISK_FIELDS = ("risk_level", "risk_signals")
-_NOT_IN_BLOCK = frozenset({*_RISK_FIELDS, "abuse_score"})
+_NOT_IN_BLOCK = frozenset({*_RISK_FIELDS, "abuse_score", "resolution"})
 
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires")
 
+# The legs that ask about the name, never the address it resolves to: the
+# registry (whois) and the record sweep (dns), whose record types each carry
+# their own status. A gating A query that failed leaves their answers
+# standing; every other leg reads the address, and is unknown without one.
+_NAME_LEGS = frozenset({"whois", "dns"})
+
 # Text placeholders. "-" is an answer: there is no such value, or the field
 # does not apply to this target. "?" is not: the lookup behind the value
-# failed, so whether there is one is unknown. Only a failed WHOIS/RDAP lookup
-# can be told apart today; a DNS or TLS failure still reads as "-".
+# failed, so whether there is one is unknown. field_values() tells them apart:
+# a registration lookup that broke, a gating A query that ended in a
+# managers.DNS_FAILURES status (every field read from the address), a TLS leg
+# that read no certificate (the cert_* fields), a reputation list that could
+# not be checked. nxdomain and noanswer are answers, and stay "-".
 MISSING = "-"
 UNKNOWN = "?"
 
@@ -154,6 +169,7 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     values = {
         "target": data.get("address"),
         "ip": data.get("resolved_ip"),
+        "resolution": data.get("resolution"),
         "reverse_dns": data.get("reverse_dns"),
         "country_code": geo["country_code"],
         "country_name": geo["country_name"],
@@ -172,20 +188,36 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "risk_signals": ",".join(s["id"] for s in reputation.get("signals") or []),
         "abuse_score": (reputation.get("abuseipdb") or {}).get("abuse_confidence"),
     }
-    # The certificate helpers answer the page, which shows an em dash for "none".
+    # The certificate helpers answer the page, which shows an em dash for
+    # "none"; and a field that does not apply to the target is "-" whatever the
+    # lookup left in the dict (an IP's resolution is "literal").
     values = {
-        name: None if value == "" or value == DASH else value
+        name: None
+        if value == "" or value == DASH or kind not in FIELDS[name][1]
+        else value
         for name, value in values.items()
     }
+    errors: dict[str, str] = {}
+    # The gating A query failed (timeout, SERVFAIL, an error dnspython could
+    # not name: the keys of DNS_FAILURE_TEXT, viewmodel's mirror of
+    # managers.DNS_FAILURES), so the name has no address to go on: the address,
+    # GeoIP, the certificate and the reputation are unknown, not empty. Chosen
+    # by leg, so a field added to FIELDS later follows the rule: every field
+    # that needs a leg reading the address (any but _NAME_LEGS) and applies to
+    # the target. resolution itself is the reason and stays readable. nxdomain
+    # and noanswer are answers, and reach here as "-".
+    resolution = data.get("resolution")
+    if resolution in DNS_FAILURE_TEXT:
+        for name, (legs, kinds) in FIELDS.items():
+            if name != "resolution" and kind in kinds and legs - _NAME_LEGS:
+                errors[name] = str(resolution)
     # compact_registration reports "not registered" as registered: false, not
     # as an error, so only a lookup that broke lands here. A field that does
     # not apply to the target stays "-" whatever happened to the lookup.
     error = registration.get("error")
-    errors = {
-        name: str(error)
-        for name in _REGISTRATION_FIELDS
-        if error and kind in FIELDS[name][1]
-    }
+    for name in _REGISTRATION_FIELDS:
+        if error and kind in FIELDS[name][1]:
+            errors[name] = str(error)
     # No list could be read: the level is unknown, not "none".
     if reputation and reputation.get("level") is None:
         for name in _RISK_FIELDS:
@@ -194,6 +226,17 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     for entry in reputation.get("could_not_check") or []:
         if entry["list"] == "AbuseIPDB" and kind in FIELDS["abuse_score"][1]:
             errors["abuse_score"] = entry["reason"]
+    # No certificate was read: port 443 never answered, the handshake never
+    # completed, or the host is IPv6-only and this server has no route to try
+    # (managers.TLS_SKIPPED_IPV6). Whether there is one is unknown, so every
+    # tls field is "?", worded as the MCP ssl_certificate tool words it
+    # (compact_ssl already built it). None from get_ssl_info -- no address, so
+    # no handshake was attempted -- is not in `tls` at all and stays "-".
+    tls_error = tls.get("error")
+    if tls_error:
+        for name, (legs, kinds) in FIELDS.items():
+            if "tls" in legs and kind in kinds:
+                errors[name] = str(tls_error)
     return values, errors
 
 
