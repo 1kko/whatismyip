@@ -171,6 +171,8 @@ else:
     app.add_route("/mcp", _mcp_disabled, include_in_schema=False)
     app.mount("/mcp", _mcp_disabled)
 templates = Jinja2Templates(directory="templates")
+# The stylesheet URL carries the deployed commit, so a deploy busts its cache.
+templates.env.globals["APP_VERSION"] = APP_VERSION
 
 # Configure logging
 log_formatter = logging.Formatter(

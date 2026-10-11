@@ -579,7 +579,7 @@ class TestErrorPageMarkup:
         assert " style=" not in page.text
 
     def test_it_shares_the_page_assets(self, page):
-        assert 'href="/static/css/whatismyip.css"' in page.text
+        assert f'href="/static/css/whatismyip.css?v={main.APP_VERSION}"' in page.text
         assert 'src="/static/js/app.js"' in page.text
         assert 'href="/static/favicon.ico"' in page.text
 

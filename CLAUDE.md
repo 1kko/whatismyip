@@ -819,7 +819,8 @@ A single stage on `python:3.12-slim`, pinned by digest:
    drop to the non-root `appuser`. A new top-level module ships on its own; a
    new top-level directory needs its own `COPY`
 4. `SOURCE_COMMIT` (build arg or Coolify's runtime env) becomes `/healthz`
-   `version` and OTel `service.version`
+   `version` and OTel `service.version`, and the three templates' stylesheet
+   URL carries it as `?v=` (`APP_VERSION`, a Jinja global set in `main.py`)
 5. `HEALTHCHECK` runs `healthcheck.py`; the entrypoint is
    `opentelemetry-instrument uvicorn main:app --host 0.0.0.0 --port 8000
    --no-server-header`, with no `--reload`
