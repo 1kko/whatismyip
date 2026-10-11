@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+import config
 import lookup
 import mcp_server
 from main import app, build_map_payload, normalize_lookup_target
@@ -739,6 +740,13 @@ class TestBrowserPage:
         assert "IPv4" in html  # a hero tag, rendered above the address
         assert "NETWORK" in html
         assert "Raw JSON" in html
+
+    def test_the_stylesheet_url_carries_the_deployed_version(self):
+        """A deploy changes the query, so a returning browser fetches the new
+        stylesheet instead of reusing its cached copy."""
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        hrefs = re.findall(r'<link rel="stylesheet" href="([^"]+)"', html)
+        assert hrefs == [f"/static/css/whatismyip.css?v={config.APP_VERSION}"]
 
     def test_no_inline_event_handlers(self):
         html = client.get("/", headers=BROWSER_UA).text

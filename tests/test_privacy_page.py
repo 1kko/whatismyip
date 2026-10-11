@@ -132,6 +132,11 @@ class TestRoute:
         assert 'id="lookup-form"' in html
         assert re.search(r'<script src="/static/js/app\.js" nonce="[^"]+"', html)
 
+    def test_the_stylesheet_url_carries_the_deployed_version(self):
+        html = client.get("/privacy", headers=CHROME).text
+        hrefs = re.findall(r'<link rel="stylesheet" href="([^"]+)"', html)
+        assert hrefs == [f"/static/css/whatismyip.css?v={config.APP_VERSION}"]
+
     def test_a_domain_that_starts_the_same_is_still_a_lookup(self, lookups):
         """The route is exact: privacy.com is somebody's domain."""
         client.get("/privacy.com", headers=CURL)
