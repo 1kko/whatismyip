@@ -122,6 +122,15 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   failures. `refresh_rdap_bootstrap` saves and clears a week-old registry so
   whoisit actually fetches again, restores the saved copy on failure, and
   holds `_bootstrap_lock` while using the configured no-retry session.
+- `eppstatus.py`: the EPP status vocabulary, standard library only. `epp_code`
+  folds the three spellings a registry uses (RFC 8056's "client transfer
+  prohibited" from RDAP, ICANN's port-43 line "clientTransferProhibited
+  https://icann.org/epp#…" from python-whois, the bare camelCase code) to one
+  EPP code and passes anything else ("connect") through verbatim;
+  `STATUS_MEANINGS` is code → (one-line meaning, tone), with `danger` kept to
+  `clientHold`, `serverHold`, `pendingDelete` and `redemptionPeriod`;
+  `explain_status` is the `[{code, meaning, severity}]` list. `rdap.py` keeps
+  `status` raw; the fold happens where a status is rendered or explained.
 - `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of
   `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
 - `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
@@ -497,6 +506,7 @@ whatismyip/
 ├── managers.py          # GeoIp / TldNames / Domain / SSL / Header managers
 ├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking
 ├── rdap.py              # RDAP-first registration lookups + WHOIS normalisation, breaker
+├── eppstatus.py         # EPP status codes: one spelling (epp_code), a meaning and tone per code
 ├── models.py            # GeoRulesUpdate, the one Pydantic model
 ├── lookup.py            # transport-agnostic lookup pipeline (gather()), manager singletons
 ├── concurrency.py       # lookup gate (503 when full) + RDAP/WHOIS and crt.sh pools
@@ -812,7 +822,8 @@ Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
   tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering),
   `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
-  forced bootstrap refresh behavior, JSContact names, thin records),
+  forced bootstrap refresh behavior, JSContact names, thin records, EPP status
+  codes in `eppstatus`),
   `test_managers.py` (GeoLite2 lookups, the country fallback, database
   sources and status, `TldNamesManager`, `is_valid_domain`), `test_lookup.py`
   (target normalisation, `is_safe_ip`, `gather()`), `test_subdomains.py`

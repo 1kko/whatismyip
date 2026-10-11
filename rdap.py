@@ -43,6 +43,12 @@ datetimes are left as datetime objects on purpose: FastAPI's jsonable_encoder
 serialises them to ISO-8601 for the JSON API, and viewmodel.whois_display()
 formats them for the browser table. On total failure the dict is {"error": ...}.
 
+`status` keeps each source's own words -- RFC 8056's ("client transfer
+prohibited") from RDAP, ICANN's port-43 line ("clientTransferProhibited
+https://icann.org/epp#...") from python-whois -- so the JSON API shows what the
+registry said. eppstatus.epp_code() folds them to one EPP code, and
+eppstatus.STATUS_MEANINGS glosses it, where a status is rendered or explained.
+
 The python-whois fallback is for domains only. Given an IP, python-whois
 resolves its PTR record and looks up the registration of that hostname's
 domain, so it would present the ISP's domain record as the address allocation;

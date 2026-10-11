@@ -18,6 +18,7 @@ import time
 import pytest
 import whoisit
 
+import eppstatus
 import lookup
 import main
 import rdap
@@ -619,6 +620,120 @@ class TestJscontactEntities:
         assert out["source"] == "rdap"
         assert out["registrar"] == "KISA"
         assert out["registrant"] == "Korea Internet & Security Agency"
+
+
+class TestEppCode:
+    """Three spellings of one status reach this service: RFC 8056's words from
+    RDAP, ICANN's port-43 line (the EPP code with its explanatory URL) from
+    python-whois, and the bare camelCase code some ccTLD registries print."""
+
+    def test_the_three_spellings_fold_to_one_code(self):
+        rdap_words = "client transfer prohibited"
+        port43 = (
+            "clientTransferProhibited https://icann.org/epp#clientTransferProhibited"
+        )
+        krnic = "clientTransferProhibited"
+        assert (
+            eppstatus.epp_code(rdap_words)
+            == eppstatus.epp_code(port43)
+            == eppstatus.epp_code(krnic)
+            == "clientTransferProhibited"
+        )
+
+    def test_the_url_goes_in_either_of_icanns_forms(self):
+        parenthesised = "clientHold (https://www.icann.org/epp#clientHold)"
+        assert eppstatus.epp_code(parenthesised) == "clientHold"
+
+    def test_the_two_pairs_whose_words_differ(self):
+        assert eppstatus.epp_code("active") == "ok"
+        assert eppstatus.epp_code("ok") == "ok"
+        assert eppstatus.epp_code("associated") == "linked"
+
+    def test_case_and_spacing_do_not_matter(self):
+        code = "clientTransferProhibited"
+        assert eppstatus.epp_code("CLIENT TRANSFER PROHIBITED") == code
+        assert eppstatus.epp_code("  server hold ") == "serverHold"
+
+    def test_a_registry_specific_word_passes_through_verbatim(self):
+        # DENIC, KRNIC and Nominet have vocabularies of their own, and RDAP has
+        # statuses outside EPP ("validated"); none is guessed at.
+        for word in ("connect", "REGISTERED", "validated"):
+            assert eppstatus.epp_code(word) == word
+
+
+class TestStatusMeanings:
+    def test_every_rfc_8056_code_has_a_meaning_and_only_those(self):
+        assert len(eppstatus.RFC8056) == 24
+        assert set(eppstatus.STATUS_MEANINGS) == set(eppstatus.RFC8056)
+
+    def test_danger_is_the_four_hold_and_delete_codes(self):
+        by_tone = {}
+        for code, (_, tone) in eppstatus.STATUS_MEANINGS.items():
+            by_tone.setdefault(tone, set()).add(code)
+        assert by_tone["danger"] == {
+            "clientHold",
+            "serverHold",
+            "pendingDelete",
+            "redemptionPeriod",
+        }
+        assert by_tone["warning"] == {"inactive"}
+        assert by_tone["success"] == {
+            code for code in eppstatus.RFC8056 if code.endswith("Prohibited")
+        }
+        assert set(by_tone) == {"default", "success", "warning", "danger"}
+
+    def test_meanings_describe_and_never_judge(self):
+        for code, (meaning, _) in eppstatus.STATUS_MEANINGS.items():
+            for word in ("safe", "danger", "risk", "malicious", "expired"):
+                assert word not in meaning.lower(), (code, word)
+
+    def test_explain_status_folds_dedupes_and_marks_an_unknown_code(self):
+        out = eppstatus.explain_status(
+            ["client hold", "clientHold https://icann.org/epp#clientHold", "connect"]
+        )
+        assert out == [
+            {
+                "code": "clientHold",
+                "meaning": eppstatus.STATUS_MEANINGS["clientHold"][0],
+                "severity": "danger",
+            },
+            {"code": "connect", "meaning": None, "severity": None},
+        ]
+
+    def test_explain_status_accepts_a_bare_string_and_nothing(self):
+        # python-whois hands back a single status as a bare string (DENIC's
+        # "connect"): one code, never iterated letter by letter.
+        assert eppstatus.explain_status("client hold") == [
+            {
+                "code": "clientHold",
+                "meaning": eppstatus.STATUS_MEANINGS["clientHold"][0],
+                "severity": "danger",
+            }
+        ]
+        assert eppstatus.explain_status("connect") == [
+            {"code": "connect", "meaning": None, "severity": None}
+        ]
+        for nothing in (None, "", []):
+            assert eppstatus.explain_status(nothing) == []
+
+
+class TestStatusStaysRaw:
+    """The fold is for rendering. The canonical record, and so the JSON API's
+    `whois.status`, keeps each source's own words."""
+
+    def test_rdap_status_is_the_registrys_words(self):
+        out = rdap._normalize_rdap_domain(RDAP_DOMAIN, "google.com")
+        assert out["status"] == [
+            "client transfer prohibited",
+            "client delete prohibited",
+        ]
+
+    def test_whois_status_is_the_port_43_line(self):
+        line = "clientTransferProhibited https://icann.org/epp#clientTransferProhibited"
+        out = rdap.normalize_whois(
+            {"domain_name": "x.com", "status": [line, line]}, "x.com"
+        )
+        assert out["status"] == [line]  # deduplicated, not reworded
 
 
 if __name__ == "__main__":

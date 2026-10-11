@@ -1351,6 +1351,7 @@ whatismyip/
 ├── managers.py          # GeoIP / suffix list / DNS / TLS / header managers
 ├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking
 ├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
+├── eppstatus.py         # EPP status codes: one spelling, a meaning per code
 ├── lookup.py            # transport-agnostic lookup pipeline (gather())
 ├── concurrency.py       # lookup concurrency gate and slow-leg thread pools
 ├── textfmt.py           # ?format=text and ?fields=
