@@ -396,6 +396,14 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     SPF/DMARC questions, where the summary from `lookup` is not enough.
     NS come from `zone`, the DNS zone serving the name. MX rows marked
     `from_zone` belong to that zone, not the name: it has no MX of its own.
+    `cname_chain` is every CNAME hop the public resolver followed to answer
+    the A query for `queried_name` (the AAAA query when A raised), in order,
+    each with the TTL left in the resolver's cache; `canonical_name` is the
+    name the hops end at, which for a domain is the name `resolved_ip` was
+    found under. Both are read off that answer, so they cost no query.
+    `cname` is the first hop alone. A null `canonical_name` means that
+    the chain is unverified, not empty: no A or AAAA answer came back to
+    read, and `a` and `aaaa` say why.
     A type whose query failed is {"error": "timeout" | "servfail" | "error"}:
     unknown, not empty. An empty list means the name has none of that type.
     `resolution` is how the name reached `resolved_ip`: "ok", "nxdomain" (the
@@ -444,6 +452,12 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
         # the zone its NS and inherited MX/SPF came from.
         "queried_name": records.get("queried_name"),
         "zone": records.get("zone"),
+        # The CNAME hops the resolver followed for the A answer (the AAAA
+        # answer when A raised) and the name they end at, read off that
+        # answer: no query was spent on them. Not record types, so they sit
+        # here beside `records`, which `types` filters.
+        "cname_chain": records.get("cname_chain") or [],
+        "canonical_name": records.get("canonical_name"),
         # A failed query must not come back as the [] it left behind: a model
         # states [] as "this name has none", the same trap the subdomains tool
         # and the unsupported-type check above avoid.

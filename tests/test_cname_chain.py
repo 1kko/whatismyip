@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 import lookup
 import managers
+import mcp_server
 from main import app
 
 QNAME = "www.microsoft.com"
@@ -357,3 +358,81 @@ def test_a_name_without_a_chain_gets_the_page_it_always_had(offline):
 
     assert _dns_rows_of(html, "CNAME") == []
     assert "Resolves via" not in html
+
+
+# --- MCP -----------------------------------------------------------------------
+
+
+async def test_dns_records_returns_the_chain_beside_queried_name_and_zone(offline):
+    """The completion condition's last leg: the tool relays the same chain
+    and canonical name the page shows, beside queried_name and zone and not
+    inside `records`, which lists _RECORD_TYPES alone."""
+    payload = await mcp_server.dns_records(QNAME)
+
+    assert payload["queried_name"] == QNAME
+    assert payload["canonical_name"] == CANONICAL
+    assert payload["cname_chain"] == [
+        {"name": "www.microsoft.com.", "target": HOPS[0][0], "ttl": 300},
+        {"name": HOPS[0][0], "target": HOPS[1][0], "ttl": 60},
+    ]
+    assert "cname_chain" not in payload["records"]
+    assert "canonical_name" not in payload["records"]
+    assert payload["records"]["cname"] == {"cname": HOPS[0][0], "ttl": 300}
+
+
+async def test_narrowing_the_types_keeps_the_chain(offline):
+    """Review Focus 3. `types` filters `records` alone, as it does for
+    queried_name and zone."""
+    payload = await mcp_server.dns_records(QNAME, types=["a"])
+
+    assert set(payload["records"]) == {"a"}
+    assert payload["canonical_name"] == CANONICAL
+    assert [hop["ttl"] for hop in payload["cname_chain"]] == [300, 60]
+
+
+async def test_a_failed_a_query_leaves_the_chain_empty_and_a_in_error(offline):
+    """Review Focus 3. With neither A nor AAAA answered there is no chain to
+    read, so the chain is [] and the name null while `a` carries the error:
+    the description tells the model that this [] is unverified, not empty."""
+    offline.outcomes[QNAME, "A"] = "timeout"
+    offline.outcomes[QNAME, "AAAA"] = "timeout"
+
+    payload = await mcp_server.dns_records(QNAME, types=["a"])
+
+    assert payload["records"]["a"] == {"error": "timeout"}
+    assert payload["cname_chain"] == []
+    assert payload["canonical_name"] is None
+
+
+MCP_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    "Host": "ip.1kko.com",
+}
+INIT = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2026-07-28",
+        "capabilities": {},
+        "clientInfo": {"name": "pytest", "version": "0"},
+    },
+}
+
+
+def test_the_tool_description_says_what_the_chain_is_and_when_it_is_unknown():
+    """What a model reads before it relays the answer. `with TestClient(app)`
+    runs the lifespan, which the MCP session manager needs."""
+    with TestClient(app) as mcp_client:
+        mcp_client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        response = mcp_client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            headers=MCP_HEADERS,
+        )
+    tools = {tool["name"]: tool for tool in response.json()["result"]["tools"]}
+    description = tools["dns_records"]["description"]
+    assert "`cname_chain`" in description and "`canonical_name`" in description
+    assert "cost no query" in description
+    assert "the chain is unverified, not empty" in description

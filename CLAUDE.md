@@ -884,8 +884,8 @@ Test files:
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
   `test_dns_status.py` (a failed
   query is never "no records"), `test_cname_chain.py` (the CNAME chain and
-  canonical name read off the A answer, the hop rows and the GeoIP 'Resolves
-  via' row), `test_zone_apex.py` (NS/MX/SPF from the zone
+  canonical name read off the A answer, the hop rows, the GeoIP 'Resolves
+  via' row and `dns_records`' two keys), `test_zone_apex.py` (NS/MX/SPF from the zone
   apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
   floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
   255 bytes), `test_resolver_unification.py` (one resolver set and budget),
