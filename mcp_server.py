@@ -64,7 +64,9 @@ from viewmodel import (
     _cert_san,
     _cert_subject_cn,
     _cert_validation,
+    cert_age,
     fcrdns_state,
+    registration_age,
 )
 
 # Said wherever a reputation answer has no signal in it. A model relays "no
@@ -234,6 +236,7 @@ def compact_registration(whois: dict | None) -> dict:
         return {"registered": False, "name": whois.get("name"), **names}
     if error:
         return {"error": error, **names}
+    created_days, _ = registration_age(whois)
     out = {
         "source": whois.get("source"),
         "name": whois.get("name"),
@@ -243,6 +246,9 @@ def compact_registration(whois: dict | None) -> dict:
         "registrant_country": whois.get("country"),
         "abuse_email": whois.get("abuse_email"),
         "created": _iso(whois.get("created")),
+        # Whole days since `created`, so a model sees that a name is days old
+        # without doing date arithmetic. For an IP, its network's age.
+        "age_days": created_days,
         "updated": _iso(whois.get("updated")),
         "expires": _iso(whois.get("expires")),
         "status": list(whois.get("status") or []),
@@ -280,6 +286,9 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
         "subject": _cert_subject_cn(ssl_data),
         "expires": expires,
         "days_remaining": days_left,
+        # Whole days since notBefore. ACME reissues every few weeks, so a young
+        # certificate is normal: no signal on its own.
+        "age_days": cert_age(ssl_data),
         "protocol": ssl_data.get("protocol"),
         # An untrusted certificate is still an answer, and a model told only
         # the issuer and expiry would vouch for an expired or self-signed one.
@@ -423,6 +432,14 @@ async def lookup(target: str) -> dict[str, Any]:
     check could not be made, not that it failed. CDNs and shared hosting are
     unconfirmed legitimately: say the name "does not point back", never that
     it is spoofed or forged. Null for a domain.
+
+    `registration.age_days` is whole days since the registration's `created`
+    date (for an IP address, since its network was registered) and
+    `tls.age_days` whole days since the certificate became valid, so no date
+    arithmetic is needed; null when the date is missing or unreadable. A
+    domain registered only days ago is worth a closer look, which is not a
+    verdict: report its age, not that it is malicious. A young certificate
+    means nothing on its own, since most are renewed every few weeks.
 
     `reputation` (for a domain, of the address it resolves to) names the
     public lists the address is on: Spamhaus DROP/ASN-DROP, Tor exits, VPN and
@@ -583,6 +600,10 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
     certificate could be read at all, such as port 443 being unreachable.
     Runs only the name's address lookup and the handshake: no registration
     lookup or DNS record sweep is spent on it.
+    `age_days` is whole days since `not_before`. Certificates are renewed
+    every few weeks, so a young one is normal and is no verdict on the name;
+    how long the domain has been registered is `registration.age_days` in
+    `lookup`.
     """
     try:
         data = await _bounded_gather(domain, legs=_TLS_LEGS)

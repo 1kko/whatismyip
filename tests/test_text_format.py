@@ -23,6 +23,7 @@ import main
 import managers
 import textfmt
 from main import app
+from managers import _asn1_time
 
 CLIENT_IP = "8.8.8.8"
 client = TestClient(app, client=(CLIENT_IP, 41234))
@@ -89,9 +90,11 @@ DOMAIN_KEYS = [
     "registrar",
     "registrant",
     "domain_expires",
+    "domain_age_days",
     "cert_issuer",
     "cert_expires",
     "cert_days_remaining",
+    "cert_age_days",
 ]
 IP_KEYS = [
     "target",
@@ -923,6 +926,172 @@ class TestReverseDnsConfirmed:
         assert text.text == "-\n"
         assert body.json() == {"reverse_dns_confirmed": None}
         mocks["records"].assert_not_called()
+
+
+@contextlib.contextmanager
+def _aged_legs(registered_days_ago=25, issued_days_ago=10):
+    """_legs(), with example.com registered and its certificate issued that
+    many days ago."""
+    now = datetime.datetime.now(datetime.UTC)
+    registration = {
+        **REGISTRATIONS["example.com"],
+        "created": now - datetime.timedelta(days=registered_days_ago),
+    }
+    cert = {
+        **CERT,
+        "notBefore": _asn1_time(now - datetime.timedelta(days=issued_days_ago)),
+    }
+    with _legs() as mocks:
+        mocks["whois"].side_effect = lambda t: copy.deepcopy(registration)
+        mocks["ssl"].return_value = copy.deepcopy(cert)
+        yield mocks
+
+
+class TestAgeFields:
+    """domain_age_days and cert_age_days: whole days since the registration's
+    created date and since the certificate's notBefore, the arithmetic a
+    script would otherwise do on the dates."""
+
+    def test_both_are_in_the_domain_block(self):
+        with _aged_legs() as mocks:
+            values = dict(_block(client.get("/example.com?format=text", headers=CURL)))
+        assert values["domain_age_days"] == "25"
+        assert values["cert_age_days"] == "10"
+        # Read off the record and the certificate the block already fetches:
+        # the same legs as without the two lines, so no new outbound call.
+        assert _ran(mocks) == {"whois", "geo", "resolver", "ssl"}
+
+    def test_fields_answer_one_integer_per_line(self):
+        with _aged_legs():
+            response = client.get(
+                "/example.com?fields=domain_age_days,cert_age_days&format=text",
+                headers=CURL,
+            )
+        assert response.text == "25\n10\n"
+
+    def test_json_carries_integers(self):
+        with _aged_legs():
+            response = client.get(
+                "/example.com?fields=domain_age_days,cert_age_days", headers=CURL
+            )
+        assert response.json() == {"domain_age_days": 25, "cert_age_days": 10}
+
+    def test_each_runs_only_its_own_leg(self):
+        with _aged_legs() as mocks:
+            client.get("/example.com?fields=domain_age_days", headers=CURL)
+        assert _ran(mocks) == {"whois"}
+        with _aged_legs() as mocks:
+            client.get("/example.com?fields=cert_age_days", headers=CURL)
+        assert _ran(mocks) == {"resolver", "ssl"}
+
+    def test_a_failed_registration_lookup_is_a_question_mark(self):
+        with _legs() as mocks:
+            mocks["whois"].side_effect = lambda t: {"error": "WHOIS lookup timed out"}
+            text = client.get(
+                "/example.com?fields=domain_age_days&format=text", headers=CURL
+            )
+            json_ = client.get("/example.com?fields=domain_age_days", headers=CURL)
+        assert text.text == "?\n"
+        assert json_.json() == {
+            "domain_age_days": None,
+            "errors": {"domain_age_days": "WHOIS lookup timed out"},
+        }
+
+    def test_not_registered_or_an_unreadable_date_is_a_dash(self):
+        """Python-whois can hand back a date it could not parse as a string,
+        and a date days ahead is bad data: neither is an age, and neither is
+        an error."""
+        path = "/example.com?fields=domain_age_days&format=text"
+        ahead = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=2)
+        with _legs() as mocks:
+            mocks["whois"].side_effect = lambda t: {"error": "not registered"}
+            unregistered = client.get(path, headers=CURL)
+            mocks["whois"].side_effect = lambda t: {
+                **REGISTRATIONS["example.com"],
+                "created": "before Aug-1996",
+            }
+            unreadable = client.get(path, headers=CURL)
+            mocks["whois"].side_effect = lambda t: {
+                **REGISTRATIONS["example.com"],
+                "created": ahead,
+            }
+            future = client.get(path, headers=CURL)
+        assert unregistered.text == "-\n"
+        assert unreadable.text == "-\n"
+        assert future.text == "-\n"
+
+    def test_a_name_registered_today_is_zero_not_a_dash(self):
+        """0 is an age, not a missing one: a name registered hours ago, and one
+        whose registry's naive local time reads a few hours ahead of UTC."""
+        path = "/example.com?fields=domain_age_days&format=text"
+        ahead = datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=9)
+        with _aged_legs(registered_days_ago=2 / 24) as mocks:
+            today = client.get(path, headers=CURL)
+            as_json = client.get("/example.com?fields=domain_age_days", headers=CURL)
+            mocks["whois"].side_effect = lambda t: {
+                **REGISTRATIONS["example.com"],
+                "created": ahead.replace(tzinfo=None),
+            }
+            ahead_of_utc = client.get(path, headers=CURL)
+        assert today.text == "0\n"
+        assert as_json.json() == {"domain_age_days": 0}
+        assert ahead_of_utc.text == "0\n"
+
+    def test_a_failed_handshake_leaves_cert_age_with_the_other_cert_fields(self):
+        """No `?` rule of its own: cert_age_days rides the tls leg, so it reads
+        what cert_days_remaining reads, "?", never a number."""
+        with _aged_legs() as mocks:
+            mocks["ssl"].return_value = {
+                "error": "port 443 unreachable",
+                "reason": "connection refused",
+            }
+            values = dict(_block(client.get("/example.com?format=text", headers=CURL)))
+        assert values["cert_age_days"] == values["cert_days_remaining"]
+        assert values["cert_age_days"] == "?"
+        assert values["domain_age_days"] == "25"
+
+    def test_a_timed_out_a_query_leaves_cert_age_with_the_other_cert_fields(self):
+        timeout = dns.resolver.LifetimeTimeout(timeout=3.0, errors=[])
+        with _aged_legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = timeout
+            # What SSLManager.get_ssl_info answers with no address to connect to.
+            mocks["ssl"].return_value = None
+            values = dict(_block(client.get("/example.com?format=text", headers=CURL)))
+        assert values["cert_age_days"] == values["cert_days_remaining"]
+        assert values["cert_age_days"] == "?"
+        # The registration is asked of the registry, not of the address.
+        assert values["domain_age_days"] == "25"
+
+    def test_an_ip_has_no_domain_age_even_when_its_registration_ran(self):
+        """registrant runs the whois leg for an IP too, and the network's
+        record has a created date: that is the block's age, not a domain's."""
+        created = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=25)
+        with _legs() as mocks:
+            mocks["whois"].side_effect = lambda t: {
+                **REGISTRATIONS[CLIENT_IP],
+                "rir": "arin",
+                "created": created,
+            }
+            response = client.get(
+                "/8.8.8.8?fields=registrant,domain_age_days,cert_age_days&format=text",
+                headers=CURL,
+            )
+        assert response.text == "Google LLC\n-\n-\n"
+
+    def test_an_ip_or_your_own_address_asks_nothing_for_them(self):
+        """Both are domain-only, so neither costs a lookup, and the visitor's
+        own address gets no outbound query from them."""
+        with _legs() as mocks:
+            ip = client.get(
+                "/8.8.8.8?fields=domain_age_days,cert_age_days&format=text",
+                headers=CURL,
+            )
+            own = client.get(
+                "/?fields=domain_age_days,cert_age_days&format=text", headers=CURL
+            )
+        assert ip.text == "-\n-\n"
+        assert own.text == "-\n-\n"
+        assert _ran(mocks) == set()
 
 
 # --- lookup.gather(legs=) -----------------------------------------------------------

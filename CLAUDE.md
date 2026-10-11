@@ -482,6 +482,10 @@ The hero tags a domain registered fewer than `YOUNG_DOMAIN_DAYS` (30) days
 ago with an amber `REGISTERED N DAYS AGO`; 0 turns the tag off. A certificate's
 age is never tagged, since ACME renews every few weeks, and `_summary()` reads
 only the `TLS` tags, so link previews do not change.
+`?fields=domain_age_days` and `cert_age_days` and MCP `registration.age_days`
+and `tls.age_days` carry the same numbers (`mcp_server.compact_registration` /
+`compact_ssl`, which `textfmt.field_values` reads); `domain_age_days` is `-`
+for an IP, whose registration is its network's.
 
 #### Error Handling
 

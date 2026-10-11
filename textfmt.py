@@ -50,9 +50,13 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "registrar": (frozenset({"whois"}), _DOMAIN),
     "registrant": (frozenset({"whois"}), _BOTH),
     "domain_expires": (frozenset({"whois"}), _DOMAIN),
+    # Whole days since the registration was created and since the certificate
+    # became valid: the MCP tools' registration.age_days and tls.age_days.
+    "domain_age_days": (frozenset({"whois"}), _DOMAIN),
     "cert_issuer": (frozenset({"tls"}), _DOMAIN),
     "cert_expires": (frozenset({"tls"}), _DOMAIN),
     "cert_days_remaining": (frozenset({"tls"}), _DOMAIN),
+    "cert_age_days": (frozenset({"tls"}), _DOMAIN),
     "risk_level": (frozenset({"reputation"}), _BOTH),
     "risk_signals": (frozenset({"reputation"}), _BOTH),
     # AbuseIPDB is asked only about an address looked up directly.
@@ -77,7 +81,7 @@ _NOT_IN_BLOCK = frozenset(
 _FCRDNS_ANSWERS = frozenset({"confirmed", "unconfirmed"})
 _FCRDNS_FAILED = "the PTR name's A/AAAA query failed"
 
-_REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires")
+_REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires", "domain_age_days")
 
 # The legs that ask about the name, never the address it resolves to: the
 # registry (whois) and the record sweep (dns), whose record types each carry
@@ -197,9 +201,14 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "registrar": registration.get("registrar"),
         "registrant": registration.get("registrant"),
         "domain_expires": _date(registration.get("expires")),
+        # An IP's registration is its network's, and that block's age is not a
+        # domain's: "-" for an IP even when ?fields= also asked for registrant
+        # and the record came back.
+        "domain_age_days": registration.get("age_days") if kind == "domain" else None,
         "cert_issuer": tls.get("issuer"),
         "cert_expires": tls.get("expires"),
         "cert_days_remaining": tls.get("days_remaining"),
+        "cert_age_days": tls.get("age_days"),
         "risk_level": reputation.get("level"),
         # The ids, comma-separated: one value per field is the format.
         "risk_signals": ",".join(s["id"] for s in reputation.get("signals") or []),
