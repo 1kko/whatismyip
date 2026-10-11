@@ -241,7 +241,9 @@ def build_map_payload(
     resolved target coordinates the caller writes back onto `location`. City
     mode (single pin, no arc) when the visitor is the target, their location is
     unknown, or the two points are the same place; see _is_route for when a
-    nearby-but-different city still draws home -> destination.
+    nearby-but-different city still draws home -> destination. Both `origin`
+    and `target` carry the gazetteer's `precision`, so the page can say what
+    each end of the arc is worth; the distance is computed either way.
     """
     target = gazetteer.resolve(target_location)
     if not target:
@@ -271,6 +273,7 @@ def build_map_payload(
             "lat": route_origin["lat"],
             "lon": route_origin["lon"],
             "accuracy_km": route_origin.get("accuracy_km"),
+            "precision": route_origin.get("precision"),
         }
 
     payload = {
@@ -417,14 +420,19 @@ def render_page(request: Request, response_data: dict, is_self: bool):
     # map.js labels the pins with the two IPs and draws the distance on the arc.
     # These ride along with the browser's map payload rather than polluting the
     # render-only `map` in the JSON API (they live under location / origin there).
+    # A pin that is not city-level is drawn dashed (map.js pin()), and
+    # distance_text is already None unless both ends are (viewmodel).
     map_data = response_data.get("map")
     if map_data:
+        location = response_data.get("location") or {}
         origin = response_data.get("origin") or {}
         map_data = {
             **map_data,
             "distance_text": view["distance_text"],
-            "target_ip": (response_data.get("location") or {}).get("ip"),
+            "target_ip": location.get("ip"),
             "origin_ip": origin.get("ip"),
+            "target_precision": location.get("precision"),
+            "origin_precision": origin.get("precision"),
         }
 
     return templates.TemplateResponse(

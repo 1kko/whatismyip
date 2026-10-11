@@ -32,6 +32,7 @@ from config import (
     WHOIS_SOCKET_TIMEOUT_SECONDS,
     WHOIS_TIMEOUT_SECONDS,
 )
+from geo import coordinate_precision
 from managers import (
     DNS_FAILURES,
     DomainManager,
@@ -434,6 +435,13 @@ async def lookup_location(ip: str) -> dict:
     # slower leg there. The security middleware's geo check reads it inline too.
     data = geo_ip_manager.fetch_location(ip)
     data.pop("elapsed_time", None)
+    # How far the coordinates can be trusted, graded once for every reader:
+    # gather() (the page, the JSON, ?fields=), the self page and the MCP tools.
+    # GeoLite2 gives a country centroid a 1000 km radius (8.8.8.8 is the middle
+    # of Kansas), which a map pin or a model otherwise reads as a place. The
+    # page may overwrite it with the gazetteer's grade for the coordinates it
+    # actually draws (main._apply_resolved_target).
+    data["precision"] = coordinate_precision(data)
     return data
 
 

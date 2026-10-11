@@ -21,6 +21,10 @@ from reputation import grade
 NOT_REGISTERED = "not registered"
 
 DASH = "—"
+# Under the country in the hero when the fix is a country centroid: GeoLite2's
+# (8.8.8.8, ± 1000 km) or the gazetteer's. Said in place of a city, because the
+# map draws a pin either way and a pin reads as a place.
+APPROXIMATE_LINE = "approximate · country-level"
 # The self page's registration while it is still being looked up: main.py
 # sends the page before a slow RDAP answer and app.js fills it in from
 # /?whois=only. It is neither an answer nor a failure, so it reads as neither.
@@ -70,6 +74,55 @@ def osm_link(location: dict | None) -> str | None:
         return None
     zoom = 11 if location.get("precision") == "city" else 5
     return f"https://www.openstreetmap.org/#map={zoom}/{lat}/{lon}"
+
+
+def _city_line(location: dict) -> str:
+    """The line under the country in the hero.
+
+    The city and region when the fix is city-level. Otherwise what the
+    coordinates are worth, since the map draws a pin either way:
+    APPROXIMATE_LINE for a country centroid, and "registered in <country> ·
+    location unknown" when GeoLite2 had only the country the block is
+    registered in (1.1.1.1). Not "anycast": GeoLite2 carries no such trait,
+    and this only says what was and was not found. Nothing under an empty
+    country or a private address: there is no fix to qualify."""
+    if location.get("precision") == "city":
+        city = location.get("city_name") or ""
+        subdivision = location.get("subdivision_name") or ""
+        return " · ".join(part for part in (city, subdivision) if part)
+    country = location.get("country_name") or ""
+    if not country or location.get("is_private"):
+        return ""
+    if location.get("country_source") == "registered":
+        return f"registered in {country} · location unknown"
+    return APPROXIMATE_LINE
+
+
+def _precise_route(response: dict) -> bool:
+    """Whether the distance is worth printing: only between two city-level
+    fixes. With a country centroid at either end -- 8.8.8.8 was "≈ 10,462 km
+    from you" from Seoul, to the middle of Kansas -- the number is the
+    centroid's, not the address's. build_map_payload still draws the arc and
+    the JSON keeps distance_km; only the chip goes."""
+    location = response.get("location") or {}
+    origin = response.get("origin") or {}
+    return location.get("precision") == "city" and origin.get("precision") == "city"
+
+
+def _accuracy_text(location: dict) -> str:
+    """The GeoIP card's Accuracy row. A city-level fix is its radius. A
+    country-level one says so, with the radius when GeoLite2 gave one
+    ("country-level (± 1000 km)" for 8.8.8.8) and without when the
+    coordinates are the gazetteer's centroid. A block GeoLite2 could only
+    register, not locate, says that in place of a radius it never had."""
+    precision = location.get("precision")
+    accuracy = location.get("accuracy_km")
+    radius = f"± {accuracy} km" if accuracy is not None else ""
+    if location.get("country_source") == "registered" and precision != "city":
+        return "country-level · registered country only"
+    if precision == "country":
+        return f"country-level ({radius})" if radius else "country-level"
+    return radius or DASH
 
 
 def format_meta(elapsed_ms: int | None, when: Any) -> str:
@@ -717,8 +770,7 @@ def geoip_rows(location: dict | None) -> list[dict]:
 
     lat, lon = location.get("lat"), location.get("lon")
     coords = f"{lat}, {lon}" if lat is not None and lon is not None else DASH
-    accuracy = location.get("accuracy_km")
-    accuracy_text = f"± {accuracy} km" if accuracy is not None else DASH
+    accuracy_text = _accuracy_text(location)
 
     return [
         {"label": "Country", "value": country, "tone": "default"},
@@ -1002,10 +1054,6 @@ def build_view(
     address = response.get("address") or ""
     is_ip = _is_ip(address)
 
-    city = location.get("city_name") or ""
-    subdivision = location.get("subdivision_name") or ""
-    city_line = " · ".join(part for part in (city, subdivision) if part)
-
     if is_ip:
         facts = [
             _network_column(location, address),
@@ -1034,9 +1082,13 @@ def build_view(
         "tags": _tags(response, is_ip),
         "flag": country_flag(location.get("country_code")),
         "country_name": location.get("country_name") or "",
-        "city_line": city_line,
+        "city_line": _city_line(location),
         "asn_line": location.get("asn_name") or "",
-        "distance_text": format_distance(response.get("distance_km")),
+        "distance_text": (
+            format_distance(response.get("distance_km"))
+            if _precise_route(response)
+            else None
+        ),
         "map_link": osm_link(location),
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
         "facts": facts,

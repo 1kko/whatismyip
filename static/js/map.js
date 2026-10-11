@@ -1,10 +1,8 @@
 // Paints what the server projected. All the Mercator/antimeridian/great-circle
-// math lives in mapgeom.py and is covered by tests/test_mapgeom.py.
-const mapDataNode = document.getElementById("map-data");
-const mapData = mapDataNode ? JSON.parse(mapDataNode.textContent) : null;
-
+// math lives in mapgeom.py and is covered by tests/test_mapgeom.py. pin() also
+// runs in node (tests/test_map_pin.py), so the page wiring at the bottom of
+// this file only runs when there is a document with #map-data in it.
 const SVG_NS = "http://www.w3.org/2000/svg";
-const MOBILE = window.matchMedia("(max-width: 900px)");
 
 // mapData is built server-side (mapgeom.py), but it reaches this script as DOM
 // text, so every tile URL is checked against the one host the CSP img-src allows
@@ -53,14 +51,21 @@ function pinLabel(x, y, text) {
   return node;
 }
 
-function pin(x, y, isOrigin, compact, label) {
-  const group = svg("g", {
-    class: isOrigin ? "map__pin map__pin--origin" : "map__pin",
-  });
+// `approx` is a fix that is not city-level: GeoLite2's country centroid
+// (8.8.8.8 is the middle of Kansas, ± 1000 km) or the gazetteer's. It keeps the
+// ring, the dot and the label -- the address is still marked -- but the halo
+// is half as wide again and the CSS dashes it, so it reads as "around here".
+function pin(x, y, isOrigin, compact, label, approx) {
+  const classes = ["map__pin"];
+  if (isOrigin) classes.push("map__pin--origin");
+  if (approx) classes.push("map__pin--approx");
+  const group = svg("g", { class: classes.join(" ") });
   if (isOrigin) {
     // [halo radius, house half-height]
     const [halo, house] = compact ? [16, 7] : [24, 10];
-    group.appendChild(svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: halo }));
+    group.appendChild(
+      svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: approx ? halo * 1.5 : halo }),
+    );
     group.appendChild(svg("path", { class: "map__pin-home", d: housePath(x, y, house) }));
     if (label) {
       group.appendChild(pinLabel(x, y + house + (compact ? 12 : 15), label));
@@ -69,7 +74,9 @@ function pin(x, y, isOrigin, compact, label) {
   }
   // [halo radius, ring radius, dot radius]
   const [halo, ring, dot] = compact ? [30, 15, 5] : [48, 24, 7];
-  group.appendChild(svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: halo }));
+  group.appendChild(
+    svg("circle", { class: "map__pin-halo", cx: x, cy: y, r: approx ? halo * 1.5 : halo }),
+  );
   group.appendChild(svg("circle", { class: "map__pin-ring", cx: x, cy: y, r: ring }));
   group.appendChild(svg("circle", { class: "map__pin-dot", cx: x, cy: y, r: dot }));
   if (label) {
@@ -96,7 +103,10 @@ function attribution() {
   return box;
 }
 
-function paint(container, canvas, distanceText, originIp, targetIp) {
+// `approx` is {origin, target}: which ends are not city-level (render_page's
+// origin_precision / target_precision). distanceText is already null unless
+// both are, so no chip is made for a centroid's distance.
+function paint(container, canvas, distanceText, originIp, targetIp, approx) {
   // Everything the server projected lives on a fixed-size stage that is scaled
   // to cover the band. Tiles, pins and the arc scale together, so they stay
   // aligned at any viewport width instead of leaving dead space on wide screens.
@@ -162,11 +172,11 @@ function paint(container, canvas, distanceText, originIp, targetIp) {
   }
   if (canvas.origin) {
     overlay.appendChild(
-      pin(canvas.origin.x, canvas.origin.y, true, compact, originIp),
+      pin(canvas.origin.x, canvas.origin.y, true, compact, originIp, approx.origin),
     );
   }
   overlay.appendChild(
-    pin(canvas.target.x, canvas.target.y, false, compact, targetIp),
+    pin(canvas.target.x, canvas.target.y, false, compact, targetIp, approx.target),
   );
   stage.appendChild(overlay);
 
@@ -210,7 +220,19 @@ function paint(container, canvas, distanceText, originIp, targetIp) {
   return cover;
 }
 
+if (typeof module === "object" && module.exports) {
+  module.exports = { pin, housePath };
+}
+
+// The page wiring, which runs only where there is a #map-data to paint.
+// tests/test_map_pin.py loads this file in node without one (TestPin: nothing
+// below runs) and with one and a fake window (TestPageWiring).
+const mapDataNode =
+  typeof document === "undefined" ? null : document.getElementById("map-data");
+const mapData = mapDataNode ? JSON.parse(mapDataNode.textContent) : null;
+
 if (mapData) {
+  const MOBILE = window.matchMedia("(max-width: 900px)");
   const containers = {
     desktop: document.getElementById("page-map"),
     mobile: document.getElementById("mobile-map"),
@@ -242,6 +264,10 @@ if (mapData) {
             mapData.distance_text,
             mapData.origin_ip,
             mapData.target_ip,
+            {
+              origin: mapData.origin_precision !== "city",
+              target: mapData.target_precision !== "city",
+            },
           )
         : null;
   };

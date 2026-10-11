@@ -197,8 +197,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `templates/browser.html` renders. Pure, with no I/O, and it imports only
   `config`, `reputation.grade` and the standard library, so `mcp_server.py`
   reuses its certificate helpers without a cycle.
-- `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`) and
-  `haversine_km`.
+- `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
+  and `coordinate_precision`, the one `city`/`country` rule for a fix.
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
   great-circle math behind it.
 - `healthcheck.py`: the Docker `HEALTHCHECK`: exit 0 when `/healthz` answers
@@ -343,6 +343,15 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   free jsdelivr mirrors, which are the only source otherwise)
 - Geo-blocking judges the City database's `country_code` (falling back to the
   block's `registered_country`, as geoip2fast's builder did)
+- `location["country_source"]` says which key `_apply_city` took, `located` or
+  `registered` (1.1.1.1 carries only `registered_country`, and no location),
+  and is None when no country was found or the geoip2fast fallback answered;
+  `country_code` is substituted either way, so geo-blocking is unchanged.
+  `lookup.lookup_location` grades the coordinates as `location["precision"]`
+  (`geo.coordinate_precision`: `city` within `MAX_CITY_ACCURACY_KM`, `country`
+  beyond it or with no radius, None without coordinates), so `gather()`, the
+  self page and MCP all carry it. The page overwrites it with the gazetteer's
+  grade for the coordinates it draws (`main._apply_resolved_target`)
 - `geoip2fast` survives only as a fallback: its bundled country-only snapshot
   (`geoip2fast-ipv6.dat.gz`, a 2024 build inside the package,
   `managers.GEOIP_FALLBACK_FILE`) is loaded only when no City database opened,
@@ -438,6 +447,11 @@ Configured at `main` module scope:
   `version`, or `unknown`. The SDK sends `""` when none is given. It is not
   `server.json`'s registry version, which is not in the image and is bumped
   only when the listing changes.
+- `compact_location` carries `precision` and `country_source` and nulls
+  `lat`/`lon`/`time_zone` unless `precision` is `city`: the HTTP JSON keeps
+  the numbers, the model gets only what the grade supports (a centroid's
+  America/Chicago is nobody's time zone). `lookup` and `whoami_caller` say so
+  in their descriptions.
 - Tool return annotations need `dict[str, Any]`, not a bare `dict` — the SDK
   can't build an output schema from a bare `dict`, so the response never gets
   `structuredContent`.
@@ -540,6 +554,19 @@ whatismyip/
 geoip2fast country fallback is loaded), `static/geo/cities.json` (GeoNames cities15000)
 matches the city name, with a population-weighted country centroid as the last
 resort (`geo.Gazetteer.resolve`). Private IPs get no map.
+
+**Precision**: `lookup.lookup_location` grades GeoLite2's coordinates as
+`location.precision` (`geo.coordinate_precision`), and `main._apply_resolved_target`
+overwrites it with the gazetteer's grade for the coordinates the page draws;
+`build_map_payload` puts the visitor's on `origin.precision`. `viewmodel._city_line`
+prints "approximate · country-level" (or "registered in … · location unknown"
+when `country_source` is `registered`) in place of a city, and `distance_text`
+exists only when both ends are `city` (`viewmodel._precise_route`); the JSON's
+numbers never change. `render_page` hands map.js `target_precision` and
+`origin_precision`, and `pin()` draws a non-city pin as `map__pin--approx`
+(dashed in CSS, a halo half as wide again) with no `map__distance` chip.
+map.js exports `pin` for node like webrtc.js does; `tests/test_map_pin.py`
+runs it, and the page wiring that feeds it, against a fake document.
 
 **Projection**: all map math is server-side and unit-tested (`tests/test_mapgeom.py`).
 `main.build_map_payload` has `mapgeom.build_canvas` emit tile URLs with pixel
@@ -777,12 +804,12 @@ and importing `main` makes no network call. The suite runs offline, and
 - A test that genuinely needs the network is marked `@pytest.mark.network`. It
   is skipped unless `RUN_NETWORK_TESTS=1`, and then runs with neither layer in
   place. No test needs it today.
-- `test_webrtc_leak.py` and `test_boot.py` run node and a fresh interpreter as
-  subprocesses, outside the guard. The webrtc tests skip when `node` is not
-  installed.
+- `test_webrtc_leak.py`, `test_map_pin.py` and `test_boot.py` run node and a
+  fresh interpreter as subprocesses, outside the guard. The node tests skip
+  when `node` is not installed.
 
 Test files:
-- Units: `test_geo.py` (gazetteer, distance), `test_mapgeom.py` (projection,
+- Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
   tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering),
   `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
   forced bootstrap refresh behavior, JSContact names, thin records),
@@ -806,7 +833,7 @@ Test files:
   `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`, and
   `?fields=` joining the self lookup),
   `test_ip_whois_column.py` (an IP's WHOIS column), `test_subdomain_panel.py`
-  (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test)
+  (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test), `test_map_pin.py` (map.js's approximate pin and its page wiring, run in node)
 - Lookup behaviour: `test_classify_target.py` (refused before any network
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
   `test_dns_status.py` (a failed

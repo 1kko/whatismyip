@@ -98,6 +98,7 @@ FAKE_LOOKUP = {
         "ip": "93.184.216.34",
         "country_code": "US",
         "country_name": "United States",
+        "country_source": "located",
         "city_name": "Norwell",
         "subdivision_name": "Massachusetts",
         "lat": 42.1596,
@@ -108,6 +109,7 @@ FAKE_LOOKUP = {
         "asn_number": 15133,
         "asn_name": "EDGECAST",
         "asn_cidr": "93.184.216.0/24",
+        "precision": "city",
     },
     "whois": {
         "source": "rdap",
@@ -141,11 +143,111 @@ def test_lookup_tool_returns_a_compact_result():
         payload = response.json()["result"]["structuredContent"]
         assert payload["ip"] == "93.184.216.34"
         assert payload["geo"]["country_code"] == "US"
+        assert payload["geo"]["precision"] == "city"
+        assert payload["geo"]["lat"] == 42.1596  # a city-level fix keeps its numbers
+        assert payload["geo"]["time_zone"] == "America/New_York"
         assert payload["network"]["asn_number"] == 15133
         assert payload["registration"]["registrar"].startswith("RESERVED")
         # Render-only data must never reach an LLM context.
         for forbidden in ("map", "distance_km", "origin"):
             assert forbidden not in payload
+
+
+# GeoLite2's answer for 8.8.8.8: the US centroid, ± 1000 km, no city, and a
+# time zone that is the centroid's (America/Chicago), not the address's.
+US_CENTROID_LOOKUP = {
+    **FAKE_LOOKUP,
+    "address": "8.8.8.8",
+    "resolved_ip": "8.8.8.8",
+    "location": {
+        **FAKE_LOOKUP["location"],
+        "ip": "8.8.8.8",
+        "city_name": "",
+        "subdivision_name": "",
+        "lat": 37.751,
+        "lon": -97.822,
+        "accuracy_km": 1000,
+        "time_zone": "America/Chicago",
+        "precision": "country",
+    },
+}
+
+# GeoLite2's answer for 1.1.1.1: only the country the block is registered in.
+REGISTERED_ONLY_LOOKUP = {
+    **FAKE_LOOKUP,
+    "address": "1.1.1.1",
+    "resolved_ip": "1.1.1.1",
+    "location": {
+        **FAKE_LOOKUP["location"],
+        "ip": "1.1.1.1",
+        "country_code": "AU",
+        "country_name": "Australia",
+        "country_source": "registered",
+        "city_name": "",
+        "subdivision_name": "",
+        "lat": None,
+        "lon": None,
+        "accuracy_km": None,
+        "time_zone": None,
+        "precision": None,
+    },
+}
+
+
+def _lookup_geo(client, data):
+    async def fake_gather(target, legs=None):  # gather()'s own signature
+        return data
+
+    with patch("mcp_server.gather", fake_gather):
+        response = _rpc(
+            client,
+            "tools/call",
+            {"name": "lookup", "arguments": {"target": data["address"]}},
+        )
+    return response.json()["result"]["structuredContent"]["geo"]
+
+
+def test_lookup_tool_keeps_only_the_country_of_a_country_level_fix():
+    """Production `lookup 185.199.108.153` handed a model lat 37.751,
+    accuracy_km 1000 and America/Chicago with nothing saying the first and
+    last are a centroid's. A model reads a number as a place, so a fix that
+    is not city-level keeps its grade and its country, and nothing it cannot
+    support. The HTTP JSON keeps the numbers; this is the MCP shape only."""
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        geo = _lookup_geo(client, US_CENTROID_LOOKUP)
+    assert geo["precision"] == "country"
+    assert geo["country_source"] == "located"
+    assert (geo["country_code"], geo["country_name"]) == ("US", "United States")
+    assert geo["lat"] is None
+    assert geo["lon"] is None
+    assert geo["time_zone"] is None
+    assert geo["accuracy_km"] == 1000  # the radius is why; it stays
+
+
+def test_lookup_tool_marks_a_registered_only_country():
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        geo = _lookup_geo(client, REGISTERED_ONLY_LOOKUP)
+    assert geo["country_code"] == "AU"
+    assert geo["country_source"] == "registered"
+    assert geo["precision"] is None
+    assert geo["lat"] is None and geo["lon"] is None and geo["time_zone"] is None
+
+
+def test_the_tool_descriptions_say_what_a_country_level_fix_is_worth():
+    """The grade only helps if the model is told to read it. The description
+    is the raw docstring, wrapped wherever its lines end, so it is compared
+    with its whitespace collapsed, as test_reputation.py reads lookup's."""
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        tools = {
+            tool["name"]: " ".join(tool["description"].split())
+            for tool in _rpc(client, "tools/list").json()["result"]["tools"]
+        }
+    for name in ("lookup", "whoami_caller"):
+        assert "precision" in tools[name], name
+        assert "only the country" in tools[name], name
 
 
 def test_lookup_tool_reports_private_targets_as_an_error():
@@ -539,6 +641,33 @@ def test_whoami_caller_reports_the_connecting_peer_not_the_user():
         # is the shape CodeQL flags as bypassable URL sanitisation
         # (py/incomplete-url-substring-sanitization), and a test should not
         # model a check we would never write in production.
+
+
+def test_whoami_caller_grades_the_callers_fix_the_same_way():
+    async def fake_location(ip):
+        return {
+            "ip": ip,
+            "country_code": "US",
+            "country_name": "United States",
+            "country_source": "located",
+            "city_name": "",
+            "lat": 37.751,
+            "lon": -97.822,
+            "accuracy_km": 1000,
+            "time_zone": "America/Chicago",
+            "precision": "country",
+        }
+
+    with TestClient(app, client=("203.0.113.9", 41234)) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.lookup_location", fake_location):
+            response = _rpc(
+                client, "tools/call", {"name": "whoami_caller", "arguments": {}}
+            )
+        geo = response.json()["result"]["structuredContent"]["geo"]
+    assert geo["precision"] == "country"
+    assert geo["country_code"] == "US"
+    assert geo["lat"] is None and geo["lon"] is None and geo["time_zone"] is None
 
 
 def test_whoami_caller_reports_unavailable_when_the_peer_is_unknown():

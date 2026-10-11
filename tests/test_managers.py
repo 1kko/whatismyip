@@ -90,6 +90,7 @@ class TestGeoLite2Lookup:
             "ip": "89.160.20.112",
             "country_code": "SE",
             "country_name": "Sweden",
+            "country_source": "located",
             "city_name": "Linköping",
             "subdivision_name": "Östergötland County",
             "subdivision_code": "E",
@@ -142,6 +143,42 @@ class TestGeoLite2Lookup:
         location = manager.fetch_location("8.8.8.8")
         assert location["country_code"] == "RO"
         assert location["country_name"] == "Romania"
+
+    def test_a_located_country_is_marked_as_such(self, tmp_path, monkeypatch):
+        """89.160.20.112's record is located in SE and registered in DE: the
+        located country wins, and country_source says that is what it is."""
+        manager = _manager(tmp_path, monkeypatch)
+        manager.city_reader = _FakeCityReader(
+            {
+                "country": {"iso_code": "SE", "names": {"en": "Sweden"}},
+                "registered_country": {"iso_code": "DE", "names": {"en": "Germany"}},
+            }
+        )
+        location = manager.fetch_location("89.160.20.112")
+        assert location["country_code"] == "SE"
+        assert location["country_source"] == "located"
+
+    def test_a_registered_only_country_is_marked_as_such(self, tmp_path, monkeypatch):
+        """1.1.1.1's record carries only registered_country (AU) and no
+        coordinates: the block is registered in Australia and located nowhere.
+        country_code still says AU, as geo-blocking and the JSON API have
+        always seen it; country_source lets the page and MCP say "registered
+        in" rather than show an Australian flag as a place."""
+        manager = _manager(tmp_path, monkeypatch)
+        manager.city_reader = _FakeCityReader(
+            {"registered_country": {"iso_code": "AU", "names": {"en": "Australia"}}}
+        )
+        location = manager.fetch_location("1.1.1.1")
+        assert location["country_code"] == "AU"
+        assert location["country_name"] == "Australia"
+        assert location["country_source"] == "registered"
+        assert location["lat"] is None
+
+    def test_an_address_with_no_country_has_no_source(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB, ASN_TEST_DB)
+        location = manager.fetch_location("1.128.0.1")  # absent from the City DB
+        assert location["country_code"] == "--"
+        assert location["country_source"] is None
 
     def test_an_unlisted_address_has_no_country_but_keeps_its_carrier(
         self, tmp_path, monkeypatch
@@ -200,6 +237,9 @@ class TestCountryFallback:
         assert manager.fetch_location("8.8.8.8")["country_code"] == "US"
         # The bundled file covers IPv6 too, not just the package's IPv4 default.
         assert manager.fetch_location("2001:4860:4860::8888")["country_code"] == "US"
+        # The snapshot made geoip2fast's own country/registered_country
+        # substitution at build time and kept no record of which: unknown.
+        assert manager.fetch_location("8.8.8.8")["country_source"] is None
 
     def test_a_corrupt_city_db_falls_back(self, tmp_path, monkeypatch):
         bad = tmp_path / "GeoLite2-City.mmdb"

@@ -107,15 +107,31 @@ def _iso(value: Any) -> str | None:
 
 
 def compact_location(loc: dict) -> dict:
+    """GeoLite2's fix, with its grade.
+
+    `precision` is "city" (the radius is within geo.MAX_CITY_ACCURACY_KM),
+    "country" (a country centroid: GeoLite2 places 8.8.8.8 at 37.751,
+    -97.822 ± 1000 km, the middle of Kansas), or null with no coordinates at
+    all. Only a city-level fix keeps its coordinates and time zone here: a
+    model reads a number as a place, and the centroid's time zone
+    (America/Chicago) is nobody's. The HTTP JSON keeps every value; this is
+    the shape for a context window. `country_source` is "registered" when
+    GeoLite2 had only the country the block is registered in (1.1.1.1: AU),
+    "located" when it had the country the address is in, and null when no
+    country was found or the bundled geoip2fast snapshot answered.
+    """
+    precise = loc.get("precision") == "city"
     return {
         "country_code": loc.get("country_code"),
         "country_name": loc.get("country_name"),
+        "country_source": loc.get("country_source"),
+        "precision": loc.get("precision"),
         "city": loc.get("city_name") or None,
         "subdivision": loc.get("subdivision_name") or None,
-        "lat": loc.get("lat"),
-        "lon": loc.get("lon"),
+        "lat": loc.get("lat") if precise else None,
+        "lon": loc.get("lon") if precise else None,
         "accuracy_km": loc.get("accuracy_km"),
-        "time_zone": loc.get("time_zone"),
+        "time_zone": loc.get("time_zone") if precise else None,
     }
 
 
@@ -286,6 +302,14 @@ async def lookup(target: str) -> dict[str, Any]:
     no trailing dot, and an internationalised name as its UTS 46 A-label
     (`straße.de` as `xn--strae-oqa.de`). `dns_records` and `ssl_certificate`
     echo `domain` the same way.
+
+    `geo.precision` says how far to trust the coordinates: "city"; "country"
+    when GeoLite2 could only place the address in a country (a centroid with
+    a 1000 km radius, as for 8.8.8.8); or null when it has no coordinates for
+    it at all. Unless it is "city", only the country is reliable, and `lat`,
+    `lon` and `time_zone` are null. `geo.country_source` "registered" means
+    even that country is where the block is registered, not where the address
+    is; say "registered in", not "located in".
 
     `registration` is the record of the registrable domain that covers the
     target: for "www.github.com" it is github.com's, identified by
@@ -587,7 +611,9 @@ async def whoami_caller() -> dict[str, Any]:
     the address is on a datacenter list, the note says it is likely a hosted
     client. If the user needs certainty, have them open https://ip.1kko.com in
     a browser. `reputation` is as in `lookup`: "none" is never "safe". It has
-    no AbuseIPDB part: the caller's own address is not sent to anyone.
+    no AbuseIPDB part: the caller's own address is not sent to anyone. `geo`
+    is graded as in `lookup`: at `precision` "country" only the country is
+    reliable, and the coordinates and time zone are null.
     """
     ip = _caller_ip.get()
     if ip == "unknown":
