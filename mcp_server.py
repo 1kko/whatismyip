@@ -280,7 +280,8 @@ async def lookup(target: str) -> dict[str, Any]:
     geolocation, network/ASN owner, registration (RDAP/WHOIS) details, and a
     summary of its TLS certificate. Accepts "example.com", "8.8.8.8",
     "2001:4860:4860::8888", or a pasted URL. Use this first; the other tools
-    go deeper on one aspect. Private and reserved addresses are refused. A
+    go deeper on one aspect. Private and reserved addresses are refused, and
+    so are .onion and home.arpa names, which nothing public answers for. A
     name is looked up and returned as `target` in one spelling: lower case,
     no trailing dot, and an internationalised name as its UTS 46 A-label
     (`straße.de` as `xn--strae-oqa.de`). `dns_records` and `ssl_certificate`
