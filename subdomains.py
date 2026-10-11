@@ -77,6 +77,27 @@ def _normalize_target(domain: str) -> str:
     return domain.strip().lower().rstrip(".")
 
 
+def _special_use_on_wire(domain: str) -> str | None:
+    """Why `domain` is a special-use name once IDNA 2003 encodes it, or None.
+
+    The same codec `lookup.special_use_suffix` matches on. Nameprep deletes
+    U+200C, U+200D and U+1806, so the raw text need not end in `.home.arpa`
+    for the name a resolver would query to be one. This module cannot import
+    `lookup` (that builds the GeoIP managers), so the encode stays here and
+    the tests pin the two answers together. The message names the ASCII form,
+    which is the name that would have been queried.
+    """
+    name = domain[:-1] if domain.endswith(".") else domain
+    try:
+        ascii_name = name.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    for suffix, why in SPECIAL_USE_NAMES.items():
+        if ascii_name == suffix or ascii_name.endswith("." + suffix):
+            return f"{ascii_name} is a special-use name: {why}"
+    return None
+
+
 def invalid_target_reason(domain: str) -> str | None:
     """Why `domain` must not be sent to the source, or None when it may be.
 
@@ -108,6 +129,12 @@ def invalid_target_reason(domain: str) -> str | None:
     if len(domain) > _MAX_NAME:
         return f"a domain name is at most {_MAX_NAME} characters"
     if not _ALLOWED.match(domain):
+        # Before the charset error: a format character in "home" or "onion"
+        # is not ASCII, and the generic punycode hint would hide that the
+        # wire name is a special-use suffix.
+        reason = _special_use_on_wire(domain)
+        if reason is not None:
+            return reason
         return (
             "a domain name may contain only letters, digits, hyphens, "
             "underscores and dots; give an internationalised name in its "

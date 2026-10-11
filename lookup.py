@@ -239,17 +239,34 @@ abuseipdb_client = AbuseIPDBClient()
 _HOST_LABEL = re.compile(r"[a-z0-9_-]{1,63}", re.IGNORECASE)
 
 
-def _is_hostname(target: str) -> bool:
+def _idna2003_hostname(target: str) -> str | None:
+    """The ASCII name dnspython will query, or None when `target` is not one.
+
+    `Resolver.resolve` encodes a non-ASCII qname with the stdlib IDNA 2003
+    codec (nameprep). That codec deletes characters UTS 46 leaves in the
+    label — U+200C, U+200D, U+1806 — so the wire name and the raw text are
+    not the same string. Callers that decide whether a name may be queried
+    have to see the wire name; `_is_hostname` used to compute it and discard
+    it.
+    """
     name = target[:-1] if target.endswith(".") else target
     try:
-        # The stdlib IDNA codec refuses an empty or over-long label and, for a
-        # non-ASCII one, the code points nameprep prohibits.
-        ascii_name = name.encode("idna").decode("ascii")
+        # Refuses an empty or over-long label and, for a non-ASCII one, the
+        # code points nameprep prohibits.
+        ascii_name = name.encode("idna").decode("ascii").lower()
     except UnicodeError:
-        return False
+        return None
+    # A second trailing dot is an empty label. Strip only the one FQDN dot
+    # above; rstrip here would turn "example.com.." into "example.com".
     if not ascii_name or len(ascii_name) > 253:
-        return False
-    return all(_HOST_LABEL.fullmatch(label) for label in ascii_name.split("."))
+        return None
+    if not all(_HOST_LABEL.fullmatch(label) for label in ascii_name.split(".")):
+        return None
+    return ascii_name
+
+
+def _is_hostname(target: str) -> bool:
+    return _idna2003_hostname(target) is not None
 
 
 def special_use_suffix(target: str) -> str | None:
@@ -259,13 +276,14 @@ def special_use_suffix(target: str) -> str | None:
     says yes to "x.onion" and "router.home.arpa", yet no public resolver,
     registry or WHOIS server can answer for them, and RFC 7686 asks software
     without Tor not to put a .onion name on the DNS at all. Matched on a label
-    boundary after lowercasing and dropping the FQDN dot, so "notonion.com"
-    and "x.onion.example.com" are not matches. A target that is not a hostname
-    is None whatever it ends in: that is "invalid_target", not a name.
+    boundary of the IDNA 2003 name, so "notonion.com" and
+    "x.onion.example.com" are not matches, and a format character nameprep
+    deletes cannot hide "home.arpa". A target that is not a hostname is None
+    whatever it ends in: that is "invalid_target", not a name.
     """
-    if not _is_hostname(target):
+    name = _idna2003_hostname(target)
+    if name is None:
         return None
-    name = target.lower().rstrip(".")
     for suffix in SPECIAL_USE_SUFFIXES:
         if name == suffix or name.endswith("." + suffix):
             return suffix

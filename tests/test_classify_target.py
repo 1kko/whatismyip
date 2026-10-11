@@ -10,6 +10,7 @@ given -- and came back as an empty 200 page tagged DOMAIN. Those failures were
 import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import dns.name
 import pytest
 from fastapi.testclient import TestClient
 
@@ -406,6 +407,81 @@ def test_special_use_suffix_matches_on_a_label_boundary(target, suffix):
 )
 def test_special_use_suffix_is_none_for_everything_else(target):
     assert lookup.special_use_suffix(target) is None
+
+
+# Nameprep (IDNA 2003, what dnspython queries with) deletes these. UTS 46,
+# which normalize_lookup_target applies, does not, so the raw text still
+# contains them and a suffix check of that text misses home.arpa.
+_IDNA2003_DROPPED = ("\u200c", "\u200d", "\u1806")
+
+
+@pytest.mark.parametrize("mark", _IDNA2003_DROPPED)
+@pytest.mark.parametrize(
+    ("shape", "suffix", "wire"),
+    [
+        ("router.ho{0}me.arpa", "home.arpa", "router.home.arpa"),
+        ("router.home{0}.arpa", "home.arpa", "router.home.arpa"),
+        ("router.{0}home.arpa", "home.arpa", "router.home.arpa"),
+        ("ho{0}me.arpa", "home.arpa", "home.arpa"),
+        ("home.{0}arpa", "home.arpa", "home.arpa"),
+        ("x.on{0}ion", "onion", "x.onion"),
+        ("router.ho{0}{0}me.arpa", "home.arpa", "router.home.arpa"),
+    ],
+)
+def test_special_use_suffix_matches_the_name_idna2003_queries(
+    mark, shape, suffix, wire
+):
+    target = shape.format(mark)
+    assert dns.name.from_text(target).to_text(omit_final_dot=True) == wire
+    assert lookup.normalize_lookup_target(target) == target
+    assert lookup.special_use_suffix(target) == suffix
+    assert lookup.classify_target(target) == "invalid"
+
+
+@pytest.mark.parametrize("mark", _IDNA2003_DROPPED)
+def test_a_dropped_mark_between_not_and_home_is_not_home_arpa(mark):
+    """Deleting the mark joins the labels into nothome.arpa, a different name."""
+    target = f"not{mark}home.arpa"
+    assert dns.name.from_text(target).to_text(omit_final_dot=True) == "nothome.arpa"
+    assert lookup.special_use_suffix(target) is None
+    assert lookup.classify_target(target) == "domain"
+
+
+@pytest.mark.parametrize("mark", _IDNA2003_DROPPED)
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        ("router.ho{0}me.arpa", HOME_ARPA_MESSAGE),
+        ("home.{0}arpa", HOME_ARPA_MESSAGE),
+        ("x.on{0}ion", ONION_MESSAGE),
+    ],
+)
+async def test_gather_refuses_a_hidden_special_use_name(mark, shape, message):
+    target = shape.format(mark)
+    with _legs() as mocks:
+        with pytest.raises(lookup.InvalidTargetError) as raised:
+            await lookup.gather(target)
+    assert raised.value.code == "special_use_name"
+    assert raised.value.message == message
+    _assert_nothing_went_out(mocks)
+
+
+@pytest.mark.parametrize("mark", _IDNA2003_DROPPED)
+def test_a_hidden_home_arpa_is_a_400_on_every_gate(mark):
+    target = f"router.ho{mark}me.arpa"
+    with _legs() as mocks:
+        response = client.get(f"/{target}", headers=API_UA)
+        include = client.get(f"/{target}?subdomains=include", headers=API_UA)
+        only = client.get(f"/{target}?subdomains=only", headers=API_UA)
+    assert response.status_code == 400
+    assert response.json() == {"error": HOME_ARPA_MESSAGE, "code": "special_use_name"}
+    assert include.status_code == 400
+    assert include.json() == {"error": HOME_ARPA_MESSAGE, "code": "special_use_name"}
+    assert only.status_code == 400
+    assert "special-use name" in only.json()["detail"]
+    assert "home.arpa" in only.json()["detail"]
+    mocks["subdomains"].assert_not_called()
+    _assert_nothing_went_out(mocks)
 
 
 @pytest.mark.parametrize(
