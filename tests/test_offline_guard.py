@@ -50,11 +50,9 @@ def test_a_tests_own_mock_sits_on_top_of_the_defaults(monkeypatch):
     assert dns.resolver.Resolver(configure=False).resolve("example.com") == "ok"
 
 
-async def test_an_unmocked_lookup_reports_failures_not_absence(monkeypatch):
+async def test_an_unmocked_lookup_reports_failures_not_absence():
     """Through the whole pipeline with nothing mocked, every leg that needs
     the network says it could not find out, never that there is nothing."""
-    # Empty, so the answers are this run's and not another test's.
-    monkeypatch.setattr(lookup, "_whois_cache", lookup.TTLCache())
     ip = await lookup.gather("8.8.8.8")
     domain = await lookup.gather("example.com")
 

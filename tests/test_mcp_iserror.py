@@ -31,8 +31,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from opentelemetry.trace import StatusCode
 
 import lookup
-import main
-from main import app, ip_ban_manager, rate_limiter
+from main import app
 
 MCP_HEADERS = {
     "Content-Type": "application/json",
@@ -86,14 +85,6 @@ SUBDOMAINS = {
     "stale": False,
     "error": None,
 }
-
-
-def setup_function():
-    """Same reset as tests/test_mcp.py: a ban or rate-limit history left by
-    another test file would 403 these requests before they reach /mcp."""
-    rate_limiter.request_history.clear()
-    main.mcp_rate_limiter.request_history.clear()
-    ip_ban_manager.banned_ips.clear()
 
 
 def _gathered(**overrides):

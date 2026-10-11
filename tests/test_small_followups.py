@@ -152,7 +152,6 @@ INIT = {
 def test_mcp_initialize_reports_the_deployed_version():
     """The commit /healthz reports (SOURCE_COMMIT, or "unknown"), not the SDK's
     empty default, so a client's log of the handshake names the build."""
-    main.mcp_rate_limiter.request_history.clear()
     with TestClient(main.app) as client:
         response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
     assert response.status_code == 200
@@ -298,8 +297,6 @@ def self_route():
     """The self route with GeoIP and the PTR answered locally (no PTR name, so
     no record sweep), a soft deadline short enough that a page goes out without
     its registration, and a gate wait of a twentieth of a second."""
-    lookup._whois_cache.clear()
-    TASKS.clear()
     with (
         patch(
             "main.lookup_location",
@@ -314,8 +311,6 @@ def self_route():
         patch.object(GATE, "wait", 0.05),
     ):
         yield
-    lookup._whois_cache.clear()
-    TASKS.clear()
 
 
 class _SlowRdap:

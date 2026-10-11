@@ -12,28 +12,13 @@ from fastapi.testclient import TestClient
 
 import lookup
 import main
-from main import app, ip_ban_manager, rate_limiter
+from main import app
 
 MCP_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
     "Host": "ip.1kko.com",
 }
-
-
-def setup_function():
-    """Undo whatever a previous run left behind before each test.
-
-    Every test here uses the default TestClient(app), whose client IP is
-    "testclient" — the same IP tests/test_security.py deliberately bans in its
-    own tests. BANNED_IPS_FILE (see tests/conftest.py) persists across pytest
-    runs, so a ban or rate-limit history left over from a previous run would
-    403 every request below before it ever reaches /mcp. Mirrors
-    tests/test_security.py's _reset_security_state().
-    """
-    rate_limiter.request_history.clear()
-    main.mcp_rate_limiter.request_history.clear()
-    ip_ban_manager.banned_ips.clear()
 
 
 INIT = {
@@ -174,8 +159,6 @@ def test_mcp_uses_its_own_rate_bucket_and_never_bans():
     addresses, so escalating an MCP rate-limit breach to a ban would take all
     of them offline at once. Over-limit is 429 and nothing more.
     """
-    main.mcp_rate_limiter.request_history.clear()
-    main.ip_ban_manager.banned_ips.clear()
     limit = main.mcp_rate_limiter.requests_per_minute
 
     with TestClient(app, client=("203.0.113.7", 41234)) as client:

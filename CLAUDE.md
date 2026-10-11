@@ -680,7 +680,12 @@ and unknown-country handling are pinned off. `pytest_sessionfinish` removes
 the ban list, `lookup._whois_cache`, `main._self_whois_tasks` and
 `main._refresh_failures` emptied, a new RDAP breaker bound to both
 `rdap.rdap_breaker` and `main.rdap_breaker`, and the geo rules reloaded from
-those defaults. A new piece of module-level state gets its line there.
+those defaults. A new piece of module-level state gets its line there. A test
+never clears these itself, and `test_state_reset.py` fails if one does: a test
+that needs a clean slate between two of its own steps lifts what the last step
+changed (`ip_ban_manager.unban_ip`), and one that needs a longer burst than a
+rate limit allows raises that limiter's `requests_per_second` with
+`monkeypatch`.
 
 The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
 and importing `main` makes no network call. The suite runs offline, and
@@ -720,7 +725,7 @@ Test files:
 - Boot: `test_boot.py` (importing `main` touches no network; the lifespan
   starts and stops the scheduler), `test_offline_guard.py` (the offline
   defaults and the network guard), `test_state_reset.py` (a state directory
-  per run, what the per-test reset covers)
+  per run, what the per-test reset covers, no reset by hand)
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
   security headers, fingerprint panel, `?subdomains=`), `test_negotiation.py`

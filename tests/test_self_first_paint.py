@@ -69,15 +69,6 @@ TASKS = main._self_whois_tasks
 
 
 @pytest.fixture(autouse=True)
-def clean_slate():
-    lookup._whois_cache.clear()
-    TASKS.clear()
-    yield
-    lookup._whois_cache.clear()
-    TASKS.clear()
-
-
-@pytest.fixture(autouse=True)
 def quick_gate():
     """A lookup that finds every slot taken waits LOOKUP_GATE_WAIT_SECONDS
     before it is turned away; a twentieth of a second keeps the wait real."""

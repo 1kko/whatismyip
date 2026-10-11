@@ -118,9 +118,6 @@ class TestLookupWhoisRouting:
     """lookup_whois() must prefer RDAP and only pay for WHOIS when RDAP can't
     answer. These patch the two lookups so nothing touches the network."""
 
-    def setup_method(self):
-        lookup._whois_cache._data.clear()
-
     def test_rdap_hit_skips_whois(self, monkeypatch):
         canonical = {"source": "rdap", "name": "google.com"}
         monkeypatch.setattr(lookup, "lookup_rdap", lambda target: canonical)

@@ -321,7 +321,6 @@ def _call_tool(mcp_client, name, arguments):
     [("lookup", "target"), ("dns_records", "domain"), ("ssl_certificate", "domain")],
 )
 def test_mcp_tools_report_an_invalid_target_as_an_error(tool, argument):
-    main.mcp_rate_limiter.request_history.clear()
     with TestClient(app) as mcp_client, _legs() as mocks:
         mcp_client.post("/mcp", json=MCP_INIT, headers=MCP_HEADERS)
         payload = _call_tool(mcp_client, tool, {argument: "foo\r\nbar.com"})

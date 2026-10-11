@@ -151,7 +151,6 @@ def offline():
         "geo": MagicMock(side_effect=_location),
         "connect": MagicMock(side_effect=AssertionError("TLS connection opened")),
     }
-    allowed = {"allowed": True, "country": "US", "region": None, "reason": "test"}
     with ExitStack() as stack:
         stack.enter_context(patch("lookup._recursive_resolver", lambda: fake))
         stack.enter_context(patch("managers._recursive_resolver", lambda: fake))
@@ -161,9 +160,6 @@ def offline():
         )
         stack.enter_context(
             patch.object(managers.SSLManager, "_connect", mocks["connect"])
-        )
-        stack.enter_context(
-            patch("main.geo_block_manager.check_access", return_value=allowed)
         )
         yield mocks
 

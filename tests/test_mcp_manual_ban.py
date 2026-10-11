@@ -11,9 +11,7 @@ started by the app lifespan, which TestClient only runs as a context manager.
 """
 
 import json
-from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 import main
@@ -36,22 +34,6 @@ INIT = {
         "clientInfo": {"name": "pytest", "version": "0"},
     },
 }
-
-
-@pytest.fixture(autouse=True)
-def _isolated_security_state():
-    """conftest clears the lookup limiter and the ban list; the MCP bucket is
-    separate. Geo-blocking is pinned open so that whatever GEO_RULES_FILE a
-    previous run left behind cannot 403 a lookup before it earns its ban."""
-    main.mcp_rate_limiter.request_history.clear()
-    allowed = {"allowed": True, "country": "US", "region": None, "reason": "test"}
-    with patch("main.geo_block_manager.check_access", return_value=allowed):
-        yield
-    main.mcp_rate_limiter.request_history.clear()
-    # Persist the clear too, so no ban from here survives into BANNED_IPS_FILE
-    # for the next pytest run to load.
-    ip_ban_manager.banned_ips.clear()
-    ip_ban_manager.save_bans()
 
 
 def test_rate_limit_ban_from_a_lookup_path_does_not_block_mcp(monkeypatch):

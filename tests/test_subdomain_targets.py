@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-import main
 import subdomains
 from main import app, ip_ban_manager
 
@@ -104,11 +103,8 @@ def _path(target: str) -> str:
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path):
-    """A throwaway store, and an empty MCP rate bucket: conftest clears only the
-    lookup limiter, and two MCP calls per test across this many parameters
-    would otherwise trip the per-second limit and 429 later tests."""
+    """A throwaway subdomain store for each test."""
     subdomains.reset_state(store_path=str(tmp_path / "s.sqlite3"))
-    main.mcp_rate_limiter.request_history.clear()
     yield
     subdomains.reset_state()
 

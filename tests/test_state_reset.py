@@ -12,6 +12,7 @@ cleared, or not, file by file.
 """
 
 import json
+import re
 import tempfile
 from pathlib import Path
 
@@ -161,3 +162,41 @@ def test_a_run_starts_from_nothing_another_run_left(pytester, monkeypatch):
         assert state_dir.name.startswith("whatismyip-test-")
         assert not state_dir.exists()
     assert first["files"] != second["files"]
+
+
+# What conftest's reset covers, done again by hand. Search whole files so a
+# normally formatted multiline patch cannot hide a geo-access bypass.
+RESET_BY_HAND = re.compile(
+    r"banned_ips\.clear\(\)"
+    r"|ip_ban_manager\.save_bans\(\)"
+    r"|request_history\.clear\(\)"
+    r"|_whois_cache(?:\._data)?\.clear\(\)"
+    r"|[\"']_whois_cache[\"']\s*,\s*lookup\.TTLCache\(\)"
+    r"|(?:_self_whois_tasks|TASKS)\.clear\(\)"
+    r"|_refresh_failures\.clear\(\)"
+    r"|geo_block_manager\.load_config\(\)"
+    r"|check_access[\"']\s*,\s*return_value\s*=\s*allowed",
+    re.S,
+)
+
+
+def test_no_test_file_resets_what_conftest_resets():
+    """A mid-test clean slate lifts only what the preceding step changed."""
+    found = []
+    for path in sorted(TESTS.glob("test_*.py")):
+        if path == Path(__file__):
+            continue
+        source = path.read_text()
+        for match in RESET_BY_HAND.finditer(source):
+            number = source.count("\n", 0, match.start()) + 1
+            excerpt = " ".join(match.group(0).split())
+            found.append(f"{path.name}:{number}: {excerpt}")
+    assert found == [], "reset by hand outside conftest:\n" + "\n".join(found)
+
+
+def test_reset_guard_sees_a_multiline_geo_bypass():
+    source = """patch(
+        "main.geo_block_manager.check_access",
+        return_value=allowed,
+    )"""
+    assert RESET_BY_HAND.search(source)

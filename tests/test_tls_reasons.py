@@ -29,7 +29,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from fastapi.testclient import TestClient
 
-import main
 import managers
 from main import app
 from managers import SSLManager
@@ -711,7 +710,6 @@ def _call_tool(name, arguments, ssl_data, resolved_ip=IP):
     async def fake_gather(target):
         return {**_gathered(ssl_data), "resolved_ip": resolved_ip}
 
-    main.mcp_rate_limiter.request_history.clear()
     with TestClient(app) as mcp_client:
         mcp_client.post("/mcp", json=INIT, headers=MCP_HEADERS)
         with patch("mcp_server.gather", fake_gather):
