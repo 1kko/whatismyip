@@ -18,6 +18,7 @@ IP_RESPONSE = {
         "ip": "8.8.8.8",
         "country_code": "US",
         "country_name": "United States",
+        "country_source": "located",
         "city_name": "",
         "subdivision_name": "",
         "cidr": "8.8.8.0/23",
@@ -25,12 +26,24 @@ IP_RESPONSE = {
         "asn_cidr": "8.8.8.0/24",
         "is_private": False,
         "reverse_dns": "dns.google.",
+        "precision": "city",
     },
     "domain": {"a": [{"ip": "8.8.8.8", "ttl": 300}], "mx": [], "ns": [], "txt": []},
     "whois": {"error": "WHOIS lookup failed"},
     "ssl": None,
     "headers": {"user-agent": "curl/8.0"},
     "distance_km": 9010.4,
+    # The visitor's end of the arc, as main.build_map_payload writes it.
+    "origin": {
+        "ip": "118.235.14.201",
+        "country_code": "KR",
+        "country_name": "South Korea",
+        "city_name": "Seoul",
+        "lat": 37.5665,
+        "lon": 126.978,
+        "accuracy_km": 20,
+        "precision": "city",
+    },
 }
 
 DOMAIN_RESPONSE = {
@@ -38,11 +51,13 @@ DOMAIN_RESPONSE = {
     "location": {
         "country_code": "US",
         "country_name": "United States",
+        "country_source": "located",
         "city_name": "Mountain View",
         "subdivision_name": "California",
         "cidr": "142.250.192.0/19",
         "asn_name": "Google LLC",
         "is_private": False,
+        "precision": "city",
     },
     "domain": {
         "a": [{"ip": "142.250.207.46", "ttl": 300}],
@@ -72,6 +87,41 @@ DOMAIN_RESPONSE = {
     },
     "headers": {},
     "distance_km": None,
+}
+
+
+# GeoLite2's answer for 8.8.8.8: the US centroid with a 1000 km radius, no
+# city, and a time zone that is the centroid's, not the address's.
+COUNTRY_LEVEL_RESPONSE = {
+    **IP_RESPONSE,
+    "location": {
+        **IP_RESPONSE["location"],
+        "lat": 37.751,
+        "lon": -97.822,
+        "accuracy_km": 1000,
+        "time_zone": "America/Chicago",
+        "precision": "country",
+    },
+    "distance_km": 10462.3,
+}
+
+# GeoLite2's answer for 1.1.1.1: only the country the block is registered in
+# and no coordinates at all; the coordinates here are the gazetteer's centroid
+# the page draws (main._apply_resolved_target).
+REGISTERED_ONLY_RESPONSE = {
+    **IP_RESPONSE,
+    "address": "1.1.1.1",
+    "location": {
+        **IP_RESPONSE["location"],
+        "ip": "1.1.1.1",
+        "country_code": "AU",
+        "country_name": "Australia",
+        "country_source": "registered",
+        "lat": -33.4888,
+        "lon": 144.9099,
+        "precision": "country",
+    },
+    "distance_km": 8300.0,
 }
 
 
@@ -497,6 +547,143 @@ class TestGeoIpSection:
         }
         assert rows["Coordinates"] == "—"
         assert rows["Accuracy"] == "—"
+
+
+class TestPrecisionWording:
+    """What the hero and the GeoIP card say when the fix is not a city.
+
+    8.8.8.8 drew a crisp pin in Kansas with "≈ 10,462 km from you", and 1.1.1.1
+    an Australian flag over the outback, with the only honest line ("Accuracy
+    ± 1000 km") inside an accordion. The words below replace the city line, so
+    the first thing read under the country is how far to trust it. None of
+    them is a verdict: "anycast" is a trait GeoLite2 does not carry."""
+
+    def test_a_city_fix_shows_the_city_and_region(self):
+        view = build_view(DOMAIN_RESPONSE, is_self=False)
+        assert view["city_line"] == "Mountain View · California"
+
+    def test_a_country_centroid_is_called_approximate(self):
+        view = build_view(COUNTRY_LEVEL_RESPONSE, is_self=False)
+        assert view["country_name"] == "United States"
+        assert view["city_line"] == "approximate · country-level"
+
+    def test_a_registered_only_country_says_so(self):
+        view = build_view(REGISTERED_ONLY_RESPONSE, is_self=False)
+        assert view["flag"] == "🇦🇺"
+        assert view["city_line"] == "registered in Australia · location unknown"
+        assert "anycast" not in view["city_line"]
+
+    def test_no_country_means_no_line(self):
+        """An address no database places: an empty country must not get
+        "approximate · country-level" written under it."""
+        response = dict(
+            IP_RESPONSE,
+            location={"ip": "8.8.8.8", "country_code": "--", "precision": None},
+        )
+        assert build_view(response, is_self=False)["city_line"] == ""
+
+    def test_a_private_visitor_gets_no_approximate_line(self):
+        """A dev server with no proxy in front: the self page's country reads
+        "Private network", which is not a country-level fix."""
+        response = dict(
+            IP_RESPONSE,
+            address="192.168.0.10",
+            location={
+                "ip": "192.168.0.10",
+                "country_code": "--",
+                "country_name": "Private network",
+                "is_private": True,
+                "precision": None,
+            },
+        )
+        assert build_view(response, is_self=True)["city_line"] == ""
+
+    def test_no_distance_to_a_country_centroid(self):
+        assert (
+            build_view(COUNTRY_LEVEL_RESPONSE, is_self=False)["distance_text"] is None
+        )
+        assert (
+            build_view(REGISTERED_ONLY_RESPONSE, is_self=False)["distance_text"] is None
+        )
+
+    def test_no_distance_from_a_country_level_visitor(self):
+        """The other end of the arc: a visitor GeoLite2 can only place in a
+        country gets no "≈ N km from you" either, whatever the target."""
+        response = dict(
+            IP_RESPONSE, origin=dict(IP_RESPONSE["origin"], precision="country")
+        )
+        assert build_view(response, is_self=False)["distance_text"] is None
+
+    def test_distance_between_two_city_fixes_is_unchanged(self):
+        assert (
+            build_view(IP_RESPONSE, is_self=False)["distance_text"]
+            == "≈ 9,010 km from you"
+        )
+
+    def _rows(self, response):
+        return {
+            r["label"]: r["value"]
+            for r in build_view(response, is_self=False)["geoip_rows"]
+        }
+
+    def test_the_accuracy_row_names_the_level(self):
+        rows = self._rows(COUNTRY_LEVEL_RESPONSE)
+        assert rows["Accuracy"] == "country-level (± 1000 km)"
+        # The card is the raw GeoLite2 detail, and the JSON keeps these values
+        # (the API contract), so the card prints them under the grade. Flip
+        # the two lines below if the owner decides the Time zone row should
+        # follow MCP and go blank at country level (backlog #2, 정할 것).
+        assert rows["Coordinates"] == "37.751, -97.822"
+        assert rows["Time zone"] == "America/Chicago"
+
+    def test_the_accuracy_row_for_a_registered_only_country(self):
+        rows = self._rows(REGISTERED_ONLY_RESPONSE)
+        assert rows["Accuracy"] == "country-level · registered country only"
+        assert "🇦🇺" in rows["Country"] and "AU" in rows["Country"]
+
+    def test_a_gazetteer_centroid_has_no_radius_to_print(self):
+        response = dict(
+            IP_RESPONSE,
+            location={
+                **IP_RESPONSE["location"],
+                "lat": 39.5,
+                "lon": -98.35,
+                "precision": "country",
+            },
+        )
+        assert self._rows(response)["Accuracy"] == "country-level"
+
+    def test_a_fallback_country_is_approximate_not_registered(self):
+        """Before the first GeoLite2-City download, and on CI, the bundled
+        geoip2fast snapshot answers with a country alone and no word on which
+        key it came from (country_source None); the page draws the gazetteer's
+        centroid. That is a country-level fix, not a registered-only one."""
+        response = dict(
+            IP_RESPONSE,
+            location={
+                **IP_RESPONSE["location"],
+                "country_source": None,
+                "lat": 39.5,
+                "lon": -98.35,
+                "precision": "country",
+            },
+        )
+        assert build_view(response, is_self=False)["city_line"] == (
+            "approximate · country-level"
+        )
+        assert self._rows(response)["Accuracy"] == "country-level"
+
+    def test_a_city_fix_keeps_its_plain_radius(self):
+        response = dict(
+            IP_RESPONSE,
+            location={
+                **IP_RESPONSE["location"],
+                "lat": 37.386,
+                "lon": -122.084,
+                "accuracy_km": 20,
+            },
+        )
+        assert self._rows(response)["Accuracy"] == "± 20 km"
 
 
 class TestSelfFlag:
