@@ -418,6 +418,47 @@ class TestDnsRows:
         assert ttls["NS"] == 20675
         assert ttls["A"] == 300
 
+    def test_rows_link_the_record_field_not_the_display_value(self):
+        """main.lookup_href on the field that is a target: an MX row shows
+        "10 mx1.mail.naver.com." but links its host; TXT is free text."""
+        hrefs = {row["type"]: row.get("href") for row in self._rows()}
+        assert hrefs["A"] == "/223.130.192.248"
+        assert hrefs["NS"] == "/ns1.naver.com"
+        assert hrefs["MX"] == "/mx1.mail.naver.com"
+        assert hrefs["TXT"] is None
+
+    def test_a_private_address_and_a_name_without_a_public_suffix_stay_text(self):
+        from main import _dns_rows
+
+        rows = _dns_rows(
+            {
+                "address": "corp.example",
+                "domain": {
+                    "a": [{"ip": "10.0.0.1", "ttl": 60}],
+                    "ns": [{"hostname": "ns1.corp.internal.", "ttl": 60, "ip": None}],
+                },
+            }
+        )
+        assert [row["type"] for row in rows] == ["A", "NS"]
+        # Not even href=None: a row that stays text is the dict it always was.
+        assert not any("href" in row for row in rows)
+
+    def test_a_failed_query_row_has_no_link(self):
+        from main import _dns_rows
+
+        rows = _dns_rows(
+            {"address": "example.com", "domain": {"status": {"mx": "timeout"}}}
+        )
+        assert rows == [
+            {
+                "type": "MX",
+                "name": "example.com",
+                "value": "(timed out)",
+                "ttl": "",
+                "tone": "warning",
+            }
+        ]
+
     # The shape get_records() returns for a name below its zone apex: NS was
     # asked of the zone, and the MX fell back to the zone's, labelled.
     ZONE_DOMAIN = {
@@ -449,6 +490,7 @@ class TestDnsRows:
             "name": "www.example.com",
             "value": "93.184.216.34",
             "ttl": 300,
+            "href": "/93.184.216.34",
         }
         assert "from_zone" not in by_type["TXT"]
         # NS is always the zone's; this MX is, because get_records said so.
@@ -643,6 +685,7 @@ class TestDnsRows:
                 "name": "www.example.com",
                 "value": "example.com.",
                 "ttl": 300,
+                "href": "/example.com",
             }
         ]
 
@@ -688,6 +731,7 @@ class TestDnsRows:
                 "name": "www.example.com",
                 "value": "alias.example.net.",
                 "ttl": 300,
+                "href": "/alias.example.net",
             },
             {
                 "type": "CNAME",
@@ -695,6 +739,7 @@ class TestDnsRows:
                 "value": "edge.example.net.",
                 "ttl": 60,
                 "hop_of": "alias.example.net",
+                "href": "/edge.example.net",
             },
         ]
 
@@ -713,8 +758,88 @@ class TestDnsRows:
                 "name": "www.example.com",
                 "value": "example.com.",
                 "ttl": 300,
+                "href": "/example.com",
             }
         ]
+
+
+class TestLookupHref:
+    """main.lookup_href: the one rule for which values on the page link to
+    their own lookup. Only what GET /{value} would answer."""
+
+    def test_a_hostname_under_a_public_suffix_links_without_its_trailing_dot(self):
+        from main import lookup_href
+
+        assert lookup_href("ns1.naver.com.") == "/ns1.naver.com"
+        assert lookup_href("dns.google") == "/dns.google"
+
+    def test_a_hostname_links_in_its_canonical_spelling(self):
+        """lookup.canonical_hostname (#1): an RDAP name server comes in upper
+        case and a name can come in Unicode; the link is the one spelling the
+        name's own page, title and cache key use."""
+        from main import lookup_href
+
+        assert lookup_href("NS1.NAVER.COM") == "/ns1.naver.com"
+        assert lookup_href("münchen.de.") == "/xn--mnchen-3ya.de"
+
+    def test_a_public_address_links_and_an_ipv6_one_keeps_its_colons(self):
+        from main import lookup_href
+
+        assert lookup_href("223.130.192.248") == "/223.130.192.248"
+        assert lookup_href("2001:4860:4860::8888") == "/2001:4860:4860::8888"
+
+    def test_a_private_or_reserved_address_is_not_a_link(self):
+        """is_safe_ip's verdict: a link never leads to the 400 page."""
+        from main import lookup_href
+
+        assert lookup_href("10.0.0.1") is None
+        assert lookup_href("127.0.0.1") is None
+        assert lookup_href("fe80::1") is None
+        assert lookup_href("::ffff:192.168.0.1") is None
+
+    def test_a_name_without_a_public_suffix_is_not_a_link(self):
+        """A path without a public suffix that matches a detector pattern bans
+        the visitor who follows it (SuspiciousPatternDetector)."""
+        from main import lookup_href
+
+        assert lookup_href("ns1.corp.internal") is None
+        assert lookup_href("localhost") is None
+
+    def test_a_link_shaped_like_a_probe_is_answered_not_banned(self):
+        """A record can name a host whose path matches a detector rule: "/admin"
+        in admin.naver.com, "\\.env" in mail.envato.com, "/wp-" in
+        wp-mail.example.net. Each has a public suffix, so lookup_href links it,
+        and the click must be answered as the lookup it is
+        (main._suspicious_path_is_ordinary), never banned for 24 hours: a link
+        on the page would have locked out the visitor who followed it."""
+        from main import ip_ban_manager, lookup_href
+
+        for name in ("admin.naver.com.", "mail.envato.com.", "wp-mail.example.net."):
+            href = lookup_href(name)
+            assert href == "/" + name.rstrip("."), name
+            with patch(
+                "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
+            ):
+                response = client.get(href, headers=BROWSER_UA)
+            assert response.status_code == 200, href
+            assert not ip_ban_manager.is_banned(SEOUL_IP), href
+
+    def test_a_special_use_name_is_not_a_link(self):
+        """classify_target calls .onion and home.arpa names invalid (#15), and
+        GET /{name} refuses them with a 400, so a record naming one stays text."""
+        from main import lookup_href
+
+        assert lookup_href("printer.home.arpa.") is None
+        assert lookup_href("example.onion") is None
+
+    def test_text_that_is_not_a_target_is_not_a_link(self):
+        from main import lookup_href
+
+        assert lookup_href("—") is None
+        assert lookup_href("(timed out)") is None
+        assert lookup_href("google-site-verification=fK9dDF") is None
+        assert lookup_href("") is None
+        assert lookup_href(None) is None
 
 
 class TestSecurityHeaders:

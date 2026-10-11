@@ -12,7 +12,7 @@ import re
 import secrets
 import time
 from logging.handlers import TimedRotatingFileHandler
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -82,6 +82,7 @@ from lookup import (
     PrivateAddressError,
     abuseipdb_client,
     cached_whois,
+    canonical_hostname,
     classify_target,
     domain_manager,
     gather,
@@ -326,6 +327,57 @@ def _record_value(kind: str, record) -> str:
     return str(record)
 
 
+def lookup_href(value: str | None) -> str | None:
+    """The page's link to a lookup of `value`, or None when it stays text.
+
+    One rule for every hostname and address the page prints (the DNS table's
+    values, the rDNS and PTR facts, the hero's A → tag, the WHOIS name
+    servers): a link only to what GET /{domain_ip} would answer. classify_target
+    admits a hostname under a public suffix, so ns1.corp.internal stays text --
+    a path like that, matching a detector pattern, bans the visitor who follows
+    it -- and so do the special-use names it refuses. is_safe_ip admits only a
+    public unicast address, so a private or reserved one in a record never
+    links to the 400 page. A name links in its canonical spelling
+    (canonical_hostname: lower case, A-label), the one its own page has; DNS
+    names arrive with their trailing dot (ns1.naver.com.), and RDAP name
+    servers often in upper case. Only ':' is left unescaped, for an IPv6
+    address; a hostname cannot contain one.
+    """
+    if not isinstance(value, str):
+        return None
+    target = value.strip().rstrip(".")
+    kind = classify_target(target)
+    if kind == "domain":
+        target = canonical_hostname(target)
+    elif kind not in ("ipv4", "ipv6") or not is_safe_ip(target):
+        return None
+    return "/" + quote(target, safe=":")
+
+
+def _record_target(kind: str, record) -> str | None:
+    """The field of a record that is itself a lookup target: an A/AAAA
+    record's address, an NS or MX record's host, a CNAME's target. Never the
+    display value: an MX shows as "10 mx1.mail.naver.com.", and TXT is text."""
+    if not isinstance(record, dict):
+        return None
+    if kind in ("A", "AAAA"):
+        return record.get("ip")
+    if kind in ("MX", "NS"):
+        return record.get("hostname")
+    if kind == "CNAME":
+        return record.get("cname")
+    return None
+
+
+def _linked_row(row: dict, target: str | None) -> dict:
+    """`row` with an `href` when `target` links (lookup_href); a row whose
+    value stays text -- TXT, a refused value, a failed query -- is returned as
+    it was, with no href key at all, so the row dicts tests compare whole are
+    the ones they always were."""
+    href = lookup_href(target)
+    return {**row, "href": href} if href else row
+
+
 def _zone_of(kind: str, record: object, zone: str) -> str | None:
     """The zone a DNS row was answered by, or None for the name's own record.
 
@@ -349,6 +401,10 @@ def _dns_rows(response_data: dict) -> list[dict]:
     whose zone differs from the queried name carries `from_zone: True`, which
     the template renders as a "(zone)" marker; every other row has no such key
     (tests pin that dict as it is). A CNAME hop row keeps its hop's owner name.
+
+    A row whose record names a lookup target (_record_target) that
+    lookup_href links carries that link as `href`; no other row has the key.
+    Only the template reads these rows, so the JSON API carries no href.
     """
     domain = response_data.get("domain") or {}
     queried_name, zone = dns_names(domain, response_data.get("address", ""))
@@ -360,7 +416,7 @@ def _dns_rows(response_data: dict) -> list[dict]:
             out["name"] = source
             if source != queried_name:
                 out["from_zone"] = True
-        return out
+        return _linked_row(out, _record_target(kind, record))
 
     def failed(kind: str, key: str) -> list[dict]:
         # A query that failed gets a row saying so; left out, it would read
@@ -408,7 +464,7 @@ def _dns_rows(response_data: dict) -> list[dict]:
             if owner != queried_name:
                 # Under 900px NAME is hidden, so VALUE says whose hop this is.
                 hop_row["hop_of"] = owner
-            rows.append(hop_row)
+            rows.append(_linked_row(hop_row, hop.get("target")))
     elif cname:
         rows.append(
             row(
