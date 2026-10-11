@@ -881,7 +881,7 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. The tool description tells the model that a level of `none` is not "safe". |
+| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP. Start here. The tool description tells the model that a level of `none` is not "safe". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR sweep. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, and whether the certificate is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection. |

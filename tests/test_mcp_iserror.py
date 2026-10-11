@@ -281,6 +281,24 @@ def test_not_registered_is_an_answer():
     assert payload["registration"]["registered"] is False
 
 
+def test_a_subdomain_is_answered_with_its_registrable_domains_record():
+    gather = _gathered(
+        whois={
+            **GATHERED["whois"],
+            "queried_name": "www.example.com",
+            "registrable_domain": "example.com",
+        }
+    )
+    with TestClient(app) as client, patch("mcp_server.gather", gather):
+        payload = _answered(_call(client, "lookup", {"target": "www.example.com"}))
+    registration = payload["registration"]
+    assert registration["registrar"] == "IANA"
+    assert registration["registrable_domain"] == "example.com"
+    assert registration["queried_name"] == "www.example.com"
+    assert "registered" not in registration
+    assert "error" not in registration
+
+
 def test_one_failed_record_type_is_still_an_answer():
     domain = {**GATHERED["domain"], "status": {"mx": "timeout"}}
     with (

@@ -669,6 +669,39 @@ def test_subdomains_tool_reports_staleness_so_a_model_can_qualify_its_answer():
         assert payload["fetched_at"]
 
 
+def test_lookup_description_says_whose_registration_a_subdomain_gets():
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        tools = _rpc(client, "tools/list").json()["result"]["tools"]
+    description = next(t["description"] for t in tools if t["name"] == "lookup")
+    assert "registrable_domain" in description
+    assert "registered: false" in description
+
+
+def test_lookup_answers_a_subdomain_with_the_registration_covering_it():
+    asked = []
+
+    def rdap(target):
+        asked.append(target)
+        return {"source": "rdap", "name": target, "registrar": "Example Registrar"}
+
+    with TestClient(app) as client, patch("lookup.lookup_rdap", rdap):
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        response = _rpc(
+            client,
+            "tools/call",
+            {"name": "lookup", "arguments": {"target": "www.example.com"}},
+        )
+    result = response.json()["result"]
+    assert result["isError"] is False
+    registration = result["structuredContent"]["registration"]
+    assert asked == ["example.com"]
+    assert registration["registrar"] == "Example Registrar"
+    assert registration["registrable_domain"] == "example.com"
+    assert registration["queried_name"] == "www.example.com"
+    assert "registered" not in registration
+
+
 class TestRegistrationShaping:
     """`not registered` is an answer, not a failure, and the distinction costs
     more here than in the browser: handed `error`, a model reports that the
@@ -698,3 +731,48 @@ class TestRegistrationShaping:
         assert out["registrar"] == "Example Registrar"
         assert "registered" not in out
         assert "error" not in out
+
+    def test_a_record_names_the_registration_that_answered(self):
+        from mcp_server import compact_registration
+
+        out = compact_registration(
+            {
+                "source": "rdap",
+                "name": "example.com",
+                "registrar": "Example Registrar",
+                "queried_name": "www.example.com",
+                "registrable_domain": "example.com",
+            }
+        )
+        assert out["registrable_domain"] == "example.com"
+        assert out["queried_name"] == "www.example.com"
+        assert out["registrar"] == "Example Registrar"
+        assert "registered" not in out
+
+    def test_not_registered_names_the_registrable_domain_that_is_missing(self):
+        from mcp_server import compact_registration
+
+        out = compact_registration(
+            {
+                "error": "not registered",
+                "queried_name": "www.nosuch-name.com",
+                "registrable_domain": "nosuch-name.com",
+            }
+        )
+        assert out["registered"] is False
+        assert out["registrable_domain"] == "nosuch-name.com"
+        assert out["queried_name"] == "www.nosuch-name.com"
+        assert "error" not in out
+
+    def test_a_failure_keeps_the_labels_too(self):
+        from mcp_server import compact_registration
+
+        out = compact_registration(
+            {
+                "error": "WHOIS lookup timed out",
+                "queried_name": "www.example.com",
+                "registrable_domain": "example.com",
+            }
+        )
+        assert out["error"] == "WHOIS lookup timed out"
+        assert out["registrable_domain"] == "example.com"
