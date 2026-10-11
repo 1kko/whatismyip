@@ -674,8 +674,9 @@ imports `main`: `BACKGROUND_REFRESH_ENABLED=false` (no lifespan starts the
 scheduler or downloads anything), `REPUTATION_ENABLED=false`, an empty
 `ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo/IP-rule
 files under a per-run temporary `STATE_DIR`; geo-blocking mode, country lists,
-and unknown-country handling are pinned off. Its `reset_security_state`
-fixture (autouse) clears the rate limiter and ban list around every test.
+and unknown-country handling are pinned off. `pytest_sessionfinish` removes
+`STATE_DIR` after the run. Its `reset_security_state` fixture (autouse) clears
+the rate limiter and ban list around every test.
 
 The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
 and importing `main` makes no network call. The suite runs offline, and
