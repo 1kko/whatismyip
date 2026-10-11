@@ -41,6 +41,17 @@ def test_normalize_lookup_target_is_idempotent():
         "nasa.gov｡",
         "example.com..",
         "a..b.com",
+        "example.com:443",
+        "8.8.8.8:53",
+        "https://nasa.gov:8443/path",
+        "[::1]:443",
+        "2001:db8::1",
+        "example.com:abc",
+        ":443",
+        "user@example.com:443",
+        # The port goes before the trailing dot is stripped: the other way
+        # round, the first pass leaves "nasa.gov." and the second cuts the dot.
+        "nasa.gov.:443",
     ):
         once = lookup.normalize_lookup_target(raw)
         twice = lookup.normalize_lookup_target(once)

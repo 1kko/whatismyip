@@ -802,6 +802,47 @@ def test_the_search_box_strips_a_url_around_an_ipv6_address_like_the_server():
     js = _js(["normalizeLookupTarget"], expression)
     assert js == [lookup.normalize_lookup_target(v) for v in values]
     assert js[:4] == ["2001:db8::1"] * 4
+    assert js[values.index("example.com:443")] == "example.com"
+
+
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_the_search_box_drops_a_port_like_the_server():
+    """`host:port` is cut to the host on both sides of the search box, and
+    only that: an IPv6 address, a non-numeric "port" and an email address
+    come out as they went in."""
+    cases = {
+        "example.com:443": "example.com",
+        "www.example.com:8443": "www.example.com",
+        "8.8.8.8:53": "8.8.8.8",
+        "https://nasa.gov:8443/path": "nasa.gov",
+        "[::1]:443": "::1",
+        "2001:db8::1": "2001:db8::1",
+        "::1": "::1",
+        "example.com:abc": "example.com:abc",
+        "example.com:": "example.com:",
+        ":443": ":443",
+        "a:b:443": "a:b:443",
+        "user@example.com": "user@example.com",
+        "user@example.com:443": "user@example.com",
+    }
+    values = list(cases)
+    expression = f"{json.dumps(values)}.map(normalizeLookupTarget)"
+    js = _js(["normalizeLookupTarget"], expression)
+    assert js == [lookup.normalize_lookup_target(v) for v in values]
+    assert js == list(cases.values())
+    # Checked against the server alone, since their spelling follows the
+    # name's: a port after a non-ASCII name goes before the name is encoded,
+    # on both sides; and Arabic-Indic digits are no port to either side, so
+    # the box refuses what is left, as the server does.
+    idn = "президент.рф:443"
+    arabic = "example.com:" + chr(0x0664) * 2 + chr(0x0663)
+    expression = (
+        f"[normalizeLookupTarget({json.dumps(idn)}),"
+        f" isLookupTarget(normalizeLookupTarget({json.dumps(arabic)}))]"
+    )
+    idn_js, arabic_accepted = _js([*SEARCH, "normalizeLookupTarget"], expression)
+    assert idn_js == lookup.normalize_lookup_target(idn)
+    assert arabic_accepted is False
 
 
 @pytest.mark.skipif(NODE is None, reason="needs node")

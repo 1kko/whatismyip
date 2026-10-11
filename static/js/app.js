@@ -6,7 +6,10 @@ function normalizeLookupTarget(raw) {
   const target = raw
     .trim()
     .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "")
-    .split(/[/?#]/)[0];
+    .split(/[/?#]/)[0]
+    // "host:port" -> "host", as lookup.normalize_lookup_target does: a single
+    // colon with digits after it. A bare IPv6 address has two colons or more.
+    .replace(/^([^:]+):\d+$/, "$1");
   // A URL writes an IPv6 host in brackets, with any port after them.
   const bracketed = target.match(/^\[([^\]]*)\](?::\d*)?$/);
   const host = bracketed ? bracketed[1] : target;
@@ -28,8 +31,8 @@ function normalizeLookupTarget(raw) {
   }
   name = labels.join(".");
   if (/[^\x00-\x7f]/.test(name)) {
-    // Keep ports, user parts, escapes and controls away from the URL parser:
-    // it would silently reinterpret them even though the server refuses them.
+    // Keep user parts, escapes and controls away from the URL parser: it
+    // would silently reinterpret them even though the server refuses them.
     if (/[\x00-\x7f]/.test(name.replace(/[a-z0-9._-]/g, ""))) {
       return host;
     }

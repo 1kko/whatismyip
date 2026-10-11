@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 import config
 import lookup
 import mcp_server
-from main import app, build_map_payload, normalize_lookup_target
+from main import app, build_map_payload, classify_target, normalize_lookup_target
 from main import _is_route
 from viewmodel import SITE_DESCRIPTION
 
@@ -303,6 +303,55 @@ class TestNormalizeLookupTarget:
     def test_empty_and_scheme_only_collapse_to_empty(self):
         assert normalize_lookup_target("") == ""
         assert normalize_lookup_target("https://") == ""
+
+    def test_a_port_after_a_hostname_or_an_ipv4_address_goes(self):
+        # What a terminal or an error message hands over: "host:port". The
+        # bracketed IPv6 form already lost its port; the other hosts now do.
+        assert normalize_lookup_target("example.com:443") == "example.com"
+        assert normalize_lookup_target("www.example.com:8443") == "www.example.com"
+        assert normalize_lookup_target("8.8.8.8:53") == "8.8.8.8"
+        assert normalize_lookup_target("https://nasa.gov:8443/path") == "nasa.gov"
+        assert normalize_lookup_target("[::1]:443") == "::1"
+
+    def test_the_port_goes_before_the_host_is_rewritten(self):
+        # Whatever else is done to the name (the trailing dot, case, the
+        # A-label), a port after it changes nothing. Cut later, it would stay
+        # behind a trailing dot, or be encoded into the last label: "рф:443"
+        # is "xn--:443-f6dy" to the IDNA codec.
+        for host in ("nasa.gov.", "NASA.GOV", "президент.рф"):
+            with_port = normalize_lookup_target(f"{host}:443")
+            assert with_port == normalize_lookup_target(host), host
+
+    def test_what_is_not_a_port_stays_as_typed(self):
+        # A bare IPv6 address has two colons or more, so it is never cut; and
+        # a colon with no digits, or no host, before or after it is not a port.
+        assert normalize_lookup_target("2001:db8::1") == "2001:db8::1"
+        assert normalize_lookup_target("::1") == "::1"
+        assert normalize_lookup_target("example.com:abc") == "example.com:abc"
+        assert normalize_lookup_target("example.com:") == "example.com:"
+        assert normalize_lookup_target(":443") == ":443"
+        assert normalize_lookup_target("a:b:443") == "a:b:443"
+
+    def test_digits_outside_ascii_are_not_a_port(self):
+        # str.isdigit() says yes to Arabic-Indic digits; app.js's \d says no,
+        # and the two normalisers must not disagree.
+        port = chr(0x0664) * 2 + chr(0x0663)  # "443" in Arabic-Indic digits
+        target = normalize_lookup_target(f"example.com:{port}")
+        assert target != "example.com"
+        assert classify_target(target) == "invalid"
+
+    def test_an_email_address_is_not_cut_to_its_domain(self):
+        # Answering for example.com would answer a different question; gather()
+        # refuses it with its own message (tests/test_classify_target.py).
+        assert normalize_lookup_target("user@example.com") == "user@example.com"
+        assert normalize_lookup_target("user@example.com:443") == "user@example.com"
+        # A URL's user:password@ has one colon too, but no digits after it.
+        assert (
+            normalize_lookup_target("https://user:secret@example.com/")
+            == "user:secret@example.com"
+        )
+        # However the name is spelled out, the @ is still there for gather().
+        assert "@" in normalize_lookup_target("user@münchen.de")
 
 
 class TestRouteVsCityMode:

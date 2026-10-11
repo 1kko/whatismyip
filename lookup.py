@@ -171,13 +171,25 @@ def normalize_lookup_target(raw: str) -> str:
     (which parses URLs via get_tld) would accept "https://host/path" but the raw
     string would then be handed to DNS/WHOIS/SSL, which cannot resolve it.
 
-    A URL writes an IPv6 host in brackets, with any port after them
-    ("[2001:db8::1]:8443"), so the brackets and the port go too. The remaining
-    host is lower case, has one DNS-root dot removed, and uses UTS 46 A-labels.
+    A port goes too, after any host: "example.com:443" and "8.8.8.8:53" lose it
+    to the single colon before it, and a URL's bracketed IPv6 host
+    ("[2001:db8::1]:8443") loses the brackets and the port. A bare IPv6 address
+    has two colons or more and is never cut. A "user@" in front of the host
+    is not cut off: the domain after it is not what was asked about. The
+    remaining host is lower case, has one DNS-root dot removed, and uses UTS 46
+    A-labels.
     """
     target = (raw or "").strip()
     target = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", target)
     target = re.split(r"[/?#]", target, maxsplit=1)[0]
+    # "host:port". Before anything below rewrites the host (the bracket case,
+    # the trailing-dot strip), so "nasa.gov.:443" still comes out whole in one
+    # pass. ASCII digits only: str.isdigit() also says yes to Arabic-Indic
+    # digits, which app.js's \d does not match.
+    if target.count(":") == 1:
+        host, _, port = target.rpartition(":")
+        if host and port.isascii() and port.isdigit():
+            target = host
     # "[host]" or "[host]:port", parsed by hand: CodeQL flags the regex for
     # this (an unanchored reading of it backtracks on a run of "[").
     if target.startswith("["):

@@ -1094,9 +1094,18 @@ def _suspicious_path_is_ordinary(request_path: str) -> bool:
     Static assets are exempt outright: `static/geo/*.json` matches the
     detector's `\\.json$` rule, and banning a visitor for loading the page's own
     data would be absurd.
+
+    "/<host>:<digits>" is judged by its host: the route cuts the port before
+    the lookup (lookup.normalize_lookup_target), so "/admin.example.com:8443"
+    is as ordinary as "/admin.example.com" and "/wp-login.php:443" as much a
+    probe as "/wp-login.php". Only a port: a path with an "@" in it gets no
+    such reading.
     """
     if whitelist_manager.is_static(request_path):
         return True
+    with_port = re.fullmatch(r"(/[^:]+):[0-9]+", request_path)
+    if with_port:
+        request_path = with_port.group(1)
     if not whitelist_manager.is_lookup(request_path):
         return False
     target = request_path.lstrip("/")
