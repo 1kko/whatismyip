@@ -655,6 +655,60 @@ class TestRealHandshake:
         assert info == {"error": "port 443 unreachable", "reason": "connection refused"}
 
 
+class TestBudgetsOnARealSocket:
+    """The scripted sockets above record settimeout calls; these read the
+    budget off a real socket at the moment it matters: when connect() runs,
+    and when wrap_socket() copies it onto the SSLSocket for the handshake."""
+
+    def test_a_dropped_syn_is_waited_for_under_the_connect_budget(self, monkeypatch):
+        budgets = []
+
+        class Blackholed(socket.socket):
+            def connect(self, address):
+                budgets.append(self.gettimeout())
+                # What a port that drops the SYN looks like once the budget is
+                # spent. Never calls the real connect, so nothing leaves.
+                raise TimeoutError("timed out")
+
+        monkeypatch.setattr(managers, "socket", SimpleNamespace(socket=Blackholed))
+        info = SSLManager.get_ssl_info(HOST, verified_ip="127.0.0.1")
+        assert info == {"error": "port 443 unreachable", "reason": "timed out"}
+        assert budgets == [TLS_CONNECT_TIMEOUT_SECONDS]
+
+    @pytest.mark.parametrize("cert_name, connects", [("valid", 1), ("expired", 2)])
+    def test_a_real_handshake_runs_under_the_handshake_budget(
+        self, pki, tmp_path, monkeypatch, cert_name, connects
+    ):
+        budgets = []
+        root_pem = _pem(pki.root).decode()
+        real_context = ssl.create_default_context
+        monkeypatch.setattr(
+            managers.ssl,
+            "create_default_context",
+            lambda *a, **k: real_context(cadata=root_pem),
+        )
+        with tls_server(tmp_path, getattr(pki, cert_name), pki.leaf_key) as port:
+
+            class Recording(socket.socket):
+                # SSLSocket is a different class, so its own settimeout does not
+                # land here: what is recorded is exactly what the plain socket
+                # carried into wrap_socket, which SSLSocket then copies.
+                def settimeout(self, value):
+                    budgets.append(value)
+                    super().settimeout(value)
+
+                def connect(self, address):
+                    assert address == ("127.0.0.1", 443)
+                    super().connect(("127.0.0.1", port))
+
+            monkeypatch.setattr(managers, "socket", SimpleNamespace(socket=Recording))
+            info = SSLManager.get_ssl_info(HOST, verified_ip="127.0.0.1")
+        assert info["trusted"] is (cert_name == "valid")
+        # An untrusted certificate is re-read over a second _connect, which
+        # gets both budgets again.
+        assert budgets == [TLS_CONNECT_TIMEOUT_SECONDS, TIMEOUT_SECONDS] * connects
+
+
 # --- the page and the JSON API ----------------------------------------------------
 
 BROWSER_UA = {"user-agent": "Mozilla/5.0 (Macintosh)"}
