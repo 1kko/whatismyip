@@ -231,3 +231,272 @@ class TestCompareLanguages:
         result = _languages(languages, country)
         assert result["verdict"] == "not_comparable"
         assert result["reason"] == reason
+
+
+# --- the panel, in a fake browser -------------------------------------------------
+
+# Just enough of a browser for fingerprint.js: the elements it looks up by id
+# (left out for a lookup page), a document that counts what it creates, a
+# navigator with scripted languages, an Intl that can be made to lack
+# "shortOffset", and a tripwire on every way a page could send something to a
+# server or keep something between visits.
+HARNESS = r"""
+if (!SHORT_OFFSET) {
+  // An engine without timeZoneName "shortOffset" (Safari before 15.4)
+  // throws a RangeError for it.
+  const RealFormat = Intl.DateTimeFormat;
+  Intl.DateTimeFormat = function (locales, options) {
+    if (options && options.timeZoneName === "shortOffset") {
+      throw new RangeError("Value shortOffset out of range for timeZoneName");
+    }
+    return new RealFormat(locales, options);
+  };
+}
+const calls = { created: 0, sent: [], stored: [] };
+function el(tag, id) {
+  const node = {
+    tag, id: id || "", className: "", children: [], dataset: {}, disabled: false,
+    colSpan: 1, style: {}, offsetWidth: 0, offsetHeight: 0, _text: "",
+    append(...nodes) { this.children.push(...nodes); },
+    appendChild(child) { this.children.push(child); return child; },
+    removeChild() {},
+    addEventListener() {},
+    getContext() { return null; },
+    classList: { add() {}, remove() {} },
+  };
+  // In a browser, textContent = "" removes every child; the fake does too.
+  Object.defineProperty(node, "textContent", {
+    get() { return this._text; },
+    set(value) { this._text = String(value); this.children = []; },
+  });
+  return node;
+}
+const ids = SELF_PAGE
+  ? ["acc-fingerprint", "fp-signals", "fp-hash", "fp-bits", "fp-unique",
+     "fp-acc-hint", "fp-copy"]
+  : [];
+const elements = Object.fromEntries(ids.map((id) => [id, el("div", id)]));
+// Open, as a visitor who expanded the panel has it: the UNIQUE ID, the bit
+// estimate and the hint's signal count are what these tests compare, and a
+// script may hold that measurement until the panel is opened.
+if (elements["acc-fingerprint"]) elements["acc-fingerprint"].open = true;
+if (PAGE_DATA !== null) {
+  elements["page-data"] = el("script", "page-data");
+  elements["page-data"].textContent = JSON.stringify(PAGE_DATA).replace(/<\//g, "<\\/");
+}
+global.window = global;
+global.document = {
+  getElementById: (id) => elements[id] || null,
+  createElement: (tag) => { calls.created += 1; return el(tag); },
+  body: el("body"),
+};
+// Node has a navigator of its own; a plain assignment does not replace it.
+Object.defineProperty(global, "navigator", {
+  configurable: true,
+  value: {
+    languages: LANGUAGES,
+    language: LANGUAGES[0],
+    sendBeacon: () => calls.sent.push("beacon"),
+  },
+});
+global.fetch = (...a) => calls.sent.push("fetch");
+global.XMLHttpRequest = function () { calls.sent.push("xhr"); };
+global.WebSocket = function () { calls.sent.push("websocket"); };
+global.EventSource = function () { calls.sent.push("eventsource"); };
+global.Image = function () { calls.sent.push("image"); };
+for (const name of ["localStorage", "sessionStorage", "indexedDB"]) {
+  Object.defineProperty(global, name, {
+    configurable: true,
+    get() { calls.stored.push(name); return {}; },
+  });
+}
+require(FINGERPRINT_JS);
+const text = (id) => (elements[id] ? elements[id].textContent : null);
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+(async () => {
+  // The measurement ends by writing the UNIQUE ID (a dash when it fails), so
+  // wait for that rather than for a fixed time; a lookup page has no ID.
+  for (let i = 0; i < 80 && elements["fp-hash"] && !text("fp-hash"); i++) {
+    await wait(25);
+  }
+  const table = elements["fp-signals"];
+  const rows = table
+    ? table.children.map((tr) => [
+        tr.children[0].textContent,
+        tr.children[1].textContent,
+        tr.children[1].className,
+      ])
+    : null;
+  console.log(JSON.stringify({
+    created: calls.created, sent: calls.sent, stored: calls.stored, rows,
+    hint: text("fp-acc-hint"), hash: text("fp-hash"), bits: text("fp-bits"),
+  }));
+})();
+"""
+
+
+def _load(
+    self_page=True,
+    location=None,
+    page_data=True,
+    tz="Asia/Seoul",
+    languages=("ko-KR", "ko"),
+    short_offset=True,
+):
+    """Load fingerprint.js into the fake browser and let both phases run.
+
+    `self_page` False leaves out the panel's elements, as a lookup page does;
+    `page_data` False leaves out #page-data itself; `location` is what the
+    server put under "location", None for a #page-data without one;
+    `short_offset` False is an engine that has no timeZoneName "shortOffset"."""
+    data = None
+    if page_data:
+        data = {"address": "203.0.113.10", "whois": {"pending": True}}
+        if location is not None:
+            data["location"] = location
+    script = (
+        HARNESS.replace("FINGERPRINT_JS", json.dumps(str(FINGERPRINT_JS)))
+        .replace("SELF_PAGE", json.dumps(self_page))
+        .replace("PAGE_DATA", json.dumps(data))
+        .replace("LANGUAGES", json.dumps(list(languages)))
+        .replace("SHORT_OFFSET", json.dumps(short_offset))
+    )
+    return _node(script, tz=tz)
+
+
+BERLIN = {"time_zone": "Europe/Berlin", "country_code": "DE", "precision": "city"}
+SEOUL = {"time_zone": "Asia/Seoul", "country_code": "KR", "precision": "city"}
+LONDON = {"time_zone": "Europe/London", "country_code": "GB", "precision": "city"}
+
+
+def _rows(run):
+    """The two comparison rows, by label: {label: (text, class)}."""
+    return {label: (text, tone) for label, text, tone in run["rows"][:2]}
+
+
+@needs_node
+class TestThePanel:
+    def test_a_lookup_page_gets_nothing(self):
+        """fingerprint.js is loaded on the self page alone, while #page-data
+        is on every page: without the panel the script stops at its first
+        line and touches nothing."""
+        run = _load(self_page=False, location=BERLIN)
+        assert run["rows"] is None
+        assert run["created"] == 0
+        assert run["sent"] == [] and run["stored"] == []
+
+    def test_the_two_rows_come_first(self):
+        labels = [label for label, _, _ in _load(location=BERLIN)["rows"][:3]]
+        assert labels == ["Clock vs address", "Languages vs address", "Languages"]
+
+    def test_a_different_zone_and_language_are_hints_not_verdicts(self):
+        """TZ=Asia/Seoul and ko-KR against an address in Berlin: both rows
+        warn, name both sides, and never claim to have detected anything.
+        The panel compares the clocks at new Date(), so Berlin's summer time
+        decides between UTC+2 (7 h) and UTC+1 (8 h)."""
+        rows = _rows(_load(location=BERLIN))
+        clock, clock_tone = rows["Clock vs address"]
+        assert clock_tone == "tone-warning"
+        assert clock.startswith("differs: your clock is on Asia/Seoul (UTC+9), ")
+        assert (
+            "the address is on Europe/Berlin (UTC+2), 7 h ahead of the address" in clock
+            or "the address is on Europe/Berlin (UTC+1), 8 h ahead of the address"
+            in clock
+        )
+        assert (
+            "a VPN, proxy or travelling device, and any site can notice it too" in clock
+        )
+        languages, languages_tone = rows["Languages vs address"]
+        assert languages_tone == "tone-warning"
+        assert languages.startswith("differs: ")
+        assert "KR" in languages and "DE" in languages
+        assert "detected" not in (clock + languages).lower()
+
+    def test_a_matching_zone_and_language_are_same(self):
+        rows = _rows(_load(location=SEOUL))
+        assert rows["Clock vs address"] == (
+            "same: your clock and the address are both on Asia/Seoul",
+            "tone-success",
+        )
+        assert rows["Languages vs address"] == (
+            "same: ko-KR names KR, where the address is",
+            "tone-success",
+        )
+
+    def test_no_time_zone_and_no_country_are_not_comparable(self):
+        """What a fresh volume shows until GeoLite2-City is downloaded, and
+        any address no database places (country_code "--")."""
+        rows = _rows(_load(location={"country_code": "--"}))
+        assert rows["Clock vs address"] == (
+            "not comparable: no time zone for this address",
+            "tone-muted",
+        )
+        assert rows["Languages vs address"] == (
+            "not comparable: no country for this address",
+            "tone-muted",
+        )
+
+    def test_a_country_level_location_is_not_compared_with_the_clock(self):
+        rows = _rows(_load(location={**BERLIN, "precision": "country"}))
+        assert rows["Clock vs address"] == (
+            "not comparable: country-level location",
+            "tone-muted",
+        )
+        # The country itself is still known, so the languages are compared.
+        assert rows["Languages vs address"][1] == "tone-warning"
+
+    def test_a_browser_reporting_utc_is_not_compared(self):
+        rows = _rows(_load(location=LONDON, tz="UTC", languages=("en-GB", "en")))
+        assert rows["Clock vs address"] == (
+            "not comparable: browser reports UTC",
+            "tone-muted",
+        )
+        assert rows["Languages vs address"][1] == "tone-success"
+
+    def test_a_half_hour_difference_is_written_out(self):
+        """Neither Kolkata nor Seoul keeps summer time, so this is exact all
+        year: a clock behind the address says so, minutes included."""
+        rows = _rows(_load(location=SEOUL, tz="Asia/Kolkata", languages=("hi-IN",)))
+        clock, clock_tone = rows["Clock vs address"]
+        assert clock_tone == "tone-warning"
+        assert "(UTC+5:30)" in clock and "Asia/Seoul (UTC+9)" in clock
+        assert "3 h 30 min behind the address" in clock
+
+    def test_an_engine_without_short_offsets_still_draws_the_table(self):
+        """Safari before 15.4 throws a RangeError for timeZoneName
+        "shortOffset", which node 22 cannot show on its own. The clock row
+        falls back to not comparable, and the language row and every signal
+        are still drawn: an exception in phase 1 would leave the whole table
+        on "Reading…"."""
+        run = _load(location=BERLIN, short_offset=False)
+        rows = _rows(run)
+        assert rows["Clock vs address"] == (
+            "not comparable: time zone not recognised by this browser",
+            "tone-muted",
+        )
+        assert rows["Languages vs address"][1] == "tone-warning"
+        assert [label for label, _, _ in run["rows"][2:4]] == ["Languages", "Time zone"]
+        assert run["hash"]
+
+    def test_a_page_without_page_data_degrades_to_not_comparable(self):
+        rows = _rows(_load(page_data=False))
+        assert rows["Clock vs address"][1] == "tone-muted"
+        assert rows["Languages vs address"][1] == "tone-muted"
+
+    def test_the_rows_are_not_signals(self):
+        """They change with the network, so they stay out of the UNIQUE ID
+        (which must survive a reload), the bit estimate and the signal count."""
+        berlin = _load(location=BERLIN)
+        seoul = _load(location=SEOUL)
+        assert berlin["hash"] == seoul["hash"]
+        assert berlin["bits"] == seoul["bits"]
+        counted = int(berlin["hint"].split(" ")[0])
+        assert counted == len(berlin["rows"]) - 2
+
+    @pytest.mark.parametrize("location", [BERLIN, SEOUL, {"country_code": "--"}])
+    def test_nothing_is_sent_or_stored(self, location):
+        """Settled decision 4, checked in the harness: the CSP would allow a
+        same-origin request, so this is what keeps one out."""
+        run = _load(location=location)
+        assert run["sent"] == []
+        assert run["stored"] == []

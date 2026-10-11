@@ -130,6 +130,15 @@
 
   const DASH = "—";
   const tbody = document.getElementById("fp-signals");
+  // The wording of the two comparison rows is a hint, not a verdict: a clock
+  // or a language that does not match the address is what a VPN or a proxy
+  // looks like, and also what a traveller, an expat or a deliberate
+  // English-and-UTC setup looks like. Declared before phase 1, which renders
+  // the rows: a const below it would still be in its temporal dead zone.
+  const CLOCK_NOTICE = "a VPN, proxy or travelling device, and any site can notice it too";
+  const LANGUAGE_NOTICE =
+    "a VPN, proxy or travelling device, or a language chosen on purpose, and any site can notice it too";
+  const TONES = { same: "success", differs: "warning" };
 
   // {label, value, bits}. bits count only when the signal was actually read,
   // so a browser that blocks canvas/WebGL honestly scores lower.
@@ -163,10 +172,22 @@
   // ---- Phase 1: passive signals (synchronous) ----------------------------
   const nav = navigator;
 
-  add("Languages", safe(() => (nav.languages || [nav.language]).join(", ")), 3);
-  add("Time zone", safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone), 3);
+  const languages = safe(() => nav.languages || [nav.language]);
+  add("Languages", languages ? languages.join(", ") : null, 3);
+  const browserZone = safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+  add("Time zone", browserZone, 3);
   const offset = safe(() => -new Date().getTimezoneOffset());
   add("UTC offset", offset != null ? (offset >= 0 ? "+" : "") + offset + " min" : null, 0, false);
+
+  // The address's side: the GeoIP record this page was rendered from, which
+  // render_page embeds as #page-data. Compared here and shown here. These two
+  // rows are not signals: they change with the network, so they stay out of
+  // `signals`, and so out of the UNIQUE ID, the bit count and the signal count.
+  const location = safe(() => JSON.parse(document.getElementById("page-data").textContent).location) || {};
+  const consistency = [
+    zoneRow(safe(() => compareZones(browserZone, offset, location.time_zone, location.precision, new Date()))),
+    languageRow(safe(() => compareLanguages(languages, location.country_code))),
+  ];
 
   add("Resolution", safe(() => screen.width + "×" + screen.height), 4);
   add("Available", safe(() => screen.availWidth + "×" + screen.availHeight), 0, false);
@@ -291,16 +312,68 @@
   function renderSignals() {
     if (!tbody) return;
     tbody.textContent = "";
-    for (const s of signals) {
-      const tr = document.createElement("tr");
-      const label = document.createElement("td");
-      label.textContent = s.label;
-      const value = document.createElement("td");
-      value.colSpan = 3;
-      value.textContent = s.value;
-      tr.append(label, value);
-      tbody.append(tr);
+    for (const c of consistency) tbody.append(row(c.label, c.value, c.tone));
+    for (const s of signals) tbody.append(row(s.label, s.value, null));
+  }
+
+  function row(label, text, tone) {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = label;
+    const value = document.createElement("td");
+    value.colSpan = 3;
+    if (tone) value.className = "tone-" + tone;
+    value.textContent = text;
+    tr.append(name, value);
+    return tr;
+  }
+
+  function zoneRow(r) {
+    if (!r) return { label: "Clock vs address", value: "not comparable: could not read the clock", tone: "muted" };
+    let text;
+    if (r.verdict === "same") {
+      text = "same: your clock and the address are both on " + r.ip_zone;
+    } else if (r.verdict === "differs") {
+      text =
+        "differs: your clock is on " + r.browser_zone + " (" + utcLabel(r.browser_offset_min) + "), " +
+        "the address is on " + r.ip_zone + " (" + utcLabel(r.ip_offset_min) + "), " +
+        aheadOrBehind(r.diff_min) + " — " + CLOCK_NOTICE;
+    } else {
+      text = "not comparable: " + r.reason;
     }
+    return { label: "Clock vs address", value: text, tone: TONES[r.verdict] || "muted" };
+  }
+
+  function languageRow(r) {
+    if (!r) return { label: "Languages vs address", value: "not comparable: could not read the languages", tone: "muted" };
+    let text;
+    if (r.verdict === "same") {
+      text = "same: " + r.match + " names " + r.country_code + ", where the address is";
+    } else if (r.verdict === "differs") {
+      text =
+        "differs: your languages name " + r.regions.join(", ") + ", the address is in " +
+        r.country_code + " — " + LANGUAGE_NOTICE;
+    } else {
+      text = "not comparable: " + r.reason;
+    }
+    return { label: "Languages vs address", value: text, tone: TONES[r.verdict] || "muted" };
+  }
+
+  function utcLabel(minutes) {
+    if (minutes === null || minutes === undefined) return "UTC offset unknown";
+    const sign = minutes < 0 ? "-" : "+";
+    const hours = Math.floor(Math.abs(minutes) / 60);
+    const rest = Math.abs(minutes) % 60;
+    return "UTC" + sign + hours + (rest ? ":" + String(rest).padStart(2, "0") : "");
+  }
+
+  function aheadOrBehind(diff) {
+    if (diff === null || diff === undefined) return "offset difference unknown";
+    if (diff === 0) return "the same UTC offset";
+    const hours = Math.floor(Math.abs(diff) / 60);
+    const rest = Math.abs(diff) % 60;
+    const span = (hours ? hours + " h" : "") + (hours && rest ? " " : "") + (rest ? rest + " min" : "");
+    return span + (diff > 0 ? " ahead of" : " behind") + " the address";
   }
 
   function canvasFingerprint() {

@@ -1277,6 +1277,27 @@ class TestFingerprintPanel:
         assert "requestIdleCallback" not in js
         assert "idle(async" not in js
 
+    def test_module_compares_the_clock_and_languages_with_the_address(self):
+        """The two comparison rows. tests/test_fingerprint_consistency.py runs
+        them in node, which a machine without node skips, so the exports, the
+        labels and the wording rule are pinned here on the source text too."""
+        js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        assert "function compareZones(" in js and "function compareLanguages(" in js
+        exports = re.search(r"module\.exports = \{([^}]*)\}", js).group(1)
+        assert {name.strip() for name in exports.split(",")} == {
+            "canonicalZone",
+            "zoneOffsetMinutes",
+            "compareZones",
+            "compareLanguages",
+        }
+        assert 'if (typeof document === "undefined")' in js
+        assert '"Clock vs address"' in js and '"Languages vs address"' in js
+        assert 'timeZoneName: "shortOffset"' in js
+        # A hint, never a detection claim: travellers, expats and a deliberate
+        # English-and-UTC setup all mismatch legitimately.
+        assert not re.search(r"vpn\s+detect", js, re.IGNORECASE)
+        assert "spoof" not in js.lower()
+
 
 class TestDesignTokens:
     def test_all_tokens_are_defined_with_the_spec_values(self):

@@ -577,6 +577,43 @@ below by text:
 - The JSON and text responses are untouched: `_dns_rows` and the view model
   feed only the template, so no `href` reaches an API answer.
 
+#### Fingerprint panel
+
+`static/js/fingerprint.js`, `templates/browser.html` (`#acc-fingerprint`):
+- Computed in the browser from the page alone, never sent or stored: the CSP's
+  `default-src 'self'` would allow a same-origin fetch, so only the file keeps
+  that promise (`tests/test_page.py::TestFingerprintPanel::test_module_is_display_only`
+  and the `sent`/`stored` tripwires in `tests/test_fingerprint_consistency.py`).
+- Its first two rows, "Clock vs address" and "Languages vs address", compare
+  `Intl`'s time zone, `getTimezoneOffset()` and the region subtags of
+  `navigator.languages` with `location.time_zone`, `country_code` and
+  `precision` read from `#page-data`. `compareZones` and `compareLanguages`
+  are pure, exported under a `module.exports` guard like `webrtc.js`, and
+  answer `same`, `differs` or `not_comparable` with a reason. The wording is
+  a hint ("differs: a VPN, proxy or travelling device, and any site can
+  notice it too"), never a detection claim: travellers, expats and a
+  deliberate English-and-UTC setup all mismatch. A `precision` other than
+  `"city"` (a GeoLite2 centroid 1000 km wide says nothing about a clock), a
+  null `time_zone`, a browser reporting UTC and a zone the engine does not
+  know are `not_comparable`, and so is any zone in an engine without
+  `timeZoneName: "shortOffset"` (Safari before 15.4). Every other zone,
+  Atlantic/Reykjavik included, is compared by name and offset with no rule of
+  its own. Two zone names with the same current offset still read `differs`,
+  worded as "the same UTC offset"; any listed language whose region is the
+  address's country reads `same`.
+- Both zone names go through `canonicalZone` (the engine's
+  `resolvedOptions().timeZone`) before they are compared: V8 reports
+  `Asia/Calcutta`, `Europe/Kiev` and `Asia/Saigon` where GeoLite2 has the
+  modern names, and plain string equality would flag every visitor there.
+- The two rows are not signals: they stay out of `signals`, of the UNIQUE ID
+  material and of the bit and signal counts, because they change with the
+  network and the ID must survive a reload. The row constants are declared
+  before phase 1, which renders them; a `const` lower in the file would still
+  be in its temporal dead zone.
+- Node runs the pure functions and a fake-DOM harness
+  (`tests/test_fingerprint_consistency.py`), which skips without node;
+  `test_page.py` pins the exports and the labels without node.
+
 #### MCP endpoint
 
 `mcp_server.py`:
@@ -680,7 +717,7 @@ whatismyip/
 │   ├── css/whatismyip.css  # design tokens + layout (dark only); jsoneditor.css is vendored
 │   ├── js/app.js           # search, copy, accordions, WHOIS fill-in, subdomain panel, lazy JSONEditor
 │   ├── js/map.js           # paints the server's map payload, with the attribution
-│   ├── js/fingerprint.js   # self page's browser fingerprint, client-side only; the active probes wait for the panel's first opening
+│   ├── js/fingerprint.js   # self page's browser fingerprint + clock/languages vs address rows, client-side only; the active probes wait for the panel's first opening
 │   ├── js/webrtc.js        # opt-in WebRTC leak test (one STUN request from the browser)
 │   ├── js/jsoneditor.min.js # vendored, loaded only when the Raw JSON panel opens
 │   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs): per face a -latin, an -extended-a and a -cyrillic-greek file behind unicode-range
