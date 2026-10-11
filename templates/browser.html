@@ -58,7 +58,7 @@
         <div class="hero inset">
             <div class="tags">
                 {% for tag in view.tags %}
-                <span class="tag tone-{{ tag.tone }}">{{ tag.text }}</span>
+                {% if tag.href %}<a class="tag tone-{{ tag.tone }} lookup-link" href="{{ tag.href }}" rel="nofollow">{{ tag.text }}</a>{% else %}<span class="tag tone-{{ tag.tone }}">{{ tag.text }}</span>{% endif %}
                 {% endfor %}
             </div>
             <h1 class="ip mono">{{ view.target }}</h1>
@@ -105,7 +105,7 @@
                 {% for row in column.rows %}
                 <div class="kv">
                     <span class="kv-label">{{ row.label }}</span>
-                    <span class="kv-value tone-{{ row.tone }}">{{ row.value }}{% if row.suffix %}{{ row.suffix }}{% endif %}</span>
+                    <span class="kv-value tone-{{ row.tone }}">{% if row.href %}<a class="lookup-link" href="{{ row.href }}" rel="nofollow">{{ row.value }}</a>{% else %}{{ row.value }}{% endif %}{% if row.suffix %}{{ row.suffix }}{% endif %}</span>
                 </div>
                 {% endfor %}
             </div>
@@ -223,8 +223,10 @@
                           {# Each name links to its own lookup. Safe as an href without
                              further escaping: normalization in subdomains.py admits only
                              [a-z0-9._-], so a name cannot carry a scheme, a slash or a
-                             quote. urlencode is belt-and-braces if that rule ever widens. #}
-                          {% for name in view.subdomains_shown %}<li><a href="/{{ name|urlencode }}">{{ name }}</a></li>{% endfor %}
+                             quote. urlencode is belt-and-braces if that rule ever widens.
+                             rel="nofollow" as on every lookup link on the page: robots.txt
+                             disallows ?subdomains= alone. #}
+                          {% for name in view.subdomains_shown %}<li><a class="lookup-link" href="/{{ name|urlencode }}" rel="nofollow">{{ name }}</a></li>{% endfor %}
                       </ul>
                       {# ?subdomains=only answers JSON even to a browser navigation,
                          so this opens the whole loaded list in the browser's own
@@ -259,7 +261,7 @@
                         <tr>
                             <td>{{ record.type }}</td>
                             <td>{{ record.name }}</td>
-                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{{ record.value }}{% if record.from_zone %} <span class="tone-muted">(zone)</span>{% endif %}{% if record.hop_of %} <span class="tone-muted">(of {{ record.hop_of }})</span>{% endif %}</td>
+                            <td{% if record.tone %} class="tone-{{ record.tone }}"{% endif %}>{% if record.href %}<a class="lookup-link" href="{{ record.href }}" rel="nofollow">{{ record.value }}</a>{% else %}{{ record.value }}{% endif %}{% if record.from_zone %} <span class="tone-muted">(zone)</span>{% endif %}{% if record.hop_of %} <span class="tone-muted">(of {{ record.hop_of }})</span>{% endif %}</td>
                             <td>{{ record.ttl }}</td>
                         </tr>
                         {% else %}
@@ -326,7 +328,20 @@
                     <table class="records">
                         <tbody>
                         {% for key, value in whois.items() %}
-                        <tr><td>{{ key }}</td><td colspan="3">{{ value }}</td></tr>
+                        {# The name servers are the one row whose value is a list of
+                           lookup targets: view.whois_name_servers carries them one
+                           entry each (same names and order as the joined text), so
+                           each gets its own link. #}
+                        <tr><td>{{ key }}</td><td colspan="3">
+                            {%- if key == "Name servers" and view.whois_name_servers -%}
+                                {%- for ns in view.whois_name_servers -%}
+                                    {%- if not loop.first %}, {% endif -%}
+                                    {%- if ns.href %}<a class="lookup-link" href="{{ ns.href }}" rel="nofollow">{{ ns.text }}</a>{% else %}{{ ns.text }}{% endif -%}
+                                {%- endfor -%}
+                            {%- else -%}
+                                {{ value }}
+                            {%- endif -%}
+                        </td></tr>
                         {% else %}
                         <tr><td colspan="4" class="tone-muted">No WHOIS data</td></tr>
                         {% endfor %}

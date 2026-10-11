@@ -1426,3 +1426,118 @@ class TestReverseColumnVerdict:
         row = _reverse_rows(response, is_self=True)["PTR"]
         assert row["value"] == "dns.google."
         assert row["suffix"] == " → confirmed"
+
+
+def _fact(view, title, label):
+    column = next(c for c in view["facts"] if c["title"] == title)
+    return next(r for r in column["rows"] if r["label"] == label)
+
+
+class TestLookupLinks:
+    """build_view() links nothing on its own. main passes its rule
+    (lookup_href) as link_for; this module stays free of lookup, whose import
+    builds the GeoIP, suffix-list and DNS managers."""
+
+    @staticmethod
+    def _link_for(value):
+        return "/" + value.rstrip(".")
+
+    def test_without_a_link_function_nothing_carries_an_href(self):
+        """Not even href=None: every facts row and tag is the dict it always
+        was, and tests across the suite compare those dicts whole."""
+        for response in (IP_RESPONSE, DOMAIN_RESPONSE):
+            view = build_view(response, is_self=False)
+            rows = [row for column in view["facts"] for row in column["rows"]]
+            assert not any("href" in row for row in rows)
+            assert not any("href" in tag for tag in view["tags"])
+            assert not any(ns["href"] for ns in view["whois_name_servers"])
+
+    def test_the_ptr_row_takes_the_link(self):
+        # No sweep of the PTR name (domain={}), so the row is the name alone.
+        view = build_view(
+            dict(IP_RESPONSE, domain={}), is_self=True, link_for=self._link_for
+        )
+        ptr = _fact(view, "REVERSE DNS", "PTR")
+        assert (ptr["value"], ptr["href"]) == ("dns.google.", "/dns.google")
+        assert "suffix" not in ptr
+
+    def test_a_ptr_with_a_verdict_links_the_name_and_keeps_the_verdict_apart(self):
+        """The href is the name's; the verdict stays its own `suffix`, which
+        the template prints after the anchor as plain text."""
+        view = build_view(IP_RESPONSE, is_self=True, link_for=self._link_for)
+        assert _fact(view, "REVERSE DNS", "PTR") == {
+            "label": "PTR",
+            "value": "dns.google.",
+            "suffix": " → confirmed",
+            "tone": "success",
+            "href": "/dns.google",
+        }
+
+    def test_the_rdns_row_takes_the_link(self):
+        location = {**DOMAIN_RESPONSE["location"], "reverse_dns": "lhr25s34.1e100.net."}
+        view = build_view(
+            dict(DOMAIN_RESPONSE, location=location),
+            is_self=False,
+            link_for=self._link_for,
+        )
+        rdns = _fact(view, "NETWORK", "rDNS")
+        assert rdns["value"] == "lhr25s34.1e100.net."
+        assert rdns["href"] == "/lhr25s34.1e100.net"
+
+    def test_a_missing_ptr_is_a_dash_with_no_link(self):
+        location = {**IP_RESPONSE["location"], "reverse_dns": None}
+        view = build_view(
+            dict(IP_RESPONSE, location=location), is_self=True, link_for=self._link_for
+        )
+        ptr = _fact(view, "REVERSE DNS", "PTR")
+        assert ptr["value"] == DASH
+        assert "href" not in ptr
+
+    def test_a_value_the_rule_refuses_carries_no_href(self):
+        """link_for's None (a private address, a name with no public suffix)
+        leaves the row as it was, not with href=None."""
+        view = build_view(IP_RESPONSE, is_self=True, link_for=lambda value: None)
+        assert "href" not in _fact(view, "REVERSE DNS", "PTR")
+
+    def test_the_address_tag_links_to_the_address(self):
+        view = build_view(DOMAIN_RESPONSE, is_self=False, link_for=self._link_for)
+        tag = next(t for t in view["tags"] if t["text"].startswith("A → "))
+        assert tag["href"] == "/142.250.207.46"
+        assert all("href" not in t for t in view["tags"] if t is not tag)
+
+    def test_name_servers_become_one_entry_each_in_the_row_s_order(self):
+        view = build_view(DOMAIN_RESPONSE, is_self=False, link_for=self._link_for)
+        assert view["whois_name_servers"] == [
+            {"text": "ns1.google.com", "href": "/ns1.google.com"},
+            {"text": "ns2.google.com", "href": "/ns2.google.com"},
+        ]
+        # The same names in the same order as the row's text, which the
+        # template shows when there is nothing to link.
+        assert whois_display(DOMAIN_RESPONSE["whois"])["Name servers"] == (
+            "ns1.google.com, ns2.google.com"
+        )
+
+    def test_duplicate_and_empty_name_servers_collapse_as_the_row_text_does(self):
+        whois = {
+            **DOMAIN_RESPONSE["whois"],
+            "name_servers": ["ns1.google.com", "ns1.google.com", "", None],
+        }
+        view = build_view(
+            dict(DOMAIN_RESPONSE, whois=whois), is_self=False, link_for=self._link_for
+        )
+        assert [ns["text"] for ns in view["whois_name_servers"]] == ["ns1.google.com"]
+
+    def test_a_record_with_no_name_servers_gives_an_empty_list(self):
+        assert (
+            build_view(IP_RESPONSE, is_self=True, link_for=self._link_for)[
+                "whois_name_servers"
+            ]
+            == []
+        )
+        errored = dict(DOMAIN_RESPONSE, whois={"error": "WHOIS lookup failed"})
+        assert (
+            build_view(errored, is_self=False, link_for=self._link_for)[
+                "whois_name_servers"
+            ]
+            == []
+        )

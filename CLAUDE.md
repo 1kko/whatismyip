@@ -218,7 +218,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - `viewmodel.py`: `build_view()` turns a response dict into what
   `templates/browser.html` renders. Pure, with no I/O, and it imports only
   `config`, `eppstatus`, `reputation.grade` and the standard library, so
-  `mcp_server.py` reuses its certificate helpers without a cycle.
+  `mcp_server.py` reuses its certificate helpers without a cycle. The one
+  decision that needs `lookup` — which values link to their own lookup —
+  comes in as the `link_for` argument (`main.lookup_href`); the default
+  `None` links nothing.
 - `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
   and `coordinate_precision`, the one `city`/`country` rule for a fix.
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
@@ -232,8 +235,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `security_headers_middleware`, `negotiate()` (HTML/JSON/text: `?format=`,
   then `Accept`, then the user-agent via `BrowserDetector`), `health_reasons()`
   and `healthz`, `build_map_payload`, `render_page`, `render_error` and
-  `render_refused_target`, `_self_lookup`, and the routes `get_self_info`,
-  `get_ip_info` and `head_lookup`.
+  `render_refused_target`, `lookup_href` and `_dns_rows` (the page's lookup
+  links), `_self_lookup`, and the routes `get_self_info`, `get_ip_info` and
+  `head_lookup`.
 
 **Endpoints** (single-segment fixed routes are declared before the
 `/{domain_ip}` catch-all, which would otherwise swallow them):
@@ -529,6 +533,49 @@ below by text:
   (`A 0 · AAAA 0 · MX 0 · NS 0 · TXT 0`); opening the accordion shows it all.
 - `.copy-icon` (the fingerprint UNIQUE ID row) is a 24px target: the 14px
   icon with 5px padding, WCAG 2.2's minimum (2.5.8).
+
+#### Lookup links
+
+`main.lookup_href`, `main._dns_rows`, `viewmodel.build_view(link_for=)`:
+- Every hostname and address the page prints links to its own lookup: the
+  DNS table's A/AAAA/NS/MX/CNAME values (the record's field, so an MX links
+  its host, never `10 host.`; a CNAME hop row its hop's target), the rDNS and
+  PTR facts, the hero's `A → ip` tag, the WHOIS name servers and the
+  subdomain list. TXT rows and failed (`tone: warning`) rows never link.
+- `lookup_href(value)` is the one rule: `/{value}` only when `classify_target`
+  calls it a domain (written as `lookup.canonical_hostname` spells it: no
+  trailing dot, lower case, A-label) or `is_safe_ip` passes the address
+  (`quote(..., safe=":")` keeps an IPv6 address's colons); anything else is
+  `None` and renders as text. So a private or reserved address never links to
+  the 400 page, nor does a special-use name `classify_target` refuses, and a
+  name without a public suffix (`ns1.corp.internal`) never becomes a path the
+  suspicious-path detector would ban a visitor for.
+- Only a row or tag that links gains an `href` key (`main._linked_row`,
+  `viewmodel._linked`); every other dict is the one it was, which the tests
+  that compare rows and tags whole rely on.
+- The anchor wraps the value alone. The DNS table's `(zone)` and `(of
+  <owner>)` markers, and the PTR row's FCrDNS verdict (`_ptr_row`'s `suffix`,
+  ` → confirmed`), follow it as plain text in the same cell or span.
+- `viewmodel.py` stays pure: `render_page` passes `link_for=lookup_href` into
+  `build_view()`, whose default `None` links nothing (what
+  `tests/test_viewmodel.py` runs on). `whois_display` keeps the name servers
+  as one string; `view.whois_name_servers` (`viewmodel.name_server_links`)
+  carries them one entry each, and the template draws the "Name servers" row
+  from it.
+- Every such link is `<a class="lookup-link" … rel="nofollow">` (the hero's
+  tag: `class="tag … lookup-link"`, the whole tag, whose border lights on
+  hover and focus), in the template and in the anchors `static/js/app.js`
+  builds for the subdomain list. `robots.txt` disallows only `?subdomains=`,
+  so without `nofollow` a crawler would walk nasa.gov → akam.net → its
+  addresses → their PTR names, a full RDAP/DNS/TLS lookup per page,
+  `no-store`. Each click is an ordinary lookup under the unchanged rate limit
+  (429 and a one-hour ban).
+- The self page links the visitor's own PTR name (and the addresses its
+  sweep found) too. The page asks nothing new; only a click looks a value
+  up, so an address link reaches AbuseIPDB exactly as typing that address
+  would, and never on its own.
+- The JSON and text responses are untouched: `_dns_rows` and the view model
+  feed only the template, so no `href` reaches an API answer.
 
 #### MCP endpoint
 
@@ -941,9 +988,9 @@ Test files:
   per run, what the per-test reset covers, no reset by hand)
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
-  security headers, fingerprint panel, `?subdomains=`), `test_negotiation.py`
-  (`?format=`/Accept/user-agent), `test_text_format.py` (`?format=text`,
-  `?fields=`), `test_error_pages.py` (`error.html` for browsers),
+  security headers, fingerprint panel, `?subdomains=`, lookup links),
+  `test_negotiation.py` (`?format=`/Accept/user-agent), `test_text_format.py`
+  (`?format=text`, `?fields=`), `test_error_pages.py` (`error.html` for browsers),
   `test_open_graph.py` (link previews), `test_privacy_page.py` (`/privacy`),
   `test_robots_head.py` (`/robots.txt`, `/favicon.ico`, HEAD and the
   Content-Type and status it shares with GET),

@@ -418,6 +418,47 @@ class TestDnsRows:
         assert ttls["NS"] == 20675
         assert ttls["A"] == 300
 
+    def test_rows_link_the_record_field_not_the_display_value(self):
+        """main.lookup_href on the field that is a target: an MX row shows
+        "10 mx1.mail.naver.com." but links its host; TXT is free text."""
+        hrefs = {row["type"]: row.get("href") for row in self._rows()}
+        assert hrefs["A"] == "/223.130.192.248"
+        assert hrefs["NS"] == "/ns1.naver.com"
+        assert hrefs["MX"] == "/mx1.mail.naver.com"
+        assert hrefs["TXT"] is None
+
+    def test_a_private_address_and_a_name_without_a_public_suffix_stay_text(self):
+        from main import _dns_rows
+
+        rows = _dns_rows(
+            {
+                "address": "corp.example",
+                "domain": {
+                    "a": [{"ip": "10.0.0.1", "ttl": 60}],
+                    "ns": [{"hostname": "ns1.corp.internal.", "ttl": 60, "ip": None}],
+                },
+            }
+        )
+        assert [row["type"] for row in rows] == ["A", "NS"]
+        # Not even href=None: a row that stays text is the dict it always was.
+        assert not any("href" in row for row in rows)
+
+    def test_a_failed_query_row_has_no_link(self):
+        from main import _dns_rows
+
+        rows = _dns_rows(
+            {"address": "example.com", "domain": {"status": {"mx": "timeout"}}}
+        )
+        assert rows == [
+            {
+                "type": "MX",
+                "name": "example.com",
+                "value": "(timed out)",
+                "ttl": "",
+                "tone": "warning",
+            }
+        ]
+
     # The shape get_records() returns for a name below its zone apex: NS was
     # asked of the zone, and the MX fell back to the zone's, labelled.
     ZONE_DOMAIN = {
@@ -449,6 +490,7 @@ class TestDnsRows:
             "name": "www.example.com",
             "value": "93.184.216.34",
             "ttl": 300,
+            "href": "/93.184.216.34",
         }
         assert "from_zone" not in by_type["TXT"]
         # NS is always the zone's; this MX is, because get_records said so.
@@ -545,7 +587,7 @@ class TestDnsRows:
 
         mx = re.search(r"<tr>\s*<td>MX</td>.*?</tr>", table, re.S).group(0)
         assert "<td>example.com</td>" in mx
-        assert '10 mail.example.com. <span class="tone-muted">(zone)</span>' in mx
+        assert '10 mail.example.com.</a> <span class="tone-muted">(zone)</span>' in mx
         ns = re.search(r"<tr>\s*<td>NS</td>.*?</tr>", table, re.S).group(0)
         assert "<td>example.com</td>" in ns
         assert "(zone)" in ns
@@ -643,6 +685,7 @@ class TestDnsRows:
                 "name": "www.example.com",
                 "value": "example.com.",
                 "ttl": 300,
+                "href": "/example.com",
             }
         ]
 
@@ -658,7 +701,14 @@ class TestDnsRows:
         row = re.search(r"<tr>\s*<td>CNAME</td>.*?</tr>", html, re.S)
         assert row, "no CNAME row in the DNS table"
         cells = re.findall(r"<td>(.*?)</td>", row.group(0), re.S)
-        assert cells == ["CNAME", "www.example.com", "example.com.", "300"]
+        # The target is a lookup of its own, so the VALUE cell is its link.
+        assert cells == [
+            "CNAME",
+            "www.example.com",
+            '<a class="lookup-link" href="/example.com" rel="nofollow">'
+            "example.com.</a>",
+            "300",
+        ]
         # Jinja autoescapes the quotes, so a leaked repr shows up either way.
         assert "{'cname'" not in html
         assert "{&#39;cname&#39;" not in html
@@ -688,6 +738,7 @@ class TestDnsRows:
                 "name": "www.example.com",
                 "value": "alias.example.net.",
                 "ttl": 300,
+                "href": "/alias.example.net",
             },
             {
                 "type": "CNAME",
@@ -695,6 +746,7 @@ class TestDnsRows:
                 "value": "edge.example.net.",
                 "ttl": 60,
                 "hop_of": "alias.example.net",
+                "href": "/edge.example.net",
             },
         ]
 
@@ -713,8 +765,88 @@ class TestDnsRows:
                 "name": "www.example.com",
                 "value": "example.com.",
                 "ttl": 300,
+                "href": "/example.com",
             }
         ]
+
+
+class TestLookupHref:
+    """main.lookup_href: the one rule for which values on the page link to
+    their own lookup. Only what GET /{value} would answer."""
+
+    def test_a_hostname_under_a_public_suffix_links_without_its_trailing_dot(self):
+        from main import lookup_href
+
+        assert lookup_href("ns1.naver.com.") == "/ns1.naver.com"
+        assert lookup_href("dns.google") == "/dns.google"
+
+    def test_a_hostname_links_in_its_canonical_spelling(self):
+        """lookup.canonical_hostname (#1): an RDAP name server comes in upper
+        case and a name can come in Unicode; the link is the one spelling the
+        name's own page, title and cache key use."""
+        from main import lookup_href
+
+        assert lookup_href("NS1.NAVER.COM") == "/ns1.naver.com"
+        assert lookup_href("münchen.de.") == "/xn--mnchen-3ya.de"
+
+    def test_a_public_address_links_and_an_ipv6_one_keeps_its_colons(self):
+        from main import lookup_href
+
+        assert lookup_href("223.130.192.248") == "/223.130.192.248"
+        assert lookup_href("2001:4860:4860::8888") == "/2001:4860:4860::8888"
+
+    def test_a_private_or_reserved_address_is_not_a_link(self):
+        """is_safe_ip's verdict: a link never leads to the 400 page."""
+        from main import lookup_href
+
+        assert lookup_href("10.0.0.1") is None
+        assert lookup_href("127.0.0.1") is None
+        assert lookup_href("fe80::1") is None
+        assert lookup_href("::ffff:192.168.0.1") is None
+
+    def test_a_name_without_a_public_suffix_is_not_a_link(self):
+        """A path without a public suffix that matches a detector pattern bans
+        the visitor who follows it (SuspiciousPatternDetector)."""
+        from main import lookup_href
+
+        assert lookup_href("ns1.corp.internal") is None
+        assert lookup_href("localhost") is None
+
+    def test_a_link_shaped_like_a_probe_is_answered_not_banned(self):
+        """A record can name a host whose path matches a detector rule: "/admin"
+        in admin.naver.com, "\\.env" in mail.envato.com, "/wp-" in
+        wp-mail.example.net. Each has a public suffix, so lookup_href links it,
+        and the click must be answered as the lookup it is
+        (main._suspicious_path_is_ordinary), never banned for 24 hours: a link
+        on the page would have locked out the visitor who followed it."""
+        from main import ip_ban_manager, lookup_href
+
+        for name in ("admin.naver.com.", "mail.envato.com.", "wp-mail.example.net."):
+            href = lookup_href(name)
+            assert href == "/" + name.rstrip("."), name
+            with patch(
+                "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
+            ):
+                response = client.get(href, headers=BROWSER_UA)
+            assert response.status_code == 200, href
+            assert not ip_ban_manager.is_banned(SEOUL_IP), href
+
+    def test_a_special_use_name_is_not_a_link(self):
+        """classify_target calls .onion and home.arpa names invalid (#15), and
+        GET /{name} refuses them with a 400, so a record naming one stays text."""
+        from main import lookup_href
+
+        assert lookup_href("printer.home.arpa.") is None
+        assert lookup_href("example.onion") is None
+
+    def test_text_that_is_not_a_target_is_not_a_link(self):
+        from main import lookup_href
+
+        assert lookup_href("—") is None
+        assert lookup_href("(timed out)") is None
+        assert lookup_href("google-site-verification=fK9dDF") is None
+        assert lookup_href("") is None
+        assert lookup_href(None) is None
 
 
 class TestSecurityHeaders:
@@ -1344,7 +1476,12 @@ class TestSubdomainPanel:
         list_markup = html.split('id="subdomains-list"')[1].split("</ul>")[0]
         # Counted on the anchor, not the bare name: each entry now renders its
         # name twice, once in the href and once as the link text.
-        assert list_markup.count('<a href="/h0.example.com">') == 1
+        assert (
+            list_markup.count(
+                '<a class="lookup-link" href="/h0.example.com" rel="nofollow">'
+            )
+            == 1
+        )
         assert "h499.example.com" not in list_markup
         assert "500" in html
 
@@ -1369,7 +1506,8 @@ class TestSubdomainPanel:
                 ).text
         list_markup = html.split('id="subdomains-list"')[1].split("</ul>")[0]
         assert (
-            '<a href="/api-watch.example.com">api-watch.example.com</a>' in list_markup
+            '<a class="lookup-link" href="/api-watch.example.com" rel="nofollow">'
+            "api-watch.example.com</a>" in list_markup
         )
 
     def test_the_summary_hint_reports_the_count_once_loaded(self):
@@ -1654,7 +1792,9 @@ class TestReverseDnsVerdict:
         with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
             html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert (
-            '<span class="kv-value tone-success">dns.google. → confirmed</span>' in html
+            '<span class="kv-value tone-success"><a class="lookup-link" '
+            'href="/dns.google" rel="nofollow">dns.google.</a> → confirmed</span>'
+            in html
         )
 
     def test_an_ip_whose_ptr_points_elsewhere_does_not_point_back(self):
@@ -1662,8 +1802,9 @@ class TestReverseDnsVerdict:
         with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
             html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         assert (
-            '<span class="kv-value tone-warning">'
-            "dns.google. → does not point back</span>" in html
+            '<span class="kv-value tone-warning"><a class="lookup-link" '
+            'href="/dns.google" rel="nofollow">dns.google.</a>'
+            " → does not point back</span>" in html
         )
         assert "spoof" not in html.lower()
 
@@ -1672,8 +1813,9 @@ class TestReverseDnsVerdict:
         gives the self page the same column."""
         html = self._self_page(client, self._sweep("host.example.net", [SEOUL_IP]))
         assert (
-            '<span class="kv-value tone-success">host.example.net. → confirmed</span>'
-            in html
+            '<span class="kv-value tone-success"><a class="lookup-link" '
+            'href="/host.example.net" rel="nofollow">host.example.net.</a>'
+            " → confirmed</span>" in html
         )
 
     def test_a_dual_stack_visitor_is_judged_as_the_ipv4_address_it_carries(self):
@@ -1682,8 +1824,9 @@ class TestReverseDnsVerdict:
         dual_stack = TestClient(app, client=(f"::ffff:{SEOUL_IP}", 41234))
         html = self._self_page(dual_stack, self._sweep("host.example.net", [SEOUL_IP]))
         assert (
-            '<span class="kv-value tone-success">host.example.net. → confirmed</span>'
-            in html
+            '<span class="kv-value tone-success"><a class="lookup-link" '
+            'href="/host.example.net" rel="nofollow">host.example.net.</a>'
+            " → confirmed</span>" in html
         )
 
     def test_an_ipv6_visitor_is_judged_however_the_proxy_spelled_it(self):
@@ -1697,6 +1840,235 @@ class TestReverseDnsVerdict:
             headers={**BROWSER_UA, "x-real-ip": "2404:6800:4004:80B::200E"},
         )
         assert (
-            '<span class="kv-value tone-success">host.example.net. → confirmed</span>'
-            in html
+            '<span class="kv-value tone-success"><a class="lookup-link" '
+            'href="/host.example.net" rel="nofollow">host.example.net.</a>'
+            " → confirmed</span>" in html
         )
+
+
+# --- lookup links --------------------------------------------------------------
+# A domain page with every kind of value the page links, and the ones it must
+# not: a second A record in private space, an NS host with no public suffix, a
+# TXT record, and an AAAA query that failed. The registration's second name
+# server is in upper case, as RDAP hands them over.
+LINKED = {
+    **GATHERED,
+    "address": "naver.com",
+    "domain": {
+        "a": [{"ip": "223.130.192.248", "ttl": 300}, {"ip": "10.0.0.1", "ttl": 300}],
+        "mx": [
+            {
+                "preference": 10,
+                "hostname": "mx1.mail.naver.com.",
+                "ttl": 300,
+                "ip": "223.130.202.36",
+            }
+        ],
+        "ns": [
+            {"hostname": "ns1.naver.com.", "ttl": 20675, "ip": "61.247.220.6"},
+            {"hostname": "ns1.corp.internal.", "ttl": 20675, "ip": None},
+        ],
+        "txt": [{"text": ["google-site-verification=fK9dDF"], "ttl": 300}],
+        "cname": None,
+        "status": {"a": "ok", "aaaa": "timeout", "mx": "ok", "ns": "ok", "txt": "ok"},
+    },
+    "location": {**GATHERED["location"], "reverse_dns": "www.naver.com."},
+    "whois": {
+        "registrar": "Example Registrar",
+        "name_servers": ["ns1.naver.com", "NS2.NAVER.COM"],
+    },
+    "resolved_ip": "223.130.192.248",
+}
+
+# An IP page whose PTR name has no sweep (domain {}): the PTR row is then the
+# name alone, with no verdict on whether it points back.
+IP_LINKED = {
+    "address": "8.8.8.8",
+    "domain": {},
+    "location": {
+        "ip": "8.8.8.8",
+        "country_code": "US",
+        "country_name": "United States",
+        "is_private": False,
+        "reverse_dns": "dns.google.",
+    },
+    "whois": {"error": "WHOIS lookup failed"},
+    "ssl": None,
+    "resolved_ip": "8.8.8.8",
+}
+
+
+def _page(gathered: dict, path: str) -> str:
+    with patch("main.gather", new_callable=AsyncMock, return_value=dict(gathered)):
+        return client.get(path, headers=BROWSER_UA).text
+
+
+def _link(href: str, text: str) -> str:
+    return f'<a class="lookup-link" href="{href}" rel="nofollow">{text}</a>'
+
+
+def _fact(html: str, label: str) -> str:
+    """The value markup of one row of the facts strip."""
+    match = re.search(
+        rf'<span class="kv-label">{label}</span>\s*'
+        r'<span class="kv-value tone-\w+">(.*?)</span>',
+        html,
+        re.S,
+    )
+    assert match, f"no {label} fact"
+    return match.group(1).strip()
+
+
+def _dns_values(html: str, rdtype: str) -> list[str]:
+    """The VALUE cell of every `rdtype` row of the DNS table, markup included."""
+    table = re.search(r'<table class="records records--dns">.*?</table>', html, re.S)
+    assert table, "no DNS table"
+    rows = re.findall(rf"<tr>\s*<td>{rdtype}</td>.*?</tr>", table.group(0), re.S)
+    assert rows, f"no {rdtype} row in the DNS table"
+    return [re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)[2].strip() for row in rows]
+
+
+class TestLookupLinks:
+    """Every hostname and address the page prints is a link to its own
+    lookup, so a trail from a domain to its mail host to that host's address
+    needs no copy and paste -- but only where GET /{value} would answer
+    (main.lookup_href), and always rel="nofollow": robots.txt disallows
+    ?subdomains= alone, and without it a crawler would walk from one full
+    lookup (RDAP, DNS, TLS, no-store) to the next without end."""
+
+    def test_dns_hosts_and_addresses_link_to_their_own_lookup(self):
+        html = _page(LINKED, "/naver.com")
+        assert _dns_values(html, "NS")[0] == _link("/ns1.naver.com", "ns1.naver.com.")
+        assert _dns_values(html, "A")[0] == _link("/223.130.192.248", "223.130.192.248")
+
+    def test_the_mx_link_is_the_host_without_the_preference(self):
+        html = _page(LINKED, "/naver.com")
+        assert _dns_values(html, "MX") == [
+            _link("/mx1.mail.naver.com", "10 mx1.mail.naver.com.")
+        ]
+        assert 'href="/10' not in html
+
+    def test_a_private_address_and_a_name_without_a_public_suffix_stay_text(self):
+        html = _page(LINKED, "/naver.com")
+        assert _dns_values(html, "A")[1] == "10.0.0.1"
+        assert _dns_values(html, "NS")[1] == "ns1.corp.internal."
+
+    def test_txt_and_failed_rows_are_not_links(self):
+        html = _page(LINKED, "/naver.com")
+        assert _dns_values(html, "TXT") == ["google-site-verification=fK9dDF"]
+        assert _dns_values(html, "AAAA") == ["(timed out)"]
+
+    def test_every_lookup_link_is_nofollow(self):
+        html = _page(LINKED, "/naver.com")
+        # Any anchor whose class list names lookup-link, the hero's tag included.
+        anchors = re.findall(r'<a [^>]*class="[^"]*\blookup-link\b[^"]*"[^>]*>', html)
+        assert anchors
+        assert all('rel="nofollow"' in anchor for anchor in anchors)
+
+    def test_the_json_and_the_text_answers_carry_no_link(self):
+        """Only the template reads _dns_rows and the view model: the API's
+        answers are the ones they always were."""
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(LINKED)):
+            body = client.get("/naver.com", headers=JSON_UA)
+            text = client.get("/naver.com?format=text", headers=JSON_UA)
+        assert body.headers["content-type"].startswith("application/json")
+        assert "href" not in body.text
+        assert text.headers["content-type"].startswith("text/plain")
+        assert "href" not in text.text
+        assert "lookup-link" not in text.text
+
+    def test_a_cname_hop_links_its_target_and_keeps_its_owner_marker(self):
+        """The hop's target is the link; "(of <owner>)" stays a muted span
+        after the anchor, as "(zone)" does."""
+        chained = {
+            **LINKED,
+            "address": "www.example.com",
+            "domain": {
+                "cname": {"cname": "alias.example.net.", "ttl": 300},
+                "cname_chain": [
+                    {
+                        "name": "www.example.com.",
+                        "target": "alias.example.net.",
+                        "ttl": 300,
+                    },
+                    {
+                        "name": "alias.example.net.",
+                        "target": "edge.example.net.",
+                        "ttl": 60,
+                    },
+                ],
+            },
+        }
+        html = _page(chained, "/www.example.com")
+        assert _dns_values(html, "CNAME") == [
+            _link("/alias.example.net", "alias.example.net."),
+            _link("/edge.example.net", "edge.example.net.")
+            + ' <span class="tone-muted">(of alias.example.net)</span>',
+        ]
+
+    def test_the_rdns_fact_links(self):
+        html = _page(LINKED, "/naver.com")
+        assert _fact(html, "rDNS") == _link("/www.naver.com", "www.naver.com.")
+
+    def test_the_address_tag_is_a_link_and_the_other_tags_are_not(self):
+        html = _page(LINKED, "/naver.com")
+        hero = html.split('class="tags"')[1].split("</div>")[0]
+        assert (
+            '<a class="tag tone-default lookup-link" href="/223.130.192.248" '
+            'rel="nofollow">A → 223.130.192.248</a>' in hero
+        )
+        assert '<span class="tag tone-default">DOMAIN</span>' in hero
+
+    def test_the_ptr_fact_of_an_ip_page_links(self):
+        html = _page(IP_LINKED, "/8.8.8.8")
+        assert _fact(html, "PTR") == _link("/dns.google", "dns.google.")
+
+    def test_a_missing_ptr_stays_a_dash(self):
+        location = {**IP_LINKED["location"], "reverse_dns": None}
+        gathered = {**IP_LINKED, "location": location}
+        html = _page(gathered, "/8.8.8.8")
+        assert _fact(html, "PTR") == "—"
+
+    def test_the_self_page_ptr_links_too(self):
+        """GET / renders through the same render_page, so the visitor's own
+        PTR name links as any other does. The page asks nothing new: only a
+        click would look the name up."""
+        with (
+            patch(
+                "main.domain_manager.perform_reverse_lookup",
+                return_value="host.example.net.",
+            ),
+            patch("main.domain_manager.get_records", return_value={}),
+            patch(
+                "main.lookup_whois",
+                new_callable=AsyncMock,
+                return_value={"source": "rdap", "name": "KORNET"},
+            ),
+        ):
+            html = client.get("/", headers=BROWSER_UA).text
+        assert _fact(html, "PTR") == _link("/host.example.net", "host.example.net.")
+
+    def test_whois_name_servers_are_a_list_of_links(self):
+        html = _page(LINKED, "/naver.com")
+        row = re.search(
+            r'<tr><td>Name servers</td><td colspan="3">(.*?)</td></tr>', html, re.S
+        )
+        assert row, "no Name servers row"
+        assert row.group(1) == ", ".join(
+            [
+                _link("/ns1.naver.com", "ns1.naver.com"),
+                # Shown as RDAP handed it over, linked in its canonical spelling.
+                _link("/ns2.naver.com", "NS2.NAVER.COM"),
+            ]
+        )
+        # The other WHOIS rows are untouched.
+        assert (
+            '<tr><td>Registrar</td><td colspan="3">Example Registrar</td></tr>' in html
+        )
+
+    def test_lookup_links_share_one_quiet_style(self):
+        css = CSS.read_text(encoding="utf-8")
+        assert "table.records a.lookup-link" in css
+        assert ".lookup-link:focus-visible" in css
+        assert ".subdomains__list a {" not in css
+        assert ".tag.lookup-link" in css

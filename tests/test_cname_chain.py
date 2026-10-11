@@ -312,8 +312,13 @@ def _dns_rows_of(html: str, rdtype: str) -> list[list[str]]:
     table = re.search(r'<table class="records records--dns">.*?</table>', html, re.S)
     assert table, "no DNS table"
     rows = re.findall(rf"<tr>\s*<td>{rdtype}</td>.*?</tr>", table.group(0), re.S)
+    # Each cell's text: a hop's target and an address are wrapped in their
+    # lookup links (tests/test_page.py::TestLookupLinks pins that markup).
     return [
-        [cell.strip() for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        [
+            re.sub(r"<[^>]+>", "", cell).strip()
+            for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+        ]
         for row in rows
     ]
 
@@ -341,12 +346,8 @@ def test_the_page_lists_every_hop_and_says_whose_location_it_shows(offline):
     owner = HOPS[0][0].rstrip(".")
     assert _dns_rows_of(html, "CNAME") == [
         ["CNAME", "www.microsoft.com", HOPS[0][0], "300"],
-        [
-            "CNAME",
-            owner,
-            f'{HOPS[1][0]} <span class="tone-muted">(of {owner})</span>',
-            "60",
-        ],
+        # The "(of …)" marker is its own muted span after the hop's link.
+        ["CNAME", owner, f"{HOPS[1][0]} (of {owner})", "60"],
     ]
     assert _dns_rows_of(html, "A") == [["A", QNAME, EDGE_IP, "20"]]
     via = _geoip_rows_of(html)["Resolves via"]
