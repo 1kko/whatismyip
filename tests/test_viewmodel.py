@@ -7,6 +7,7 @@ from viewmodel import (
     format_distance,
     ssl_rows,
     whois_display,
+    whois_fill,
 )
 
 UTC = datetime.timezone.utc
@@ -692,4 +693,61 @@ class TestWhoisOfTheRegistrableDomain:
         assert self._hint("www.nosuch-name.com", missing) == "not registered"
         assert whois_display(missing) == {
             "Status": "no registration record for this name"
+        }
+
+
+THIN_RECORD = {"source": "whois", "name": "admin.ch", "thin": True}
+
+
+class TestWhoisThinRecord:
+    @staticmethod
+    def _hint(whois):
+        view = build_view(
+            {
+                "address": "admin.ch",
+                "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
+                "location": {},
+                "whois": whois,
+            },
+            is_self=False,
+        )
+        return next(i["hint"] for i in view["accordions"] if i["id"] == "whois")
+
+    @staticmethod
+    def _status(whois):
+        view = build_view(
+            {"address": "192.0.2.1", "domain": {}, "location": {}, "whois": whois},
+            is_self=False,
+        )
+        column = next(c for c in view["facts"] if c["title"] == "WHOIS")
+        return next(row for row in column["rows"] if row["label"] == "Status")
+
+    def test_the_hint_says_no_details_rather_than_registry_data(self):
+        assert self._hint(THIN_RECORD) == "no details over WHOIS"
+        assert self._hint({"source": "whois", "registrar": "cyon AG"}) == "cyon AG"
+        parent = dict(
+            THIN_RECORD, queried_name="www.admin.ch", registrable_domain="admin.ch"
+        )
+        assert self._hint(parent) == (
+            "registration of admin.ch · no details over WHOIS"
+        )
+
+    def test_the_facts_column_has_a_fourth_state(self):
+        thin = self._status(THIN_RECORD)
+        assert (thin["value"], thin["tone"]) == ("no details", "muted")
+        assert self._status({"registrar": "Example Registrar"})["value"] == "available"
+        assert self._status({"error": "not registered"})["value"] == "not registered"
+        failed = self._status({"error": "WHOIS lookup timed out"})
+        assert (failed["value"], failed["tone"]) == ("unavailable", "warning")
+
+    def test_the_accordion_rows_are_the_two_facts_there_are(self):
+        assert whois_display(THIN_RECORD) == {"Source": "WHOIS", "Name": "admin.ch"}
+
+    def test_whois_fill_words_it_the_same(self):
+        fill = whois_fill(THIN_RECORD)
+        assert fill["hint"] == "no details over WHOIS"
+        assert fill["column"][0] == {
+            "label": "Status",
+            "value": "no details",
+            "tone": "muted",
         }

@@ -144,7 +144,7 @@ def compact_registration(whois: dict | None) -> dict:
         return {"registered": False, "name": whois.get("name"), **names}
     if error:
         return {"error": error, **names}
-    return {
+    out = {
         "source": whois.get("source"),
         "name": whois.get("name"),
         **names,
@@ -158,6 +158,10 @@ def compact_registration(whois: dict | None) -> dict:
         "status": list(whois.get("status") or []),
         "rir": whois.get("rir"),
     }
+    if whois.get("thin"):
+        out["thin"] = True
+        out["note"] = "WHOIS answered with no details beyond the name"
+    return out
 
 
 def _tls_failure(ssl_data: dict) -> str:
@@ -286,6 +290,10 @@ async def lookup(target: str) -> dict[str, Any]:
     target: for "www.github.com" it is github.com's, identified by
     `registrable_domain` and `queried_name`. `registered: false` means that
     registrable domain itself has no registration.
+
+    `registration.thin` and its `note` mean port-43 WHOIS answered with
+    nothing beyond the name. Report that no details were published, rather
+    than saying the name is unregistered or the lookup failed.
 
     `reputation` (for a domain, of the address it resolves to) names the
     public lists the address is on: Spamhaus DROP/ASN-DROP, Tor exits, VPN and

@@ -353,6 +353,11 @@ and `registrable_domain`; IP answers carry neither. `NOT_REGISTERED` therefore
 means the registrable domain itself has no record. If the suffix list cannot
 be read, the lookup asks about the supplied name instead of failing.
 
+A port-43 record with nothing beyond `source` and `name` gets `thin: True`.
+The page says `no details`, MCP adds `thin` and a note, and flat registration
+fields stay `-`. Thin records are cached for `WHOIS_CACHE_ERROR_TTL` (5 min)
+so a registry can be retried; full records retain the 6-hour TTL.
+
 #### Error Handling
 
 - A registration failure is `{"error": "..."}` in the response, never a 500
@@ -741,7 +746,8 @@ and importing `main` makes no network call. The suite runs offline, and
 Test files:
 - Units: `test_geo.py` (gazetteer, distance), `test_mapgeom.py` (projection,
   tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering),
-  `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing),
+  `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
+  forced bootstrap refresh behavior, JSContact names, thin records),
   `test_managers.py` (GeoLite2 lookups, the country fallback, database
   sources and status, `TldNamesManager`, `is_valid_domain`), `test_lookup.py`
   (target normalisation, `is_safe_ip`, `gather()`), `test_subdomains.py`

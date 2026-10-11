@@ -36,6 +36,7 @@ never have to care which one answered:
         "rir": str | None,
         "whois_server": str | None,
         "url": str | None,
+        "thin": True,                # port-43 only: no detail beyond the name
     }
 
 datetimes are left as datetime objects on purpose: FastAPI's jsonable_encoder
@@ -428,10 +429,11 @@ def _as_list(value: Any) -> list:
 
 def normalize_whois(raw: dict | None, target: str) -> dict:
     """Fold a python-whois record into the same canonical shape as RDAP so the
-    fallback path is indistinguishable to the API and the template."""
+    fallback path is indistinguishable to the API and the template. A record
+    with nothing beyond source and name is marked ``thin``."""
     if not raw or (isinstance(raw, dict) and raw.get("error")):
         return raw or {"error": "WHOIS lookup failed"}
-    return {
+    record = {
         "source": "whois",
         "name": _first(raw.get("domain_name")) or target,
         "registrar": _first(raw.get("registrar")),
@@ -446,3 +448,7 @@ def normalize_whois(raw: dict | None, target: str) -> dict:
         "country": _first(raw.get("country")),
         "whois_server": _first(raw.get("whois_server")),
     }
+    detail_keys = set(record) - {"source", "name"}
+    if not any(record[key] for key in detail_keys):
+        record["thin"] = True
+    return record

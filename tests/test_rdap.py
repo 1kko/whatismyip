@@ -234,6 +234,34 @@ class TestNormalizeWhois:
         assert rdap.normalize_whois(None, "x")["error"]
         assert rdap.normalize_whois({}, "x")["error"]
 
+    def test_a_record_with_nothing_beyond_the_name_is_thin(self):
+        refusal = {
+            "domain_name": None,
+            "registrant_name": None,
+            "registrant_address": None,
+            "registrar": None,
+            "creation_date": None,
+            "dnssec": None,
+            "tech-c": None,
+            "name_servers": None,
+        }
+        out = rdap.normalize_whois(refusal, "admin.ch")
+        assert out["source"] == "whois"
+        assert out["name"] == "admin.ch"
+        assert out["thin"] is True
+        assert "error" not in out
+        assert "thin" not in rdap.CANONICAL_FIELDS
+
+    def test_a_record_with_any_detail_is_not_thin(self):
+        named = rdap.normalize_whois(
+            {"domain_name": "example.ch", "registrar": "cyon AG"}, "example.ch"
+        )
+        assert "thin" not in named
+        dated = rdap.normalize_whois(
+            {"creation_date": datetime.datetime(2001, 1, 1, tzinfo=UTC)}, "x.ch"
+        )
+        assert "thin" not in dated
+
 
 class TestLookupWhoisRouting:
     """lookup_whois() must prefer RDAP and only pay for WHOIS when RDAP can't
@@ -276,6 +304,22 @@ class TestLookupWhoisRouting:
         asyncio.run(main.lookup_whois("example.com"))
         asyncio.run(main.lookup_whois("example.com"))
         assert calls["n"] == 1  # second call served from cache
+
+    def test_a_port43_refusal_reaches_the_api_as_a_thin_record(self, monkeypatch):
+        monkeypatch.setattr(lookup, "lookup_rdap", lambda target: None)
+        monkeypatch.setattr(
+            lookup.whois,
+            "whois",
+            lambda target, quiet=True, timeout=None: {
+                "domain_name": None,
+                "registrar": None,
+                "name_servers": None,
+            },
+        )
+        out = asyncio.run(main.lookup_whois("admin.ch"))
+        assert out["source"] == "whois"
+        assert out["thin"] is True
+        assert "error" not in out
 
 
 class TestRdapOverrides:
