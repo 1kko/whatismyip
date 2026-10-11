@@ -494,7 +494,9 @@ class TestFieldsRunOnlyTheirLegs:
     def test_target_alone_costs_nothing(self):
         with _legs() as mocks:
             response = client.get("/EXAMPLE.com?fields=target", headers=CURL)
-        assert response.json() == {"target": "EXAMPLE.com"}
+            idn = client.get("/straße.de.?fields=target", headers=CURL)
+        assert response.json() == {"target": "example.com"}
+        assert idn.json() == {"target": "xn--strae-oqa.de"}
         assert _ran(mocks) == set()
 
     def test_a_domain_resolving_to_a_private_address_is_still_refused(self):

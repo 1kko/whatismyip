@@ -9,7 +9,49 @@ function normalizeLookupTarget(raw) {
     .split(/[/?#]/)[0];
   // A URL writes an IPv6 host in brackets, with any port after them.
   const bracketed = target.match(/^\[([^\]]*)\](?::\d*)?$/);
-  return bracketed ? bracketed[1] : target;
+  const host = bracketed ? bracketed[1] : target;
+  // Mirror lookup.canonical_hostname: normalize IDNA's three alternate dots,
+  // lower case, remove one root dot, and encode a non-ASCII label with the
+  // browser's UTS 46 URL parser. Invalid boundaries and lengths stay as typed.
+  let name = host.toLowerCase().replace(/[。．｡]/g, ".");
+  let labels = name.split(".");
+  if (labels[labels.length - 1] === "") {
+    labels.pop();
+  }
+  if (
+    !labels.length ||
+    labels.some((label) => !label || label.length > 63)
+  ) {
+    return host;
+  }
+  name = labels.join(".");
+  if (/[^\x00-\x7f]/.test(name)) {
+    // Keep ports, user parts, escapes and controls away from the URL parser:
+    // it would silently reinterpret them even though the server refuses them.
+    if (/[\x00-\x7f]/.test(name.replace(/[a-z0-9._-]/g, ""))) {
+      return host;
+    }
+    try {
+      const parsed = new URL(`http://${name}/`).hostname;
+      const typed = name.normalize("NFKC");
+      // WHATWG expands abbreviated numeric hosts (８.８ -> 8.0.0.8). The
+      // server accepts only a four-part IPv4 literal, so keep shorthand invalid.
+      if (/^[\d.]+$/.test(parsed) && parsed !== typed) {
+        return host;
+      }
+      name = parsed;
+    } catch {
+      return host;
+    }
+    labels = name.split(".");
+  }
+  if (
+    name.length > 253 ||
+    labels.some((label) => !label || label.length > 63)
+  ) {
+    return host;
+  }
+  return name;
 }
 
 const form = document.getElementById("lookup-form");
@@ -19,15 +61,18 @@ const status = document.getElementById("lookup-status");
 const progress = document.getElementById("progress");
 
 const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-const DOMAIN = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
+const DOMAIN = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+)$/i;
 
 // The server bans a request whose path matches a probe pattern and whose target
 // has no public suffix, so the search box must not navigate to one. DOMAIN below
 // is happy with "admin.php" — one label, a dot, three letters — and submitting
 // it would earn the visitor a 24 hour ban from this page's own form. These are
-// the extensions in the server's detector that also pass DOMAIN; the rest of it
-// (dotfiles, /wp-, nested paths) can't be produced by a single-segment target.
+// the extensions in the server's detector that also pass DOMAIN.
 const PROBE_SUFFIX = /\.(php|aspx?|json|xml|sql|bak|conf|config|ini|log)$/i;
+// The detector also sees reachable single-segment shapes such as /admin,
+// /wp-* and .env. Nested names can be legitimate public-suffix domains (for
+// example admin.example.com), so the guard below preserves that shape.
+const PROBE_PATH = /(?:^admin|^wp-|\.env)/i;
 
 // An IPv6 address as the URL parser writes it (lower case, the longest run of
 // zero groups as "::"), or null when `value` is not one. The parser accepts
@@ -53,7 +98,12 @@ function isLookupTarget(value) {
   if (ipv6Host(value) !== null) {
     return true;
   }
-  return DOMAIN.test(value) && !PROBE_SUFFIX.test(value);
+  if (!DOMAIN.test(value) || PROBE_SUFFIX.test(value)) {
+    return false;
+  }
+  const labels = value.split(".");
+  const nestedDomain = labels.length >= 3 && !value.toLowerCase().endsWith(".env");
+  return !PROBE_PATH.test(value) || nestedDomain;
 }
 
 // A router's address is the commonest thing typed in here, and the server

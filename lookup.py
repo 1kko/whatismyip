@@ -16,6 +16,7 @@ import unicodedata
 from collections.abc import Collection
 from typing import Any
 
+import idna
 import whois
 
 import abuseipdb
@@ -105,8 +106,42 @@ def sanitize_log_input(value: str) -> str:
     return value.replace("\n", "").replace("\r", "").replace("\x00", "")
 
 
+_IDNA_DOTS = str.maketrans({"。": ".", "．": ".", "｡": "."})
+
+
+def canonical_hostname(name: str) -> str:
+    """Give a domain or address literal one stable spelling.
+
+    Names are case-insensitive, the three IDNA dot variants delimit labels,
+    and one final dot only denotes the DNS root. Non-ASCII labels use UTS 46;
+    ASCII labels stay outside the encoder so service labels such as ``_dmarc``
+    remain valid inputs. Invalid label boundaries or lengths return the input
+    unchanged for ``classify_target`` to refuse.
+    """
+    normalized = name.lower().translate(_IDNA_DOTS)
+    labels = normalized.split(".")
+    if labels and labels[-1] == "":
+        labels.pop()
+    if not labels or any(not label for label in labels):
+        return name
+
+    encoded = []
+    for label in labels:
+        if not label.isascii():
+            try:
+                label = idna.encode(label, uts46=True).decode("ascii")
+            except idna.IDNAError:
+                return name
+        if len(label.encode("ascii")) > 63:
+            return name
+        encoded.append(label)
+
+    canonical = ".".join(encoded)
+    return canonical if len(canonical) <= 253 else name
+
+
 def normalize_lookup_target(raw: str) -> str:
-    """Reduce a pasted URL to the bare host or IP the pipeline can resolve.
+    """Reduce a pasted URL to the canonical host or IP the pipeline resolves.
 
     Mirrors static/js/app.js normalizeLookupTarget so a URL typed into the search
     box and one sent straight to the API behave the same: drop the scheme and
@@ -115,7 +150,8 @@ def normalize_lookup_target(raw: str) -> str:
     string would then be handed to DNS/WHOIS/SSL, which cannot resolve it.
 
     A URL writes an IPv6 host in brackets, with any port after them
-    ("[2001:db8::1]:8443"), so the brackets and the port go too.
+    ("[2001:db8::1]:8443"), so the brackets and the port go too. The remaining
+    host is lower case, has one DNS-root dot removed, and uses UTS 46 A-labels.
     """
     target = (raw or "").strip()
     target = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", target)
@@ -126,8 +162,8 @@ def normalize_lookup_target(raw: str) -> str:
         host, closed, rest = target[1:].partition("]")
         port = rest[1:] if rest.startswith(":") else None
         if closed and (rest == "" or port == "" or (port or "").isdigit()):
-            return host
-    return target
+            return canonical_hostname(host)
+    return canonical_hostname(target)
 
 
 # NAT64's well-known prefix (RFC 6052): the last 32 bits are an IPv4 address.

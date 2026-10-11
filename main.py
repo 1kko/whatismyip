@@ -1800,9 +1800,9 @@ async def get_self_info(request: Request):
 @app.get("/{domain_ip}", response_model=None)
 async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None = None):
     started = time.perf_counter()
-    # Normalize before the log line below so it records what the pipeline
-    # actually resolves, not a raw pasted URL/path. gather() normalizes again
-    # (it must, for its MCP callers); normalize_lookup_target is idempotent,
+    # Canonicalize before the log line below so it records the host spelling
+    # the pipeline resolves, not a raw pasted URL/path. gather() does it again
+    # for its MCP callers; normalize_lookup_target is idempotent,
     # see test_normalize_lookup_target_is_idempotent in tests/test_lookup.py.
     domain_ip = normalize_lookup_target(domain_ip)
     filter_manager = HeaderManager()

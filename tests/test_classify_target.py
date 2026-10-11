@@ -167,6 +167,8 @@ async def test_gather_refuses_an_invalid_target_before_any_lookup(target):
         "/test-xss",
         "/wpad.dat",
         "/example.com:443",
+        "/example.com..",
+        "/a..b.com",
     ],
 )
 def test_invalid_target_is_a_400_with_no_outbound_call(path):
@@ -208,15 +210,40 @@ def test_a_private_ipv6_target_is_a_400_with_no_outbound_call(path):
 
 
 @pytest.mark.parametrize(
-    "target",
-    ["example.com", "EXAMPLE.com", "example.com.", "_dmarc.example.com", "8.8.8.8"],
+    "target, canonical",
+    [
+        ("example.com", "example.com"),
+        ("EXAMPLE.com", "example.com"),
+        ("example.com.", "example.com"),
+        ("NASA.GOV.", "nasa.gov"),
+        ("_dmarc.example.com", "_dmarc.example.com"),
+        ("münchen.de", "xn--mnchen-3ya.de"),
+        ("straße.de", "xn--strae-oqa.de"),
+        ("8.8.8.8", "8.8.8.8"),
+        ("8.8.8.8.", "8.8.8.8"),
+        ("８。８。８。８", "8.8.8.8"),
+    ],
 )
-def test_valid_targets_are_looked_up_as_before(target):
+def test_valid_targets_are_looked_up_as_before(target, canonical):
     with _legs() as mocks:
         response = client.get(f"/{target}", headers=API_UA)
     assert response.status_code == 200
-    assert response.json()["address"] == target
-    mocks["whois"].assert_called_once_with(target)
+    assert response.json()["address"] == canonical
+    mocks["whois"].assert_called_once_with(canonical)
+    if canonical == "8.8.8.8":
+        mocks["ssl"].assert_not_called()
+    else:
+        resolver = mocks["resolver"].return_value
+        resolver.resolve.assert_called_once_with(canonical, "A")
+        mocks["records"].assert_called_once_with(canonical, ip="93.184.216.34")
+        mocks["ssl"].assert_called_once_with(canonical, "93.184.216.34")
+
+
+def test_the_page_titles_the_canonical_name():
+    with _legs():
+        html = client.get("/NASA.GOV.", headers=BROWSER_UA).text
+    assert "<title>nasa.gov — WhatIsMyIP</title>" in html
+    assert '<h1 class="ip mono">nasa.gov</h1>' in html
 
 
 def test_private_address_keeps_its_own_400():
@@ -326,3 +353,11 @@ def test_mcp_tools_report_an_invalid_target_as_an_error(tool, argument):
         payload = _call_tool(mcp_client, tool, {argument: "foo\r\nbar.com"})
     assert payload == {"error": "not a domain name or IP address"}
     _assert_nothing_went_out(mocks)
+
+
+def test_mcp_lookup_echoes_the_canonical_target():
+    with TestClient(app) as mcp_client, _legs() as mocks:
+        mcp_client.post("/mcp", json=MCP_INIT, headers=MCP_HEADERS)
+        payload = _call_tool(mcp_client, "lookup", {"target": "straße.de."})
+    assert payload["target"] == "xn--strae-oqa.de"
+    mocks["whois"].assert_called_once_with("xn--strae-oqa.de")
