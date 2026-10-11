@@ -675,6 +675,58 @@ class TestAFailedTlsLegIsAQuestionMark:
         assert _ran(mocks) == {"resolver", "ssl"}
 
 
+class TestResolutionField:
+    """`?fields=resolution`: why `ip` is "?" (or "-"), by name only."""
+
+    def test_it_says_how_the_a_query_ended(self):
+        with _legs() as mocks:
+            response = client.get("/example.com?fields=ip,resolution", headers=CURL)
+        assert response.json() == {"ip": DOMAIN_IP, "resolution": "ok"}
+        assert _ran(mocks) == {"resolver"}
+
+    def test_it_is_the_reason_behind_a_question_mark_not_one_itself(self):
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = TIMEOUT
+            body = client.get("/example.com?fields=ip,resolution", headers=CURL).json()
+            text = client.get(
+                "/example.com?fields=ip,resolution&format=text", headers=CURL
+            ).text
+        assert body == {
+            "ip": None,
+            "resolution": "timeout",
+            "errors": {"ip": "timeout"},
+        }
+        assert text == "?\ntimeout\n"
+
+    def test_a_name_with_no_address_says_so_without_an_error(self):
+        with _legs() as mocks:
+            mocks["resolver"].return_value.resolve.side_effect = dns.resolver.NXDOMAIN
+            response = client.get("/example.com?fields=ip,resolution", headers=CURL)
+        assert response.json() == {"ip": None, "resolution": "nxdomain"}
+
+    def test_it_is_not_in_the_text_block(self):
+        with _legs():
+            response = client.get("/example.com?format=text", headers=CURL)
+        assert [key for key, _ in _block(response)] == DOMAIN_KEYS
+        assert textfmt.block_fields("domain") == DOMAIN_KEYS
+
+    def test_an_ip_and_the_self_route_answer_a_dash_for_nothing(self):
+        """An IP's "literal" is not shown: the field is a domain's, and a
+        field that does not apply to the target is "-" whatever gather()
+        left in the dict."""
+        with _legs() as mocks:
+            by_ip = client.get("/8.8.8.8?fields=resolution&format=text", headers=CURL)
+            own = client.get("/?fields=resolution&format=text", headers=CURL)
+        assert by_ip.text == "-\n"
+        assert own.text == "-\n"
+        assert _ran(mocks) == set()
+
+    def test_it_is_named_among_the_valid_fields(self):
+        with _legs():
+            response = client.get("/example.com?fields=bogus", headers=CURL)
+        assert "resolution" in response.json()["error"]
+
+
 class TestFieldsRunOnlyTheirLegs:
     def test_network_fields_skip_whois_dns_and_tls(self):
         with _legs() as mocks:

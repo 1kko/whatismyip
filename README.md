@@ -461,6 +461,7 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | --- | --- | --- | --- |
 | `target` | the target after URL host extraction and canonical name spelling (see `GET /{domain_or_ip}`) | none | both |
 | `ip` | the address a domain resolves to; an IP itself; on `/`, yours; `?` when the A query failed (`timeout`, `servfail`, `error`), as is every field below that is read from the address | A query (domains) | both |
+| `resolution` | how a domain's A query ended: `ok`, `nxdomain`, `noanswer`, `timeout`, `servfail` or `error` — the reason behind a `?` or `-` `ip`; by name only, never in the text block | A query | domain |
 | `reverse_dns` | PTR name | reverse DNS | IP |
 | `country_code` | ISO 3166-1 alpha-2 | GeoIP (local) | both |
 | `country_name` | | GeoIP (local) | both |
@@ -480,9 +481,10 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 
 The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
 is `cert_expires` here, and its `registration.expires` is `domain_expires`.
-`risk_level`, `risk_signals` and `abuse_score` are answered only when asked for
-by name; the text block leaves them out, because a bare `risk_level: none` among the other
-lines would read as a clean bill of health the lists cannot give.
+`resolution`, `risk_level`, `risk_signals` and `abuse_score` are answered only
+when asked for by name; the text block leaves them out: a bare `risk_level: none`
+among the other lines would read as a clean bill of health the lists cannot
+give, and `resolution: ok` would be a line to skip on every read.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
 own address; `cert_*` and the domain-only fields are `-`.
@@ -508,7 +510,8 @@ A value is never left blank:
   out)`, or `TLS not checked (IPv6-only host; this server has no IPv6
   connectivity)` for a name with only an AAAA record. A monitor reading
   `cert_days_remaining` therefore sees `?`/`null` with a reason during an
-  outage, never a missing certificate.
+  outage, never a missing certificate. `?fields=ip,resolution` names the reason
+  in text too: `?` then `timeout`.
 
 An unknown field is refused with `400` before any lookup runs:
 

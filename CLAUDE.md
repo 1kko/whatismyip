@@ -157,7 +157,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   new field follows; `_NAME_LEGS`, whois and the dns sweep, ask about the
   name and keep their own status) when the gating A query's `resolution` is
   in `managers.DNS_FAILURES`, and the `tls` fields when the TLS leg came back
-  `{"error"}`; `nxdomain`/`noanswer` stay `-`.
+  `{"error"}`; `nxdomain`/`noanswer` stay `-`. `resolution` is a name-only
+  domain field (never in the text block) that says how the A query ended.
 - `subdomains.py`: subdomain discovery from Certificate Transparency (crt.sh),
   opt-in per request. `get_subdomains()` owns normalization, single-flight, and
   a global outbound budget; `invalid_target_reason()` decides which targets may

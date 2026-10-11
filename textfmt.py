@@ -34,6 +34,10 @@ _IP = frozenset({"ip"})
 FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "target": (frozenset(), _BOTH),
     "ip": (frozenset({"resolve"}), _BOTH),
+    # How the A query ended, so a "?" ip can be read: the gather() resolution
+    # ("ok", "nxdomain", "noanswer", "timeout", "servfail", "error"). A
+    # domain's only; an IP's "literal" says nothing, and / has none.
+    "resolution": (frozenset({"resolve"}), _DOMAIN),
     "reverse_dns": (frozenset({"ptr"}), _IP),
     "country_code": (frozenset({"geo"}), _BOTH),
     "country_name": (frozenset({"geo"}), _BOTH),
@@ -57,8 +61,10 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
 # among the other lines reads as a clean bill, which the lists cannot give; a
 # script that asks for it knows what it asked for. With REPUTATION_ENABLED=false
 # all three read "-", and abuse_score does without ABUSEIPDB_API_KEY too.
+# resolution stays out too: the block already says "?" where it matters, and
+# "resolution: ok" is one more line for every reader to skip.
 _RISK_FIELDS = ("risk_level", "risk_signals")
-_NOT_IN_BLOCK = frozenset({*_RISK_FIELDS, "abuse_score"})
+_NOT_IN_BLOCK = frozenset({*_RISK_FIELDS, "abuse_score", "resolution"})
 
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires")
 
@@ -163,6 +169,7 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     values = {
         "target": data.get("address"),
         "ip": data.get("resolved_ip"),
+        "resolution": data.get("resolution"),
         "reverse_dns": data.get("reverse_dns"),
         "country_code": geo["country_code"],
         "country_name": geo["country_name"],
@@ -181,9 +188,13 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "risk_signals": ",".join(s["id"] for s in reputation.get("signals") or []),
         "abuse_score": (reputation.get("abuseipdb") or {}).get("abuse_confidence"),
     }
-    # The certificate helpers answer the page, which shows an em dash for "none".
+    # The certificate helpers answer the page, which shows an em dash for
+    # "none"; and a field that does not apply to the target is "-" whatever the
+    # lookup left in the dict (an IP's resolution is "literal").
     values = {
-        name: None if value == "" or value == DASH else value
+        name: None
+        if value == "" or value == DASH or kind not in FIELDS[name][1]
+        else value
         for name, value in values.items()
     }
     errors: dict[str, str] = {}
@@ -193,11 +204,12 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     # GeoIP, the certificate and the reputation are unknown, not empty. Chosen
     # by leg, so a field added to FIELDS later follows the rule: every field
     # that needs a leg reading the address (any but _NAME_LEGS) and applies to
-    # the target. nxdomain and noanswer are answers, and reach here as "-".
+    # the target. resolution itself is the reason and stays readable. nxdomain
+    # and noanswer are answers, and reach here as "-".
     resolution = data.get("resolution")
     if resolution in DNS_FAILURE_TEXT:
         for name, (legs, kinds) in FIELDS.items():
-            if kind in kinds and legs - _NAME_LEGS:
+            if name != "resolution" and kind in kinds and legs - _NAME_LEGS:
                 errors[name] = str(resolution)
     # compact_registration reports "not registered" as registered: false, not
     # as an error, so only a lookup that broke lands here. A field that does
