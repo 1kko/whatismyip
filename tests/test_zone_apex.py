@@ -334,7 +334,7 @@ async def test_an_ip_whose_ptr_ends_in_a_dot_keeps_its_zone(fake_dns, monkeypatc
 async def test_dns_records_tool_reports_the_queried_name_and_zone(monkeypatch):
     import mcp_server
 
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return {
             "address": target,
             "resolved_ip": "151.101.0.81",

@@ -835,7 +835,7 @@ INIT = {
 
 
 def _call_tool(name, arguments, ssl_data, resolved_ip=IP):
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return {**_gathered(ssl_data), "resolved_ip": resolved_ip}
 
     with TestClient(app) as mcp_client:

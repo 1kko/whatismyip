@@ -295,9 +295,15 @@ _GATHER_CONCURRENCY = LookupGate("MCP", MCP_LOOKUP_CONCURRENCY)
 _GATHER_TIMEOUT_SECONDS = RDAP_TIMEOUT_SECONDS + WHOIS_TIMEOUT_SECONDS + 5
 
 
-async def _bounded_gather(target: str) -> dict:
+async def _bounded_gather(target: str, legs: frozenset[str] | None = None) -> dict:
+    """gather() under MCP's share of the gate and the wall-clock ceiling.
+
+    `legs` goes through as given: None runs every leg, a set only those
+    (lookup.LEGS names them)."""
     async with _GATHER_CONCURRENCY.slot():
-        return await asyncio.wait_for(gather(target), timeout=_GATHER_TIMEOUT_SECONDS)
+        return await asyncio.wait_for(
+            gather(target, legs=legs), timeout=_GATHER_TIMEOUT_SECONDS
+        )
 
 
 @mcp.tool()

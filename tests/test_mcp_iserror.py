@@ -88,14 +88,14 @@ SUBDOMAINS = {
 
 
 def _gathered(**overrides):
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         return {**GATHERED, **overrides}
 
     return fake_gather
 
 
 def _raising(exc):
-    async def fake_gather(target):
+    async def fake_gather(target, legs=None):
         raise exc
 
     return fake_gather
