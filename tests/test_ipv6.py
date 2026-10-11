@@ -17,6 +17,7 @@ Every lookup is faked; nothing here touches the network.
 
 import ipaddress
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -370,6 +371,95 @@ async def test_aaaa_is_not_asked_when_the_name_does_not_exist(offline):
     data = await lookup.gather("nosuch.example.com", legs={"resolve"})
     assert data["resolution"] == "nxdomain"
     assert ("nosuch.example.com", "AAAA") not in offline["resolver"].queries
+
+
+# --- gather(): the gating A query's misses are logged by what they mean ----------
+
+NAME = "v6only.example.com"
+
+
+def _timeout():
+    return dns.resolver.LifetimeTimeout(timeout=3.0, errors=[])
+
+
+class _Resolver:
+    def __init__(self):
+        self.answers = {}
+
+    def resolve(self, qname, rdtype="A", *args, **kwargs):
+        outcome = self.answers.get(rdtype) or dns.resolver.NoAnswer()
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+@pytest.fixture
+def resolver(monkeypatch, caplog):
+    fake = _Resolver()
+    monkeypatch.setattr(lookup, "_recursive_resolver", lambda: fake)
+    caplog.set_level(logging.DEBUG)
+    return fake
+
+
+def _logged(caplog, level):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == level and NAME in record.getMessage()
+    ]
+
+
+class TestGatingAQueryLogLevel:
+    async def test_an_ipv6_only_name_is_not_a_warning(self, resolver, caplog):
+        resolver.answers = {"A": dns.resolver.NoAnswer(), "AAAA": [V6]}
+        data = await lookup.gather(NAME, legs={"resolve"})
+        assert data["resolved_ip"] == V6
+        assert data["resolution"] == "ok"
+        assert _logged(caplog, logging.WARNING) == []
+        assert any("No A record" in line for line in _logged(caplog, logging.DEBUG))
+
+    @pytest.mark.parametrize(
+        "answers, resolution",
+        [
+            ({"A": dns.resolver.NXDOMAIN()}, "nxdomain"),
+            ({"A": dns.resolver.NoAnswer()}, "noanswer"),
+            ({"A": dns.resolver.NoAnswer(), "AAAA": dns.resolver.NXDOMAIN()}, None),
+        ],
+        ids=["nxdomain", "no-address-records", "aaaa-nxdomain"],
+    )
+    async def test_a_name_with_no_address_is_an_answer_not_a_warning(
+        self, resolver, caplog, answers, resolution
+    ):
+        resolver.answers = answers
+        data = await lookup.gather(NAME, legs={"resolve"})
+        assert data["resolved_ip"] is None
+        if resolution:
+            assert data["resolution"] == resolution
+        assert _logged(caplog, logging.WARNING) == []
+        assert _logged(caplog, logging.DEBUG)
+
+    @pytest.mark.parametrize(
+        "answers, status",
+        [
+            ({"A": _timeout()}, "timeout"),
+            ({"A": dns.resolver.NoNameservers()}, "servfail"),
+            ({"A": RuntimeError("resolver bug")}, "error"),
+            ({"A": dns.resolver.NoAnswer(), "AAAA": _timeout()}, "timeout"),
+            (
+                {"A": dns.resolver.NoAnswer(), "AAAA": dns.resolver.NoNameservers()},
+                "servfail",
+            ),
+        ],
+        ids=["a-timeout", "a-servfail", "a-error", "aaaa-timeout", "aaaa-servfail"],
+    )
+    async def test_a_name_that_could_not_be_resolved_still_warns(
+        self, resolver, caplog, answers, status
+    ):
+        resolver.answers = answers
+        data = await lookup.gather(NAME, legs={"resolve"})
+        assert data["resolved_ip"] is None
+        assert data["resolution"] == status
+        assert len(_logged(caplog, logging.WARNING)) == 1
 
 
 # --- get_records(): AAAA with its status ------------------------------------------

@@ -732,12 +732,15 @@ Test files:
   (`?format=`/Accept/user-agent), `test_text_format.py` (`?format=text`,
   `?fields=`), `test_error_pages.py` (`error.html` for browsers),
   `test_open_graph.py` (link previews), `test_privacy_page.py` (`/privacy`),
-  `test_robots_head.py` (`/robots.txt`, `/favicon.ico`, HEAD),
-  `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`),
+  `test_robots_head.py` (`/robots.txt`, `/favicon.ico`, HEAD and the
+  Content-Type and status it shares with GET),
+  `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`, and
+  `?fields=` joining the self lookup),
   `test_ip_whois_column.py` (an IP's WHOIS column), `test_subdomain_panel.py`
   (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test)
 - Lookup behaviour: `test_classify_target.py` (refused before any network
-  work), `test_ipv6.py` (IPv6 literals, AAAA), `test_dns_status.py` (a failed
+  work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
+  `test_dns_status.py` (a failed
   query is never "no records"), `test_zone_apex.py` (NS/MX/SPF from the zone
   apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
   floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
@@ -752,7 +755,8 @@ Test files:
   guards, the admin key, bans, rate limiting, geo-blocking, the probe detector
   and whitelist, per-IP rules, response headers, log injection), `test_ssrf.py`
   (only global unicast becomes a connection target)
-- MCP: `test_mcp.py` (handshake, tools, transport limits, rate bucket),
+- MCP: `test_mcp.py` (handshake and `serverInfo.version`, tools, transport
+  limits, rate bucket),
   `test_mcp_iserror.py` (`isError` on outright failures),
   `test_mcp_manual_ban.py` (only a manual ban applies), `test_mcp_registry.py`
   (`server.json`, its publish workflow, the page's tool list)

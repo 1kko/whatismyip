@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+import config
 import lookup
 import main
 from main import app
@@ -47,6 +48,17 @@ def test_initialize_handshake():
         result = response.json()["result"]
         assert result["serverInfo"]["name"] == "whatismyip"
         assert "tools" in result["capabilities"]
+
+
+def test_mcp_initialize_reports_the_deployed_version():
+    """The initialize response names the same deployed build as /healthz."""
+    with TestClient(app) as client:
+        response = client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+    assert response.status_code == 200
+    server_info = response.json()["result"]["serverInfo"]
+    assert server_info["name"] == "whatismyip"
+    assert server_info["version"] == config.APP_VERSION
+    assert server_info["version"]
 
 
 def test_tools_list_exposes_the_five_tools():
