@@ -734,19 +734,23 @@ class TestSecurityMiddleware:
         assert not ip_ban_manager.is_banned("testclient")
 
     def test_static_assets_are_exempt_from_rate_limit(self):
-        """One page load pulls the stylesheet, three scripts, four fonts, three
-        icons and the manifest. If those counted against the limiter, a
-        first-time visitor would ban themselves before the page finished
-        rendering."""
+        """One page load pulls the stylesheet, three scripts, four fonts (the
+        Latin subsets; the Extended-A and Cyrillic+Greek files load only when
+        such text is on the page), three icons and the manifest. If those
+        counted against the limiter, a first-time visitor would ban themselves
+        before the page finished rendering. Every path must answer 200: a 404
+        passes the limiter checks too, so when the fonts were renamed for the
+        subsets the old names would have left four of these requests checking
+        nothing."""
         assets = [
             "/static/css/whatismyip.css",
             "/static/js/app.js",
             "/static/js/map.js",
             "/static/js/fingerprint.js",
-            "/static/fonts/InterVariable.woff2",
-            "/static/fonts/JetBrainsMono-Regular.woff2",
-            "/static/fonts/JetBrainsMono-Medium.woff2",
-            "/static/fonts/JetBrainsMono-SemiBold.woff2",
+            "/static/fonts/InterVariable-latin.woff2",
+            "/static/fonts/JetBrainsMono-Regular-latin.woff2",
+            "/static/fonts/JetBrainsMono-Medium-latin.woff2",
+            "/static/fonts/JetBrainsMono-SemiBold-latin.woff2",
             "/static/favicon.svg",
             "/static/favicon.ico",
             "/static/apple-touch-icon.png",
@@ -756,8 +760,7 @@ class TestSecurityMiddleware:
         rate_limiter.requests_per_second = 2
         try:
             statuses = [client.get(path).status_code for path in assets]
-            assert 429 not in statuses
-            assert 403 not in statuses
+            assert statuses == [200] * len(assets), dict(zip(assets, statuses))
             assert not ip_ban_manager.is_banned("testclient")
         finally:
             rate_limiter.requests_per_second = original_per_second
@@ -810,7 +813,7 @@ class TestWhitelistManager:
         wm = WhitelistManager()
         assert wm.is_static("/static/css/whatismyip.css")
         assert wm.is_static("/static/js/app.js")
-        assert wm.is_static("/static/fonts/InterVariable.woff2")
+        assert wm.is_static("/static/fonts/InterVariable-latin.woff2")
         assert wm.is_static("/static/favicon.ico")
         assert wm.is_static("/static/site.webmanifest")
         assert wm.is_static("/static/geo/cities.json")

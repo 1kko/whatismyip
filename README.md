@@ -1231,10 +1231,11 @@ Requests pass through the middleware in this order:
    is banned.
 4. **Rate limiting** — 60 req/min and 10 req/sec per IP (`429` + 1h ban). Static
    assets under `/static/` are exempt: one page load pulls the stylesheet, three
-   scripts, four fonts, three icons and the manifest, which would trip the
-   per-second limit and ban a first-time visitor. Everything else is limited,
-   including `/` and `/{domain_or_ip}` — that is where the DNS, RDAP/WHOIS and
-   TLS work happens.
+   scripts, four fonts (the Latin subsets; the Extended-A and Cyrillic+Greek
+   files load only when such text is on the page), three icons and the
+   manifest, which would trip the per-second limit and ban a first-time
+   visitor. Everything else is limited, including `/` and `/{domain_or_ip}` —
+   that is where the DNS, RDAP/WHOIS and TLS work happens.
 
 Two surfaces are handled before this chain: `/admin/*` checks bans and rate
 limits but skips geo and suspicious-path filtering, and `/mcp` checks bans and
