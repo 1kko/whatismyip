@@ -502,20 +502,28 @@ async def lookup(target: str) -> dict[str, Any]:
     return result
 
 
-# Exactly the types DomainManager.get_records() queries. A type missing from
-# its sweep must not be listed here: it would come back {} for a domain that
-# has it, which a model relays as "this domain has none".
-_RECORD_TYPES = ("a", "aaaa", "mx", "ns", "cname", "txt", "spf", "ptr")
+# Exactly the types a domain's DomainManager.get_records() sweep returns
+# (gather() asks it for DMARC). A type missing from its sweep must not be
+# listed here: it would come back {} for a domain that has it, which a model
+# relays as "this domain has none".
+_RECORD_TYPES = ("a", "aaaa", "mx", "ns", "cname", "txt", "spf", "ptr", "dmarc")
 
 
 @mcp.tool(title="DNS records", annotations=_READ_ONLY)
 async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, Any]:
-    """DNS records for a domain: A, AAAA, MX, NS, CNAME, TXT, SPF, PTR — the
-    exact set this server queries. Pass `types` (lowercase, a subset of those) to
-    narrow the sweep; omit it for everything. Use this for mail-routing and
-    SPF/DMARC questions, where the summary from `lookup` is not enough.
+    """DNS records for a domain: A, AAAA, MX, NS, CNAME, TXT, SPF, PTR, DMARC —
+    the exact set this server queries. Pass `types` (lowercase, a subset of
+    those) to narrow the sweep; omit it for everything. Use this for
+    mail-routing and SPF/DMARC questions, where the summary from `lookup` is
+    not enough.
     NS come from `zone`, the DNS zone serving the name. MX rows marked
     `from_zone` belong to that zone, not the name: it has no MX of its own.
+    `dmarc` is the v=DMARC1 TXT record at _dmarc.<name> or, when the name has
+    none, at its registrable domain (RFC 7489). Each record's `queried_name`
+    says which name answered: relay an inherited policy as that domain's.
+    Report the policy as published (p=none asks for reports only); nothing
+    here grades it. DMARC is asked for a domain only: for an IP address the
+    key is left out.
     `cname_chain` is every CNAME hop the public resolver followed to answer
     the A query for `queried_name` (the AAAA query when A raised), in order,
     each with the TTL left in the resolver's cache; `canonical_name` is the

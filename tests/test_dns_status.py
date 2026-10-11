@@ -774,3 +774,48 @@ async def test_mcp_four_outcomes_are_four_answers(offline):
         "nxdomain": ([], "nxdomain"),
         "noanswer": ([], "ok"),
     }
+
+
+@pytest.mark.parametrize(
+    "outcome, expected",
+    [
+        (
+            None,
+            [{"text": DMARC_TEXT, "ttl": 300, "queried_name": "_dmarc.example.com"}],
+        ),
+        ("noanswer", []),
+        ("nxdomain", []),
+        ("timeout", {"error": "timeout"}),
+        ("servfail", {"error": "servfail"}),
+    ],
+)
+async def test_mcp_answers_dmarc_instead_of_refusing_it(offline, outcome, expected):
+    """types=["dmarc"] is the record, an empty list, or {"error": status}:
+    never the "unsupported record types" refusal it used to be."""
+    if outcome:
+        offline.fail("_dmarc.example.com", outcome, "TXT")
+
+    payload = await mcp_server.dns_records("example.com", types=["dmarc"])
+
+    assert payload["records"] == {"dmarc": expected}
+
+
+def test_every_type_the_mcp_tool_names_is_in_a_domains_sweep(fake_dns):
+    """A type _RECORD_TYPES names but the sweep never returns would come back
+    missing from every answer, which a model relays as "none"."""
+    records = managers.DomainManager().get_records(
+        "example.com", ip="93.184.216.34", dmarc=True
+    )
+
+    assert set(mcp_server._RECORD_TYPES) <= set(records)
+
+
+async def test_mcp_asks_no_dmarc_of_an_ip_targets_ptr_name(offline):
+    """An IP's records are its PTR name's, a name nobody asked about: no
+    _dmarc query is spent on it, and the key is left out, as the tool's
+    description says, rather than sent back looking like an answer."""
+    payload = await mcp_server.dns_records("93.184.216.34", types=["dmarc"])
+
+    assert payload["queried_name"] == "edge.example.net"
+    assert payload["records"] == {}
+    assert _dmarc_asked(offline) == []
