@@ -109,8 +109,14 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   unset). `main.security_middleware` applies them.
 - `rdap.py`: `lookup_rdap` (whoisit) and `normalize_whois` (python-whois's
   port-43 output) both produce one canonical dict (`CANONICAL_FIELDS`).
+  `bootstrap_rdap` loads IANA's registry with whoisit's bundled override table
+  enabled for RDAP servers IANA omits, including .ch/.li/.de/.io/.me/.us.
+  `_jscontact_name` reads registrar and registrant names from JSContact cards
+  in raw responses from registries such as KRNIC.
   `rdap_breaker` (a `CircuitBreaker`) skips an RDAP host after repeated
-  failures; `refresh_rdap_bootstrap` keeps IANA's bootstrap registry current.
+  failures. `refresh_rdap_bootstrap` saves and clears a week-old registry so
+  whoisit actually fetches again, restores the saved copy on failure, and
+  holds `_bootstrap_lock` while using the configured no-retry session.
 - `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of
   `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
 - `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
@@ -346,6 +352,11 @@ same ICANN-view public suffix floor as `zone_apex`. This makes `www.` and
 and `registrable_domain`; IP answers carry neither. `NOT_REGISTERED` therefore
 means the registrable domain itself has no record. If the suffix list cannot
 be read, the lookup asks about the supplied name instead of failing.
+
+A port-43 record with nothing beyond `source` and `name` gets `thin: True`.
+The page says `no details`, MCP adds `thin` and a note, and flat registration
+fields stay `-`. Thin records are cached for `WHOIS_CACHE_ERROR_TTL` (5 min)
+so a registry can be retried; full records retain the 6-hour TTL.
 
 #### Error Handling
 
@@ -735,7 +746,8 @@ and importing `main` makes no network call. The suite runs offline, and
 Test files:
 - Units: `test_geo.py` (gazetteer, distance), `test_mapgeom.py` (projection,
   tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering),
-  `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing),
+  `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
+  forced bootstrap refresh behavior, JSContact names, thin records),
   `test_managers.py` (GeoLite2 lookups, the country fallback, database
   sources and status, `TldNamesManager`, `is_valid_domain`), `test_lookup.py`
   (target normalisation, `is_safe_ip`, `gather()`), `test_subdomains.py`

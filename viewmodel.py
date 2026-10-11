@@ -466,13 +466,15 @@ def _whois_column(whois_data: dict | None) -> dict:
         return {"title": "WHOIS", "id": "whois", "rows": rows}
     whois_data = whois_data or {}
     error = whois_data.get("error")
-    # Three states, not two. "not registered" is an answer -- the registry was
+    # Four states. "not registered" is an answer -- the registry was
     # reached and found no registration for the registrable domain -- while
     # "unavailable" means we could not find out.
     if error == NOT_REGISTERED:
         status, tone = "not registered", "muted"
     elif error or not whois_data:
         status, tone = "unavailable", "warning"
+    elif whois_data.get("thin"):
+        status, tone = "no details", "muted"
     else:
         status, tone = "available", "success"
     # Separate from the status above: this one only asks whether there is a
@@ -756,6 +758,8 @@ def _whois_hint(whois_data: dict | None) -> str:
     if whois_error or not whois_data:
         return "lookup failed"
     who = whois_data.get("registrar") or whois_data.get("registrant") or "registry data"
+    if whois_data.get("thin"):
+        who = "no details over WHOIS"
     created = _year(whois_data.get("created"))
     expires = _year(whois_data.get("expires"))
     span = f" · {created} → {expires}" if created and expires else ""

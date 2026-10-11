@@ -776,3 +776,22 @@ class TestRegistrationShaping:
         )
         assert out["error"] == "WHOIS lookup timed out"
         assert out["registrable_domain"] == "example.com"
+
+    def test_a_thin_record_says_so(self):
+        from mcp_server import compact_registration
+
+        thin = {
+            "source": "whois",
+            "name": "admin.ch",
+            "thin": True,
+            "queried_name": "www.admin.ch",
+            "registrable_domain": "admin.ch",
+        }
+        out = compact_registration(thin)
+        assert out["thin"] is True
+        assert out["note"] == "WHOIS answered with no details beyond the name"
+        assert out["name"] == "admin.ch"
+        assert out["registrar"] is None
+        assert out["queried_name"] == "www.admin.ch"
+        assert out["registrable_domain"] == "admin.ch"
+        assert "error" not in out and "registered" not in out

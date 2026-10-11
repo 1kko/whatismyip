@@ -3,9 +3,15 @@
 RDAP (RFC 9082/9083) is the IETF successor to port-43 WHOIS: a single HTTPS GET
 that returns structured JSON instead of free-form text. It is faster (usually
 <1s vs the ~11s some registrars take on port 43) and needs no fragile text
-parsing. Coverage is not total though — most gTLDs publish an RDAP endpoint in
-the IANA bootstrap registry, but many ccTLDs (.kr among them) do not, so those
-still go through python-whois.
+parsing. Coverage is not total though. IANA's bootstrap registry maps most
+gTLDs and many ccTLDs to an RDAP server, and whoisit's bundled override table
+adds registries IANA omits or misstates, including .ch, .li, .de, .io, .me and
+.us. A TLD in neither still goes through python-whois.
+
+The override flag also permits handleless records such as KRNIC's. KRNIC uses
+JSContact cards, which whoisit's vCard parser does not name; `_jscontact_name`
+reads registrar and registrant names from the raw response retained by
+`whoisit.domain(..., include_raw=True)`.
 
 Both sources are normalised into one canonical dict so the API and the template
 never have to care which one answered:
@@ -30,6 +36,7 @@ never have to care which one answered:
         "rir": str | None,
         "whois_server": str | None,
         "url": str | None,
+        "thin": True,                # port-43 only: no detail beyond the name
     }
 
 datetimes are left as datetime objects on purpose: FastAPI's jsonable_encoder
@@ -44,11 +51,12 @@ an IP whose RIR does not answer gets RIR_RDAP_UNAVAILABLE instead.
 
 from __future__ import annotations
 
+import html
 import ipaddress
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -78,6 +86,7 @@ def _configure_whoisit() -> None:
     whoisit.utils.http_timeout = RDAP_HTTP_TIMEOUT_SECONDS
     whoisit.utils.http_max_retries = RDAP_HTTP_RETRIES
     whoisit.clear_session()
+    whoisit._bootstrap.session = whoisit.get_session()
 
 
 _configure_whoisit()
@@ -131,21 +140,38 @@ def is_ip(target: str) -> bool:
 
 def bootstrap_rdap(force: bool = False) -> bool:
     """Load (or refresh) the IANA bootstrap registry whoisit uses to map a TLD
-    or IP block to its authoritative RDAP server. Idempotent and thread-safe;
-    returns True when the registry is ready, False if it could not be fetched
-    (callers then fall back to WHOIS)."""
+    or IP block to its authoritative RDAP server, with whoisit's bundled
+    override table enabled. Idempotent and thread-safe; returns whether the
+    registry is ready."""
     with _bootstrap_lock:
+        if whoisit.is_bootstrapped() and not force:
+            return True
+        saved = whoisit.save_bootstrap_data() if whoisit.is_bootstrapped() else None
         try:
-            if force or not whoisit.is_bootstrapped():
-                whoisit.bootstrap()
-            return whoisit.is_bootstrapped()
+            if saved is not None:
+                whoisit.clear_bootstrapping()
+            whoisit.bootstrap(overrides=True)
         except Exception:
-            logging.warning("RDAP bootstrap failed; WHOIS fallback stays in use")
-            return False
+            whoisit.clear_bootstrapping()
+            if saved is None:
+                logging.warning("RDAP bootstrap failed; WHOIS fallback stays in use")
+                return False
+            logging.warning("RDAP bootstrap refresh failed; keeping the old registry")
+            _restore_bootstrap(saved)
+        return whoisit.is_bootstrapped()
+
+
+def _restore_bootstrap(saved: str) -> None:
+    """Restore a saved registry into a cleared whoisit instance."""
+    try:
+        whoisit.load_bootstrap_data(saved, overrides=True)
+    except Exception:
+        whoisit.clear_bootstrapping()
+        logging.exception("could not restore the saved RDAP bootstrap registry")
 
 
 def refresh_rdap_bootstrap() -> None:
-    """Scheduler hook: re-fetch the registry only when it has gone stale."""
+    """Re-fetch a week-old registry, retaining the old one if IANA fails."""
     try:
         if not whoisit.is_bootstrapped() or whoisit.bootstrap_is_older_than(7):
             bootstrap_rdap(force=True)
@@ -169,14 +195,46 @@ def _entity_email(entities: dict | None, role: str) -> str | None:
     return None
 
 
+def _rdap_entities(rdap_json: dict | None) -> Iterator[dict]:
+    """Yield every entity in an RDAP response, including nested contacts."""
+    for entity in (rdap_json or {}).get("entities") or []:
+        if isinstance(entity, dict):
+            yield entity
+            yield from _rdap_entities(entity)
+
+
+def _jscontact_name(rdap_json: dict | None, role: str) -> str | None:
+    """Read a role's name from the first matching JSContact card."""
+    for entity in _rdap_entities(rdap_json):
+        roles = [str(item).lower() for item in entity.get("roles") or []]
+        card = entity.get("jscontact_card")
+        if role not in roles or not isinstance(card, dict):
+            continue
+        name_obj = card.get("name")
+        name = name_obj.get("full") if isinstance(name_obj, dict) else None
+        if not name:
+            organizations = card.get("organizations")
+            if isinstance(organizations, dict):
+                for organization in organizations.values():
+                    if isinstance(organization, dict) and organization.get("name"):
+                        name = organization["name"]
+                        break
+        if name:
+            return html.unescape(str(name)).strip() or None
+    return None
+
+
 def _normalize_rdap_domain(raw: dict, target: str) -> dict:
     entities = raw.get("entities") or {}
+    rdap_json = raw.get("raw") or {}
     return {
         "source": "rdap",
         "name": raw.get("name") or target,
         "handle": raw.get("handle"),
-        "registrar": _entity_name(entities, "registrar"),
-        "registrant": _entity_name(entities, "registrant"),
+        "registrar": _entity_name(entities, "registrar")
+        or _jscontact_name(rdap_json, "registrar"),
+        "registrant": _entity_name(entities, "registrant")
+        or _jscontact_name(rdap_json, "registrant"),
         "abuse_email": _entity_email(entities, "abuse"),
         "status": list(raw.get("status") or []),
         "name_servers": list(raw.get("nameservers") or []),
@@ -317,7 +375,7 @@ def lookup_rdap(target: str) -> dict | None:
     try:
         host = _rdap_host(target, "ip" if ip_target else "domain")
     except whoisit.errors.UnsupportedError:
-        # TLD/allocation has no RDAP endpoint — expected for many ccTLDs.
+        # No endpoint in IANA's files or whoisit's bundled override table.
         return None
     except Exception:
         logging.info("RDAP has no server for %s", target)
@@ -329,7 +387,9 @@ def lookup_rdap(target: str) -> dict | None:
         if ip_target:
             result = _normalize_rdap_ip(whoisit.ip(target), target)
         else:
-            result = _normalize_rdap_domain(whoisit.domain(target), target)
+            result = _normalize_rdap_domain(
+                whoisit.domain(target, include_raw=True), target
+            )
     except whoisit.errors.ResourceDoesNotExist:
         # RDAP authoritatively says the name/allocation is unregistered; do not
         # waste a WHOIS round-trip re-confirming it.
@@ -369,10 +429,11 @@ def _as_list(value: Any) -> list:
 
 def normalize_whois(raw: dict | None, target: str) -> dict:
     """Fold a python-whois record into the same canonical shape as RDAP so the
-    fallback path is indistinguishable to the API and the template."""
+    fallback path is indistinguishable to the API and the template. A record
+    with nothing beyond source and name is marked ``thin``."""
     if not raw or (isinstance(raw, dict) and raw.get("error")):
         return raw or {"error": "WHOIS lookup failed"}
-    return {
+    record = {
         "source": "whois",
         "name": _first(raw.get("domain_name")) or target,
         "registrar": _first(raw.get("registrar")),
@@ -387,3 +448,7 @@ def normalize_whois(raw: dict | None, target: str) -> dict:
         "country": _first(raw.get("country")),
         "whois_server": _first(raw.get("whois_server")),
     }
+    detail_keys = set(record) - {"source", "name"}
+    if not any(record[key] for key in detail_keys):
+        record["thin"] = True
+    return record

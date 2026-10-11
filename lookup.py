@@ -368,8 +368,12 @@ async def lookup_whois(target: str) -> dict:
     if not result:
         result = {"error": "WHOIS lookup failed"}
 
-    failed = isinstance(result, dict) and result.get("error")
-    _whois_cache.set(name, result, WHOIS_CACHE_ERROR_TTL if failed else WHOIS_CACHE_TTL)
+    retryable = isinstance(result, dict) and any(
+        result.get(key) for key in ("error", "thin")
+    )
+    _whois_cache.set(
+        name, result, WHOIS_CACHE_ERROR_TTL if retryable else WHOIS_CACHE_TTL
+    )
     return {**result, **labels}
 
 

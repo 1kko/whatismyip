@@ -274,6 +274,20 @@ class TestTargetText:
         assert unregistered["registrar"] == "-"
         assert unregistered["domain_expires"] == "-"
 
+    def test_a_thin_whois_record_is_a_dash_not_a_question_mark(self):
+        with _legs() as mocks:
+            mocks["whois"].side_effect = lambda target: {
+                "source": "whois",
+                "name": target,
+                "thin": True,
+            }
+            text = dict(_block(client.get("/nic.ch?format=text", headers=CURL)))
+            path = "/nic.ch?fields=registrar,domain_expires"
+            fields = client.get(path, headers=CURL)
+        assert text["registrar"] == "-"
+        assert text["domain_expires"] == "-"
+        assert fields.json() == {"registrar": None, "domain_expires": None}
+
     def test_a_value_cannot_break_the_line_structure(self):
         """Registration data is whatever a registry sent. A newline in it would
         forge another key, and an escape sequence would reach the terminal."""

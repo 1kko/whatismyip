@@ -409,7 +409,9 @@ before the port is bound.
 4. **Public Suffix List** - Checked daily, re-fetched once older than
    `TLD_MAX_AGE_DAYS` (see [Public Suffix List](#public-suffix-list))
 5. **RDAP Bootstrap** - IANA's registry of RDAP servers, checked daily and
-   re-fetched once a week old
+   re-fetched once a week old; a failed refresh restores the registry it had.
+   Lookups use whoisit's bundled override table for fixed registry hosts IANA
+   omits; request input never selects those hosts
 6. **IP Reputation Lists** - Checked every 10 minutes, each list downloaded
    once its copy in `data/reputation/` is a day old (and at boot only when
    missing or stale). The URLs are operator config, never request input, so the

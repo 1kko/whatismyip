@@ -49,12 +49,13 @@ RDAP registration data and the full TLS certificate, expanded.
 
 ### Lookups
 
-- **Registration** — RDAP first (structured JSON, sub-second), falling back to
-  port-43 WHOIS for the TLDs RDAP does not serve. Both sources are normalised to
-  one shape and cached for 6 hours (5 minutes for a failure). An IP address has
-  no WHOIS fallback: when its RIR's RDAP server does not answer, the lookup says
-  so instead of showing the registration of the address's reverse-DNS domain.
-  An RDAP server that fails three times in a row is skipped for 10 minutes.
+- **Registration** — RDAP first (structured JSON, sub-second), routed through
+  IANA's bootstrap files plus the override table bundled with whoisit. This
+  covers registries IANA omits, including .ch, .li, .de, .io, .me and .us.
+  Port-43 WHOIS is used only when no RDAP server exists or RDAP does not answer.
+  Both sources are normalised to one shape and cached for 6 hours (5 minutes
+  for a failure). An IP address has no WHOIS fallback. An RDAP server that fails
+  three times in a row is skipped for 10 minutes.
   A hostname such as `www.github.com` gets the registration that covers it,
   `github.com`'s, with `queried_name` and `registrable_domain` identifying both
   names. `not registered` therefore means the registrable domain has no record.
@@ -731,6 +732,10 @@ failed lookup returns `{"error": "..."}` there rather than failing the request.
 For a hostname below its registrable domain, `whois` is that domain's record:
 `queried_name` is the requested hostname and `registrable_domain` is the name
 whose registration answered (`www.github.com` becomes `github.com`).
+A port-43 record with nothing beyond the name carries `thin: true`; the page
+says "no details over WHOIS" and MCP adds a `note`, so an empty answer is not
+shown as a registration. Thin records use the same 5-minute retry TTL as a
+failure while remaining an answered lookup.
 `ssl` is `null` for IP lookups and for domains with no address. A domain whose
 only address is IPv6 gets `{"error": "TLS not checked", "reason": "IPv6-only
 host; this server has no IPv6 connectivity"}`: no handshake was attempted, so

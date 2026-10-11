@@ -289,6 +289,27 @@ class TestRegistrationTarget:
         assert asked == ["example.com", "example.com"]
 
     @pytest.mark.asyncio
+    async def test_a_thin_record_uses_the_short_retry_ttl(self, monkeypatch):
+        asked = []
+        now = [1000.0]
+
+        def thin(target):
+            asked.append(target)
+            return {"source": "whois", "name": target, "thin": True}
+
+        monkeypatch.setattr(lookup, "lookup_rdap", thin)
+        monkeypatch.setattr(lookup, "time", SimpleNamespace(time=lambda: now[0]))
+
+        first = await lookup.lookup_whois("www.example.com")
+        second = await lookup.lookup_whois("api.example.com")
+        assert asked == ["example.com"]
+        assert first["thin"] is True and second["thin"] is True
+
+        now[0] += WHOIS_CACHE_ERROR_TTL + 1
+        await lookup.lookup_whois("mail.example.com")
+        assert asked == ["example.com", "example.com"]
+
+    @pytest.mark.asyncio
     async def test_a_suffix_list_that_cannot_load_asks_about_the_name_as_given(
         self, rdap, monkeypatch
     ):

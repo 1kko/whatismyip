@@ -75,8 +75,10 @@
         <ul>
             <li><strong>Public DNS resolvers</strong> {{ resolvers | join(" and ") }}: the records of
                 the domain you look up, and the reverse-DNS name of an address.</li>
-            <li><strong>RDAP registries</strong>, found through IANA's bootstrap files: the domain or
-                address, sent to the registry or regional internet registry that holds it.</li>
+            <li><strong>RDAP registries</strong>, found through IANA's bootstrap files and, for the
+                few registries IANA omits (.ch, .de, .io, .us among them), the list bundled with
+                the whoisit library: the domain or address, sent to the registry or regional
+                internet registry that holds it.</li>
             <li><strong>WHOIS servers</strong> on port 43: the domain, when its registry has no RDAP
                 service or does not answer.</li>
             <li><strong>The looked-up host itself</strong>: a TLS connection to its port 443, to read
