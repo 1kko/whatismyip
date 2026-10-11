@@ -519,6 +519,113 @@ class TestDnsRows:
             body = client.get("/www.example.com", headers=JSON_UA).json()
         assert body["domain"] == self.ZONE_DOMAIN
 
+    def test_the_page_captions_the_queried_name_and_marks_zone_rows(self):
+        gathered = {
+            **GATHERED,
+            "address": "www.example.com",
+            "domain": self.ZONE_DOMAIN,
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            html = client.get("/www.example.com", headers=BROWSER_UA).text
+
+        table = re.search(
+            r'<table class="records records--dns">.*?</table>', html, re.S
+        ).group(0)
+        caption = re.search(
+            r'<caption class="records__caption">(.*?)</caption>', table, re.S
+        )
+        assert caption, "no caption on the DNS table"
+        assert " ".join(caption.group(1).split()) == (
+            "records for www.example.com · NS/MX from zone example.com"
+        )
+        # HTML wants the caption first, and it keeps the row regexes elsewhere
+        # in the suite (thead, then rows) matching as before.
+        assert table.index("<caption") < table.index("<thead>")
+
+        mx = re.search(r"<tr>\s*<td>MX</td>.*?</tr>", table, re.S).group(0)
+        assert "<td>example.com</td>" in mx
+        assert '10 mail.example.com. <span class="tone-muted">(zone)</span>' in mx
+        ns = re.search(r"<tr>\s*<td>NS</td>.*?</tr>", table, re.S).group(0)
+        assert "<td>example.com</td>" in ns
+        assert "(zone)" in ns
+        # The name's own records: no marker, and the NAME cell stays a bare
+        # <td> (test_the_page_lists_aaaa_records matches on exactly that).
+        a_row = re.search(r"<tr>\s*<td>A</td>.*?</tr>", table, re.S).group(0)
+        assert "(zone)" not in a_row
+        assert "<td>www.example.com</td>" in a_row
+
+    def test_the_apex_page_has_neither_the_zone_note_nor_the_marker(self):
+        # At the apex NS is asked of the name itself and the MX is its own, so
+        # every row, NS included, is the queried name's: nothing is marked.
+        domain = {
+            **self.ZONE_DOMAIN,
+            "queried_name": "example.com",
+            "mx": [{"preference": 10, "hostname": "mail.example.com.", "ttl": 3600}],
+        }
+        gathered = {**GATHERED, "address": "example.com", "domain": domain}
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            html = client.get("/example.com", headers=BROWSER_UA).text
+
+        table = re.search(
+            r'<table class="records records--dns">.*?</table>', html, re.S
+        ).group(0)
+        caption = re.search(
+            r'<caption class="records__caption">(.*?)</caption>', table, re.S
+        )
+        assert caption, "no caption on the DNS table"
+        assert caption.group(1).strip() == "records for example.com"
+        ns = re.search(r"<tr>\s*<td>NS</td>.*?</tr>", table, re.S)
+        assert ns, "no NS row in the DNS table"
+        assert "<td>example.com</td>" in ns.group(0)
+        assert "NS/MX from zone" not in html
+        assert "(zone)" not in html
+
+    def test_an_ip_without_a_ptr_gets_a_caption_over_no_records(self):
+        # conftest's offline defaults fail the PTR, so gather() hands the page
+        # domain={}: the caption falls back to the address, nothing is marked.
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        table = re.search(
+            r'<table class="records records--dns">.*?</table>', html, re.S
+        ).group(0)
+        assert "records for 8.8.8.8" in table
+        assert "No records" in table
+        assert "NS/MX from zone" not in table
+        assert "(zone)" not in table
+
+    def test_a_hostile_ptr_name_is_escaped_in_the_caption_and_name_cells(self):
+        # Whoever holds an address writes its PTR record, and dnspython keeps
+        # "<" and ">" in a name. get_records hands the swept name back as
+        # queried_name, which now fills the caption and every NAME cell: both
+        # must reach the page through Jinja's autoescape, never as markup.
+        hostile = "<b>x</b>.evil.example"
+        gathered = {
+            **GATHERED,
+            "address": "8.8.8.8",
+            "domain": {
+                "queried_name": hostile,
+                "zone": hostile,
+                "a": [{"ip": "8.8.8.8", "ttl": 300}],
+                "ns": [{"hostname": "ns1.evil.example.", "ttl": 300}],
+            },
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+
+        table = re.search(
+            r'<table class="records records--dns">.*?</table>', html, re.S
+        ).group(0)
+        caption = re.search(
+            r'<caption class="records__caption">(.*?)</caption>', table, re.S
+        )
+        assert caption, "no caption on the DNS table"
+        escaped = "&lt;b&gt;x&lt;/b&gt;.evil.example"
+        assert caption.group(1).strip() == f"records for {escaped}"
+        assert re.findall(r"<tr>\s*<td>\w+</td>\s*<td>([^<]*)</td>", table) == [
+            escaped,
+            escaped,
+        ]
+        assert "<b>" not in table
+
     # The shape fetch_cname() actually returns. This fixture used to be a bare
     # string, which is why the page could print the whole dict's repr unnoticed.
     CNAME = {"cname": "example.com.", "ttl": 300}
@@ -586,6 +693,7 @@ class TestDnsRows:
                 "name": "alias.example.net",
                 "value": "edge.example.net.",
                 "ttl": 60,
+                "hop_of": "alias.example.net",
             },
         ]
 
@@ -1277,3 +1385,38 @@ class TestThePageGlossesAndTheJsonDoesNot:
         assert body["whois"]["status"] == [self.PORT43]
         assert "status_explained" not in body["whois"]
         assert body["reputation"]["level"] == "none"
+
+
+class TestDnsTableStyles:
+    # Exactly the rule inside the 900px media block, indentation included.
+    MOBILE_NAME_RULE = (
+        "  table.records--dns th:nth-child(2),\n"
+        "  table.records--dns td:nth-child(2) { display: none; }\n"
+    )
+
+    def test_the_caption_is_styled(self):
+        css = CSS.read_text(encoding="utf-8")
+        rule = re.search(r"\.records__caption \{([^}]*)\}", css)
+        assert rule, "no .records__caption rule"
+        assert "text-align: left" in rule.group(1)
+        assert "var(--text-secondary)" in rule.group(1)
+
+    def test_mobile_hides_the_name_column_and_desktop_keeps_it(self):
+        css = CSS.read_text(encoding="utf-8")
+        hidden = css.find(self.MOBILE_NAME_RULE)
+        assert hidden >= 0, "no mobile rule hiding the NAME column"
+        # Inside a 900px block and no other: the last @media opened before the
+        # rule is that one (the two-space indent is the block's).
+        assert css.rfind("@media", 0, hidden) == css.rfind(
+            "@media (max-width: 900px)", 0, hidden
+        )
+        # Above 900px the column keeps its width: the phone layout is the only
+        # place the name is folded into the caption.
+        desktop = css[: css.index("@media (max-width: 900px)")]
+        assert re.search(
+            r"table\.records--dns td:nth-child\(2\) \{\s*width: 170px;", desktop
+        )
+        column = re.search(
+            r"table\.records--dns td:nth-child\(2\) \{([^}]*)\}", desktop
+        )
+        assert "display: none" not in column.group(1)

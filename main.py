@@ -396,14 +396,17 @@ def _dns_rows(response_data: dict) -> list[dict]:
         # The first hop is the `cname` record, so that single row is not drawn
         # on top of it. Not through row(), which would name it queried_name.
         for hop in chain:
-            rows.append(
-                {
-                    "type": "CNAME",
-                    "name": str(hop.get("name", "")).rstrip("."),
-                    "value": str(hop.get("target", "")),
-                    "ttl": hop.get("ttl", ""),
-                }
-            )
+            owner = str(hop.get("name", "")).rstrip(".")
+            hop_row = {
+                "type": "CNAME",
+                "name": owner,
+                "value": str(hop.get("target", "")),
+                "ttl": hop.get("ttl", ""),
+            }
+            if owner != queried_name:
+                # Under 900px NAME is hidden, so VALUE says whose hop this is.
+                hop_row["hop_of"] = owner
+            rows.append(hop_row)
     elif cname:
         rows.append(
             row(
