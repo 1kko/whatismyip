@@ -64,6 +64,8 @@ RDAP registration data and the full TLS certificate, expanded.
   A hostname such as `www.github.com` gets the registration that covers it,
   `github.com`'s, with `queried_name` and `registrable_domain` identifying both
   names. `not registered` therefore means the registrable domain has no record.
+  The WHOIS panel counts a domain's age in days, with how long ago its record
+  was last updated beside it.
 - **GeoIP** — country, real coordinates, the precise city and an accuracy radius
   from GeoLite2-City, and the carrier from GeoLite2-ASN, both memory-mapped and
   refreshed every 3 days. Until the first download lands, the country-only

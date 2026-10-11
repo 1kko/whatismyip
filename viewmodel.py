@@ -188,6 +188,33 @@ def _first(value: Any) -> Any:
     return value
 
 
+def _age_days(value: Any, now: datetime.datetime | None = None) -> int | None:
+    """Whole days from `value` to `now` (the current time by default), in UTC.
+
+    `value` is a canonical date field: a datetime from RDAP or python-whois,
+    or a string for the odd WHOIS record that hands one back, read only when
+    it is ISO 8601. A naive time is taken as UTC. A time up to a day ahead
+    counts as 0: python-whois returns a registry's local time as a naive
+    datetime, so a name registered an hour ago east of UTC reads as a few
+    hours in the future. Anything else, a time further ahead included, has no
+    age: None, never an exception.
+    """
+    if isinstance(value, str):
+        try:
+            value = datetime.datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, datetime.datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    now = now or datetime.datetime.now(tz=datetime.timezone.utc)
+    days = (now - value).days
+    if days < -1:
+        return None
+    return max(days, 0)
+
+
 def _cert_issuer(ssl_data: dict) -> str:
     for rdn in ssl_data.get("issuer", ()):
         for key, value in rdn:
@@ -275,14 +302,32 @@ def _host_covered(ssl_data: dict, host: str | None) -> bool | None:
     return any(_dns_name_matches(pattern, host) for pattern in names)
 
 
+def _parse_cert_date(raw: str | None) -> datetime.datetime | None:
+    """getpeercert()'s 'Jun  1 00:00:00 2026 GMT' as an aware UTC datetime;
+    None when the field is absent or not in that form."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.datetime.strptime(raw, "%b %d %H:%M:%S %Y %Z")
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=datetime.timezone.utc)
+
+
 def _format_cert_date(raw: str | None) -> str:
     if not raw:
         return DASH
-    try:
-        parsed = datetime.datetime.strptime(raw, "%b %d %H:%M:%S %Y %Z")
-        return parsed.date().isoformat()
-    except ValueError:
-        return raw
+    parsed = _parse_cert_date(raw)
+    return parsed.date().isoformat() if parsed else raw
+
+
+def cert_age(ssl_data: dict | None, now: datetime.datetime | None = None) -> int | None:
+    """Whole days since the certificate's notBefore, read the way the SSL
+    panel's Valid from row reads it; None with no certificate or no readable
+    date."""
+    if not ssl_data or ssl_data.get("error"):
+        return None
+    return _age_days(_parse_cert_date(ssl_data.get("notBefore")), now)
 
 
 # managers.SSLManager's verify_error["reason"], in the words a reader expects.
@@ -845,6 +890,53 @@ def _year(value: Any) -> str:
     return str(value or "")[:4]
 
 
+def registration_age(
+    whois_data: dict | None, now: datetime.datetime | None = None
+) -> tuple[int | None, int | None]:
+    """(days since `created`, days since `updated`) of a canonical
+    registration record. None for a date the record lacks or that cannot be
+    read, and both None when there is no record: a failed lookup, "not
+    registered", or a self page's registration still loading."""
+    if not whois_data or whois_data.get("error"):
+        return None, None
+    return (
+        _age_days(whois_data.get("created"), now),
+        _age_days(whois_data.get("updated"), now),
+    )
+
+
+def _days(count: int) -> str:
+    """'1 day', '6 days', '10,599 days'."""
+    return f"{count:,} day{'' if count == 1 else 's'}"
+
+
+def _ago(count: int) -> str:
+    """'today', '1 day ago', '6 days ago'."""
+    return "today" if count == 0 else f"{_days(count)} ago"
+
+
+def _age_row(whois_data: dict) -> str | None:
+    """The WHOIS panel's Age row, '6 days (updated 2 days ago)', for a
+    domain's record with a readable created date; None otherwise.
+
+    The update's age rides along because a name that changed hands, at an
+    expiry auction or by transfer, keeps its old created date, and often only
+    the update shows the change. An address block's record gets no row, so an
+    IP lookup and the self page read as they did. A domain's record is told by
+    its `registrar` key, the test the Status row makes (_status_text): both
+    domain shapes set it, None included, and rdap._normalize_rdap_ip never
+    does.
+    """
+    if "registrar" not in whois_data:
+        return None
+    created, updated = registration_age(whois_data)
+    if created is None:
+        return None
+    if updated is None:
+        return _days(created)
+    return f"{_days(created)} (updated {_ago(updated)})"
+
+
 def _whois_value(key: str, value: Any) -> str:
     """Render one canonical field. RDAP and WHOIS both feed this, so it copes
     with datetimes, lists, and the odd bool without leaking Python reprs."""
@@ -921,6 +1013,10 @@ def whois_display(whois_data: dict | None) -> dict:
             text = _whois_value(key, whois_data.get(key))
         if text and text != DASH:
             out[label] = text
+        if key == "updated":
+            age = _age_row(whois_data)
+            if age:
+                out["Age"] = age
     return out
 
 

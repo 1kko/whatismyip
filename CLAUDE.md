@@ -469,6 +469,16 @@ codes and are shown as they are. The tag is not a reputation signal:
 `reputation.grade` never sees it, and `_summary()` (link previews) reads only
 the TLS tags.
 
+A registration's age is derived, never fetched: `viewmodel.registration_age`
+(days since `created` and since `updated`) and `viewmodel.cert_age` (days since
+the certificate's `notBefore`) count whole UTC days through
+`viewmodel._age_days`. It reads a datetime or an ISO 8601 string, takes a naive
+time as UTC, counts a time up to a day ahead as 0 (python-whois's naive
+registry-local times) and answers None, never an exception, for anything else.
+The WHOIS panel's `Age` row ("6 days (updated 2 days ago)") is a domain's
+only. As for the Status row, a record without a `registrar` key is an IP
+allocation, so IP lookups and the self page (`whois_fill`) read as they did.
+
 #### Error Handling
 
 - A registration failure is `{"error": "..."}` in the response, never a 500
@@ -1081,7 +1091,7 @@ and importing `main` makes no network call. The suite runs offline, and
 Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
   tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering, the
-  FCrDNS verdict),
+  FCrDNS verdict, registration and certificate ages),
   `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
   forced bootstrap refresh behavior, JSContact names, thin records, EPP status
   codes in `eppstatus`),
