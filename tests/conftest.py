@@ -7,11 +7,30 @@ suite no longer depends on which file pytest happens to collect first.
 """
 
 import os
+import shutil
+import tempfile
 
 os.environ["ADMIN_API_KEY"] = "test-secret-key"
 os.environ["TRUSTED_PROXIES"] = "127.0.0.1,10.0.0.1"
-os.environ["BANNED_IPS_FILE"] = "/tmp/test_banned_ips.json"
-os.environ["GEO_RULES_FILE"] = "/tmp/test_geo_rules.json"
+# The ban list and the geo rules are files the security managers load when main
+# is imported and write when they change; the IP rules are a file they read.
+# They used to sit at fixed /tmp paths every pytest run on the machine shared,
+# so the bans and geo rules one run left behind were the next run's starting
+# state, and two suites at once (two worktrees, two agents) wrote over each
+# other. Each run now gets a directory of its own, which pytest_sessionfinish
+# removes.
+STATE_DIR = tempfile.mkdtemp(prefix="whatismyip-test-")
+os.environ["BANNED_IPS_FILE"] = os.path.join(STATE_DIR, "banned_ips.json")
+os.environ["GEO_RULES_FILE"] = os.path.join(STATE_DIR, "geo_rules.json")
+os.environ["IP_RULES_FILE"] = os.path.join(STATE_DIR, "ip_rules.json")
+# A developer's .env may switch geo-blocking on for their own instance, and
+# load_dotenv() never overrides a variable already set. Pinned off, a fresh
+# rules file starts from the same defaults on every machine: no mode, no
+# country.
+os.environ["GEO_MODE"] = "disabled"
+os.environ["GEO_BLOCKED_COUNTRIES"] = ""
+os.environ["GEO_ALLOWED_COUNTRIES"] = ""
+os.environ["GEO_BLOCK_UNKNOWN"] = "false"
 # The app lifespan starts the scheduler and fetches what data/ lacks (GeoLite2,
 # the public suffix list), and every `with TestClient(app)` runs that lifespan.
 # Off, it does neither, so no lifespan downloads anything. Importing main
@@ -279,6 +298,7 @@ def pytest_sessionfinish(session, exitstatus):
             + "\n"
         )
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    shutil.rmtree(STATE_DIR, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

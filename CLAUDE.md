@@ -672,8 +672,9 @@ which never runs the lifespan, and the MCP tests use `with TestClient(app)`,
 which does. `tests/conftest.py` sets the environment before any test module
 imports `main`: `BACKGROUND_REFRESH_ENABLED=false` (no lifespan starts the
 scheduler or downloads anything), `REPUTATION_ENABLED=false`, an empty
-`ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo-rule files
-under `/tmp`. Its `reset_security_state`
+`ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo/IP-rule
+files under a per-run temporary `STATE_DIR`; geo-blocking mode, country lists,
+and unknown-country handling are pinned off. Its `reset_security_state`
 fixture (autouse) clears the rate limiter and ban list around every test.
 
 The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
@@ -713,7 +714,7 @@ Test files:
   `test_subdomain_store.py` (the SQLite cache degrades to a miss)
 - Boot: `test_boot.py` (importing `main` touches no network; the lifespan
   starts and stops the scheduler), `test_offline_guard.py` (the offline
-  defaults and the network guard)
+  defaults and the network guard), `test_state_reset.py` (per-run state files)
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
   security headers, fingerprint panel, `?subdomains=`), `test_negotiation.py`

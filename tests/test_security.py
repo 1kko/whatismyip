@@ -12,12 +12,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-# Set env vars before importing main (which reads them at module level)
-os.environ["ADMIN_API_KEY"] = "test-secret-key"
-os.environ["TRUSTED_PROXIES"] = "127.0.0.1,10.0.0.1"
-os.environ["BANNED_IPS_FILE"] = "/tmp/test_banned_ips.json"
-os.environ["GEO_RULES_FILE"] = "/tmp/test_geo_rules.json"
-
 import main
 from lookup import is_safe_ip
 from main import (
@@ -900,28 +894,19 @@ class TestRateLimiter:
 
 
 class TestIPBanManager:
-    def test_ban_and_check(self):
-        mgr = IPBanManager.__new__(IPBanManager)
-        mgr.banned_ips = {}
-        mgr.ban_file = "/tmp/test_ban_check.json"
-        mgr.save_bans = MagicMock()
+    def test_ban_and_check(self, tmp_path):
+        mgr = IPBanManager(ban_file=str(tmp_path / "bans.json"))
         mgr.ban_ip("1.2.3.4", reason="test", duration=3600)
         assert mgr.is_banned("1.2.3.4")
 
-    def test_unban(self):
-        mgr = IPBanManager.__new__(IPBanManager)
-        mgr.banned_ips = {}
-        mgr.ban_file = "/tmp/test_ban_unban.json"
-        mgr.save_bans = MagicMock()
+    def test_unban(self, tmp_path):
+        mgr = IPBanManager(ban_file=str(tmp_path / "bans.json"))
         mgr.ban_ip("1.2.3.4", reason="test", duration=3600)
         mgr.unban_ip("1.2.3.4")
         assert not mgr.is_banned("1.2.3.4")
 
-    def test_expired_ban_not_active(self):
-        mgr = IPBanManager.__new__(IPBanManager)
-        mgr.banned_ips = {}
-        mgr.ban_file = "/tmp/test_ban_expire.json"
-        mgr.save_bans = MagicMock()
+    def test_expired_ban_not_active(self, tmp_path):
+        mgr = IPBanManager(ban_file=str(tmp_path / "bans.json"))
         # Ban with 0 second duration (already expired)
         mgr.ban_ip("1.2.3.4", reason="test", duration=0)
         assert not mgr.is_banned("1.2.3.4")
