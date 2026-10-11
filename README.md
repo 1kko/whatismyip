@@ -364,6 +364,19 @@ is rejected with `400` before any lookup runs:
 {"error": "not a domain name or IP address", "code": "invalid_target"}
 ```
 
+A name under `.onion` (RFC 7686) or `home.arpa` (RFC 8375) is a hostname with a
+public suffix, but nothing public can answer for it, and a Tor hidden service's
+name is not one to hand to a resolver or a WHOIS server. It is refused the same
+way, with its own code and the reason, before any DNS, RDAP or WHOIS query:
+
+```json
+{"error": "a Tor onion address is not resolvable on the public DNS", "code": "special_use_name"}
+```
+
+`home.arpa` names get `home.arpa names only exist inside a home network`. Only
+those two suffixes: the rest of `.arpa` (`in-addr.arpa`, `ip6.arpa`) is looked
+up like any other name.
+
 An IPv6 address gets the same GeoIP, registration and PTR answer an IPv4 one
 does, and `address` comes back in its RFC 5952 spelling. A bracketed URL host
 (`[2001:db8::1]:8443`) is accepted, and an IPv4-mapped address
@@ -520,7 +533,7 @@ An unknown field is refused with `400` before any lookup runs:
 ```
 
 A text client gets each of the route's `400`s — `invalid_field`,
-`invalid_target`, a private address, a bad `?subdomains=`
+`invalid_target`, `special_use_name`, a private address, a bad `?subdomains=`
 — as one line with the same status code, e.g.
 `error: not a domain name or IP address`. `?format=text` and `?fields=` are
 query parameters, so they pass through the same bans, geo rules and rate limit as
@@ -531,7 +544,10 @@ any other lookup.
 `GET /{domain}?subdomains=include` adds a list of the domain's subdomains, as
 seen in public Certificate Transparency logs. `?subdomains=only` skips the rest
 of the pipeline (DNS, TLS, GeoIP, the map) and returns just that list; it only
-accepts a domain, not an IP, and answers `400` for one.
+accepts a domain, not an IP, and answers `400` for one. A `.onion` or
+`home.arpa` name is refused too, with the reason in `detail`: crt.sh may hold
+`.onion` certificates, but a Tor address typed here is not sent to a third
+party any more than to the DNS.
 
 Omitting the parameter changes nothing: the default lookup never contacts
 crt.sh, so its latency and uptime cannot affect an ordinary request. Any value
@@ -855,7 +871,7 @@ other users' free text. A timeout, an error or a spent quota puts AbuseIPDB in
 | Code | Meaning |
 | --- | --- |
 | `200` | success |
-| `400` | private or reserved address, not a domain name or IP address, or an invalid `format`, `fields` or `subdomains` parameter |
+| `400` | private or reserved address, not a domain name or IP address, a `.onion` or `home.arpa` name (`special_use_name`), or an invalid `format`, `fields` or `subdomains` parameter |
 | `403` | banned IP, geo-blocked, or suspicious request |
 | `404` | unknown endpoint — also the answer to a wrong admin API key |
 | `413` | `POST /mcp` body over `MCP_MAX_BODY_BYTES` |
@@ -876,8 +892,9 @@ path all stay in the log line. See [Getting unbanned](#getting-unbanned).
 The bodies above are what every client that is not answered as a browser gets
 (see [Response format](#response-format)). A browser gets the same status as a
 small page with the search box instead: the `403` page says only the sentence
-above, the `429` page adds "Try again later", and a private address such as
-`192.168.0.1` gets an explanation of local network addresses and a link to `/`.
+above, the `429` page adds "Try again later", a private address such as
+`192.168.0.1` gets an explanation of local network addresses and a link to `/`,
+and a `.onion` or `home.arpa` name gets the reason it has no public answer.
 `/mcp` always answers JSON.
 
 ## MCP (Model Context Protocol)

@@ -500,8 +500,23 @@ def render_refused_target(
     address gets an explanation rather than "not allowed". The target is shown
     only once it is known to be an address or a hostname: free text in the
     path would otherwise let a link put words on this page.
+
+    A .onion or home.arpa name (InvalidTargetError with code "special_use_name")
+    gets its reason, in config's words; every other invalid target the fixed
+    "not a domain name" text.
     """
     if isinstance(exc, InvalidTargetError):
+        if exc.code == "special_use_name":
+            # A hostname under .onion or home.arpa: a real name, with no
+            # public answer. The message is config.SPECIAL_USE_NAMES's fixed
+            # text, so nothing the visitor typed reaches the page.
+            return render_error(
+                request,
+                400,
+                "Not a public name",
+                f"{exc.message[:1].upper()}{exc.message[1:]}, so there is "
+                "nothing public to look up.",
+            )
         return render_error(
             request,
             400,

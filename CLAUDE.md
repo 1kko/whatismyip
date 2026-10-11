@@ -120,10 +120,11 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of
   `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
 - `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
-  `GET /{domain_ip}` and the MCP tools. Also `classify_target`, `is_safe_ip`,
-  `lookup_whois` (RDAP first, port-43 only for a domain; a hostname is looked
-  up and cached as its registrable domain and the answer carries both names),
-  `lookup_location` and `ip_reputation`. Raises
+  `GET /{domain_ip}` and the MCP tools. Also `classify_target`,
+  `special_use_suffix`, `is_safe_ip`, `lookup_whois` (RDAP first, port-43
+  only for a domain; a hostname is looked up and cached as its registrable
+  domain and the answer carries both names), `lookup_location` and
+  `ip_reputation`. Raises
   `PrivateAddressError` and `InvalidTargetError` rather than `HTTPException`
   so it stays free of FastAPI. `gather(legs=)` runs only the named legs
   (`LEGS`); the default (None) runs them all, and the page, the full JSON and
@@ -244,7 +245,14 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    root dot, UTS 46 A-labels); `lookup.classify_target` then calls it a domain,
    `ipv4`, `ipv6` or `invalid` before any network work; an invalid target is a
    `400` (`InvalidTargetError`), and so is a private or reserved address
-   (`PrivateAddressError`, from `is_safe_ip`). A browser gets
+   (`PrivateAddressError`, from `is_safe_ip`). A hostname under
+   `config.SPECIAL_USE_SUFFIXES` (`onion`, `home.arpa`: on the PSL, so
+   `is_valid_domain` says yes) is `invalid` too, and `gather()` raises
+   `InvalidTargetError(code="special_use_name")` with the reason from
+   `config.SPECIAL_USE_NAMES` (`lookup.special_use_suffix`); never the rest
+   of `.arpa`, which PTR names live in. The check is not in
+   `is_valid_domain`, which `main._suspicious_path_is_ordinary` reads: the
+   probe verdict for these paths must not change. A browser gets
    `main.render_refused_target`'s error page instead of the JSON
 3. **IP Resolution**: a domain's A record, or its AAAA record when it has no A
    (an IPv6-only host), from the public resolvers; the address must pass
@@ -585,6 +593,10 @@ service IP blocked. `subdomains.invalid_target_reason()` is the one check — th
 substitute: it asks only whether a public suffix is present, and `com` has one.
 The HTTP gate sees the canonical spelling, so an IDN such as `/straße.de` reaches
 it as its A-label; the MCP subdomains tool checks its argument as given.
+`.onion` and `home.arpa` names are refused there too (`config.SPECIAL_USE_NAMES`,
+the same two suffixes `lookup.special_use_suffix` refuses): crt.sh may hold
+`.onion` certificates, but a Tor address typed here is not sent to a third
+party any more than to the DNS.
 
 **No scheduler job**, unlike GeoIP and the public suffix list. Those are read
 by every request, so pre-refreshing always pays. This store is filled and read

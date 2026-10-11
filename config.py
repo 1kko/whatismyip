@@ -170,6 +170,22 @@ TLD_LIST_URL = os.getenv(
 # long a brand-new suffix can be mistaken for a probe.
 TLD_MAX_AGE_DAYS = int(os.getenv("TLD_MAX_AGE_DAYS", "14"))
 TLD_UPDATE_RETRY_SECONDS = int(os.getenv("TLD_UPDATE_RETRY_SECONDS", "3600"))
+# Special-use domain names (RFC 6761's registry) that the public suffix list
+# carries all the same, so DomainManager.is_valid_domain says yes to them
+# although nothing public can answer for them: "onion" (RFC 7686: Tor hidden
+# services, which software without Tor SHOULD NOT look up on the DNS) and
+# "home.arpa" (RFC 8375: one home network's own zone). A name under either is
+# refused before the resolvers, RDAP, port-43 WHOIS and crt.sh are asked, with
+# the message here (lookup.special_use_suffix, subdomains.invalid_target_reason).
+# Only these two, and not from the environment: the other RFC 6761 names
+# (.local, .test, .invalid, localhost ...) are not on the list and are already
+# refused as not a domain, and the rest of .arpa (in-addr.arpa, ip6.arpa,
+# e164.arpa) are real public zones that PTR lookups depend on.
+SPECIAL_USE_NAMES = {
+    "onion": "a Tor onion address is not resolvable on the public DNS",
+    "home.arpa": "home.arpa names only exist inside a home network",
+}
+SPECIAL_USE_SUFFIXES = tuple(SPECIAL_USE_NAMES)
 
 # IP reputation (reputation.py): which public lists an address is on, and a
 # grade from them. Key-free lists only. Each is downloaded into REPUTATION_DIR

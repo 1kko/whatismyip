@@ -73,6 +73,12 @@ REJECTED = [
     "___.com",
     "a_b.com",
     "https://example.com",
+    # On the public suffix list, so the suffix check alone lets them through,
+    # and a Tor hidden service's name is not sent to crt.sh any more than to
+    # the DNS (config.SPECIAL_USE_NAMES).
+    "x.onion",
+    "X.ONION.",
+    "router.home.arpa",
 ]
 
 # The route reduces a pasted URL to its host before the gate sees it (see
@@ -88,6 +94,11 @@ ACCEPTED = [
     "foo.github.io",
     "_dmarc.example.com",
     "Example.COM.",
+    # The special-use rule matches on a label boundary, and only those two
+    # suffixes: the rest of .arpa is public, and a lookalike is a domain.
+    "1.0.0.10.in-addr.arpa",
+    "notonion.com",
+    "x.onion.example.com",
 ]
 
 
@@ -132,6 +143,22 @@ class TestInvalidTargetReason:
         name = f"{label}.{label}.{label}.{'a' * 57}.com"
         assert len(name) == 253
         assert subdomains.invalid_target_reason(name) is None
+
+    @pytest.mark.parametrize(
+        ("target", "words"),
+        [
+            ("x.onion", "Tor onion address"),
+            ("onion", "Tor onion address"),
+            ("router.home.arpa", "home network"),
+        ],
+    )
+    def test_a_special_use_name_is_named_as_one(self, target, words):
+        """x.onion has a public suffix and passes every shape check, so this is
+        the one rule that refuses it; like the suffix rule, the reason says
+        why, so a model does not retry with another label."""
+        reason = subdomains.invalid_target_reason(target)
+        assert "special-use name" in reason
+        assert words in reason
 
 
 class TestGetSubdomainsRefusesInvalidTargets:

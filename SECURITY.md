@@ -784,8 +784,12 @@ certificate lookups. Before any of them runs, `classify_target`
 target with a control character, a character no hostname has, or no
 public suffix is answered with HTTP 400 (an `error` result from the MCP
 tools) without a single outbound query; python-whois would otherwise
-write it, CR/LF included, into its port-43 query. Two defenses then
-apply to the address:
+write it, CR/LF included, into its port-43 query. So is a name under
+`.onion` (RFC 7686) or `home.arpa` (RFC 8375), with the code
+`special_use_name` (`lookup.special_use_suffix`): both are on the public
+suffix list, yet nothing public answers for them, and a Tor hidden
+service's name is not one to hand to a resolver or a WHOIS server. Two
+defenses then apply to the address:
 
 1. **Public-address allowlist** (`is_safe_ip`). An IP given as the
    target, and the A record a domain resolves to (or its AAAA record,

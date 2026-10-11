@@ -25,6 +25,8 @@ from concurrency import abuseipdb_pool, lookup_gate, registration_pool, run_in
 from config import (
     ABUSEIPDB_TIMEOUT_SECONDS,
     RDAP_TIMEOUT_SECONDS,
+    SPECIAL_USE_NAMES,
+    SPECIAL_USE_SUFFIXES,
     WHOIS_CACHE_ERROR_TTL,
     WHOIS_CACHE_TTL,
     WHOIS_SOCKET_TIMEOUT_SECONDS,
@@ -58,6 +60,9 @@ class InvalidTargetError(Exception):
     Same contract as PrivateAddressError. `code` is the stable, machine-readable
     half of the answer and `message` the human one; main.py returns both with a
     400, mcp_server.py returns the message as {"error": ...}.
+    `code` is "invalid_target", or "special_use_name" for a hostname under
+    config.SPECIAL_USE_SUFFIXES (.onion, home.arpa), when `message` is that
+    suffix's reason from config.SPECIAL_USE_NAMES.
     """
 
     def __init__(
@@ -247,6 +252,26 @@ def _is_hostname(target: str) -> bool:
     return all(_HOST_LABEL.fullmatch(label) for label in ascii_name.split("."))
 
 
+def special_use_suffix(target: str) -> str | None:
+    """Which of config.SPECIAL_USE_SUFFIXES a hostname sits under, or None.
+
+    "onion" and "home.arpa" are on the public suffix list, so is_valid_domain
+    says yes to "x.onion" and "router.home.arpa", yet no public resolver,
+    registry or WHOIS server can answer for them, and RFC 7686 asks software
+    without Tor not to put a .onion name on the DNS at all. Matched on a label
+    boundary after lowercasing and dropping the FQDN dot, so "notonion.com"
+    and "x.onion.example.com" are not matches. A target that is not a hostname
+    is None whatever it ends in: that is "invalid_target", not a name.
+    """
+    if not _is_hostname(target):
+        return None
+    name = target.lower().rstrip(".")
+    for suffix in SPECIAL_USE_SUFFIXES:
+        if name == suffix or name.endswith("." + suffix):
+            return suffix
+    return None
+
+
 def classify_target(target: str) -> str:
     """What a lookup target is: "domain", "ipv4", "ipv6" or "invalid".
 
@@ -261,6 +286,10 @@ def classify_target(target: str) -> str:
     "ipv4" and "ipv6" say nothing about whether the address is public;
     is_safe_ip answers that. An IPv6 address with a zone ("fe80::1%eth0") is
     invalid: the zone names an interface on the machine that typed it.
+
+    A hostname under a special-use suffix ("x.onion", "router.home.arpa") is
+    invalid too, public suffix or not: nothing public answers for it. gather()
+    asks special_use_suffix() which it was, so the refusal can say so.
     """
     if not target or any(unicodedata.category(ch) == "Cc" for ch in target):
         return "invalid"
@@ -272,7 +301,11 @@ def classify_target(target: str) -> str:
         if ip.version == 4:
             return "ipv4"
         return "invalid" if ip.scope_id else "ipv6"
-    if _is_hostname(target) and domain_manager.is_valid_domain(target):
+    if (
+        _is_hostname(target)
+        and special_use_suffix(target) is None
+        and domain_manager.is_valid_domain(target)
+    ):
         return "domain"
     return "invalid"
 
@@ -470,6 +503,13 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
     # an ERROR log line, and came back as an empty 200 page.
     kind = classify_target(target)
     if kind == "invalid":
+        # A .onion or home.arpa name is a hostname under a public suffix that
+        # nothing public answers for: say which, not "not a domain name".
+        suffix = special_use_suffix(target)
+        if suffix is not None:
+            raise InvalidTargetError(
+                target, code="special_use_name", message=SPECIAL_USE_NAMES[suffix]
+            )
         raise InvalidTargetError(target)
     if kind != "domain":
         # One spelling per address, ipaddress's (RFC 5952 for IPv6), so the

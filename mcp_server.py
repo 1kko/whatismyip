@@ -280,7 +280,8 @@ async def lookup(target: str) -> dict[str, Any]:
     geolocation, network/ASN owner, registration (RDAP/WHOIS) details, and a
     summary of its TLS certificate. Accepts "example.com", "8.8.8.8",
     "2001:4860:4860::8888", or a pasted URL. Use this first; the other tools
-    go deeper on one aspect. Private and reserved addresses are refused. A
+    go deeper on one aspect. Private and reserved addresses are refused, and
+    so are .onion and home.arpa names, which nothing public answers for. A
     name is looked up and returned as `target` in one spelling: lower case,
     no trailing dot, and an internationalised name as its UTS 46 A-label
     (`straße.de` as `xn--strae-oqa.de`). `dns_records` and `ssl_certificate`
@@ -471,8 +472,8 @@ async def subdomains(
     certificate, so it is evidence of existence and never a complete inventory.
     Use it for "what else is under this domain?". `limit` caps how many names
     come back; `count` always reports the true total. Pass a registered domain
-    or a name under one: an IP address or a bare public suffix (com, co.uk,
-    github.io) is refused.
+    or a name under one: an IP address, a bare public suffix (com, co.uk,
+    github.io) or a .onion or home.arpa name is refused.
     """
     if limit < 1:
         return _fail("limit must be at least 1")

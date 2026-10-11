@@ -18,7 +18,7 @@ REQUIRED_TOKENS = {
     "--border-strong": "#2E3746",
     "--text-primary": "#E8ECF3",
     "--text-secondary": "#8B97AC",
-    "--text-muted": "#606C82",
+    "--text-muted": "#748097",
     "--accent": "#5B8CFF",
     "--success": "#34D399",
     "--warning": "#FBBF24",

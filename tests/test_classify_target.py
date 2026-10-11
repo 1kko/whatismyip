@@ -361,3 +361,184 @@ def test_mcp_lookup_echoes_the_canonical_target():
         payload = _call_tool(mcp_client, "lookup", {"target": "straße.de."})
     assert payload["target"] == "xn--strae-oqa.de"
     mocks["whois"].assert_called_once_with("xn--strae-oqa.de")
+
+
+# --- special-use names: a public suffix nothing public answers for -----------
+#
+# "onion" (RFC 7686) and "home.arpa" (RFC 8375) are on the public suffix list,
+# so is_valid_domain says yes to them and, until now, a Tor hidden service's
+# name went to 8.8.8.8/1.1.1.1 and a port-43 WHOIS server. .local, .test,
+# localhost and the other RFC 6761 names are not on the list and were never
+# domains here.
+
+ONION = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
+ONION_MESSAGE = "a Tor onion address is not resolvable on the public DNS"
+HOME_ARPA_MESSAGE = "home.arpa names only exist inside a home network"
+
+
+@pytest.mark.parametrize(
+    ("target", "suffix"),
+    [
+        ("x.onion", "onion"),
+        ("X.ONION.", "onion"),  # case and the FQDN dot
+        (ONION, "onion"),
+        ("onion", "onion"),
+        ("router.home.arpa", "home.arpa"),
+        ("a.b.home.arpa", "home.arpa"),
+        ("home.arpa", "home.arpa"),
+    ],
+)
+def test_special_use_suffix_matches_on_a_label_boundary(target, suffix):
+    assert lookup.special_use_suffix(target) == suffix
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "notonion.com",  # ends in "onion", not in ".onion"
+        "x.onion.example.com",  # ".onion" in the middle is just a label
+        "1.0.0.10.in-addr.arpa",  # the rest of .arpa is public: PTR names
+        "foo.e164.arpa",
+        "example.com",
+        "foo\r\nbar.onion",  # not a hostname at all, so invalid_target
+        "",
+    ],
+)
+def test_special_use_suffix_is_none_for_everything_else(target):
+    assert lookup.special_use_suffix(target) is None
+
+
+@pytest.mark.parametrize(
+    "target", ["x.onion", "X.ONION.", ONION, "onion", "router.home.arpa", "home.arpa"]
+)
+def test_special_use_names_are_invalid(target):
+    # The suffix list says yes, to the bare suffixes too; classify_target
+    # must not.
+    assert lookup.domain_manager.is_valid_domain(target)
+    assert lookup.classify_target(target) == "invalid"
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["1.0.0.10.in-addr.arpa", "foo.e164.arpa", "notonion.com", "x.onion.example.com"],
+)
+def test_the_rest_of_arpa_and_the_lookalikes_stay_domains(target):
+    assert lookup.classify_target(target) == "domain"
+
+
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        ("x.onion", ONION_MESSAGE),
+        (ONION, ONION_MESSAGE),
+        ("router.home.arpa", HOME_ARPA_MESSAGE),
+    ],
+)
+async def test_gather_refuses_a_special_use_name_before_any_lookup(target, message):
+    with _legs() as mocks:
+        with pytest.raises(lookup.InvalidTargetError) as raised:
+            await lookup.gather(target)
+    assert raised.value.code == "special_use_name"
+    assert raised.value.message == message
+    _assert_nothing_went_out(mocks)
+
+
+@pytest.mark.parametrize("target", ["foo\r\nbar.onion", "x.onion..", "*.onion"])
+async def test_a_malformed_onion_name_is_still_invalid_target(target):
+    """Only a hostname gets the special-use reason. Anything else that ends in
+    "onion" -- a control character, a second trailing dot, a wildcard -- is
+    the ordinary refusal, and still reaches nothing."""
+    with _legs() as mocks:
+        with pytest.raises(lookup.InvalidTargetError) as raised:
+            await lookup.gather(target)
+    assert raised.value.code == "invalid_target"
+    assert raised.value.message == "not a domain name or IP address"
+    _assert_nothing_went_out(mocks)
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("/x.onion", ONION_MESSAGE),
+        (f"/{ONION}", ONION_MESSAGE),
+        ("/router.home.arpa", HOME_ARPA_MESSAGE),
+    ],
+)
+def test_a_special_use_name_is_a_400_with_its_own_code(path, message):
+    """JSON, ?format=text and ?fields= all answer the code and the reason, and
+    none of them asks a resolver, a registry or a WHOIS server."""
+    with _legs() as mocks:
+        as_json = client.get(path, headers=API_UA)
+        as_text = client.get(f"{path}?format=text", headers=API_UA)
+        fields = client.get(f"{path}?fields=target,ip", headers=API_UA)
+    assert [r.status_code for r in (as_json, as_text, fields)] == [400, 400, 400]
+    assert as_json.json() == {"error": message, "code": "special_use_name"}
+    assert as_text.text == f"error: {message}\n"
+    assert fields.json() == {"error": message, "code": "special_use_name"}
+    _assert_nothing_went_out(mocks)
+    # Both suffixes are public suffixes, so the probe detector never fired on
+    # these paths (main._suspicious_path_is_ordinary reads is_valid_domain,
+    # which this change leaves alone); refusing them must not start a ban.
+    assert not main.ip_ban_manager.is_banned("8.8.8.8")
+
+
+@pytest.mark.parametrize("path", ["/x.onion", "/router.home.arpa"])
+def test_a_special_use_name_is_a_400_for_a_browser_too(path):
+    # Status only: the page's wording is tests/test_error_pages.py's.
+    with _legs() as mocks:
+        response = client.get(path, headers=BROWSER_UA)
+    assert response.status_code == 400
+    _assert_nothing_went_out(mocks)
+
+
+@pytest.mark.parametrize("target", ["1.0.0.10.in-addr.arpa", "example.com"])
+def test_the_rest_of_arpa_and_ordinary_domains_are_looked_up_as_before(target):
+    with _legs() as mocks:
+        response = client.get(f"/{target}", headers=API_UA)
+    assert response.status_code == 200
+    assert response.json()["address"] == target
+    mocks["whois"].assert_called_once_with(target)
+
+
+@pytest.mark.parametrize(
+    ("tool", "argument"),
+    [("lookup", "target"), ("dns_records", "domain"), ("ssl_certificate", "domain")],
+)
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [("x.onion", ONION_MESSAGE), ("router.home.arpa", HOME_ARPA_MESSAGE)],
+)
+def test_mcp_tools_report_a_special_use_name_with_its_reason(
+    tool, argument, target, message
+):
+    # No bucket reset here: conftest's reset_security_state empties the MCP
+    # bucket around every test (#22), so two calls a case stay under its
+    # 5-a-second limit.
+    with TestClient(app) as mcp_client, _legs() as mocks:
+        mcp_client.post("/mcp", json=MCP_INIT, headers=MCP_HEADERS)
+        payload = _call_tool(mcp_client, tool, {argument: target})
+    assert payload == {"error": message}
+    _assert_nothing_went_out(mocks)
+
+
+def test_a_special_use_name_with_subdomains_include_contacts_nothing():
+    # The gate in get_ip_info asks invalid_target_reason before it starts the
+    # crt.sh task, so the refusal must come from there, not from the cancel
+    # that follows gather()'s error: an AsyncMock counts the task's creation
+    # as a call.
+    with _legs() as mocks:
+        response = client.get("/x.onion?subdomains=include", headers=API_UA)
+    assert response.status_code == 400
+    assert response.json() == {"error": ONION_MESSAGE, "code": "special_use_name"}
+    _assert_nothing_went_out(mocks)
+    mocks["subdomains"].assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["/x.onion", "/router.home.arpa"])
+def test_a_special_use_name_with_subdomains_only_is_refused_by_the_gate(path):
+    with _legs() as mocks:
+        response = client.get(f"{path}?subdomains=only", headers=API_UA)
+    assert response.status_code == 400
+    assert "special-use name" in response.json()["detail"]
+    _assert_nothing_went_out(mocks)
+    mocks["subdomains"].assert_not_called()
