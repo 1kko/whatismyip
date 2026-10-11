@@ -60,9 +60,7 @@ NASA = {
 
 @contextmanager
 def mocked_lookups():
-    allowed = {"allowed": True, "country": "KR", "region": None, "reason": "test"}
     with (
-        patch("main.geo_block_manager.check_access", return_value=allowed),
         patch(
             "main.gather",
             new_callable=AsyncMock,

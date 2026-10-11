@@ -64,13 +64,6 @@ def _status(cls, code: int) -> whoisit.errors.QueryError:
     return cls(f"RDAP request returned {code}", status_code=code)
 
 
-@pytest.fixture(autouse=True)
-def clean_cache():
-    lookup._whois_cache.clear()
-    yield
-    lookup._whois_cache.clear()
-
-
 @pytest.fixture
 def clock(monkeypatch):
     fake = FakeClock()

@@ -69,15 +69,6 @@ TASKS = main._self_whois_tasks
 
 
 @pytest.fixture(autouse=True)
-def clean_slate():
-    lookup._whois_cache.clear()
-    TASKS.clear()
-    yield
-    lookup._whois_cache.clear()
-    TASKS.clear()
-
-
-@pytest.fixture(autouse=True)
 def quick_gate():
     """A lookup that finds every slot taken waits LOOKUP_GATE_WAIT_SECONDS
     before it is turned away; a twentieth of a second keeps the wait real."""
@@ -178,6 +169,12 @@ async def settle():
     if pending:
         await asyncio.wait(pending, timeout=5)
     await asyncio.sleep(0)  # the done callbacks that drop them from TASKS
+
+
+async def _until(condition):
+    async with asyncio.timeout(2):
+        while not condition():
+            await asyncio.sleep(0.01)
 
 
 def _accordion(html, name):
@@ -472,6 +469,97 @@ class TestOtherClientsStillWait:
             response = await client.get("/?format=text", headers=CURL)
         assert response.text == f"{CLIENT_IP}\n"
         assert registry.calls == []
+
+
+class TestFieldsJoinTheSelfLookup:
+    """The fields endpoint shares the self page's registration lookup."""
+
+    async def test_it_joins_the_lookup_the_page_left_running(
+        self, slow_rdap, short_deadline
+    ):
+        async with _client() as client:
+            page = await client.get("/", headers=CHROME)
+            assert 'id="whois-pending"' in page.text
+            fields = asyncio.create_task(
+                client.get("/?fields=registrant", headers=CURL)
+            )
+            await asyncio.sleep(0.1)
+            assert not fields.done()
+            slow_rdap.release.set()
+            response = await fields
+            await settle()
+        assert response.json() == {"registrant": "Google LLC"}
+        assert slow_rdap.calls == [CLIENT_IP]
+
+    async def test_the_page_joins_a_lookup_the_fields_started(
+        self, slow_rdap, short_deadline
+    ):
+        async with _client() as client:
+            fields = asyncio.create_task(
+                client.get("/?fields=registrant", headers=CURL)
+            )
+            await _until(lambda: slow_rdap.calls)
+            page = await client.get("/", headers=CHROME)
+            slow_rdap.release.set()
+            response = await fields
+            await settle()
+        assert 'id="whois-pending"' in page.text
+        assert response.json() == {"registrant": "Google LLC"}
+        assert slow_rdap.calls == [CLIENT_IP]
+
+    async def test_it_takes_no_slot_to_join_a_running_lookup(
+        self, slow_rdap, short_deadline
+    ):
+        async with _client() as client:
+            await client.get("/", headers=CHROME)
+            async with _holding(GATE.size - 1):
+                fields = asyncio.create_task(
+                    client.get("/?fields=registrant", headers=CURL)
+                )
+                await asyncio.sleep(0.1)
+                slow_rdap.release.set()
+                response = await fields
+            await settle()
+        assert response.status_code == 200
+        assert response.json() == {"registrant": "Google LLC"}
+        assert slow_rdap.calls == [CLIENT_IP]
+
+    async def test_it_takes_no_slot_to_read_the_cache(self, slow_rdap, short_deadline):
+        async with _client() as client:
+            await client.get("/", headers=CHROME)
+            slow_rdap.release.set()
+            await settle()
+            async with _holding(GATE.size):
+                response = await client.get("/?fields=registrant", headers=CURL)
+        assert response.status_code == 200
+        assert response.json() == {"registrant": "Google LLC"}
+        assert slow_rdap.calls == [CLIENT_IP]
+
+    async def test_with_nothing_to_join_it_asks_once_and_takes_a_slot(
+        self, slow_rdap, short_deadline
+    ):
+        slow_rdap.release.set()
+        async with _client() as client:
+            async with _holding(GATE.size):
+                busy = await client.get("/?fields=registrant", headers=CURL)
+            response = await client.get("/?fields=registrant", headers=CURL)
+        assert busy.status_code == 503
+        assert busy.json()["code"] == "busy"
+        assert response.json() == {"registrant": "Google LLC"}
+        assert slow_rdap.calls == [CLIENT_IP]
+        assert TASKS == {}
+
+    async def test_a_reverse_lookup_asked_alongside_still_takes_a_slot(
+        self, slow_rdap, short_deadline
+    ):
+        async with _client() as client:
+            await client.get("/", headers=CHROME)
+            async with _holding(GATE.size - 1):
+                busy = await client.get("/?fields=registrant,reverse_dns", headers=CURL)
+            slow_rdap.release.set()
+            await settle()
+        assert busy.status_code == 503
+        assert slow_rdap.calls == [CLIENT_IP]
 
 
 class TestTheGate:

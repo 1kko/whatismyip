@@ -64,9 +64,7 @@ NASA = {
 @pytest.fixture(autouse=True)
 def lookups():
     """Every entry point into the lookup pipeline, mocked, so a test can tell
-    whether one ran; geo-blocking pinned open so a GEO_RULES_FILE left by
-    another run cannot 403 a request."""
-    allowed = {"allowed": True, "country": "KR", "region": None, "reason": "test"}
+    whether one ran."""
     mocks = {
         "gather": AsyncMock(side_effect=lambda *_, **__: copy.deepcopy(NASA)),
         "lookup_whois": AsyncMock(return_value={"source": "rdap", "name": "KT"}),
@@ -74,9 +72,6 @@ def lookups():
         "perform_reverse_lookup": MagicMock(return_value=None),
     }
     with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            patch("main.geo_block_manager.check_access", return_value=allowed)
-        )
         for name in ("gather", "lookup_whois", "lookup_location"):
             stack.enter_context(patch(f"main.{name}", mocks[name]))
         stack.enter_context(
@@ -86,10 +81,6 @@ def lookups():
             )
         )
         yield mocks
-    # conftest clears the in-memory bans; persist that, so no ban from here
-    # survives into BANNED_IPS_FILE for the next run to load.
-    ip_ban_manager.banned_ips.clear()
-    ip_ban_manager.save_bans()
 
 
 def _text(html):

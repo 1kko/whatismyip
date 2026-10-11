@@ -189,6 +189,55 @@ class TestHead:
         assert head.content == b""
         assert_no_lookup(lookups)
 
+    @pytest.mark.parametrize(
+        "path, headers, status, media_type",
+        [
+            ("/", BROWSER, 200, "text/html"),
+            ("/", CURL, 200, "application/json"),
+            ("/?format=text", CURL, 200, "text/plain"),
+            ("/?whois=only", BROWSER, 200, "application/json"),
+            ("/?whois=only", CURL, 200, "application/json"),
+            ("/?whois=ONLY", BROWSER, 200, "application/json"),
+            ("/?whois=only&format=text", CURL, 200, "application/json"),
+            ("/?whois=only&format=html", BROWSER, 200, "application/json"),
+            ("/?whois=all", BROWSER, 400, "application/json"),
+            ("/?whois=", BROWSER, 400, "application/json"),
+            ("/?whois=all&format=text", CURL, 400, "text/plain"),
+            ("/?fields=ip", BROWSER, 200, "application/json"),
+            ("/?fields=ip&format=text", BROWSER, 200, "text/plain"),
+            ("/?fields=nope", BROWSER, 400, "application/json"),
+            ("/?fields=nope&format=text", CURL, 400, "text/plain"),
+            ("/?format=nope", BROWSER, 400, "application/json"),
+            ("/?subdomains=only", BROWSER, 200, "text/html"),
+            ("/?subdomains=nope", BROWSER, 200, "text/html"),
+            ("/nasa.gov", BROWSER, 200, "text/html"),
+            ("/nasa.gov", CURL, 200, "application/json"),
+            ("/nasa.gov?format=text", CURL, 200, "text/plain"),
+            ("/nasa.gov?subdomains=only", BROWSER, 200, "application/json"),
+            ("/nasa.gov?subdomains=only", CURL, 200, "application/json"),
+            ("/nasa.gov?subdomains=only&format=text", CURL, 200, "application/json"),
+            ("/nasa.gov?subdomains=include", BROWSER, 200, "text/html"),
+            ("/nasa.gov?subdomains=exclude", CURL, 200, "application/json"),
+            ("/nasa.gov?subdomains=nope", BROWSER, 400, "application/json"),
+            ("/nasa.gov?subdomains=nope&format=text", CURL, 400, "text/plain"),
+            ("/nasa.gov?fields=ip", BROWSER, 200, "application/json"),
+            ("/nasa.gov?fields=ip&format=text", BROWSER, 200, "text/plain"),
+            ("/nasa.gov?fields=nope", BROWSER, 400, "application/json"),
+            ("/nasa.gov?whois=only", BROWSER, 200, "text/html"),
+            ("/nasa.gov?whois=nope", CURL, 200, "application/json"),
+        ],
+    )
+    def test_head_answers_as_get_would(
+        self, lookups, path, headers, status, media_type
+    ):
+        get = client.get(path, headers=headers)
+        head = client.head(path, headers=headers)
+        assert get.status_code == status
+        assert get.headers["content-type"].split(";")[0] == media_type
+        assert head.status_code == get.status_code
+        assert head.headers["content-type"] == get.headers["content-type"]
+        assert head.content == b""
+
 
 class TestHeadStaysBehindTheMiddleware:
     """HEAD is answered by routes, after the security middleware has run, so a

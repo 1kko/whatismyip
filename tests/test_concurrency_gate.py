@@ -69,13 +69,6 @@ def quick_gates():
         yield
 
 
-@pytest.fixture(autouse=True)
-def empty_whois_cache():
-    lookup._whois_cache.clear()
-    yield
-    lookup._whois_cache.clear()
-
-
 @pytest.fixture
 def legs():
     """Every leg a lookup can reach, on the gather() path and the self path."""

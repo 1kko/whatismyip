@@ -12,12 +12,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-# Set env vars before importing main (which reads them at module level)
-os.environ["ADMIN_API_KEY"] = "test-secret-key"
-os.environ["TRUSTED_PROXIES"] = "127.0.0.1,10.0.0.1"
-os.environ["BANNED_IPS_FILE"] = "/tmp/test_banned_ips.json"
-os.environ["GEO_RULES_FILE"] = "/tmp/test_geo_rules.json"
-
 import main
 from lookup import is_safe_ip
 from main import (
@@ -71,19 +65,10 @@ MOCK_DNS_RECORDS = {
 }
 
 
-def _reset_security_state():
-    """Reset rate limiter and ban manager between tests."""
-    rate_limiter.request_history.clear()
-    ip_ban_manager.banned_ips.clear()
-
-
 # ---------------------------------------------------------------------------
 # Fix 1: XSS via </script> injection
 # ---------------------------------------------------------------------------
 class TestXSSPrevention:
-    def setup_method(self):
-        _reset_security_state()
-
     @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
@@ -146,9 +131,6 @@ class TestXSSPrevention:
 # Fix 2: IP Spoofing via x-real-ip header
 # ---------------------------------------------------------------------------
 class TestIPSpoofingPrevention:
-    def setup_method(self):
-        _reset_security_state()
-
     def test_untrusted_proxy_ignores_headers(self):
         """IP Spoofing: proxy headers should be ignored from untrusted sources."""
         mock_request = MagicMock()
@@ -242,9 +224,6 @@ class TestIPSpoofingPrevention:
 # Fix 3: SSRF - Internal network probing
 # ---------------------------------------------------------------------------
 class TestSSRFPrevention:
-    def setup_method(self):
-        _reset_security_state()
-
     def test_private_ip_blocked(self):
         """SSRF: Private IPs (RFC 1918) should be rejected."""
         assert not is_safe_ip("192.168.1.1")
@@ -313,9 +292,6 @@ class TestSSRFPrevention:
 # Fix 4: API Key timing attack
 # ---------------------------------------------------------------------------
 class TestTimingAttackPrevention:
-    def setup_method(self):
-        _reset_security_state()
-
     def test_admin_with_correct_key(self):
         """Timing: Admin endpoint works with correct key."""
         response = client.get("/admin/stats", headers={"api-key": "test-secret-key"})
@@ -345,9 +321,6 @@ class TestTimingAttackPrevention:
 # Fix 5: Admin endpoints bypass all security
 # ---------------------------------------------------------------------------
 class TestAdminSecurityEnforcement:
-    def setup_method(self):
-        _reset_security_state()
-
     def test_banned_ip_blocked_on_admin(self):
         """Admin security: Banned IPs should be blocked on admin endpoints too."""
         # Ban the testclient IP
@@ -355,7 +328,6 @@ class TestAdminSecurityEnforcement:
         response = client.get("/admin/stats", headers={"api-key": "test-secret-key"})
         assert response.status_code == 403
         assert response.json() == main.ACCESS_DENIED
-        ip_ban_manager.unban_ip("testclient")
 
     def test_rate_limit_applies_to_admin(self):
         """Admin security: Rate limiting should apply to admin endpoints."""
@@ -371,7 +343,6 @@ class TestAdminSecurityEnforcement:
             assert 429 in responses or 403 in responses
         finally:
             rate_limiter.requests_per_second = original_per_second
-            _reset_security_state()
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +429,6 @@ class TestAsyncIO:
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
     def test_self_info_endpoint_still_works(self, mock_rev, mock_geo, mock_whois):
         """Async: / endpoint should still return valid responses with async wrapping."""
-        _reset_security_state()
         response = client.get("/")
         assert response.status_code == 200
         data = response.json()
@@ -476,7 +446,6 @@ class TestAsyncIO:
         self, mock_records, mock_rev, mock_geo, mock_whois
     ):
         """Async: /{ip} endpoint should still return valid responses."""
-        _reset_security_state()
         response = client.get("/8.8.8.8")
         assert response.status_code == 200
         data = response.json()
@@ -487,9 +456,6 @@ class TestAsyncIO:
 # Fix 7: Admin config injection (GeoRulesUpdate Pydantic model)
 # ---------------------------------------------------------------------------
 class TestAdminConfigInjection:
-    def setup_method(self):
-        _reset_security_state()
-
     def test_geo_rules_update_model_validates_fields(self):
         """Config injection: GeoRulesUpdate should only accept known fields."""
         # Valid fields
@@ -522,6 +488,17 @@ class TestAdminConfigInjection:
         )
         assert response.status_code == 200
         assert response.json()["status"] == "updated"
+
+    def test_the_rules_put_above_are_gone_for_the_next_test(self):
+        """Runs right after test_update_geo_rules_valid_request: pytest keeps a
+        class's order. conftest's reset deletes GEO_RULES_FILE and reloads the
+        defaults after every test, so the RU blocklist PUT above is neither
+        left in memory nor waiting in the file for the next run to load."""
+        config = main.geo_block_manager.config
+        assert config["mode"] == "disabled"
+        assert config["blocked_countries"] == []
+        with open(main.geo_block_manager.config_file) as f:
+            assert json.load(f)["blocked_countries"] == []
 
     def test_update_geo_rules_invalid_mode(self):
         """Config injection: Invalid mode should return 400."""
@@ -574,9 +551,6 @@ class TestDockerHardening:
 # Fix 9: FastAPI docs exposed
 # ---------------------------------------------------------------------------
 class TestDocsDisabled:
-    def setup_method(self):
-        _reset_security_state()
-
     def test_swagger_docs_disabled(self):
         """Docs: /docs endpoint should return 404."""
         response = client.get("/docs")
@@ -639,9 +613,6 @@ class TestLogInjection:
 # Cross-cutting: Security middleware integration
 # ---------------------------------------------------------------------------
 class TestSecurityMiddleware:
-    def setup_method(self):
-        _reset_security_state()
-
     def test_suspicious_path_returns_403(self):
         """Middleware: Suspicious multi-segment paths should return 403."""
         # /.env matches the whitelist (single segment), so use a nested path
@@ -651,18 +622,15 @@ class TestSecurityMiddleware:
 
     def test_suspicious_path_bans_ip(self):
         """Middleware: Suspicious request should ban the client IP."""
-        _reset_security_state()
         client.get("/.git/HEAD")
         # The testclient IP should now be banned
         assert ip_ban_manager.is_banned("testclient")
-        _reset_security_state()
 
     def test_banned_ip_gets_403(self):
         """Middleware: Banned IPs should get 403 on regular endpoints."""
         ip_ban_manager.ban_ip("testclient", reason="test", duration=3600)
         response = client.get("/")
         assert response.status_code == 403
-        _reset_security_state()
 
     @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
@@ -687,7 +655,6 @@ class TestSecurityMiddleware:
             assert ip_ban_manager.is_banned("testclient")
         finally:
             rate_limiter.requests_per_second = original_per_second
-            _reset_security_state()
 
     def test_every_403_says_the_same_thing(self):
         """A blocked requester learns that they were blocked and nothing else.
@@ -696,7 +663,6 @@ class TestSecurityMiddleware:
         indistinguishable from the outside — reasons live in the log."""
         bodies = []
 
-        _reset_security_state()
         # Manual, because that is the only ban /mcp honours.
         ip_ban_manager.ban_ip("testclient", reason="manual", duration=3600)
         bodies.append(client.get("/").json())  # banned
@@ -705,12 +671,14 @@ class TestSecurityMiddleware:
         )  # banned, admin surface
         bodies.append(client.post("/mcp", json={}).json())  # banned, mcp surface
 
-        _reset_security_state()
+        ip_ban_manager.unban_ip("testclient")
         bodies.append(client.get("/.git/config").json())  # suspicious, nested
-        _reset_security_state()
+        assert ip_ban_manager.banned_ips["testclient"]["request_path"] == "/.git/config"
+        ip_ban_manager.unban_ip("testclient")
         bodies.append(client.get("/admin.php").json())  # suspicious, single token
+        assert ip_ban_manager.banned_ips["testclient"]["request_path"] == "/admin.php"
 
-        _reset_security_state()
+        ip_ban_manager.unban_ip("testclient")
         with patch(
             "main.geo_block_manager.check_access",
             return_value={
@@ -727,18 +695,17 @@ class TestSecurityMiddleware:
         blob = json.dumps(bodies).lower()
         for leak in ("banned", "country", "reason", "location", "contact", "cn"):
             assert leak not in blob, leak
-        _reset_security_state()
 
     def test_single_segment_probes_are_banned(self):
         """A probe and a lookup are the same shape, so the ban turns on whether
         the target has a public suffix. Before this, every one of these returned
         200 and was answered as a (failing) domain lookup."""
         for path in ("/.env", "/admin", "/admin.php", "/wp-login.php"):
-            _reset_security_state()
             response = client.get(path)
             assert response.status_code == 403, path
             assert ip_ban_manager.is_banned("testclient"), path
-        _reset_security_state()
+            assert ip_ban_manager.banned_ips["testclient"]["request_path"] == path
+            ip_ban_manager.unban_ip("testclient")
 
     @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
@@ -755,20 +722,16 @@ class TestSecurityMiddleware:
             MagicMock(__str__=lambda self: "93.184.216.34")
         ]
         for path in ("/foo.dev", "/foo.zip"):
-            _reset_security_state()
             response = client.get(path)
             assert response.status_code == 200, path
             assert not ip_ban_manager.is_banned("testclient"), path
-        _reset_security_state()
 
     def test_page_data_is_never_a_probe(self):
         """static/geo/*.json matches the detector's \\.json$ rule. Banning a
         visitor for loading the page's own gazetteer would be absurd."""
-        _reset_security_state()
         response = client.get("/static/geo/countries.json")
         assert response.status_code == 200
         assert not ip_ban_manager.is_banned("testclient")
-        _reset_security_state()
 
     def test_static_assets_are_exempt_from_rate_limit(self):
         """One page load pulls the stylesheet, three scripts, four fonts, three
@@ -798,7 +761,6 @@ class TestSecurityMiddleware:
             assert not ip_ban_manager.is_banned("testclient")
         finally:
             rate_limiter.requests_per_second = original_per_second
-            _reset_security_state()
 
 
 # ---------------------------------------------------------------------------
@@ -900,28 +862,19 @@ class TestRateLimiter:
 
 
 class TestIPBanManager:
-    def test_ban_and_check(self):
-        mgr = IPBanManager.__new__(IPBanManager)
-        mgr.banned_ips = {}
-        mgr.ban_file = "/tmp/test_ban_check.json"
-        mgr.save_bans = MagicMock()
+    def test_ban_and_check(self, tmp_path):
+        mgr = IPBanManager(ban_file=str(tmp_path / "bans.json"))
         mgr.ban_ip("1.2.3.4", reason="test", duration=3600)
         assert mgr.is_banned("1.2.3.4")
 
-    def test_unban(self):
-        mgr = IPBanManager.__new__(IPBanManager)
-        mgr.banned_ips = {}
-        mgr.ban_file = "/tmp/test_ban_unban.json"
-        mgr.save_bans = MagicMock()
+    def test_unban(self, tmp_path):
+        mgr = IPBanManager(ban_file=str(tmp_path / "bans.json"))
         mgr.ban_ip("1.2.3.4", reason="test", duration=3600)
         mgr.unban_ip("1.2.3.4")
         assert not mgr.is_banned("1.2.3.4")
 
-    def test_expired_ban_not_active(self):
-        mgr = IPBanManager.__new__(IPBanManager)
-        mgr.banned_ips = {}
-        mgr.ban_file = "/tmp/test_ban_expire.json"
-        mgr.save_bans = MagicMock()
+    def test_expired_ban_not_active(self, tmp_path):
+        mgr = IPBanManager(ban_file=str(tmp_path / "bans.json"))
         # Ban with 0 second duration (already expired)
         mgr.ban_ip("1.2.3.4", reason="test", duration=0)
         assert not mgr.is_banned("1.2.3.4")
@@ -931,9 +884,6 @@ class TestIPBanManager:
 # Response security headers (regression guard for /cso hardening)
 # ---------------------------------------------------------------------------
 class TestResponseSecurityHeaders:
-    def setup_method(self):
-        _reset_security_state()
-
     @patch("lookup.whois.whois", return_value=MOCK_WHOIS)
     @patch("main.geo_ip_manager.fetch_location", return_value=dict(MOCK_LOCATION))
     @patch("main.domain_manager.perform_reverse_lookup", return_value=None)
@@ -1175,12 +1125,6 @@ class TestIpRulesInTheMiddleware:
     module-level client's peer is the string "testclient", which is not trusted
     and would make every request look like it came from the same place.
     """
-
-    def setup_method(self):
-        _reset_security_state()
-
-    def teardown_method(self):
-        _reset_security_state()
 
     def test_block_true_refuses_outright(self, ip_rules):
         ip_rules([{"name": "scanner", "ipv4": "203.0.113.9", "block": True}])

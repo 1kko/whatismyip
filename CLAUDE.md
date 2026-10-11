@@ -469,8 +469,8 @@ whatismyip/
 │   ├── image/, favicons    # logo (also og:image), icons, web manifest
 │   └── geo/                # cities.json, countries.json (generated, committed)
 ├── tests/                  # see Testing Strategy for each file
-│   ├── conftest.py         # env switches set before main is imported; per-test security reset;
-│   │                       # offline lookup defaults and the network guard
+│   ├── conftest.py         # env switches and a state dir per run, set before main is imported;
+│   │                       # per-test reset of module state; offline defaults and the network guard
 │   └── fixtures/           # MaxMind's GeoLite2 test mmdbs, the MCP server.json schema
 ├── docs/
 │   ├── images/          # README screenshots
@@ -672,9 +672,20 @@ which never runs the lifespan, and the MCP tests use `with TestClient(app)`,
 which does. `tests/conftest.py` sets the environment before any test module
 imports `main`: `BACKGROUND_REFRESH_ENABLED=false` (no lifespan starts the
 scheduler or downloads anything), `REPUTATION_ENABLED=false`, an empty
-`ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo-rule files
-under `/tmp`. Its `reset_security_state`
-fixture (autouse) clears the rate limiter and ban list around every test.
+`ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo/IP-rule
+files under a per-run temporary `STATE_DIR`; geo-blocking mode, country lists,
+and unknown-country handling are pinned off. `pytest_sessionfinish` removes
+`STATE_DIR` after the run. Its `reset_security_state` fixture (autouse) runs
+`_reset_mutable_state` before and after every test: both rate-limit buckets,
+the ban list, `lookup._whois_cache`, `main._self_whois_tasks` and
+`main._refresh_failures` emptied, a new RDAP breaker bound to both
+`rdap.rdap_breaker` and `main.rdap_breaker`, and the geo rules reloaded from
+those defaults. A new piece of module-level state gets its line there. A test
+never clears these itself, and `test_state_reset.py` fails if one does: a test
+that needs a clean slate between two of its own steps lifts what the last step
+changed (`ip_ban_manager.unban_ip`), and one that needs a longer burst than a
+rate limit allows raises that limiter's `requests_per_second` with
+`monkeypatch`.
 
 The external lookups each test checks (RDAP/WHOIS, GeoIP, DNS, TLS) are mocked,
 and importing `main` makes no network call. The suite runs offline, and
@@ -713,19 +724,23 @@ Test files:
   `test_subdomain_store.py` (the SQLite cache degrades to a miss)
 - Boot: `test_boot.py` (importing `main` touches no network; the lifespan
   starts and stops the scheduler), `test_offline_guard.py` (the offline
-  defaults and the network guard)
+  defaults and the network guard), `test_state_reset.py` (a state directory
+  per run, what the per-test reset covers, no reset by hand)
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
   security headers, fingerprint panel, `?subdomains=`), `test_negotiation.py`
   (`?format=`/Accept/user-agent), `test_text_format.py` (`?format=text`,
   `?fields=`), `test_error_pages.py` (`error.html` for browsers),
   `test_open_graph.py` (link previews), `test_privacy_page.py` (`/privacy`),
-  `test_robots_head.py` (`/robots.txt`, `/favicon.ico`, HEAD),
-  `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`),
+  `test_robots_head.py` (`/robots.txt`, `/favicon.ico`, HEAD and the
+  Content-Type and status it shares with GET),
+  `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`, and
+  `?fields=` joining the self lookup),
   `test_ip_whois_column.py` (an IP's WHOIS column), `test_subdomain_panel.py`
   (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test)
 - Lookup behaviour: `test_classify_target.py` (refused before any network
-  work), `test_ipv6.py` (IPv6 literals, AAAA), `test_dns_status.py` (a failed
+  work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
+  `test_dns_status.py` (a failed
   query is never "no records"), `test_zone_apex.py` (NS/MX/SPF from the zone
   apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
   floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
@@ -740,7 +755,8 @@ Test files:
   guards, the admin key, bans, rate limiting, geo-blocking, the probe detector
   and whitelist, per-IP rules, response headers, log injection), `test_ssrf.py`
   (only global unicast becomes a connection target)
-- MCP: `test_mcp.py` (handshake, tools, transport limits, rate bucket),
+- MCP: `test_mcp.py` (handshake and `serverInfo.version`, tools, transport
+  limits, rate bucket),
   `test_mcp_iserror.py` (`isError` on outright failures),
   `test_mcp_manual_ban.py` (only a manual ban applies), `test_mcp_registry.py`
   (`server.json`, its publish workflow, the page's tool list)

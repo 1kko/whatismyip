@@ -6,12 +6,32 @@ conftest is the only place guaranteed to run before every test module, so the
 suite no longer depends on which file pytest happens to collect first.
 """
 
+import contextlib
 import os
+import shutil
+import tempfile
 
 os.environ["ADMIN_API_KEY"] = "test-secret-key"
 os.environ["TRUSTED_PROXIES"] = "127.0.0.1,10.0.0.1"
-os.environ["BANNED_IPS_FILE"] = "/tmp/test_banned_ips.json"
-os.environ["GEO_RULES_FILE"] = "/tmp/test_geo_rules.json"
+# The ban list and the geo rules are files the security managers load when main
+# is imported and write when they change; the IP rules are a file they read.
+# They used to sit at fixed /tmp paths every pytest run on the machine shared,
+# so the bans and geo rules one run left behind were the next run's starting
+# state, and two suites at once (two worktrees, two agents) wrote over each
+# other. Each run now gets a directory of its own, which pytest_sessionfinish
+# removes.
+STATE_DIR = tempfile.mkdtemp(prefix="whatismyip-test-")
+os.environ["BANNED_IPS_FILE"] = os.path.join(STATE_DIR, "banned_ips.json")
+os.environ["GEO_RULES_FILE"] = os.path.join(STATE_DIR, "geo_rules.json")
+os.environ["IP_RULES_FILE"] = os.path.join(STATE_DIR, "ip_rules.json")
+# A developer's .env may switch geo-blocking on for their own instance, and
+# load_dotenv() never overrides a variable already set. Pinned off, the
+# defaults GeoBlockManager.load_config() rebuilds before every test (see
+# reset_security_state) are the same on every machine: no mode, no country.
+os.environ["GEO_MODE"] = "disabled"
+os.environ["GEO_BLOCKED_COUNTRIES"] = ""
+os.environ["GEO_ALLOWED_COUNTRIES"] = ""
+os.environ["GEO_BLOCK_UNKNOWN"] = "false"
 # The app lifespan starts the scheduler and fetches what data/ lacks (GeoLite2,
 # the public suffix list), and every `with TestClient(app)` runs that lifespan.
 # Off, it does neither, so no lifespan downloads anything. Importing main
@@ -32,9 +52,8 @@ import sys  # noqa: E402  (must follow the env vars above)
 import pytest  # noqa: E402
 
 
-@pytest.fixture(autouse=True)
-def reset_security_state():
-    """Clear the rate limiter and ban list around every test.
+def _reset_mutable_state():
+    """Put back every piece of module-level state a test can change.
 
     The suite drives hundreds of requests through one TestClient in a few
     seconds, and the lookup surface is rate limited with a ban on breach. Without
@@ -47,16 +66,42 @@ def reset_security_state():
     runs.
     """
 
-    def clear():
-        main = sys.modules.get("main")
-        if main is None:
-            return
-        main.rate_limiter.request_history.clear()
-        main.ip_ban_manager.banned_ips.clear()
+    lookup = sys.modules.get("lookup")
+    if lookup is not None:
+        lookup._whois_cache.clear()
+    rdap = sys.modules.get("rdap")
+    main = sys.modules.get("main")
+    if rdap is not None:
+        breaker = rdap.CircuitBreaker(
+            rdap.RDAP_BREAKER_FAILURES, rdap.RDAP_BREAKER_COOLDOWN_SECONDS
+        )
+        rdap.rdap_breaker = breaker
+        if main is not None:
+            main.rdap_breaker = breaker
+    if main is None:
+        return
+    main.rate_limiter.request_history.clear()
+    main.mcp_rate_limiter.request_history.clear()
+    main.ip_ban_manager.banned_ips.clear()
+    main._self_whois_tasks.clear()
+    main._refresh_failures.clear()
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(main.geo_block_manager.config_file)
+    main.geo_block_manager.load_config()
 
-    clear()
+
+@pytest.fixture(autouse=True)
+def reset_security_state():
+    """Reset every mutable app state around each test."""
+    _reset_mutable_state()
     yield
-    clear()
+    _reset_mutable_state()
+
+
+@pytest.fixture
+def reset_state():
+    """Return the reset callable for tests that inspect its coverage."""
+    return _reset_mutable_state
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +324,7 @@ def pytest_sessionfinish(session, exitstatus):
             + "\n"
         )
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    shutil.rmtree(STATE_DIR, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

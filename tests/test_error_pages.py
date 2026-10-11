@@ -62,12 +62,8 @@ LOCATION = {
 
 @pytest.fixture(autouse=True)
 def _quiet_lookups():
-    """No lookup leaves the process, and geo-blocking is pinned open so that
-    whatever GEO_RULES_FILE a previous run left behind cannot 403 a request
-    a test expects to reach the route."""
-    allowed = {"allowed": True, "country": "US", "region": None, "reason": "test"}
+    """No lookup leaves the process."""
     with (
-        patch("main.geo_block_manager.check_access", return_value=allowed),
         patch(
             "main.lookup_location",
             new_callable=AsyncMock,
@@ -81,10 +77,6 @@ def _quiet_lookups():
         patch("main.domain_manager.perform_reverse_lookup", return_value=None),
     ):
         yield
-    # conftest clears the in-memory bans; persist that, so no ban from here
-    # survives into BANNED_IPS_FILE for the next run to load.
-    ip_ban_manager.banned_ips.clear()
-    ip_ban_manager.save_bans()
 
 
 def _is_html(response):
@@ -257,12 +249,14 @@ class TestAccessDenied:
         _ban()
         pages.append(client.get("/", headers=CHROME))  # banned
         pages.append(client.get("/example.com", headers=CHROME))  # banned
-        ip_ban_manager.banned_ips.clear()
+        ip_ban_manager.unban_ip(CLIENT_IP)
 
         pages.append(client.get("/admin.php", headers=CHROME))  # probe
-        ip_ban_manager.banned_ips.clear()
+        assert ip_ban_manager.banned_ips[CLIENT_IP]["request_path"] == "/admin.php"
+        ip_ban_manager.unban_ip(CLIENT_IP)
         pages.append(client.get("/.git/config", headers=CHROME))  # nested probe
-        ip_ban_manager.banned_ips.clear()
+        assert ip_ban_manager.banned_ips[CLIENT_IP]["request_path"] == "/.git/config"
+        ip_ban_manager.unban_ip(CLIENT_IP)
 
         blocked = {"allowed": False, "country": "CN", "region": None, "reason": "x"}
         with patch("main.geo_block_manager.check_access", return_value=blocked):
