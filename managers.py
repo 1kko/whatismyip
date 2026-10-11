@@ -143,6 +143,17 @@ def _with_host_ips(rows: list[dict], rdtype: str = "A") -> list[dict]:
     return rows
 
 
+def _is_dmarc_record(text: str) -> bool:
+    """Whether a TXT string is a DMARC policy record: its first tag is
+    v=DMARC1. The tag name in any case and spaces around "=" are allowed, as
+    RFC 7489's grammar allows them; the value must be DMARC1 exactly, as a
+    receiver requires (§6.3), so a record every receiver ignores is never
+    shown as the policy in force."""
+    tag = text.partition(";")[0]
+    name, sep, value = tag.partition("=")
+    return bool(sep) and name.strip().lower() == "v" and value.strip() == "DMARC1"
+
+
 class _AuthDroppingRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Strip the Authorization header when following a redirect. MaxMind's
     download endpoint 302-redirects to a presigned URL on another host that
@@ -741,8 +752,20 @@ class DomainManager:
         return floor
 
     def get_records(
-        self, domain: str, ns_servers: list | None = None, ip: str | None = None
+        self,
+        domain: str,
+        ns_servers: list | None = None,
+        ip: str | None = None,
+        dmarc: bool = False,
     ) -> dict:
+        """The record sweep of `domain`, every type at once, each with its
+        dns_status() in records["status"].
+
+        `ip` adds its PTR. `dmarc` adds the name's DMARC policy record
+        (records["dmarc"], status["dmarc"]). It is off unless asked, so the
+        sweep of a PTR name -- an IP target's, or the visitor's own on the
+        self page -- makes no query it did not make before.
+        """
         # ns_servers is kept for signature compatibility but unused: every query
         # now goes to the cached public resolvers (see _recursive_resolver).
         # A PTR target arrives as DNS text, trailing dot and all ('dns.google.').
@@ -770,6 +793,9 @@ class DomainManager:
             "ptr": [],
             "a": [],
             "aaaa": [],
+            # Present only when asked: a key that was never queried must not
+            # read as "this name has no DMARC record".
+            **({"dmarc": []} if dmarc else {}),
             # Each type's dns_status(), or "ok". An empty list above says only
             # that nothing came back; this says whether that was the answer
             # (noanswer, nxdomain) or the query failing (timeout, servfail,
@@ -917,6 +943,51 @@ class DomainManager:
                     return outcome
             return "nxdomain" if txt_status == "nxdomain" else "noanswer"
 
+        def dmarc_from(answer, name: str) -> list:
+            dmarc_records = []
+            for r in answer:
+                # Joined as SPF is: a record over 255 bytes arrives split.
+                joined = "".join(s.decode("utf-8", errors="replace") for s in r.strings)
+                if _is_dmarc_record(joined):
+                    dmarc_records.append(
+                        {"text": joined, "ttl": answer.rrset.ttl, "queried_name": name}
+                    )
+            return dmarc_records
+
+        def fetch_dmarc() -> tuple[list, str]:
+            """The DMARC policy record, found as RFC 7489 §6.6.3 finds it:
+            _dmarc.<name> first, and only when that holds no policy record
+            (no TXT, no such name, or TXT that is not DMARC),
+            _dmarc.<registrable domain>, once. The registrable domain, not the
+            SOA zone: DMARC's Organizational Domain comes from the public
+            suffix list. Each record's queried_name says which name answered,
+            so an inherited policy is never read as the name's own.
+
+            A failed query ends the search: a timeout is not "no record".
+            Once the name has answered "none here", the row stands on the
+            registrable domain's query, so its failure is the status, as with
+            the zone's MX.
+            """
+            names = [f"_dmarc.{domain}"]
+            # None under no public suffix: the name is then its own floor.
+            organizational = self.registrable_domain(domain) or domain
+            if organizational != domain:
+                names.append(f"_dmarc.{organizational}")
+            outcome = "noanswer"
+            for name in names:
+                try:
+                    answer = _recursive_resolver().resolve(name, "TXT")
+                except Exception as e:
+                    outcome = dns_status(e)
+                    if outcome in DNS_FAILURES:
+                        return [], outcome
+                    continue
+                found = dmarc_from(answer, name)
+                if found:
+                    return found, "ok"
+                outcome = "noanswer"
+            return [], outcome
+
         def fetch_ptr(lookup_ip: str) -> tuple[list, str]:
             try:
                 answer = _recursive_resolver().resolve(
@@ -928,8 +999,10 @@ class DomainManager:
             return [{"hostname": str(r), "ttl": answer.rrset.ttl} for r in answer], "ok"
 
         # Every record type is independent, so sweep them at once against the
-        # cached public resolvers instead of walking them in series.
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        # cached public resolvers instead of walking them in series. One
+        # worker per fetcher (NS, A, AAAA, MX, CNAME, TXT, the zone's SPF, PTR,
+        # DMARC), so none waits behind another.
+        with ThreadPoolExecutor(max_workers=9) as pool:
             f_ns = pool.submit(fetch_ns)
             f_a = pool.submit(fetch_a)
             f_aaaa = pool.submit(fetch_aaaa)
@@ -938,6 +1011,7 @@ class DomainManager:
             f_txt = pool.submit(fetch_txt)
             f_base_spf = pool.submit(fetch_base_spf)
             f_ptr = pool.submit(fetch_ptr, ip) if ip else None
+            f_dmarc = pool.submit(fetch_dmarc) if dmarc else None
 
             records["ns"], status["ns"] = f_ns.result()
             records["a"], status["a"], a_chain = f_a.result()
@@ -958,6 +1032,8 @@ class DomainManager:
             status["spf"] = spf_status(status["txt"], base_spf_status)
             if f_ptr is not None:
                 records["ptr"], status["ptr"] = f_ptr.result()
+            if f_dmarc is not None:
+                records["dmarc"], status["dmarc"] = f_dmarc.result()
 
         # Fallback only when a caller omits ip -- which gather() does when its
         # own A and AAAA queries failed, so the sweep's answers may still

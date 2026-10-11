@@ -361,7 +361,7 @@ def compact_reputation(reputation: dict | None) -> dict | None:
 # hold its slots forever. The threads behind it are bounded at the source now:
 # RDAP makes one 3.5s request, python-whois has a 5s socket timeout, and both
 # run on a pool of their own; `DomainManager.get_records()` (managers.py)
-# still opens up to 8 + 2 x DNS_HOST_RESOLVE_WORKERS threads per sweep.
+# still opens up to 9 + 2 x DNS_HOST_RESOLVE_WORKERS threads per sweep.
 # The same ceiling bounds dns_records and ssl_certificate, which run only
 # their own legs (_DNS_LEGS, _TLS_LEGS): those legs have budgets of their own
 # (DNS_QUERY_LIFETIME per query; TLS_CONNECT_TIMEOUT_SECONDS for the TLS

@@ -95,8 +95,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
     `data/tld/`. Constructed before `DomainManager` (see `lookup.py`), because
     it repoints `tld` at the data volume
   - `DomainManager`: `is_valid_domain` (does the target have a public suffix),
-    `zone_apex`, `get_records` (the record sweep) and `perform_reverse_lookup`
-    (PTR)
+    `zone_apex`, `registrable_domain` (the ICANN-section floor `zone_apex`,
+    the registration lookup and the DMARC fallback share), `get_records` (the
+    record sweep; `dmarc=True` adds the name's DMARC record) and
+    `perform_reverse_lookup` (PTR)
   - `SSLManager.get_ssl_info`: the certificate, read from a verified IP.
     `_connect` gives the TCP connect `TLS_CONNECT_TIMEOUT_SECONDS` (3 s) and
     then sets `TIMEOUT_SECONDS` (5 s) for the handshake before returning, since
@@ -404,8 +406,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   drawn as `(of <owner>)` the same way. The NAME `<td>` stays attribute-free
   (tests match it as a bare `<td>`). JSON, MCP `dns_records` and
   `?format=text` are unchanged
-- `zone_apex`'s floor comes from `tld.get_fld(..., search_private=False)`,
-  which reads `tld`'s separate public-only list
+- `zone_apex`'s floor, `DomainManager.registrable_domain()`, comes from
+  `tld.get_fld(..., search_private=False)`, which reads `tld`'s separate
+  public-only list
   (`data/tld/res/effective_tld_names_public_only.dat.txt`). `TldNamesManager`
   keeps it as a byte copy of the full list, at boot (`_mirror_public_only`)
   and on every refresh: `tld`'s public-only parser stops at
@@ -1147,11 +1150,11 @@ Test files:
   `test_fingerprint_consistency.py` (clock and languages vs address, in node)
 - Lookup behaviour: `test_classify_target.py` (refused before any network
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
-  `test_dns_status.py` (a failed
-  query is never "no records"), `test_cname_chain.py` (the CNAME chain and
-  canonical name read off the A answer, the hop rows, the GeoIP 'Resolves
-  via' row and `dns_records`' two keys), `test_zone_apex.py` (NS/MX/SPF from the zone
-  apex), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
+  `test_dns_status.py` (a failed query is never "no records"; DMARC
+  discovery), `test_cname_chain.py` (the CNAME chain and canonical name read
+  off the A answer, the hop rows, the GeoIP 'Resolves via' row and
+  `dns_records`' two keys), `test_zone_apex.py` (NS/MX/SPF from the zone
+  apex; DMARC from the registrable domain), `test_psl_public_only.py` (the ICANN-only suffix list `zone_apex`
   floors on, kept offline), `test_dns_fanout.py` (NS/MX host cap), `test_txt_join.py` (TXT over
   255 bytes), `test_resolver_unification.py` (one resolver set and budget),
   `test_tls_reasons.py` (why a certificate fails, the TLS connect and handshake
