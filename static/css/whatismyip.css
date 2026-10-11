@@ -233,11 +233,12 @@ body {
   cursor: pointer;
 }
 .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
-/* Inline copy icon (the fingerprint UNIQUE ID row) */
+/* Inline copy icon (the fingerprint UNIQUE ID row). 5px around the 14px icon
+   makes a 24px target, WCAG 2.2's minimum (2.5.8); 4px was 22px. */
 .copy-icon {
   display: inline-flex;
   align-items: center;
-  padding: 4px;
+  padding: 5px;
   border: 0;
   background: none;
   color: var(--text-muted);

@@ -527,6 +527,8 @@ below by text:
   `app.js`'s `setWhoisHint` / `setSubdomainHint`, `fingerprint.js`'s
   `setHint`. The 390px self page cuts the DNS hint
   (`A 0 · AAAA 0 · MX 0 · NS 0 · TXT 0`); opening the accordion shows it all.
+- `.copy-icon` (the fingerprint UNIQUE ID row) is a 24px target: the 14px
+  icon with 5px padding, WCAG 2.2's minimum (2.5.8).
 
 #### MCP endpoint
 

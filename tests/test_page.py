@@ -1157,6 +1157,16 @@ class TestMobileLayout:
         assert 'setHint("fp-acc-hint"' in fp
         assert "el.title = text" in fp
 
+    def test_the_copy_icon_is_a_24px_target(self):
+        # WCAG 2.2 target size (minimum, 2.5.8) is 24px: the 14px icon plus 5px
+        # of padding each side. 4px made a 22px target.
+        css = CSS.read_text(encoding="utf-8")
+        icon = re.search(r"^\.copy-icon\s*\{([^}]*)\}", css, re.M).group(1)
+        assert re.search(r"padding:\s*5px;", icon)
+        html = client.get("/", headers=BROWSER_UA).text
+        button = html.split('id="fp-copy"')[1].split("</button>")[0]
+        assert 'width="14" height="14"' in button
+
 
 # gather() is patched throughout this class. tests/test_page.py has no mocking
 # layer — every existing test here uses an IP target — and "/example.com" would
