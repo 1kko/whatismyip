@@ -135,7 +135,12 @@ RDAP registration data and the full TLS certificate, expanded.
   passive signals are read as the page loads; the canvas, audio, WebGL and font
   probes run only when the panel is opened, so a browser that asks before a
   canvas is read (Tor Browser, Firefox with `resistFingerprinting`) asks on
-  that click, not on landing.
+  that click, not on landing. The panel's first two rows, "Clock vs address"
+  and "Languages vs address", compare the browser's time zone, UTC offset and
+  language regions with the address's GeoIP time zone and country, in the
+  page: a mismatch is a hint ("differs: a VPN, proxy or travelling device"),
+  and a missing time zone, a country-level location or a browser that reports
+  UTC reads "not comparable", with the reason.
 - **WebRTC leak test** (in the fingerprint panel, opt-in) — asks one STUN server
   (`WEBRTC_STUN_URL`, Cloudflare's by default) which public address the
   browser's WebRTC traffic uses, and compares it with the address the page saw,

@@ -577,6 +577,44 @@ below by text:
 - The JSON and text responses are untouched: `_dns_rows` and the view model
   feed only the template, so no `href` reaches an API answer.
 
+#### Fingerprint panel
+
+`static/js/fingerprint.js`, `templates/browser.html` (`#acc-fingerprint`):
+- Computed in the browser from the page alone, never sent or stored: the CSP's
+  `default-src 'self'` would allow a same-origin fetch, so only the file keeps
+  that promise (`tests/test_page.py::TestFingerprintPanel::test_module_is_display_only`
+  and the `sent`/`stored` tripwires in `tests/test_fingerprint_consistency.py`).
+- Its first two rows, "Clock vs address" and "Languages vs address", compare
+  `Intl`'s time zone, `getTimezoneOffset()` and the region subtags of
+  `navigator.languages` with `location.time_zone`, `country_code` and
+  `precision` read from `#page-data`. `compareZones` and `compareLanguages`
+  are pure, exported under a `module.exports` guard like `webrtc.js`, and
+  answer `same`, `differs` or `not_comparable` with a reason. The wording is
+  a hint ("differs: a VPN, proxy or travelling device, and any site can
+  notice it too"), never a detection claim: travellers, expats and a
+  deliberate English-and-UTC setup all mismatch. A `precision` other than
+  `"city"` (a GeoLite2 centroid 1000 km wide says nothing about a clock), a
+  null `time_zone`, a browser reporting UTC and a zone the engine does not
+  know are `not_comparable`, and so is any zone in an engine without
+  `timeZoneName: "shortOffset"` (Safari before 15.4). Every other zone,
+  Atlantic/Reykjavik included, is compared by name and offset with no rule of
+  its own. Two zone names with the same current offset still read `differs`,
+  worded as "the same UTC offset"; any listed language whose region is the
+  address's country reads `same`.
+- Both zone names go through `canonicalZone` (the engine's
+  `resolvedOptions().timeZone`) before they are compared: V8 reports
+  `Asia/Calcutta`, `Europe/Kiev` and `Asia/Saigon` where GeoLite2 has the
+  modern names, and plain string equality would flag every visitor there.
+- The two rows are not signals: they stay out of `signals`, of the UNIQUE ID
+  material and of the bit and signal counts, because they change with the
+  network and the ID must survive a reload. The row constants are declared
+  before phase 1, which renders them; a `const` lower in the file would still
+  be in its temporal dead zone.
+- Node runs the pure functions and a fake-DOM harness
+  (`tests/test_fingerprint_consistency.py`), which skips without node;
+  `test_page.py` pins the exports, the labels and the `#page-data` contract
+  without node.
+
 #### MCP endpoint
 
 `mcp_server.py`:
@@ -680,7 +718,7 @@ whatismyip/
 │   ├── css/whatismyip.css  # design tokens + layout (dark only); jsoneditor.css is vendored
 │   ├── js/app.js           # search, copy, accordions, WHOIS fill-in, subdomain panel, lazy JSONEditor
 │   ├── js/map.js           # paints the server's map payload, with the attribution
-│   ├── js/fingerprint.js   # self page's browser fingerprint, client-side only; the active probes wait for the panel's first opening
+│   ├── js/fingerprint.js   # self page's browser fingerprint + clock/languages vs address rows, client-side only; the active probes wait for the panel's first opening
 │   ├── js/webrtc.js        # opt-in WebRTC leak test (one STUN request from the browser)
 │   ├── js/jsoneditor.min.js # vendored, loaded only when the Raw JSON panel opens
 │   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs): per face a -latin, an -extended-a and a -cyrillic-greek file behind unicode-range
@@ -966,9 +1004,10 @@ and importing `main` makes no network call. The suite runs offline, and
 - A test that genuinely needs the network is marked `@pytest.mark.network`. It
   is skipped unless `RUN_NETWORK_TESTS=1`, and then runs with neither layer in
   place. No test needs it today.
-- `test_webrtc_leak.py`, `test_map_pin.py`, `test_fingerprint_probes.py` and
-  `test_boot.py` run node and a fresh interpreter as subprocesses, outside the
-  guard. The node tests skip when `node` is not installed.
+- `test_webrtc_leak.py`, `test_map_pin.py`, `test_fingerprint_probes.py`,
+  `test_fingerprint_consistency.py` and `test_boot.py` run node and a fresh
+  interpreter as subprocesses, outside the guard. The node tests skip when
+  `node` is not installed.
 
 Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
@@ -1002,7 +1041,8 @@ Test files:
   `test_map_pin.py` (map.js's approximate pin and its page wiring, run in
   node), `test_fingerprint_probes.py` (the active fingerprint probes wait for
   the panel's first opening, and a click on its header reads the canvas
-  inside the click, the only moment Firefox's resistFingerprinting asks)
+  inside the click, the only moment Firefox's resistFingerprinting asks),
+  `test_fingerprint_consistency.py` (clock and languages vs address, in node)
 - Lookup behaviour: `test_classify_target.py` (refused before any network
   work), `test_ipv6.py` (IPv6 literals, AAAA, the gating A query's log level),
   `test_dns_status.py` (a failed

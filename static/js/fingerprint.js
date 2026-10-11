@@ -5,12 +5,140 @@
 // No dependencies, no storage. Mirrors the map.js pattern: server renders empty
 // placeholders, this paints them. Two phases: the passive signals on load, the
 // active probes only once the visitor opens the panel.
+//
+// The first two rows of the signal table compare this browser's clock and
+// languages with the address the page was served to, whose GeoIP record is in
+// #page-data. The comparison is plain functions, run in node by
+// tests/test_fingerprint_consistency.py; the DOM wiring after them only runs
+// in a page.
 (function () {
+  // ---- Clock and languages against the address (pure) --------------------
+
+  // The engine's own name for `zone`, so that two spellings of one zone are
+  // equal: V8 answers "Asia/Calcutta" for the clock of a browser in India,
+  // while GeoLite2 writes "Asia/Kolkata", and "Etc/UTC" and "GMT" both become
+  // "UTC". null when the engine does not know the zone.
+  function canonicalZone(zone) {
+    if (typeof zone !== "string" || !zone) return null;
+    try {
+      return new Intl.DateTimeFormat("en-US", { timeZone: zone }).resolvedOptions().timeZone;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  // Minutes east of UTC that `zone` keeps at `now`, from the engine's tables:
+  // "GMT+5:30" is 330, "GMT-2:30" is -150, "GMT" alone is 0. null when the
+  // engine does not know the zone or cannot write a short offset.
+  function zoneOffsetMinutes(zone, now) {
+    let text;
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: zone,
+        timeZoneName: "shortOffset",
+      }).formatToParts(now);
+      const part = parts.find((p) => p.type === "timeZoneName");
+      text = part ? part.value : "";
+    } catch (_e) {
+      return null;
+    }
+    if (text === "GMT" || text === "UTC") return 0;
+    const match = /^(?:GMT|UTC)([+-])(\d{1,2})(?::(\d{2}))?$/.exec(text);
+    if (!match) return null;
+    const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
+    return match[1] === "-" ? -minutes : minutes;
+  }
+
+  // `browserZone` and `browserOffsetMin` (minutes east of UTC) are what this
+  // browser reports; `ipZone` and `precision` are the address's GeoIP record.
+  // "same" when both clocks are in one zone, "differs" with the difference
+  // (`diff_min`, positive when the clock runs ahead of the address), and
+  // "not_comparable" with a reason when a comparison would mislead: no zone
+  // for the address, a location only known to the country (GeoLite2's zone
+  // for a 1000 km centroid says nothing about a clock), a browser that
+  // reports UTC, or a zone this engine does not know.
+  function compareZones(browserZone, browserOffsetMin, ipZone, precision, now) {
+    const result = {
+      verdict: "not_comparable",
+      reason: null,
+      browser_zone: browserZone || null,
+      ip_zone: ipZone || null,
+      browser_offset_min: Number.isFinite(browserOffsetMin) ? browserOffsetMin : null,
+      ip_offset_min: null,
+      diff_min: null,
+    };
+    if (!browserZone) return { ...result, reason: "no browser time zone" };
+    if (!ipZone) return { ...result, reason: "no time zone for this address" };
+    if (precision !== "city") return { ...result, reason: "country-level location" };
+    const browser = canonicalZone(browserZone);
+    if (browser === "UTC") return { ...result, reason: "browser reports UTC" };
+    const ip = canonicalZone(ipZone);
+    const ipOffset = zoneOffsetMinutes(ipZone, now);
+    if (ip === null || ipOffset === null) {
+      return { ...result, reason: "time zone not recognised by this browser" };
+    }
+    result.ip_offset_min = ipOffset;
+    if (browser !== null && browser === ip) return { ...result, verdict: "same" };
+    const diff = result.browser_offset_min === null ? null : result.browser_offset_min - ipOffset;
+    return { ...result, verdict: "differs", diff_min: diff };
+  }
+
+  // The region subtag of a BCP 47 tag: "ko-KR" and "zh-Hant-TW" name a
+  // country, "en" and "es-419" (a UN M.49 area, never an ISO code) do not.
+  const REGION = /^[a-z]{2,8}(?:-[a-z]{4})?-([a-z]{2})(?:-|$)/i;
+
+  // `languages` is navigator.languages (or navigator.language); `countryCode`
+  // the address's ISO code. "same" when any listed language names that
+  // country, "differs" when the languages name only other countries, and
+  // "not_comparable" when no language names a country at all or the address
+  // has none ("--" is managers.NO_COUNTRY).
+  function compareLanguages(languages, countryCode) {
+    const tags = Array.isArray(languages) ? languages : languages ? [languages] : [];
+    const regions = [];
+    const named = [];
+    for (const tag of tags) {
+      const match = REGION.exec(String(tag || "").trim());
+      if (match) {
+        regions.push(match[1].toUpperCase());
+        named.push(String(tag).trim());
+      }
+    }
+    const country = typeof countryCode === "string" ? countryCode.trim().toUpperCase() : "";
+    const result = {
+      verdict: "not_comparable",
+      reason: null,
+      regions: [...new Set(regions)],
+      country_code: /^[A-Z]{2}$/.test(country) ? country : null,
+      match: null,
+    };
+    if (result.country_code === null) return { ...result, reason: "no country for this address" };
+    if (!regions.length) return { ...result, reason: "no country in your languages" };
+    const index = regions.indexOf(country);
+    if (index !== -1) return { ...result, verdict: "same", match: named[index] };
+    return { ...result, verdict: "differs" };
+  }
+
+  if (typeof module === "object" && module.exports) {
+    module.exports = { canonicalZone, zoneOffsetMinutes, compareZones, compareLanguages };
+  }
+  if (typeof document === "undefined") {
+    return;
+  }
+
   const panel = document.getElementById("acc-fingerprint");
   if (!panel) return; // lookup page, or not the self view — do nothing.
 
   const DASH = "—";
   const tbody = document.getElementById("fp-signals");
+  // The wording of the two comparison rows is a hint, not a verdict: a clock
+  // or a language that does not match the address is what a VPN or a proxy
+  // looks like, and also what a traveller, an expat or a deliberate
+  // English-and-UTC setup looks like. Declared before phase 1, which renders
+  // the rows: a const below it would still be in its temporal dead zone.
+  const CLOCK_NOTICE = "a VPN, proxy or travelling device, and any site can notice it too";
+  const LANGUAGE_NOTICE =
+    "a VPN, proxy or travelling device, or a language chosen on purpose, and any site can notice it too";
+  const TONES = { same: "success", differs: "warning" };
 
   // {label, value, bits}. bits count only when the signal was actually read,
   // so a browser that blocks canvas/WebGL honestly scores lower.
@@ -44,10 +172,22 @@
   // ---- Phase 1: passive signals (synchronous) ----------------------------
   const nav = navigator;
 
-  add("Languages", safe(() => (nav.languages || [nav.language]).join(", ")), 3);
-  add("Time zone", safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone), 3);
+  const languages = safe(() => nav.languages || [nav.language]);
+  add("Languages", languages ? languages.join(", ") : null, 3);
+  const browserZone = safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+  add("Time zone", browserZone, 3);
   const offset = safe(() => -new Date().getTimezoneOffset());
   add("UTC offset", offset != null ? (offset >= 0 ? "+" : "") + offset + " min" : null, 0, false);
+
+  // The address's side: the GeoIP record this page was rendered from, which
+  // render_page embeds as #page-data. Compared here and shown here. These two
+  // rows are not signals: they change with the network, so they stay out of
+  // `signals`, and so out of the UNIQUE ID, the bit count and the signal count.
+  const location = safe(() => JSON.parse(document.getElementById("page-data").textContent).location) || {};
+  const consistency = [
+    zoneRow(safe(() => compareZones(browserZone, offset, location.time_zone, location.precision, new Date()))),
+    languageRow(safe(() => compareLanguages(languages, location.country_code))),
+  ];
 
   add("Resolution", safe(() => screen.width + "×" + screen.height), 4);
   add("Available", safe(() => screen.availWidth + "×" + screen.availHeight), 0, false);
@@ -172,16 +312,68 @@
   function renderSignals() {
     if (!tbody) return;
     tbody.textContent = "";
-    for (const s of signals) {
-      const tr = document.createElement("tr");
-      const label = document.createElement("td");
-      label.textContent = s.label;
-      const value = document.createElement("td");
-      value.colSpan = 3;
-      value.textContent = s.value;
-      tr.append(label, value);
-      tbody.append(tr);
+    for (const c of consistency) tbody.append(row(c.label, c.value, c.tone));
+    for (const s of signals) tbody.append(row(s.label, s.value, null));
+  }
+
+  function row(label, text, tone) {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = label;
+    const value = document.createElement("td");
+    value.colSpan = 3;
+    if (tone) value.className = "tone-" + tone;
+    value.textContent = text;
+    tr.append(name, value);
+    return tr;
+  }
+
+  function zoneRow(r) {
+    if (!r) return { label: "Clock vs address", value: "not comparable: could not read the clock", tone: "muted" };
+    let text;
+    if (r.verdict === "same") {
+      text = "same: your clock and the address are both on " + r.ip_zone;
+    } else if (r.verdict === "differs") {
+      text =
+        "differs: your clock is on " + r.browser_zone + " (" + utcLabel(r.browser_offset_min) + "), " +
+        "the address is on " + r.ip_zone + " (" + utcLabel(r.ip_offset_min) + "), " +
+        aheadOrBehind(r.diff_min) + " — " + CLOCK_NOTICE;
+    } else {
+      text = "not comparable: " + r.reason;
     }
+    return { label: "Clock vs address", value: text, tone: TONES[r.verdict] || "muted" };
+  }
+
+  function languageRow(r) {
+    if (!r) return { label: "Languages vs address", value: "not comparable: could not read the languages", tone: "muted" };
+    let text;
+    if (r.verdict === "same") {
+      text = "same: " + r.match + " names " + r.country_code + ", where the address is";
+    } else if (r.verdict === "differs") {
+      text =
+        "differs: your languages name " + r.regions.join(", ") + ", the address is in " +
+        r.country_code + " — " + LANGUAGE_NOTICE;
+    } else {
+      text = "not comparable: " + r.reason;
+    }
+    return { label: "Languages vs address", value: text, tone: TONES[r.verdict] || "muted" };
+  }
+
+  function utcLabel(minutes) {
+    if (minutes === null || minutes === undefined) return "UTC offset unknown";
+    const sign = minutes < 0 ? "-" : "+";
+    const hours = Math.floor(Math.abs(minutes) / 60);
+    const rest = Math.abs(minutes) % 60;
+    return "UTC" + sign + hours + (rest ? ":" + String(rest).padStart(2, "0") : "");
+  }
+
+  function aheadOrBehind(diff) {
+    if (diff === null || diff === undefined) return "offset difference unknown";
+    if (diff === 0) return "the same UTC offset";
+    const hours = Math.floor(Math.abs(diff) / 60);
+    const rest = Math.abs(diff) % 60;
+    const span = (hours ? hours + " h" : "") + (hours && rest ? " " : "") + (rest ? rest + " min" : "");
+    return span + (diff > 0 ? " ahead of" : " behind") + " the address";
   }
 
   function canvasFingerprint() {
