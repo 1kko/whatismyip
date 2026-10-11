@@ -875,6 +875,11 @@ The app distrusts `X-Forwarded-For` and `X-Real-IP` by default.
   digest.
 - `.github/dependabot.yml` raises weekly PRs across GitHub Actions,
   pip, and Docker ecosystems, so pinned SHAs and digests stay fresh.
+  pip's minor and patch bumps arrive as one grouped PR on Mondays (the
+  OTel packages, majors included, in a group of their own); any other
+  major bump comes as a PR of its own, so it is reviewed on its own.
+  Security updates are never grouped, so a fix does not wait on a
+  bundle that another bump broke.
 
 ## Support
 

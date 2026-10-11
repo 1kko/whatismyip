@@ -523,7 +523,8 @@ whatismyip/
 │   ├── images/          # README screenshots
 │   └── ops/             # alerts.md (healthz probe, SigNoz alerts), mcp-directories.md
 ├── .github/
-│   ├── dependabot.yml   # weekly: GitHub Actions, pip, Docker
+│   ├── dependabot.yml   # Mondays: pip as otel + minor-and-patch groups, other majors alone;
+│   │                    # GitHub Actions one group, Docker ungrouped
 │   └── workflows/       # ci, deploy, healthz-probe, mcp-publish, security-audit
 ├── data/                # Volume mount for persistent data (Docker); gitignored contents:
 │                        # GeoLite2 mmdbs, tld/, reputation/, subdomains.sqlite3, bans/rules
@@ -717,6 +718,18 @@ A single stage on `python:3.12-slim`, pinned by digest:
 - `mcp-publish.yml`: publishes `server.json` to the MCP Registry, by hand only
 - `security-audit.yml`: a weekly pip-audit that opens or updates a
   `security-audit` issue when it finds something
+- `dependabot.yml`: version updates once a week, on Monday, beside the
+  `security-audit.yml` run. pip comes as at most two grouped PRs, `otel`
+  (every `opentelemetry-*` bump) and `minor-and-patch` (every other minor or
+  patch bump), and each remaining major as a PR of its own; GitHub Actions as
+  one group; Docker ungrouped. Security updates are never grouped. The pip
+  groups stay in that order: Dependabot puts a dependency in the first group
+  it matches, and `tests/test_dependabot_config.py` pins it. A bundle that
+  bumps whoisit can go red on
+  `test_rdap.py::TestBootstrapRefresh::test_the_registry_fetch_retries_no_more_than_a_query`:
+  `rdap._configure_whoisit` replaces whoisit's private `_bootstrap.session`,
+  and a release that renames it fails that test. Take whoisit out of the
+  bundle and fix `_configure_whoisit` in a PR of its own
 
 ### Testing Strategy
 
@@ -816,7 +829,9 @@ Test files:
   `test_mcp_manual_ban.py` (only a manual ban applies), `test_mcp_registry.py`
   (`server.json`, its publish workflow, the page's tool list)
 - Ops: `test_healthz_degraded.py` (`degraded` and its reasons,
-  `healthcheck.py`), `test_deploy_version.py` (`/healthz` `version`)
+  `healthcheck.py`), `test_deploy_version.py` (`/healthz` `version`),
+  `test_dependabot_config.py` (the pip groups and their order, security
+  updates left ungrouped, the Monday schedule next to `security-audit.yml`)
 
 ## Commit Conventions
 - Never include Claude session URLs or metadata in commit messages.
