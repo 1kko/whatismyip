@@ -669,7 +669,7 @@ whatismyip/
 ├── server.json          # official MCP Registry entry (see mcp-publish.yml)
 ├── scripts/
 │   ├── build_gazetteer.py  # regenerates static/geo/*.json from GeoNames
-│   └── fetch_fonts.sh      # vendors Inter + JetBrains Mono into static/fonts/
+│   └── fetch_fonts.sh      # vendors Inter + JetBrains Mono into static/fonts/ as pyftsubset subsets (uvx; not a dependency)
 ├── templates/
 │   ├── browser.html     # server-rendered lookup page (no client-side templating)
 │   ├── error.html       # 400/403/429/503 page for browsers, same status as the JSON
@@ -683,7 +683,7 @@ whatismyip/
 │   ├── js/fingerprint.js   # self page's browser fingerprint, computed and kept client-side
 │   ├── js/webrtc.js        # opt-in WebRTC leak test (one STUN request from the browser)
 │   ├── js/jsoneditor.min.js # vendored, loaded only when the Raw JSON panel opens
-│   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs)
+│   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs): per face a -latin, an -extended-a and a -cyrillic-greek file behind unicode-range
 │   ├── image/, favicons    # logo (also og:image), icons, web manifest
 │   └── geo/                # cities.json, countries.json (generated, committed)
 ├── tests/                  # see Testing Strategy for each file
@@ -988,8 +988,9 @@ Test files:
   per run, what the per-test reset covers, no reset by hand)
 - Endpoints and pages: `test_basic.py` (smoke tests, `/healthz`, refresh
   retries, boot fetch), `test_page.py` (API + HTML, map payload, DNS rows,
-  security headers, fingerprint panel, `?subdomains=`, lookup links),
-  `test_negotiation.py` (`?format=`/Accept/user-agent), `test_text_format.py`
+  security headers, fingerprint panel, `?subdomains=`, lookup links, the font
+  subsets and preloads), `test_negotiation.py`
+  (`?format=`/Accept/user-agent), `test_text_format.py`
   (`?format=text`, `?fields=`), `test_error_pages.py` (`error.html` for browsers),
   `test_open_graph.py` (link previews), `test_privacy_page.py` (`/privacy`),
   `test_robots_head.py` (`/robots.txt`, `/favicon.ico`, HEAD and the

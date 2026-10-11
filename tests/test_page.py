@@ -1,6 +1,8 @@
 import copy
+import io
 import json
 import re
+import tokenize
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -14,6 +16,131 @@ from main import app, build_map_payload, normalize_lookup_target
 from main import _is_route
 
 CSS = Path("static/css/whatismyip.css")
+
+# The @font-face blocks, their url() sources and unicode-range, and the
+# <link rel="preload"> font hrefs in the three templates. Font loading itself
+# is the browser's; these tests pin what the CSS and the templates ask it to do.
+FONT_FACE = re.compile(r"@font-face\s*\{([^}]*)\}")
+FONT_SRC = re.compile(r"url\(['\"]?(/static/fonts/[^'\")]+)")
+FONT_PRELOAD = re.compile(r'<link rel="preload" href="(/static/fonts/[^"]+)" as="font"')
+UNICODE_RANGE = re.compile(r"unicode-range:\s*([^;]+);")
+# scripts/fetch_fonts.sh cuts every face into these three files; the suffix
+# names the variable in the script whose ranges the file holds.
+FONT_SUBSETS = {
+    "-latin.woff2": "LATIN",
+    "-extended-a.woff2": "EXTENDED_A",
+    "-cyrillic-greek.woff2": "CYRILLIC_GREEK",
+}
+# Each cut's four files together, in bytes, as scripts/fetch_fonts.sh left
+# them (fonttools 4.66.1); the unsubsetted four were 632,700.
+LATIN_BYTES = 208_600
+EXTENDED_A_BYTES = 61_256
+CYRILLIC_GREEK_BYTES = 91_516
+TEMPLATES = [
+    Path("templates/browser.html"),
+    Path("templates/error.html"),
+    Path("templates/privacy.html"),
+]
+# What the page writes itself, as opposed to the data it shows: the templates,
+# the view model and main.py that fill them, and the scripts and stylesheet
+# that write text of their own.
+PAGE_SOURCES = [
+    *sorted(Path("templates").glob("*.html")),
+    Path("viewmodel.py"),
+    Path("main.py"),
+    Path("static/js/app.js"),
+    Path("static/js/map.js"),
+    Path("static/js/fingerprint.js"),
+    Path("static/js/webrtc.js"),
+    CSS,
+]
+# A WOFF2 table directory names a known table by its index in the format's
+# list of known tags. These are the indices the font tests read.
+WOFF2_TAGS = {10: "glyf", 11: "loca", 27: "GPOS", 28: "GSUB", 47: "fvar", 48: "gvar"}
+
+
+def _page_text(path):
+    """What `path` can put on a page: the file without its comments, which no
+    page draws (static/js/app.js's comments quote a full-width digit and a
+    Hangul TLD), so LATIN never claims a glyph the fonts lack."""
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".py":
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        return " ".join(t.string for t in tokens if t.type != tokenize.COMMENT)
+    if path.suffix == ".html":
+        return re.sub(r"\{#.*?#\}|<!--.*?-->", "", text, flags=re.S)
+    if path.suffix == ".css":
+        return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    # The four scripts write whole-line // comments only, no /* */ blocks.
+    return re.sub(r"^\s*//.*$", "", text, flags=re.M)
+
+
+def _codepoints(ranges):
+    """'U+0000-00FF, U+0131' -> [(0x0, 0xFF), (0x131, 0x131)], sorted."""
+    pairs = []
+    for item in ranges.split(","):
+        first, _, last = item.strip().removeprefix("U+").partition("-")
+        pairs.append((int(first, 16), int(last or first, 16)))
+    return sorted(pairs)
+
+
+def _block_codepoints(block):
+    declared = UNICODE_RANGE.search(block)
+    assert declared, f"no unicode-range in {block!r}"
+    return _codepoints(declared.group(1))
+
+
+def _covers(pairs, char):
+    return any(first <= ord(char) <= last for first, last in pairs)
+
+
+def _subset(source):
+    """Which of the script's three cuts a font file is: LATIN, EXTENDED_A
+    or CYRILLIC_GREEK."""
+    names = [name for suffix, name in FONT_SUBSETS.items() if source.endswith(suffix)]
+    assert len(names) == 1, source
+    return names[0]
+
+
+def _base128(data, offset):
+    """WOFF2's UIntBase128: seven bits a byte, the high bit set on every byte
+    but the last. Returns the value and the offset after it."""
+    value = 0
+    for _ in range(5):
+        byte = data[offset]
+        offset += 1
+        value = (value << 7) | (byte & 0x7F)
+        if not byte & 0x80:
+            return value, offset
+    raise ValueError("UIntBase128 longer than five bytes")
+
+
+def _woff2_tables(path):
+    """The table tags of a WOFF2 file, read without brotli: the table
+    directory follows the 48-byte header uncompressed. Each entry is a flags
+    byte (low six bits: an index into the known tags, 63 for a literal tag
+    that follows; high two: the transform), the original length, and the
+    transformed length only when the table is transformed."""
+    data = path.read_bytes()
+    assert data[:4] == b"wOF2", path
+    count = int.from_bytes(data[12:14], "big")
+    offset, tags = 48, set()
+    for _ in range(count):
+        flags = data[offset]
+        offset += 1
+        index, transform = flags & 0x3F, flags >> 6
+        if index == 63:
+            tag = data[offset : offset + 4].decode("ascii")
+            offset += 4
+        else:
+            tag = WOFF2_TAGS.get(index, f"#{index}")
+        tags.add(tag)
+        _, offset = _base128(data, offset)  # origLength
+        null_transform = 3 if tag in ("glyf", "loca") else 0
+        if transform != null_transform:
+            _, offset = _base128(data, offset)  # transformLength
+    return tags
+
 
 REQUIRED_TOKENS = {
     "--bg": "#0B0D12",
@@ -1139,6 +1266,125 @@ class TestDesignTokens:
 
     def test_no_light_mode_branch(self):
         assert "prefers-color-scheme" not in CSS.read_text(encoding="utf-8")
+
+    def test_every_font_face_block_declares_a_unicode_range(self):
+        """Four faces, each split into a Latin file, a Latin Extended-A file
+        and a Cyrillic+Greek file (scripts/fetch_fonts.sh). unicode-range is
+        what lets the browser skip the last two, so a block without it would
+        be fetched by every page."""
+        blocks = FONT_FACE.findall(CSS.read_text(encoding="utf-8"))
+        assert len(blocks) == 12
+        for block in blocks:
+            assert "unicode-range:" in block, block
+
+    def test_only_the_latin_files_cover_ascii(self):
+        """A block whose range covers "A" is downloaded by every page, so
+        exactly the -latin files may cover it. Exactly the -extended-a files
+        cover the Latin Extended-A letters of Polish, Czech, Turkish and
+        Romanian names ("Łódź", "Plzeň", "İzmir", "A.Ş.", "Constanța"), and
+        exactly the -cyrillic-greek files cover Cyrillic and Greek text (a
+        registrant such as "Яндекс", a city such as "Αθήνα"). This is the CSS
+        side of "only a page with such text fetches more"."""
+        samples = {
+            "EXTENDED_A": ("ŁźňİŞț",),
+            "CYRILLIC_GREEK": ("Яндекс", "Αθήνα"),
+        }
+        for block in FONT_FACE.findall(CSS.read_text(encoding="utf-8")):
+            source = FONT_SRC.search(block).group(1)
+            subset = _subset(source)
+            pairs = _block_codepoints(block)
+            assert _covers(pairs, "A") == (subset == "LATIN"), source
+            for name, texts in samples.items():
+                for text in texts:
+                    covered = all(_covers(pairs, char) for char in text)
+                    assert covered == (subset == name), (source, text)
+
+    def test_the_css_ranges_are_the_ones_the_script_cuts(self):
+        """unicode-range tells the browser what a file holds. A range the
+        script did not cut sends a character to a file without its glyph, and
+        a glyph the CSS does not claim is never drawn, so every block repeats
+        LATIN, EXTENDED_A or CYRILLIC_GREEK from scripts/fetch_fonts.sh."""
+        script = Path("scripts/fetch_fonts.sh").read_text(encoding="utf-8")
+        cut = {}
+        for name in FONT_SUBSETS.values():
+            assigned = re.search(rf'^{name}="([^"]+)"$', script, re.MULTILINE)
+            assert assigned, f"no {name}= in scripts/fetch_fonts.sh"
+            cut[name] = _codepoints(assigned.group(1))
+        for block in FONT_FACE.findall(CSS.read_text(encoding="utf-8")):
+            source = FONT_SRC.search(block).group(1)
+            assert _block_codepoints(block) == cut[_subset(source)], source
+
+    def test_every_character_the_page_writes_is_in_the_latin_files(self):
+        """Google Fonts' latin range stops short of four characters the page
+        writes itself, all of them in the fonts (Inter lacks only "▸"): "→" in
+        viewmodel._tags' "A → ip" and the WHOIS hint's years, "≈" in the map's
+        distance label and the fingerprint panel, fingerprint.js's "∞" and the
+        accordion marker "▸". LATIN adds them; without them each would be drawn
+        in a fallback font on every page. Comments are left out (_page_text),
+        since no page draws them. A new character the page does draw outside
+        the range fails here: add it to LATIN in scripts/fetch_fonts.sh and to
+        the -latin unicode-range, then re-run the script."""
+        latin = [
+            _block_codepoints(block)
+            for block in FONT_FACE.findall(CSS.read_text(encoding="utf-8"))
+            if _subset(FONT_SRC.search(block).group(1)) == "LATIN"
+        ]
+        assert len(latin) == 4
+        missing = sorted(
+            f"U+{ord(char):04X} {char} in {path}"
+            for path in PAGE_SOURCES
+            for char in set(_page_text(path))
+            if ord(char) > 0x7F and not all(_covers(pairs, char) for pairs in latin)
+        )
+        assert not missing, missing
+
+    def test_the_subsets_fit_their_measured_sizes(self):
+        """Backlog #14's acceptance test: a Latin-only first visit downloads
+        the four -latin files, LATIN_BYTES as measured when they were cut,
+        down from 632,700 B unsubsetted. The other two cuts are fetched only
+        for such text, and stay at their measured totals too. Each budget is
+        the measured total plus 2%, room for a fonttools release to shift a
+        few hundred bytes but not for a range or a flag to slip. Sizes only:
+        fonttools is a maintainer tool (scripts/fetch_fonts.sh) and never runs
+        in the suite."""
+        measured = {
+            "LATIN": LATIN_BYTES,
+            "EXTENDED_A": EXTENDED_A_BYTES,
+            "CYRILLIC_GREEK": CYRILLIC_GREEK_BYTES,
+        }
+        totals = dict.fromkeys(measured, 0)
+        counts = dict.fromkeys(measured, 0)
+        for source in FONT_SRC.findall(CSS.read_text(encoding="utf-8")):
+            totals[_subset(source)] += Path(source.lstrip("/")).stat().st_size
+            counts[_subset(source)] += 1
+        assert counts == dict.fromkeys(measured, 4)
+        for name, size in measured.items():
+            assert totals[name] <= size * 1.02, (name, totals[name])
+
+    def test_the_subsets_keep_the_variable_and_layout_tables(self):
+        """pyftsubset keeps the variation tables by default and, with
+        --layout-features='*', all of GSUB (Inter's tabular figures and
+        alternates, JetBrains Mono's ligatures) and GPOS (kerning, marks). A
+        file regenerated without them still loads, so only this notices; fvar
+        and gvar carry Inter's opsz and wght axes. The axis tags themselves sit
+        in the compressed fvar table, which only fonttools reads (ttx -t fvar)."""
+        for source in FONT_SRC.findall(CSS.read_text(encoding="utf-8")):
+            tables = _woff2_tables(Path(source.lstrip("/")))
+            assert {"GSUB", "GPOS"} <= tables, (source, sorted(tables))
+            if "/InterVariable" in source:
+                assert {"fvar", "gvar"} <= tables, (source, sorted(tables))
+
+    def test_every_preloaded_font_is_a_css_source_that_exists(self):
+        """A preload of a file the CSS no longer names is a wasted request and
+        a console warning; a preload of a missing file is a 404 on every page.
+        The fonts were renamed once already (the subsets)."""
+        sources = set(FONT_SRC.findall(CSS.read_text(encoding="utf-8")))
+        for template in TEMPLATES:
+            preloads = FONT_PRELOAD.findall(template.read_text(encoding="utf-8"))
+            assert preloads, template
+            for href in preloads:
+                assert href in sources, (template, href)
+                assert Path(href.lstrip("/")).is_file(), href
 
 
 def _media_blocks(css, query):

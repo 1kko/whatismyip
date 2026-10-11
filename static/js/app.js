@@ -13,7 +13,9 @@ function normalizeLookupTarget(raw) {
   // Mirror lookup.canonical_hostname: normalize IDNA's three alternate dots,
   // lower case, remove one root dot, and encode a non-ASCII label with the
   // browser's UTS 46 URL parser. Invalid boundaries and lengths stay as typed.
-  let name = host.toLowerCase().replace(/[。．｡]/g, ".");
+  // The dots (。 ． ｡) are escaped, not typed: no page draws them, and
+  // tests/test_page.py reads this code for characters the Latin fonts need.
+  let name = host.toLowerCase().replace(/[\u3002\uFF0E\uFF61]/g, ".");
   let labels = name.split(".");
   if (labels[labels.length - 1] === "") {
     labels.pop();

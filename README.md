@@ -255,14 +255,30 @@ Both are committed, so this is only needed when refreshing them:
 
 ```bash
 poetry run python scripts/build_gazetteer.py   # static/geo/*.json from GeoNames
-./scripts/fetch_fonts.sh                       # static/fonts/*.woff2
+./scripts/fetch_fonts.sh                       # static/fonts/*-latin.woff2, *-extended-a.woff2, *-cyrillic-greek.woff2
 ```
 
 The Content-Security-Policy is `default-src 'self'`, so fonts must be
-self-hosted. Map tiles come from the single allowlisted host
-`tile.openstreetmap.org`: the browser fetches them directly (no API key, no
-proxy), which means visitor IPs reach OSM — `/privacy` says so, and
-`© OpenStreetMap contributors` attribution is required.
+self-hosted. `fetch_fonts.sh` downloads Inter and JetBrains Mono from their
+GitHub releases and cuts each face into three files with `pyftsubset`
+(fonttools, run through `uvx`, so it needs `uv` but is not a project
+dependency): a Latin subset (Google Fonts' `latin` range plus the four symbols
+the page writes itself, → ≈ ∞ ▸) that every page loads, 208,600 B for the four
+faces instead of 632,700 B unsubsetted; a Latin Extended-A subset (U+0100-017F
+and U+0218-021B, for names such as Łódź, Plzeň, İzmir or A.Ş.); and a
+Cyrillic+Greek subset. `unicode-range` in `static/css/whatismyip.css` makes the
+browser fetch the last two only when such text is on the page. Characters
+outside all three ranges (cyrillic-ext, greek-ext, Vietnamese) fall back to the
+system fonts, as CJK always has. The test suite only checks the committed
+files (`tests/test_page.py::TestDesignTokens`) and never runs fonttools; it
+fails when the page starts writing a character outside the Latin range, which
+then goes into `LATIN` in the script and into the CSS before the script is run
+again, and when a cut outgrows its measured size.
+
+Map tiles come from the single allowlisted host `tile.openstreetmap.org`: the
+browser fetches them directly (no API key, no proxy), which means visitor IPs
+reach OSM — `/privacy` says so, and `© OpenStreetMap contributors` attribution
+is required.
 
 Coordinates for the map come from GeoLite2-City. The GeoNames gazetteer above
 covers addresses it gives no coordinates for, and the window before the first
