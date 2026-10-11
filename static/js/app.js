@@ -332,10 +332,13 @@ function whoisTable(rows) {
   return table;
 }
 
+// A hint is one line with an ellipsis on a narrow screen (.hint in
+// whatismyip.css), so its title carries the full text wherever it is written.
 function setWhoisHint(text) {
   const hint = document.getElementById("hint-whois");
   if (hint) {
     hint.textContent = text;
+    hint.title = text;
   }
 }
 
@@ -418,6 +421,7 @@ let subdomainsBooted = false;
 function setSubdomainHint(text) {
   if (subdomainHint) {
     subdomainHint.textContent = text;
+    subdomainHint.title = text;
   }
 }
 

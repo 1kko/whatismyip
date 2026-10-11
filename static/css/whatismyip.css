@@ -377,8 +377,21 @@ body {
   transform: rotate(90deg);
   color: var(--accent);
 }
-.accordion__title { flex: 1; }
-.hint { font-size: 12px; font-weight: 400; color: var(--text-muted); }
+/* One line each at 390px: the title never wraps, and a hint that does not fit
+   ("A 0 · AAAA 0 · MX 0 · NS 0 · TXT 0" beside "DNS records") truncates with
+   an ellipsis. The cut is visual only: the DOM text stays whole for a screen
+   reader, and the span's title attribute repeats it on hover; on a phone,
+   opening the accordion shows it all. */
+.accordion__title { flex: 1; white-space: nowrap; }
+.hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
 .accordion__body {
   padding: 16px 18px 18px;
   border-top: 1px solid var(--border);

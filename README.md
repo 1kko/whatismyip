@@ -132,6 +132,8 @@ RDAP registration data and the full TLS certificate, expanded.
   filter are 16px, so iOS Safari does not zoom in when one takes focus (the
   viewport keeps pinch-zoom on), and the `/` keyboard badge is hidden where
   there is no hover; the shortcut itself stays for an attached keyboard.
+  Accordion titles stay on one line; a hint that does not fit is cut with an
+  ellipsis and repeated whole in its `title`.
 - Self-hosted fonts and a `default-src 'self'` Content-Security-Policy with a
   per-request nonce. The single allowlisted remote origin is
   `tile.openstreetmap.org` in `img-src`. STUN is not a fetch and no CSP

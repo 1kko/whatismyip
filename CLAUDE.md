@@ -520,6 +520,13 @@ below by text:
   touch-first devices. The keydown handler in `app.js` stays, so an attached
   keyboard still has the shortcut. `_search.html` is one include, so
   `browser.html`, `error.html` and `privacy.html` all get the rule.
+- Accordion titles never wrap (`.accordion__title`), and a hint that does not
+  fit truncates with an ellipsis (`.hint`). The cut is visual: the DOM text
+  stays whole for a screen reader, and the span's `title` repeats it, so
+  everything that writes a hint writes `title` too — the template,
+  `app.js`'s `setWhoisHint` / `setSubdomainHint`, `fingerprint.js`'s
+  `setHint`. The 390px self page cuts the DNS hint
+  (`A 0 · AAAA 0 · MX 0 · NS 0 · TXT 0`); opening the accordion shows it all.
 
 #### MCP endpoint
 

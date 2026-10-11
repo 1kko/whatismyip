@@ -1088,6 +1088,75 @@ class TestMobileLayout:
             page = Path("templates", name).read_text(encoding="utf-8")
             assert '{% include "_search.html" %}' in page, name
 
+    def test_accordion_titles_stay_on_one_line(self):
+        css = CSS.read_text(encoding="utf-8")
+        assert re.search(r"\.accordion__title\s*\{[^}]*white-space:\s*nowrap", css)
+        hint = re.search(r"^\.hint\s*\{([^}]*)\}", css, re.M).group(1)
+        for declaration in (
+            "min-width: 0",
+            "overflow: hidden",
+            "text-overflow: ellipsis",
+            "white-space: nowrap",
+        ):
+            assert declaration in hint, declaration
+
+    def test_a_truncated_hint_keeps_its_full_text_in_title(self):
+        # The ellipsis is visual: the DOM text stays whole for a screen reader,
+        # and the span's title repeats it for a pointer's hover. Jinja escapes
+        # both the same way, so the two strings are equal as markup.
+        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        spans = re.findall(
+            r'<span class="hint" id="(hint-[a-z]+)" title="([^"]*)">([^<]*)</span>',
+            html,
+        )
+        assert {name for name, _, _ in spans} >= {
+            "hint-whois",
+            "hint-dns",
+            "hint-ssl",
+            "hint-geoip",
+            "hint-headers",
+            "hint-raw",
+        }
+        for name, title, text in spans:
+            assert title == text, name
+        self_page = client.get("/", headers=BROWSER_UA).text
+        assert (
+            '<span class="hint" id="fp-acc-hint" title="browser signals">'
+            "browser signals</span>" in self_page
+        )
+
+    def test_a_quote_in_a_hint_cannot_leave_its_title(self):
+        # A registrar name is third-party text, and the WHOIS hint prints it.
+        # Jinja escapes the attribute and the text the same way, so a quote
+        # cannot end title="..." early and the two stay equal as markup;
+        # app.js writes .title as a property, which needs no escaping.
+        registrar = 'Acme "Names" <b>&</b> Co\'s'
+        gathered = {**GATHERED, "whois": {"registrar": registrar}}
+        with patch("main.gather", new_callable=AsyncMock, return_value=gathered):
+            html = client.get("/example.com", headers=BROWSER_UA).text
+        escaped = "Acme &#34;Names&#34; &lt;b&gt;&amp;&lt;/b&gt; Co&#39;s"
+        assert (
+            f'<span class="hint" id="hint-whois" title="{escaped}">{escaped}</span>'
+            in html
+        )
+
+    def test_the_scripts_that_rewrite_a_hint_rewrite_its_title(self):
+        # app.js fills the WHOIS hint on the self page and the Subdomains hint
+        # when that panel opens; fingerprint.js fills the Fingerprint hint. No
+        # JS runtime here (see the fingerprint.js checks above), so by source
+        # text, the way tests/test_subdomain_panel.py pins app.js's wiring.
+        js = Path("static/js/app.js").read_text(encoding="utf-8")
+        for name, element in (
+            ("setWhoisHint", "hint"),
+            ("setSubdomainHint", "subdomainHint"),
+        ):
+            body = re.search(rf"^function {name}\(.*?^\}}$", js, re.M | re.S).group(0)
+            assert f"{element}.textContent = text" in body, name
+            assert f"{element}.title = text" in body, name
+        fp = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        assert 'setHint("fp-acc-hint"' in fp
+        assert "el.title = text" in fp
+
 
 # gather() is patched throughout this class. tests/test_page.py has no mocking
 # layer — every existing test here uses an IP target — and "/example.com" would
@@ -1387,7 +1456,10 @@ class TestSubdomainRegistration:
         with patch("lookup.lookup_rdap", lambda target: dict(self.RECORD)):
             html = client.get("/www.example.com", headers=BROWSER_UA).text
 
-        hint = 'id="hint-whois">registration of example.com · Example Registrar<'
+        hint = (
+            'id="hint-whois" title="registration of example.com · Example Registrar">'
+            "registration of example.com · Example Registrar<"
+        )
         assert hint in html
         assert '<td>Registration of</td><td colspan="3">example.com</td>' in html
         assert "not registered" not in html

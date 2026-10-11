@@ -182,7 +182,7 @@ def _accordion(html, name):
 
 
 def _hint(html, name):
-    return re.search(rf'id="hint-{name}">([^<]*)<', html).group(1)
+    return re.search(rf'id="hint-{name}"[^>]*>([^<]*)<', html).group(1)
 
 
 def _column(html, name):

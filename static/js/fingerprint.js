@@ -30,6 +30,15 @@
     const el = document.getElementById(id);
     if (el) el.textContent = text || DASH;
   };
+  // The accordion hint is one line with an ellipsis on a narrow screen (.hint
+  // in whatismyip.css), so its title carries the full text too.
+  const setHint = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.textContent = text;
+      el.title = text;
+    }
+  };
 
   // ---- Phase 1: passive signals (synchronous) ----------------------------
   const nav = navigator;
@@ -118,7 +127,7 @@
       }
       setText("fp-bits", "≈ " + bits + " bits");
       setText("fp-unique", "≈ 1 in " + formatCount(Math.pow(2, bits)) + " browsers");
-      setText("fp-acc-hint", signals.length + " signals · ≈ " + bits + " bits");
+      setHint("fp-acc-hint", signals.length + " signals · ≈ " + bits + " bits");
     } catch (_e) {
       // Phase 1 already painted; a phase-2 failure just leaves the ID blank.
       setText("fp-hash", DASH);
