@@ -1252,10 +1252,13 @@ class TestReputationLevelWording:
         "as_of": "2026-10-09T06:13:20Z",
     }
 
-    def _card(self, level, signals=()):
+    def _card(self, level, signals=(), score=0):
+        if level is None:
+            score = None
         return reputation_view(
             {
                 "level": level,
+                "score": score,
                 "signals": list(signals),
                 "checked": [] if level is None else [self.TOR, self.DATACENTER],
                 "unavailable": [],
@@ -1270,17 +1273,27 @@ class TestReputationLevelWording:
             "value": "No signals",
             "tone": "default",
         }
+        assert card["rows"][1] == {
+            "label": "Score",
+            "value": "0 of 100",
+            "tone": "default",
+        }
         assert card["summary"].startswith("Listed on 1 of the 2 lists checked")
+        assert card["hint"] == "0 · none · Datacenter"
 
     def test_no_list_read_is_still_unknown(self):
         card = self._card(None)
         assert card["rows"][0]["value"] == "Unknown"
         assert card["rows"][0]["tone"] == "muted"
+        assert card["rows"][1]["value"] == "Unknown"
+        assert "0" not in card["rows"][1]["value"]
 
     def test_graded_levels_are_unchanged(self):
-        card = self._card("medium", [dict(self.TOR, weight=50)])
+        card = self._card("medium", [dict(self.TOR, weight=50)], score=50)
         assert card["rows"][0]["value"] == "Medium"
         assert card["rows"][0]["tone"] == "warning"
+        assert card["rows"][1]["value"] == "50 of 100"
+        assert card["hint"] == "50 · medium · Tor exit"
 
 
 # --- forward-confirmed reverse DNS ---------------------------------------------------

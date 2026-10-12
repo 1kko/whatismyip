@@ -308,6 +308,9 @@ def compact_reputation(reputation: dict | None) -> dict | None:
     out: dict[str, Any] = {
         # none/low/medium/high, or null when no list could be checked at all.
         "level": reputation.get("level"),
+        # 0-100, 100 the most dangerous; null in that same unknown case. 0 is
+        # not safe. The weights grade() already sums, capped.
+        "score": reputation.get("score"),
         "signals": [
             {
                 "id": signal["id"],
@@ -449,8 +452,10 @@ async def lookup(target: str) -> dict[str, Any]:
     a `level` (none/low/medium/high) computed from those alone. Report it as
     "listed on X as of <date>", not as a verdict. A level of "none" means only
     that it is on none of the lists checked: never report that as safe, clean
-    or trustworthy. Lists under `could_not_check` were not consulted, and a
-    null level means none could be.
+    or trustworthy. `score` is 0-100, 100 the most dangerous: the same weights,
+    summed and capped. A score of 0 is the same case as "none": never report
+    that as safe either. Lists under `could_not_check` were not consulted, and
+    a null level or a null score means none could be.
 
     For an IP address given directly (not a domain's), `reputation.abuseipdb`
     adds AbuseIPDB's abuse confidence (0-100) and how many reports, from how
@@ -827,7 +832,9 @@ whoami_caller.__doc__ = (
     "Usually you cannot tell from here which case you are in; when the address "
     "is on a datacenter list, the note says it is likely a hosted client. If the "
     "user needs certainty, have them open https://ip.1kko.com in a browser. "
-    '`reputation` is as in `lookup`: "none" is never "safe". It has no AbuseIPDB '
+    '`reputation` is as in `lookup`: "none" is never "safe", and `score` is '
+    "0-100 with 100 the most dangerous (0 is not safe, null means unknown). "
+    "It has no AbuseIPDB "
     "part: the caller's own address is not sent to anyone. `geo` is graded as in "
     '`lookup`: at `precision` "country" only the country is reliable, and the '
     "coordinates and time zone are null."

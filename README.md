@@ -614,6 +614,7 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `cert_age_days` | whole days since the certificate became valid (`notBefore`); integer in JSON; `?` as for `cert_issuer` | TLS handshake on 443 | domain |
 | `risk_level` | `none`, `low`, `medium` or `high` (see [IP reputation](#ip-reputation)); `?` when no list could be checked | the lists in memory (an A query for a domain) | both |
 | `risk_signals` | the ids of the lists the address is on, comma-separated, e.g. `tor_exit,datacenter` | the lists in memory (an A query for a domain) | both |
+| `risk_score` | the summed signal weights, capped at 100, where 100 is the most dangerous; `0` is the `none` band, not a clean bill; `?` when no list could be checked | the lists in memory (an A query for a domain) | both |
 | `abuse_score` | AbuseIPDB's abuse confidence, 0-100; `?` when AbuseIPDB did not answer, `-` without `ABUSEIPDB_API_KEY` | AbuseIPDB's API (cached a day) | ip |
 | `dmarc_policy` | `none`, `quarantine` or `reject`: the DMARC policy that governs the name, as published — its own `_dmarc` record's `p=`, or, for a name that inherits its registrable domain's record, that record's `sp=` when it has one; `-` with no record, or with two (RFC 7489 then applies neither); `?` when the `_dmarc` query failed (a failed A query leaves it standing: the record does not depend on the address) | an A query, then the DNS record sweep with `_dmarc` | domain |
 
@@ -621,10 +622,11 @@ The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
 is `cert_expires` here, its `registration.expires` is `domain_expires`, and its
 `registration.age_days` and `tls.age_days` are `domain_age_days` and
 `cert_age_days`.
-`resolution`, `risk_level`, `risk_signals` and `abuse_score` are answered only
-when asked for by name; the text block leaves them out: a bare `risk_level: none`
-among the other lines would read as a clean bill of health the lists cannot
-give, and `resolution: ok` would be a line to skip on every read.
+`resolution`, `risk_level`, `risk_signals`, `risk_score` and `abuse_score` are
+answered only when asked for by name; the text block leaves them out: a bare
+`risk_level: none` or `risk_score: 0` among the other lines would read as a
+clean bill of health the lists cannot give, and `resolution: ok` would be a
+line to skip on every read.
 `reverse_dns_confirmed` is left out of the block too, for its cost: it needs the
 record sweep of the PTR name, which the block skips.
 `dmarc_policy` is asked for by name only too: it needs the DNS record sweep,
@@ -951,6 +953,7 @@ with no address):
 ```json
 "reputation": {
   "level": "medium",
+  "score": 50,
   "signals": [
     { "id": "tor_exit", "label": "Tor exit", "source": "Tor Project", "as_of": "2026-10-09T06:13:20Z", "weight": 50 },
     { "id": "datacenter", "label": "Datacenter", "source": "X4BNet lists_vpn", "as_of": "2026-10-09T06:13:21Z", "weight": 0 }
@@ -983,6 +986,13 @@ Spamhaus listing is high, a Tor exit medium (anonymity, not malice), a VPN low,
 and a datacenter changes nothing. Weights and bands are `REPUTATION_WEIGHT_*`
 and `REPUTATION_LEVEL_*`.
 
+`score` is that same sum capped at 100: 100 is the most dangerous. The bands
+stay on the uncapped sum, so a Tor exit (50) plus an AbuseIPDB confidence of
+87 is `score` 100 and still `high`. `score` is `null` when nothing could be
+checked, and `0` is the `none` band, not a clean bill. The page prints it as
+"N of 100", or "Unknown" when no list could be checked, on a Score row after
+Level.
+
 `none` means the address is on none of the lists in `checked`, not that it is
 safe. A list that has not been downloaded, is older than
 `REPUTATION_MAX_AGE_HOURS`, or does not cover the address's family is in
@@ -1007,8 +1017,9 @@ With `ABUSEIPDB_API_KEY` set, an IP address looked up directly (`GET /{ip}`,
 [AbuseIPDB](https://www.abuseipdb.com): its abuse confidence score (0-100) and
 how many reports, from how many users, it has had in the last
 `ABUSEIPDB_MAX_AGE_DAYS` (90). The answer joins `checked`, and when the score
-is above 0 `signals` too, with the score as its weight, so on the default bands
-a score of 80 or more alone is `high`:
+is above 0 `signals` too, with the score as its weight. That weight is added
+into `score` and then capped at 100, while `level` is graded on the uncapped
+sum, so on the default bands a score of 80 or more alone is `high`:
 
 ```json
 { "id": "abuseipdb", "label": "AbuseIPDB", "source": "AbuseIPDB", "as_of": "2026-10-09T11:43:06Z",
@@ -1087,10 +1098,10 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). `registration.age_days` and `tls.age_days` count the days since the registration was created and the certificate became valid, and the description calls a days-old domain worth a closer look, not a verdict. |
+| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", that `score` runs from 0 to 100 with 100 the most dangerous (`null` when nothing could be checked, and 0 is not safe), and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). `registration.age_days` and `tls.age_days` count the days since the registration was created and the certificate became valid, and the description calls a days-old domain worth a closer look, not a verdict. |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR / DMARC sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. `dmarc` is a domain's `v=DMARC1` record, or its registrable domain's when it has none, each labelled with the `queried_name` that answered. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, the certificate's age in days (`age_days`), and whether it is trusted (with the reason when it is not). |
-| `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way. |
+| `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way and the same reputation `score` (no AbuseIPDB part). |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |
 
 A call that could not answer at all (a private or malformed target, a timeout,
@@ -1533,7 +1544,7 @@ whatismyip/
 ├── lookup.py            # transport-agnostic lookup pipeline (gather())
 ├── concurrency.py       # lookup concurrency gate and slow-leg thread pools
 ├── textfmt.py           # ?format=text and ?fields=
-├── reputation.py        # IP reputation lists, downloaded daily, read in memory
+├── reputation.py        # IP reputation lists, downloaded daily, read in memory; score 0-100
 ├── subdomains.py        # Certificate Transparency (crt.sh) subdomain lookup
 ├── subdomain_store.py   # SQLite cache for subdomains.py
 ├── mcp_server.py        # public MCP server mounted at /mcp

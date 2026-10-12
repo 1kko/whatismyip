@@ -428,18 +428,23 @@ class TestMerge:
         assert ids(merged["signals"]) == ["tor_exit", "abuseipdb"]
         assert merged["signals"][1]["weight"] == 87
         assert merged["level"] == "high"
+        # Tor's 50 plus the confidence, capped: 100 is the top of the scale.
+        assert merged["score"] == 100
         assert ids(merged["checked"]) == ["tor_exit", "abuseipdb"]
 
     @pytest.mark.parametrize(
         "score, level", [(0, "none"), (9, "none"), (10, "low"), (40, "medium")]
     )
     def test_alone_the_score_grades_on_the_usual_bands(self, score, level):
-        assert merge(lists(), answer(score))["level"] == level
+        merged = merge(lists(), answer(score))
+        assert merged["level"] == level
+        assert merged["score"] == score
 
     def test_a_zero_score_is_checked_not_a_signal(self):
         merged = merge(lists(), answer(0))
         assert merged["signals"] == []
         assert merged["checked"][-1]["score"] == 0
+        assert merged["score"] == 0
 
     def test_a_failure_is_could_not_check(self):
         merged = merge(lists(), {"ok": False, "reason": "AbuseIPDB answered HTTP 503"})
@@ -452,13 +457,17 @@ class TestMerge:
             }
         ]
         assert merged["level"] == "none"
+        assert merged["score"] == 0
 
     def test_with_the_lists_off(self):
         """REPUTATION_ENABLED=false turns AbuseIPDB off too, but merge() copes
         with no list answer: the level is AbuseIPDB's alone, or unknown."""
-        assert merge(None, answer(50))["level"] == "medium"
+        alone = merge(None, answer(50))
+        assert alone["level"] == "medium"
+        assert alone["score"] == 50
         failed = merge(None, {"ok": False, "reason": "x"})
         assert failed["level"] is None
+        assert failed["score"] is None
 
     def test_credits_abuseipdb_once(self):
         merged = merge(merge(lists(), answer()), answer())
@@ -694,6 +703,7 @@ class TestPage:
 class TestMcp:
     def test_compact_reputation_names_the_score(self):
         compact = mcp_server.compact_reputation(merge(lists(), answer(87)))
+        assert compact["score"] == 87
         assert compact["abuseipdb"] == {
             "abuse_confidence": 87,
             "reports": 152,

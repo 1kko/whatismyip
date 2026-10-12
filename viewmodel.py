@@ -858,6 +858,17 @@ def _level_text(level: str | None) -> str:
     return _LEVEL_TEXT.get(level, level or "unknown")
 
 
+def _score_text(score: int | None) -> str:
+    """'50 of 100', or 'Unknown' when nothing could be checked.
+
+    A missing score must not print as 0: 0 means the lists were read and
+    none of them carried weight.
+    """
+    if score is None:
+        return "Unknown"
+    return f"{score} of 100"
+
+
 def _signal_name(signal: dict) -> str:
     """A signal as a tag or hint names it: the list ("Tor exit"), or for
     AbuseIPDB its confidence score as well ("AbuseIPDB 87%")."""
@@ -1334,12 +1345,19 @@ def reputation_view(reputation: dict | None) -> dict | None:
     if unavailable:
         summary += f" {len(unavailable)} could not be checked."
 
+    tone = _LEVEL_TONES.get(level, "default" if level else "muted")
+    score = reputation.get("score")
     rows = [
         {
             "label": "Level",
             "value": _level_text(level).capitalize(),
-            "tone": _LEVEL_TONES.get(level, "default" if level else "muted"),
-        }
+            "tone": tone,
+        },
+        {
+            "label": "Score",
+            "value": _score_text(score if isinstance(score, int) else None),
+            "tone": tone,
+        },
     ]
     for signal in signals:
         effect = "" if signal["weight"] else " · informational, no effect on the level"
@@ -1382,9 +1400,15 @@ def reputation_view(reputation: dict | None) -> dict | None:
     if level is None:
         hint = "could not check"
     elif signals:
-        hint = f"{level} · {', '.join(_signal_name(signal) for signal in signals)}"
+        names = ", ".join(_signal_name(signal) for signal in signals)
+        hint = (
+            f"{level} · {names}"
+            if not isinstance(score, int)
+            else f"{score} · {level} · {names}"
+        )
     else:
-        hint = f"not on {_lists_checked(len(checked))}"
+        quiet = f"not on {_lists_checked(len(checked))}"
+        hint = quiet if not isinstance(score, int) else f"{score} · {quiet}"
     return {
         "hint": hint,
         "summary": summary,
@@ -1392,7 +1416,8 @@ def reputation_view(reputation: dict | None) -> dict | None:
         "note": (
             "A list records what its maintainer has seen of an address or its "
             "network, not what the address will do; being on none of them is "
-            "no guarantee either."
+            "no guarantee either. The score runs from 0 to 100, and 100 is the "
+            "most dangerous. Unknown means no list could be checked."
         ),
         "attribution": reputation.get("attribution") or [],
     }

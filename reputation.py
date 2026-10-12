@@ -8,7 +8,9 @@ opens no new SSRF surface, and costs microseconds.
 
 The answer is evidence first: each list the address is on, with its source and
 when the copy was taken, and a grade computed from those signals alone. Being
-on no list is not "safe". The lists that were read are named, and one that is
+on no list is not "safe". The same weights also make `score`, 0-100 with 100
+the most dangerous, capped; it is null when nothing could be checked, and 0
+is not safe. The lists that were read are named, and one that is
 stale or missing is reported as not checked rather than quietly left out.
 
 This service's own ban list is never a signal. It would expose the rules a 403
@@ -326,7 +328,8 @@ def grade(signals: list[dict]) -> str:
     """The level for a set of signals: the REPUTATION_LEVEL_* band their summed
     weights fall in. Only the signals decide it. The lists that could not be
     checked are reported beside it, never folded in, and when none could be
-    checked there is no level at all (see check())."""
+    checked there is no level at all (see check()). The band uses the uncapped
+    sum; risk_score() is the same sum capped at 100."""
     total = sum(signal["weight"] for signal in signals)
     if total >= REPUTATION_LEVEL_HIGH:
         return "high"
@@ -335,6 +338,23 @@ def grade(signals: list[dict]) -> str:
     if total >= REPUTATION_LEVEL_LOW:
         return "low"
     return "none"
+
+
+# 100 is the most dangerous. The weights already top out there (Spamhaus, or
+# an AbuseIPDB confidence of 100); a second signal must not push the number
+# past the scale the page and the tools describe.
+SCORE_MAX = 100
+
+
+def risk_score(signals: list[dict]) -> int:
+    """0-100, 100 the most dangerous: the weights grade() sums, capped.
+
+    A datacenter's weight is 0, so it does not move the number. 0 means no
+    weighted signal, which is not safe. check() answers None instead when
+    nothing could be checked, so a caller only uses this for a real reading.
+    """
+    total = sum(int(signal["weight"]) for signal in signals)
+    return min(SCORE_MAX, max(0, total))
 
 
 def _download(url: str) -> bytes:
@@ -515,7 +535,7 @@ class ReputationManager:
         """Which lists `ip` is on, read from memory only. `asn` is its AS
         number, for ASN-DROP; without one that list is not checked.
 
-        {level, signals, checked, unavailable, attribution}:
+        {level, score, signals, checked, unavailable, attribution}:
         - signals: {id, label, source, as_of, weight} per list the address is on
         - checked: {id, label, source, as_of} per list that was read, listed or
           not, so "on none of these" can name what "these" were
@@ -524,6 +544,8 @@ class ReputationManager:
           covering this address family
         - level: none/low/medium/high from the signals (grade()), or None when
           no list could be checked at all, which is unknown rather than "none"
+        - score: 0-100 from the same weights (risk_score()), 100 the most
+          dangerous, or None in that same unknown case. 0 is not safe
         - attribution: the credit each list read asks for
 
         None when disabled, or when `ip` is not an address.
@@ -576,8 +598,10 @@ class ReputationManager:
             if credit not in attribution:
                 attribution.append(credit)
 
+        readable = bool(checked)
         return {
-            "level": grade(signals) if checked else None,
+            "level": grade(signals) if readable else None,
+            "score": risk_score(signals) if readable else None,
             "signals": signals,
             "checked": checked,
             "unavailable": unavailable,

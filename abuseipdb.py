@@ -44,7 +44,7 @@ from config import (
     REPUTATION_ENABLED,
     REPUTATION_USER_AGENT,
 )
-from reputation import grade
+from reputation import grade, risk_score
 
 CHECK_URL = "https://api.abuseipdb.com/api/v2/check"
 # The address's own page, linked from the card for the reports themselves.
@@ -333,8 +333,9 @@ def merge(reputation: dict | None, answer: dict | None) -> dict | None:
     """`reputation` (a ReputationManager.check() result) with AbuseIPDB's
     `answer` added as one more source: in `checked`, and in `signals` too when
     its score is above 0, weighted by the score; or in `unavailable` with the
-    reason. The level is graded again from the signals. Neither argument is
-    changed. With no answer, `reputation` as it was."""
+    reason. The level and the 0-100 score are graded again from the signals
+    (100 is the most dangerous; the score is capped there). Neither argument
+    is changed. With no answer, `reputation` as it was."""
     if answer is None:
         return reputation
     base = reputation or {
@@ -374,9 +375,11 @@ def merge(reputation: dict | None, answer: dict | None) -> dict | None:
             attribution.append(ATTRIBUTION)
     else:
         unavailable.append({**SOURCE, "reason": answer["reason"]})
+    readable = bool(checked)
     return {
         **base,
-        "level": grade(signals) if checked else None,
+        "level": grade(signals) if readable else None,
+        "score": risk_score(signals) if readable else None,
         "signals": signals,
         "checked": checked,
         "unavailable": unavailable,

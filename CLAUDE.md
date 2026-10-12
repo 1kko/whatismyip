@@ -209,8 +209,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - `reputation.py`: IP reputation from key-free public lists (Spamhaus DROP and
   ASN-DROP, Tor exits, X4BNet VPN/datacenter). `ReputationManager` keeps them in
   `data/reputation/` (gitignored) the way `TldNamesManager` keeps the suffix
-  list, and answers `check(ip, asn)` from sorted intervals in memory. Imports
-  only `config` and the standard library; `lookup.py` builds the singleton.
+  list, and answers `check(ip, asn)` from sorted intervals in memory.
+  `risk_score` (`SCORE_MAX = 100`) is the sum of signal weights capped at 100,
+  and 100 is the most dangerous. Imports only `config` and the standard
+  library; `lookup.py` builds the singleton.
 - `abuseipdb.py`: AbuseIPDB's abuse confidence score and report counts for an
   address, the one reputation source asked per lookup (`AbuseIPDBClient`, with
   a per-address cache and the daily quota), and `merge()`, which adds its
@@ -818,7 +820,7 @@ whatismyip/
 ├── textfmt.py           # ?format=text and ?fields=: field table, rendering (pure)
 ├── subdomains.py        # crt.sh adapter, normalization, cache-fill orchestration
 ├── subdomain_store.py   # SQLite cache for subdomains.py (data/subdomains.sqlite3)
-├── reputation.py        # IP reputation lists (data/reputation/), bisect lookups
+├── reputation.py        # IP reputation lists (data/reputation/), bisect lookups; score 0-100
 ├── abuseipdb.py         # AbuseIPDB score for a directly looked-up IP: cache, daily quota
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
@@ -991,7 +993,14 @@ descriptions and `?fields=risk_level` (which stays out of the text block) all
 keep that distinction. The service's own ban list is never a signal.
 The page's Level row prints `none` as "No signals" and null as "Unknown"
 (`viewmodel._level_text`); the JSON, MCP and `?fields=risk_level` keep the word
-`none`. Likewise the WHOIS facts column says "record found", never "available",
+`none`. `score` is the sum of signal weights capped at 100
+(`reputation.risk_score`, `SCORE_MAX`); 100 is the most dangerous, it is null
+when `checked` is empty, and 0 is the `none` band, not a clean bill. The page's
+Score row sits after Level (`viewmodel._score_text`: "N of 100" or "Unknown").
+`?fields=risk_score` stays out of the text block with `risk_level` and
+`risk_signals` (`textfmt._RISK_FIELDS`, `_NOT_IN_BLOCK`). MCP
+`compact_reputation` carries `score`; a new output key does not bump
+`server.json`. Likewise the WHOIS facts column says "record found", never "available",
 for a lookup that found a record: "available" beside a name reads as "available
 to register".
 
@@ -1015,7 +1024,9 @@ AbuseIPDB reports the quota spent (`X-RateLimit-Remaining: 0`, `429`) until its
 reset. Never ask for `verbose`: the reports' comments are other users' free
 text. The score is the signal's weight, so it grades on the same bands as the
 lists; a score of 0 is `checked`, not a signal, and a failure is in
-`unavailable`. `tests/conftest.py` empties `ABUSEIPDB_API_KEY`, so a key in a
+`unavailable`. That weight is added into `score` and then capped at 100, while
+`level` is graded on the uncapped sum, so the bands do not move.
+`tests/conftest.py` empties `ABUSEIPDB_API_KEY`, so a key in a
 developer's `.env` never reaches a test; `tests/test_abuseipdb.py` builds
 enabled clients over a fake transport.
 
@@ -1180,9 +1191,9 @@ Test files:
   (RDAP/WHOIS cost, no port-43 for an IP), `test_concurrency_gate.py` (gate
   503s, what takes no slot, pool isolation, the legs each MCP tool runs),
   `test_subdomain_targets.py` (which targets may reach crt.sh),
-  `test_reputation.py` (list parsers, intervals, grade, download guard,
-  surfaces), `test_abuseipdb.py` (cache, quota, failures, which lookups ask,
-  surfaces)
+  `test_reputation.py` (list parsers, intervals, grade, the 0-100 score,
+  download guard, surfaces), `test_abuseipdb.py` (cache, quota, failures,
+  which lookups ask, surfaces)
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding
   guards, the admin key, bans, rate limiting, geo-blocking, the probe detector
   and whitelist, per-IP rules, response headers, log injection), `test_ssrf.py`
