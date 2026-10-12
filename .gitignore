@@ -200,3 +200,6 @@ docs/superpowers/
 .openchrome/
 # macOS Finder metadata
 .DS_Store
+
+# Playwright MCP screenshots and console logs
+.playwright-mcp/
