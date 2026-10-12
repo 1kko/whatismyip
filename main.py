@@ -118,6 +118,7 @@ from security import (
     SuspiciousPatternDetector,
     WhitelistManager,
     _peer_is_trusted,
+    blocked_ban_log,
     get_client_ip,
 )
 
@@ -1170,6 +1171,25 @@ def _suspicious_path_is_ordinary(request_path: str) -> bool:
     return domain_manager.is_valid_domain(target) or domain_manager.is_ipv4(target)
 
 
+def _log_blocked_ban(kind: str, client_ip: str, message: str) -> None:
+    """Log one banned-IP refusal, then keep quiet for the window.
+
+    `message` holds one %s for the address and keeps its existing wording,
+    which starts "SECURITY: Blocked" so a log query for that prefix still
+    matches. A later line names how many repeats were left out. The address
+    is stripped of newlines before it is written.
+    """
+    suppressed = blocked_ban_log.record(kind, client_ip)
+    if suppressed is None:
+        return
+    safe = sanitize_log_input(client_ip)
+    if suppressed == 0:
+        logging.warning(message, safe)
+        return
+    noun = "block" if suppressed == 1 else "blocks"
+    logging.warning(message + " (%d similar %s suppressed)", safe, suppressed, noun)
+
+
 # Security middleware
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
@@ -1195,9 +1215,10 @@ async def security_middleware(request: Request, call_next):
     # Admin endpoints: still check bans and rate limits, skip geo/suspicious checks
     if request_path.startswith("/admin/"):
         if not trusted and ip_ban_manager.is_banned(client_ip):
-            logging.warning(
-                "SECURITY: Blocked banned IP %s on admin endpoint",
+            _log_blocked_ban(
+                "admin",
                 client_ip,
+                "SECURITY: Blocked banned IP %s on admin endpoint",
             )
             return _access_denied(request)
         if rate_limited and not rate_limiter.allow_request(client_ip):
@@ -1220,9 +1241,10 @@ async def security_middleware(request: Request, call_next):
     # it still holds there, but only a manual ban carries over to /mcp.
     if request_path == "/mcp" or request_path.startswith("/mcp/"):
         if not trusted and ip_ban_manager.is_banned(client_ip, reason="manual"):
-            logging.warning(
+            _log_blocked_ban(
+                "mcp",
+                client_ip,
                 "SECURITY: Blocked manually banned IP %s on MCP endpoint",
-                sanitize_log_input(client_ip),
             )
             return JSONResponse(status_code=403, content=ACCESS_DENIED)
         # `request.body()` inside the SDK buffers the whole thing into memory
@@ -1267,7 +1289,7 @@ async def security_middleware(request: Request, call_next):
 
     # 1. Check if IP is banned (highest priority)
     if not trusted and ip_ban_manager.is_banned(client_ip):
-        logging.warning(f"SECURITY: Blocked banned IP {client_ip}")
+        _log_blocked_ban("lookup", client_ip, "SECURITY: Blocked banned IP %s")
         return _access_denied(request)
 
     # 2. Check geographic restrictions

@@ -83,6 +83,7 @@ def _reset_mutable_state():
     main.rate_limiter.request_history.clear()
     main.mcp_rate_limiter.request_history.clear()
     main.ip_ban_manager.banned_ips.clear()
+    main.blocked_ban_log.clear()
     main._self_whois_tasks.clear()
     main._refresh_failures.clear()
     with contextlib.suppress(FileNotFoundError):

@@ -6,6 +6,7 @@ They use FastAPI's TestClient and mock external dependencies.
 
 import datetime
 import json
+import logging
 import os
 from unittest.mock import MagicMock, patch
 
@@ -29,7 +30,8 @@ from main import (
     sanitize_log_input,
     whitelist_manager,
 )
-from security import _extract_forwarded_ip
+import security
+from security import BlockedBanLog, _extract_forwarded_ip
 
 client = TestClient(app, raise_server_exceptions=False)
 # Peer 127.0.0.1 is in TRUSTED_PROXIES, so x-real-ip is honoured and a test
@@ -607,6 +609,134 @@ class TestLogInjection:
 
         ip_source = inspect.getsource(get_ip_info)
         assert "sanitize_log_input" in ip_source
+
+
+def _ban_warnings(caplog):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "SECURITY: Blocked" in record.getMessage()
+        and "banned IP" in record.getMessage()
+    ]
+
+
+class TestBlockedBanLog:
+    """A banned address is still refused every time. The warning is not: one
+    line per channel and address inside the window, then a line that says how
+    many repeats were left out."""
+
+    def _clock(self, monkeypatch, interval=3600):
+        clock = {"t": 1_000_000.0}
+        monkeypatch.setattr(security.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(security, "BLOCKED_IP_LOG_INTERVAL_SECONDS", interval)
+        return clock
+
+    def test_one_warning_per_window_and_every_request_is_still_refused(
+        self, monkeypatch, caplog
+    ):
+        clock = self._clock(monkeypatch)
+        ip_ban_manager.ban_ip("203.0.113.50", reason="manual", duration=3600)
+        headers = {"x-real-ip": "203.0.113.50"}
+        with caplog.at_level(logging.WARNING):
+            first = proxy_client.get("/8.8.8.8", headers=headers)
+            second = proxy_client.get("/1.1.1.1", headers=headers)
+        assert first.status_code == 403 and second.status_code == 403
+        assert first.json() == main.ACCESS_DENIED
+        assert _ban_warnings(caplog) == ["SECURITY: Blocked banned IP 203.0.113.50"]
+
+        caplog.clear()
+        clock["t"] += 3600
+        with caplog.at_level(logging.WARNING):
+            third = proxy_client.get("/8.8.8.8", headers=headers)
+        assert third.status_code == 403
+        assert _ban_warnings(caplog) == [
+            "SECURITY: Blocked banned IP 203.0.113.50 (1 similar block suppressed)"
+        ]
+
+    def test_channels_keep_their_own_count_and_the_wording(self, monkeypatch, caplog):
+        clock = self._clock(monkeypatch, interval=100)
+        ip = "203.0.113.51"
+        ip_ban_manager.ban_ip(ip, reason="manual", duration=3600)
+        headers = {"x-real-ip": ip, "api-key": "test-secret-key"}
+        with caplog.at_level(logging.WARNING):
+            assert proxy_client.get("/8.8.8.8", headers=headers).status_code == 403
+            assert proxy_client.get("/admin/stats", headers=headers).status_code == 403
+            assert proxy_client.get("/mcp", headers=headers).status_code == 403
+            proxy_client.get("/8.8.8.8", headers=headers)
+            proxy_client.get("/8.8.8.8", headers=headers)
+            proxy_client.get("/admin/stats", headers=headers)
+        assert _ban_warnings(caplog) == [
+            f"SECURITY: Blocked banned IP {ip}",
+            f"SECURITY: Blocked banned IP {ip} on admin endpoint",
+            f"SECURITY: Blocked manually banned IP {ip} on MCP endpoint",
+        ]
+
+        caplog.clear()
+        clock["t"] += 100
+        with caplog.at_level(logging.WARNING):
+            proxy_client.get("/8.8.8.8", headers=headers)
+            proxy_client.get("/admin/stats", headers=headers)
+            proxy_client.get("/mcp", headers=headers)
+        # MCP had no repeat inside the window, so its next line is a first line.
+        assert _ban_warnings(caplog) == [
+            f"SECURITY: Blocked banned IP {ip} (2 similar blocks suppressed)",
+            f"SECURITY: Blocked banned IP {ip} on admin endpoint "
+            "(1 similar block suppressed)",
+            f"SECURITY: Blocked manually banned IP {ip} on MCP endpoint",
+        ]
+
+    def test_a_different_address_logs_on_its_own(self, monkeypatch, caplog):
+        self._clock(monkeypatch)
+        for ip in ("203.0.113.52", "203.0.113.53"):
+            ip_ban_manager.ban_ip(ip, reason="test", duration=3600)
+        with caplog.at_level(logging.WARNING):
+            for ip in ("203.0.113.52", "203.0.113.53", "203.0.113.52"):
+                response = proxy_client.get("/8.8.8.8", headers={"x-real-ip": ip})
+                assert response.status_code == 403
+        assert _ban_warnings(caplog) == [
+            "SECURITY: Blocked banned IP 203.0.113.52",
+            "SECURITY: Blocked banned IP 203.0.113.53",
+        ]
+
+    def test_a_newline_in_the_address_is_one_key_and_leaves_the_line(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            main._log_blocked_ban(
+                "lookup", "203.0.113.7\nINJECT", "SECURITY: Blocked banned IP %s"
+            )
+            main._log_blocked_ban(
+                "lookup", "203.0.113.7INJECT", "SECURITY: Blocked banned IP %s"
+            )
+        assert _ban_warnings(caplog) == [
+            "SECURITY: Blocked banned IP 203.0.113.7INJECT"
+        ]
+
+    def test_the_tracker_drops_the_oldest_past_its_cap(self, monkeypatch):
+        monkeypatch.setattr(security, "_MAX_TRACKED_BANS", 2)
+        clock = self._clock(monkeypatch)
+        tracker = BlockedBanLog()
+        assert tracker.record("lookup", "a") == 0
+        clock["t"] += 1
+        assert tracker.record("lookup", "b") == 0
+        clock["t"] += 1
+        assert tracker.record("lookup", "c") == 0
+        # "a" was the oldest of three fresh keys and was dropped. "b" remains,
+        # so a repeat of it stays quiet; asking for "a" again is a first line.
+        assert tracker.record("lookup", "b") is None
+        assert tracker.record("lookup", "a") == 0
+
+    def test_keys_older_than_the_window_go_before_the_oldest(self, monkeypatch):
+        monkeypatch.setattr(security, "_MAX_TRACKED_BANS", 2)
+        clock = self._clock(monkeypatch, interval=100)
+        tracker = BlockedBanLog()
+        assert tracker.record("lookup", "a") == 0
+        clock["t"] += 1
+        assert tracker.record("lookup", "b") == 0
+        clock["t"] += 100
+        assert tracker.record("lookup", "c") == 0
+        # Both earlier keys had aged out, so neither was evicted as "oldest".
+        assert tracker.record("lookup", "a") == 0
+        assert tracker.record("lookup", "b") == 0
 
 
 # ---------------------------------------------------------------------------

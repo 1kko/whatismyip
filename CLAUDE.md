@@ -118,7 +118,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   only when its target has a public suffix or is an IPv4 address; a
   `/<host>:<digits>` path is judged by its host (the lookup drops the port),
   a path with an `@` never is. `WhitelistManager.lookup_patterns` and the
-  detector rules stay as they are.
+  detector rules stay as they are. `BlockedBanLog` (`blocked_ban_log`) is the
+  per-(channel, address) window `main._log_blocked_ban` uses for the three ban
+  warnings.
 - `rdap.py`: `lookup_rdap` (whoisit) and `normalize_whois` (python-whois's
   port-43 output) both produce one canonical dict (`CANONICAL_FIELDS`).
   `bootstrap_rdap` loads IANA's registry with whoisit's bundled override table
@@ -555,6 +557,14 @@ Configured at `main` module scope:
   in it is refused and written as `<email-like>` (`lookup.loggable_target`), so
   an email address or a URL's password stays out of the line. uvicorn's access
   line and the OTel trace still carry the path as sent
+- Repeated `SECURITY: Blocked banned IP` warnings (the lookup line, the admin
+  line, and the MCP "Blocked manually banned IP" line) go through
+  `main._log_blocked_ban` and `security.BlockedBanLog`. The first hit logs the
+  original wording, so a SigNoz match on that wording still hits; repeats for
+  the same (kind, sanitized IP) stay quiet for
+  `BLOCKED_IP_LOG_INTERVAL_SECONDS` (3600), then one line carries
+  `(%d similar block(s) suppressed)`. A window whose suppressed count is 0
+  logs a fresh first line. Geo-block and rate-limit logs are unchanged
 
 #### Link previews
 
@@ -811,7 +821,7 @@ whatismyip/
 ├── main.py              # FastAPI app: lifespan, middleware, routes, page rendering, wiring
 ├── config.py            # env-driven constants (reads .env; imports nothing app-local)
 ├── managers.py          # GeoIp / TldNames / Domain / SSL / Header managers
-├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking
+├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking, ban-log dedupe
 ├── rdap.py              # RDAP-first registration lookups + WHOIS normalisation, breaker
 ├── eppstatus.py         # EPP status codes: one spelling (epp_code), a meaning and tone per code
 ├── models.py            # GeoRulesUpdate, the one Pydantic model
@@ -1106,8 +1116,9 @@ files under a per-run temporary `STATE_DIR`; geo-blocking mode, country lists,
 and unknown-country handling are pinned off. `pytest_sessionfinish` removes
 `STATE_DIR` after the run. Its `reset_security_state` fixture (autouse) runs
 `_reset_mutable_state` before and after every test: both rate-limit buckets,
-the ban list, `lookup._whois_cache`, `main._self_whois_tasks` and
-`main._refresh_failures` emptied, a new RDAP breaker bound to both
+the ban list, `lookup._whois_cache`, `main._self_whois_tasks`,
+`main.blocked_ban_log` and `main._refresh_failures` emptied, a new RDAP breaker
+bound to both
 `rdap.rdap_breaker` and `main.rdap_breaker`, and the geo rules reloaded from
 those defaults. A new piece of module-level state gets its line there. A test
 never clears these itself, and `test_state_reset.py` fails if one does: a test
@@ -1195,8 +1206,9 @@ Test files:
   download guard, surfaces), `test_abuseipdb.py` (cache, quota, failures,
   which lookups ask, surfaces)
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding
-  guards, the admin key, bans, rate limiting, geo-blocking, the probe detector
-  and whitelist, per-IP rules, response headers, log injection), `test_ssrf.py`
+  guards, the admin key, bans, the blocked-ban log dedupe, rate limiting,
+  geo-blocking, the probe detector and whitelist, per-IP rules, response
+  headers, log injection), `test_ssrf.py`
   (only global unicast becomes a connection target)
 - MCP: `test_mcp.py` (handshake and `serverInfo.version`, tools, transport
   limits, rate bucket),

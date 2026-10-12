@@ -53,6 +53,7 @@ def test_every_piece_of_module_state_is_put_back(reset_state):
     lookup._whois_cache.set(ip, {"source": "rdap"}, ttl=600)
     main._self_whois_tasks[ip] = object()
     main._refresh_failures["GeoLite2-City"] = 2
+    assert main.blocked_ban_log.record("lookup", ip) == 0
     for _ in range(rdap.rdap_breaker.threshold):
         rdap.rdap_breaker.record_failure("rdap.example.net")
     assert main.rdap_breaker.open_hosts() == ["rdap.example.net"]
@@ -65,6 +66,8 @@ def test_every_piece_of_module_state_is_put_back(reset_state):
     assert lookup._whois_cache.get(ip) is None
     assert main._self_whois_tasks == {}
     assert main._refresh_failures == {}
+    # A repeat inside the window stays quiet, so 0 means the tracker was cleared.
+    assert main.blocked_ban_log.record("lookup", ip) == 0
     # One breaker under both names: lookup_rdap records into rdap's,
     # health_reasons reads main's.
     assert main.rdap_breaker is rdap.rdap_breaker

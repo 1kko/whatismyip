@@ -110,6 +110,12 @@ RATE_LIMIT_REQUESTS_PER_SECOND = int(os.getenv("RATE_LIMIT_REQUESTS_PER_SECOND",
 # Ban Duration Configuration (in seconds)
 BAN_DURATION_RATE_LIMIT = int(os.getenv("BAN_DURATION_RATE_LIMIT", "3600"))  # 1 hour
 BAN_DURATION_SUSPICIOUS = int(os.getenv("BAN_DURATION_SUSPICIOUS", "86400"))  # 24 hours
+# How long a repeat "blocked banned IP" warning for the same address and
+# channel stays quiet. The first block is logged; the next line after the
+# window says how many were suppressed. The refusal itself is unchanged.
+BLOCKED_IP_LOG_INTERVAL_SECONDS = int(
+    os.getenv("BLOCKED_IP_LOG_INTERVAL_SECONDS", "3600")
+)
 
 # File Paths
 BANNED_IPS_FILE = os.getenv("BANNED_IPS_FILE", "data/banned_ips.json")
