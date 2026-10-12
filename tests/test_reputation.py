@@ -32,7 +32,14 @@ import mcp_server
 import reputation
 import textfmt
 import viewmodel
-from reputation import Intervals, ReputationManager, grade, parse_lines, parse_spamhaus
+from reputation import (
+    Intervals,
+    ReputationManager,
+    grade,
+    parse_lines,
+    parse_spamhaus,
+    risk_score,
+)
 
 HOUR = 3600
 T0 = 1_791_530_000.0  # 2026-10-09 07:13:20 UTC, just after the samples were taken
@@ -263,6 +270,7 @@ class TestCheck:
     def test_a_tor_exit_in_a_datacenter(self, tmp_path):
         result = make_manager(tmp_path).check(TOR_IP)
         assert result["level"] == "medium"
+        assert result["score"] == 50
         assert ids(result["signals"]) == ["tor_exit", "datacenter"]
         tor = result["signals"][0]
         assert tor == {
@@ -290,6 +298,7 @@ class TestCheck:
     def test_no_signals_is_level_none_with_every_list_checked(self, tmp_path):
         result = make_manager(tmp_path).check(CLEAN_IP, asn=13335)
         assert result["level"] == "none"
+        assert result["score"] == 0
         assert result["signals"] == []
         assert ids(result["checked"]) == FEED_IDS
         assert result["unavailable"] == []
@@ -298,22 +307,26 @@ class TestCheck:
         result = make_manager(tmp_path).check(ASN_DROP_IP, asn=DROPPED_ASN)
         assert ids(result["signals"]) == ["spamhaus_asndrop"]
         assert result["level"] == "high"
+        assert result["score"] == 100
 
     def test_spamhaus_drop_is_high(self, tmp_path):
         result = make_manager(tmp_path).check(DROP_IP, asn=13335)
         assert ids(result["signals"]) == ["spamhaus_drop"]
         assert result["level"] == "high"
+        assert result["score"] == 100
 
     def test_vpn_is_low_and_datacenter_does_not_raise_it(self, tmp_path):
         result = make_manager(tmp_path).check(VPN_IP, asn=13335)
         assert ids(result["signals"]) == ["vpn", "datacenter"]
         assert result["level"] == "low"
+        assert result["score"] == 20
 
     def test_datacenter_alone_is_informational(self, tmp_path):
         result = make_manager(tmp_path).check(DC_IP, asn=13335)
         assert ids(result["signals"]) == ["datacenter"]
         assert result["signals"][0]["weight"] == 0
         assert result["level"] == "none"
+        assert result["score"] == 0
 
     def test_ipv6_on_the_v6_lists(self, tmp_path):
         result = make_manager(tmp_path).check(DC_V6, asn=13335)
@@ -350,11 +363,13 @@ class TestCheck:
         assert result["signals"] == []
         assert result["checked"] == []
         assert result["level"] is None
+        assert result["score"] is None
 
     def test_nothing_downloaded_is_unknown_not_none(self, tmp_path):
         manager = make_manager(tmp_path, files={})
         result = manager.check(TOR_IP, asn=13335)
         assert result["level"] is None
+        assert result["score"] is None
         assert result["checked"] == []
         assert ids(result["unavailable"]) == FEED_IDS
         assert all("not been downloaded" in e["reason"] for e in result["unavailable"])
@@ -416,6 +431,19 @@ class TestCheck:
 def test_grade_rule(signal_ids, level):
     signals = [{"id": i, "weight": config.REPUTATION_WEIGHTS[i]} for i in signal_ids]
     assert grade(signals) == level
+
+
+def test_risk_score_is_the_capped_sum():
+    """100 is the most dangerous. A second signal does not leave the scale,
+    and a datacenter's weight of 0 does not move it. grade() still sees the
+    uncapped sum, so the bands do not change."""
+    tor = {"weight": config.REPUTATION_WEIGHTS["tor_exit"]}
+    abuse = {"weight": 87}
+    assert risk_score([tor, {"weight": 0}]) == 50
+    assert risk_score([tor, abuse]) == 100
+    assert grade([tor, abuse]) == "high"
+    assert risk_score([]) == 0
+    assert risk_score([{"weight": 0}]) == 0
 
 
 def test_weights_and_thresholds_live_in_config():
@@ -675,6 +703,7 @@ class TestApi:
     def test_an_ip_lookup_carries_reputation(self, rep, legs):
         body = client.get(f"/{TOR_IP}", headers=CURL).json()
         assert body["reputation"]["level"] == "medium"
+        assert body["reputation"]["score"] == 50
         assert ids(body["reputation"]["signals"]) == ["tor_exit", "datacenter"]
         assert ids(body["reputation"]["checked"]) == FEED_IDS
         assert any("Spamhaus" in line for line in body["reputation"]["attribution"])
@@ -686,15 +715,18 @@ class TestApi:
         body = client.get(f"/{ASN_DROP_IP}", headers=CURL).json()
         assert ids(body["reputation"]["signals"]) == ["spamhaus_asndrop"]
         assert body["reputation"]["level"] == "high"
+        assert body["reputation"]["score"] == 100
 
     def test_a_domain_is_judged_by_the_address_it_resolves_to(self, rep, legs):
         body = client.get(f"/{DOMAIN}", headers=CURL).json()
         assert body["resolved_ip"] == TOR_IP
         assert ids(body["reputation"]["signals"]) == ["tor_exit", "datacenter"]
+        assert body["reputation"]["score"] == 50
 
     def test_the_self_lookup_carries_reputation(self, rep, legs):
         body = as_peer(TOR_IP).get("/", headers=CURL).json()
         assert ids(body["reputation"]["signals"]) == ["tor_exit", "datacenter"]
+        assert body["reputation"]["score"] == 50
 
     def test_disabled_adds_no_key(self, legs):
         assert "reputation" not in client.get(f"/{TOR_IP}", headers=CURL).json()
@@ -708,15 +740,20 @@ class TestApi:
 class TestFields:
     def test_risk_fields_as_json(self, rep, legs):
         body = client.get(
-            f"/{TOR_IP}?fields=risk_level,risk_signals", headers=CURL
+            f"/{TOR_IP}?fields=risk_level,risk_signals,risk_score", headers=CURL
         ).json()
-        assert body == {"risk_level": "medium", "risk_signals": "tor_exit,datacenter"}
+        assert body == {
+            "risk_level": "medium",
+            "risk_signals": "tor_exit,datacenter",
+            "risk_score": 50,
+        }
 
     def test_risk_fields_as_text(self, rep, legs):
         response = client.get(
-            f"/{CLEAN_IP}?fields=risk_level,risk_signals&format=text", headers=CURL
+            f"/{CLEAN_IP}?fields=risk_level,risk_signals,risk_score&format=text",
+            headers=CURL,
         )
-        assert response.text == "none\n-\n"
+        assert response.text == "none\n-\n0\n"
 
     def test_on_the_self_route(self, rep, legs):
         response = as_peer(TOR_IP).get("/?fields=risk_level&format=text", headers=CURL)
@@ -725,18 +762,26 @@ class TestFields:
     def test_nothing_checked_is_unknown_not_none(self, tmp_path, monkeypatch, legs):
         manager = make_manager(tmp_path, files={})
         monkeypatch.setattr(lookup, "reputation_manager", manager)
-        text = client.get(f"/{TOR_IP}?fields=risk_level&format=text", headers=CURL)
-        assert text.text == "?\n"
-        body = client.get(f"/{TOR_IP}?fields=risk_level", headers=CURL).json()
+        text = client.get(
+            f"/{TOR_IP}?fields=risk_level,risk_score&format=text", headers=CURL
+        )
+        assert text.text == "?\n?\n"
+        body = client.get(
+            f"/{TOR_IP}?fields=risk_level,risk_score", headers=CURL
+        ).json()
         assert body["risk_level"] is None
+        assert body["risk_score"] is None
         assert body["errors"]["risk_level"]
+        assert body["errors"]["risk_score"] == body["errors"]["risk_level"]
 
     def test_not_in_the_default_text_block(self, rep, legs):
         response = client.get(f"/{TOR_IP}?format=text", headers=CURL)
         assert "risk_level" not in response.text
+        assert "risk_score" not in response.text
 
     def test_the_fields_are_known(self):
-        assert {"risk_level", "risk_signals"} <= set(textfmt.FIELDS)
+        assert {"risk_level", "risk_signals", "risk_score"} <= set(textfmt.FIELDS)
+        assert "risk_score" in textfmt._NOT_IN_BLOCK
 
 
 # --- the page -------------------------------------------------------------------------
@@ -767,6 +812,7 @@ class TestPage:
         assert 'id="acc-reputation"' in html
         text = page_text(html)
         assert "Reputation" in text
+        assert "50 of 100" in text
         assert "Listed on Tor exit (as of 2026-10-09 06:13 UTC)" in text
         assert "Not listed on Spamhaus DROP (as of 2026-10-09 06:13 UTC)" in text
         assert "(c) 2026 The Spamhaus Project SLU" in text
@@ -775,6 +821,8 @@ class TestPage:
     def test_no_signals_does_not_read_as_safe(self, rep, legs):
         text = page_text(client.get(f"/{CLEAN_IP}", headers=CHROME).text)
         assert "Not on any of the 5 lists checked" in text
+        assert "0 of 100" in text
+        assert "100 is the most dangerous" in text
         for word in ("safe", "clean", "trusted address"):
             assert word not in text.lower()
 
@@ -865,6 +913,7 @@ class TestMcp:
         payload = await mcp_server.lookup(TOR_IP)
         summary = payload["reputation"]
         assert summary["level"] == "medium"
+        assert summary["score"] == 50
         assert [s["list"] for s in summary["signals"]] == ["Tor exit", "Datacenter"]
         assert summary["signals"][0]["as_of"] == "2026-10-09T06:13:20Z"
         assert summary["not_listed_on"] == [
@@ -878,6 +927,7 @@ class TestMcp:
     async def test_no_signals_carries_a_note_that_it_is_not_safe(self, rep, legs):
         summary = (await mcp_server.lookup(CLEAN_IP))["reputation"]
         assert summary["level"] == "none"
+        assert summary["score"] == 0
         assert "not" in summary["note"] and "safe" in summary["note"]
 
     async def test_a_list_it_could_not_check_is_named(
@@ -956,6 +1006,7 @@ def test_the_own_ban_list_is_never_a_signal(rep, legs):
         result = lookup.ip_reputation(CLEAN_IP, _location(CLEAN_IP))
     assert result["signals"] == []
     assert result["level"] == "none"
+    assert result["score"] == 0
 
 
 def test_reputation_imports_no_app_module():

@@ -264,6 +264,9 @@ REPUTATION_WEIGHTS = {
 REPUTATION_LEVEL_HIGH = max(int(os.getenv("REPUTATION_LEVEL_HIGH", "80")), 1)
 REPUTATION_LEVEL_MEDIUM = max(int(os.getenv("REPUTATION_LEVEL_MEDIUM", "40")), 1)
 REPUTATION_LEVEL_LOW = max(int(os.getenv("REPUTATION_LEVEL_LOW", "10")), 1)
+# `score` is that same sum, capped at 100, where 100 is the most dangerous.
+# The bands above stay on the uncapped sum, so a Spamhaus listing is still
+# high on its own. 0 is the `none` band, not a clean bill.
 
 # AbuseIPDB (abuseipdb.py): how often an address has been reported for abuse,
 # and AbuseIPDB's confidence (0-100) that it is abusive, as one more reputation
