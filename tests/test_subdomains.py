@@ -102,7 +102,10 @@ class TestFetchFromSource:
     async def test_a_successful_fetch_returns_normalized_names(self):
         with patch.object(subdomains, "_fetch_sync", return_value=CRTSH_ROWS):
             names, total = await subdomains.fetch_from_source("example.com")
-        assert "api.example.com" in names
+        # Equality, not `"api.example.com" in names`: that shape is what
+        # CodeQL flags as bypassable URL sanitisation
+        # (py/incomplete-url-substring-sanitization).
+        assert any(name == "api.example.com" for name in names)
         assert total == len(names)
 
     @pytest.mark.asyncio
@@ -289,7 +292,9 @@ class TestGetSubdomains:
         with patch.object(subdomains, "_fetch_sync", side_effect=slow):
             owner = aio.create_task(subdomains._fetch_and_store("example.com"))
             await aio.sleep(0.05)  # owner claims _inflight, blocks in the thread
-            assert "example.com" in subdomains._inflight
+            # .get, not `"example.com" in _inflight`: CodeQL reads a hostname
+            # literal with `in` as incomplete URL sanitisation.
+            assert subdomains._inflight.get("example.com") is not None
 
             waiter_to_cancel = aio.create_task(
                 subdomains._fetch_and_store("example.com")
@@ -331,7 +336,7 @@ class TestGetSubdomains:
             with patch.object(subdomains, "_fetch_sync", side_effect=slow):
                 owner = aio.create_task(subdomains._fetch_and_store("example.com"))
                 await aio.sleep(0.05)
-                assert "example.com" in subdomains._inflight
+                assert subdomains._inflight.get("example.com") is not None
 
                 waiter = aio.create_task(subdomains._fetch_and_store("example.com"))
                 await aio.sleep(0.05)
