@@ -1,5 +1,6 @@
 """Request-security subsystem: IP bans, rate limiting, suspicious-path
-detection, a static-path whitelist, and country-level geo-blocking.
+detection, a static-path whitelist, country-level geo-blocking, and
+BlockedBanLog, which keeps a repeat "blocked banned IP" warning quiet.
 """
 
 import datetime
@@ -8,6 +9,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -16,6 +19,7 @@ from starlette.requests import Request
 from config import (
     BAN_DURATION_SUSPICIOUS,
     BANNED_IPS_FILE,
+    BLOCKED_IP_LOG_INTERVAL_SECONDS,
     GEO_ALLOWED_COUNTRIES_INITIAL,
     GEO_BLOCK_UNKNOWN_INITIAL,
     GEO_BLOCKED_COUNTRIES_INITIAL,
@@ -662,3 +666,73 @@ def client_ip_from_scope(scope: dict) -> str:
     trusted-proxy logic above instead of restating it.
     """
     return get_client_ip(Request(scope))
+
+
+def _strip_log_controls(value: str) -> str:
+    """The same three characters lookup.sanitize_log_input removes.
+
+    Duplicated rather than imported: lookup builds the GeoIP, TLD and domain
+    managers at import, and this module must not pay that cost.
+    """
+    return value.replace("\n", "").replace("\r", "").replace("\x00", "")
+
+
+# Past this many distinct (channel, address) keys, drop the quietest. A scan
+# that rotates addresses must not grow the dict without a bound.
+_MAX_TRACKED_BANS = 4096
+
+
+class BlockedBanLog:
+    """How often a banned-IP refusal is written down.
+
+    The refusal itself always happens. The warning does not: the first block
+    for a channel and address is logged, repeats inside
+    BLOCKED_IP_LOG_INTERVAL_SECONDS stay quiet, and the next line after the
+    window carries how many were suppressed. Channels (the lookup paths, the
+    admin paths, MCP) do not share a count. The clock is time.monotonic, so a
+    test can move it.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[tuple[str, str], tuple[float, int]] = {}
+        self._lock = threading.Lock()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._seen.clear()
+
+    def record(self, kind: str, client_ip: str) -> int | None:
+        """None to stay quiet. 0 for the first line. N, the count suppressed
+        since the previous line, when the window has elapsed."""
+        now = time.monotonic()
+        key = (kind, _strip_log_controls(client_ip))
+        with self._lock:
+            state = self._seen.get(key)
+            if state is None:
+                emitted: int | None = 0
+                self._seen[key] = (now, 0)
+            else:
+                last, suppressed = state
+                if now - last < BLOCKED_IP_LOG_INTERVAL_SECONDS:
+                    self._seen[key] = (last, suppressed + 1)
+                    return None
+                emitted = suppressed
+                self._seen[key] = (now, 0)
+            self._prune(now)
+            return emitted
+
+    def _prune(self, now: float) -> None:
+        if len(self._seen) <= _MAX_TRACKED_BANS:
+            return
+        interval = BLOCKED_IP_LOG_INTERVAL_SECONDS
+        for key in [k for k, (last, _) in self._seen.items() if now - last >= interval]:
+            del self._seen[key]
+        overflow = len(self._seen) - _MAX_TRACKED_BANS
+        if overflow <= 0:
+            return
+        oldest = sorted(self._seen, key=lambda key: self._seen[key][0])
+        for key in oldest[:overflow]:
+            del self._seen[key]
+
+
+blocked_ban_log = BlockedBanLog()

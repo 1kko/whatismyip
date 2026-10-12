@@ -1538,7 +1538,7 @@ whatismyip/
 ├── main.py              # FastAPI app: lifespan, routes, middleware, page rendering
 ├── config.py            # env-driven settings (no import cycles)
 ├── managers.py          # GeoIP / suffix list / DNS / TLS / header managers
-├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking
+├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking, ban-log dedupe
 ├── rdap.py              # RDAP-first registration lookups + WHOIS fallback
 ├── eppstatus.py         # EPP status codes: one spelling, a meaning per code
 ├── lookup.py            # transport-agnostic lookup pipeline (gather())
