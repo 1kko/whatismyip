@@ -65,7 +65,23 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "abuse_score": (frozenset({"reputation"}), _IP),
     # The DMARC policy that governs the name (viewmodel.dmarc_policy).
     "dmarc_policy": (frozenset({"dns"}), _DOMAIN),
+    # dnssecurity.evaluate()'s state per check: pass, warn, fail or info;
+    # "unknown" is "?" with the check's summary as the reason.
+    **{
+        f"{check}_state": (frozenset({"dns", "security"}), _DOMAIN)
+        for check in (
+            "spf",
+            "dmarc",
+            "dkim",
+            "caa",
+            "dnssec",
+            "mta_sts",
+            "tls_rpt",
+            "bimi",
+        )
+    },
 }
+_SECURITY_FIELDS = tuple(name for name in FIELDS if name.endswith("_state"))
 
 # Asked for by name only, never in the text block. A bare "risk_level: none"
 # or "risk_score: 0" among the other lines reads as a clean bill, which the
@@ -77,6 +93,7 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
 # reverse_dns_confirmed is left out for its cost: in the block, every IP lookup
 # would pay for the sweep of its PTR name, which nothing else there reads.
 # dmarc_policy needs the record sweep, which the block is built to skip.
+# The DNS security states need the sweep and about 17 more queries.
 _RISK_FIELDS = ("risk_level", "risk_signals", "risk_score")
 _NOT_IN_BLOCK = frozenset(
     {
@@ -85,6 +102,7 @@ _NOT_IN_BLOCK = frozenset(
         "resolution",
         "reverse_dns_confirmed",
         "dmarc_policy",
+        *_SECURITY_FIELDS,
     }
 )
 
@@ -96,10 +114,11 @@ _FCRDNS_FAILED = "the PTR name's A/AAAA query failed"
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires", "domain_age_days")
 
 # The legs that ask about the name, never the address it resolves to: the
-# registry (whois) and the record sweep (dns), whose record types each carry
-# their own status. A gating A query that failed leaves their answers
-# standing; every other leg reads the address, and is unknown without one.
-_NAME_LEGS = frozenset({"whois", "dns"})
+# registry (whois), the record sweep (dns) and the DNS security checks
+# (security), whose answers each carry their own status. A gating A query
+# that failed leaves their answers standing; every other leg reads the
+# address, and is unknown without one.
+_NAME_LEGS = frozenset({"whois", "dns", "security"})
 
 # Text placeholders. "-" is an answer: there is no such value, or the field
 # does not apply to this target. "?" is not: the lookup behind the value
@@ -197,6 +216,7 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     reputation = compact_reputation(data.get("reputation")) or {}
     domain = data.get("domain") or {}
     dmarc = dmarc_policy(domain) or {}
+    security = data.get("dns_security") or {}
     fcrdns = fcrdns_state(
         data.get("reverse_dns"), data.get("domain"), data.get("address") or ""
     )
@@ -230,6 +250,10 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "risk_score": reputation.get("score"),
         "abuse_score": (reputation.get("abuseipdb") or {}).get("abuse_confidence"),
         "dmarc_policy": dmarc.get("policy"),
+        **{
+            name: (security.get(name.removesuffix("_state")) or {}).get("state")
+            for name in _SECURITY_FIELDS
+        },
     }
     # The certificate helpers answer the page, which shows an em dash for
     # "none"; and a field that does not apply to the target is "-" whatever the
@@ -294,6 +318,12 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     # The JSON says null beside the reason, never a policy.
     if "dmarc_policy" in errors:
         values["dmarc_policy"] = None
+    # A check that could not be decided is "?", with its summary as the reason.
+    for name in _SECURITY_FIELDS:
+        result = security.get(name.removesuffix("_state")) or {}
+        if result.get("state") == "unknown" and kind in FIELDS[name][1]:
+            errors[name] = result.get("summary") or "unknown"
+            values[name] = None
     return values, errors
 
 

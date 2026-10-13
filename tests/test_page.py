@@ -2631,3 +2631,27 @@ class TestLookupLinks:
         assert ".lookup-link:focus-visible" in css
         assert ".subdomains__list a {" not in css
         assert ".tag.lookup-link" in css
+
+
+class TestDnsSecurityPanel:
+    """The DNS security accordion: one row per check, its state in its tone."""
+
+    def test_rows_render(self):
+        gathered = {
+            **LINKED,
+            "dns_security": {
+                "spf": {
+                    "state": "fail",
+                    "summary": "SPF: no record",
+                    "findings": [{"severity": "fail", "text": "No v=spf1 record"}],
+                },
+            },
+        }
+        html = _page(gathered, "/naver.com")
+        assert 'id="acc-security"' in html
+        assert "SPF: no record" in html
+        assert '<td class="tone-danger">fail</td>' in html
+        assert '<span class="tone-danger">No v=spf1 record</span>' in html
+
+    def test_no_panel_without_data(self):
+        assert 'id="acc-security"' not in _page(LINKED, "/naver.com")

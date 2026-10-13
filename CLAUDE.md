@@ -140,6 +140,17 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `clientHold`, `serverHold`, `pendingDelete` and `redemptionPeriod`;
   `explain_status` is the `[{code, meaning, severity}]` list. `rdap.py` keeps
   `status` raw; the fold happens where a status is rendered or explained.
+- `dnssecurity.py`: a domain's DNS security posture. `fetch(name, zone,
+  registrable)` asks the public resolvers what the record sweep does not —
+  CAA (climbing to the registrable domain, RFC 8659), DS and DNSKEY at the
+  zone with DO/AD set (`_validating_resolver`), TXT at
+  `<selector>._domainkey.<name>` for each of `config.DKIM_SELECTORS`, and
+  `_mta-sts`, `_smtp._tls`, `default._bimi` TXT — on a pool of its own.
+  `evaluate(domain, raw)` is pure and grades `CHECKS` (`spf, dmarc, dkim,
+  caa, dnssec, mta_sts, tls_rpt, bimi`) from that and the sweep's SPF and
+  DMARC: each `{state, summary, findings}`, state `pass | warn | fail | info
+  | unknown`. Imports `config`, `managers`, `viewmodel` and `cryptography`;
+  must not import `lookup` or `main`.
 - `models.py`: one Pydantic model, `GeoRulesUpdate`, the body of
   `PUT /admin/geo/rules`. Responses are plain dicts with no response model.
 - `lookup.py`: the transport-agnostic lookup pipeline, `gather()`, shared by
@@ -162,7 +173,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   (`LEGS`); the default (None) runs them all, and the page, the full JSON and
   the MCP `lookup` tool use the default. MCP `dns_records` and
   `ssl_certificate` pass `mcp_server._DNS_LEGS` (`{"resolve", "dns"}`) and
-  `_TLS_LEGS` (`{"resolve", "tls"}`), so neither spends a registration
+  `_TLS_LEGS` (`{"resolve", "tls"}`; `_DNS_LEGS` is
+  `{"resolve", "dns", "security"}`), so neither spends a registration
   lookup, the other's leg or an AbuseIPDB request; `?fields=` narrows the
   same way through `textfmt.legs_for()`. Builds the manager singletons
   (`geo_ip_manager`, `tld_names_manager`, `domain_manager`,
@@ -183,7 +195,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `MCP_LOOKUP_CONCURRENCY` of the global slots. A full gate is `LookupBusy` —
   a `503` with `Retry-After` over HTTP, never a ban. RDAP/WHOIS
   (`registration_pool`), crt.sh (`subdomain_pool`) and AbuseIPDB
-  (`abuseipdb_pool`) run on their own pools, not the default executor; GeoIP
+  (`abuseipdb_pool`) and the DNS security leg (`dns_security_pool`) run on
+  their own pools, not the default executor; GeoIP
   runs inline. Imports only `config`, so
   `subdomains.py` may use it.
 - `textfmt.py`: `?format=text` and `?fields=`. The field table (names are
@@ -327,13 +340,15 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 4. **Data Gathering** (`lookup._run_legs`, holding a `lookup_gate` slot): the
    registration lookup runs alongside everything else; a domain's DNS sweep
    (its DMARC record included) and TLS handshake run concurrently; an IP gets
-   its PTR, then a sweep of the PTR name, without DMARC. GeoIP is read inline,
+   its PTR, then a sweep of the PTR name, without DMARC. A domain's
+   `security` leg (`dnssecurity.fetch`) runs beside its sweep, unless the A
+   query was `nxdomain`. GeoIP is read inline,
    and reputation from the lists in memory; an IP
    target is also sent to AbuseIPDB, alongside the rest
 5. **Response Assembly**: `main.get_ip_info` builds a plain dict (`address`,
    `resolved_ip`, `resolution`, `datetime`, `domain`, `location`, `whois`,
    `ssl`, `headers`, `map`, `distance_km`, `origin`, `elapsed_ms`, plus
-   `reputation` and `subdomains` when present) and returns it as JSON or
+   `reputation`, `dns_security` and `subdomains` when present) and returns it as JSON or
    renders it through `render_page` and `viewmodel.build_view()`
 6. **Logging**: every lookup is logged as `client={client_ip} lookup={target}`,
    with `<email-like>` in place of a target that has an `@` in it
@@ -385,8 +400,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   through `_with_host_ips`, capped at `DNS_HOST_RESOLVE_LIMIT`; rows past the
   cap carry `ip_skipped`. A TXT string
   over 255 bytes arrives split and is joined with no separator (RFC 7208).
-- NS, the zone's SPF, and MX for a name with none of its own come from the zone
-  apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
+- NS, the zone's SPF (marked `from_zone`, like a zone MX row), and MX for a
+  name with none of its own come from the zone apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
   turned naver.co.kr into co.kr), floored at the registrable domain. Zone MX
   rows carry `from_zone`; the response names `queried_name` and `zone`, and,
   read off the A answer (the AAAA answer when the A query raised) at no query
@@ -437,6 +452,41 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   (`main._dmarc_rows`); an inherited one carries `inherited_from` and ends
   VALUE with that domain in parentheses, as a zone row ends with `(zone)`,
   since NAME is hidden under 900px.
+
+#### DNS security
+
+`dnssecurity.py`, `lookup._security_raw`, `viewmodel.dns_security_view`:
+- A domain target only: an IP's sweep is of its PTR name, the self page
+  checks nothing, and a name whose A query was `nxdomain` gets no
+  `dns_security` key (the page already says it does not exist). The leg runs
+  beside the sweep and the TLS handshake (about 17 queries, in parallel), on
+  `concurrency.dns_security_pool`, never the default executor; a
+  leg that raised is logged and grades its six checks `unknown`.
+- A query that failed (`DNS_FAILURES`) makes a check `unknown`, never `fail`.
+  DKIM with no key at any of `DKIM_SELECTORS` (env `DKIM_SELECTORS`) is
+  `unknown`, "not found at the common selectors": DNS cannot list selectors,
+  so it is never "no DKIM".
+- SPF and DMARC are graded from the sweep's records, never re-fetched. SPF
+  is graded on the name's own records only: the sweep appends the zone's
+  marked `from_zone`, and SPF is not inherited (RFC 7208). None of its own,
+  two or more, or `+all` fail; `?all`, no `all` without `redirect=`, or `ptr`
+  warn. A name below the apex with no SPF and no MX of its own (`www`, `api`)
+  is `info`, not `fail`. DMARC: none or two records fail;
+  `p=none`, `pct` < 100 or no `rua` warn; `viewmodel.dmarc_policy` reads the
+  policy, `sp=` for an inherited one. DKIM: an RSA key under 1024 bits fails,
+  under 2048 warns, Ed25519 passes; a key that does not parse, or is EC or
+  DSA, warns. CAA: none, or a set with no `issue` property (iodef or
+  `issuewild` alone, RFC 8659 §4), warns; the climb stops after
+  `CAA_MAX_NAMES` (8) names, and a deeper name with no answer in them is
+  `unknown`. DNSSEC: DS present and the DNSKEY answer's AD bit set passes;
+  no DS, or DS without AD, warns; a failed query is `unknown` (a SERVFAIL may
+  be a broken chain). MTA-STS, TLS-RPT and BIMI: present passes, absent is
+  `info`. No overall score.
+- Surfaces: the JSON's `dns_security`; the page's "DNS security" accordion
+  after "DNS records" (hint: the state counts); MCP `lookup` and
+  `dns_records` (`compact_dns_security`, records dropped); `?fields=`
+  `spf_state` ... `bimi_state`, out of the text block, `?` with the summary
+  as the reason for `unknown`.
 
 #### GeoIP Databases
 
@@ -824,6 +874,7 @@ whatismyip/
 ├── security.py          # IP bans, per-IP rules, rate limit, suspicious paths, geo-blocking, ban-log dedupe
 ├── rdap.py              # RDAP-first registration lookups + WHOIS normalisation, breaker
 ├── eppstatus.py         # EPP status codes: one spelling (epp_code), a meaning and tone per code
+├── dnssecurity.py       # SPF/DMARC/DKIM/CAA/DNSSEC/MTA-STS/TLS-RPT/BIMI: queries + grading
 ├── models.py            # GeoRulesUpdate, the one Pydantic model
 ├── lookup.py            # transport-agnostic lookup pipeline (gather()), manager singletons
 ├── concurrency.py       # lookup gate (503 when full) + RDAP/WHOIS and crt.sh pools
@@ -1202,7 +1253,9 @@ Test files:
   (RDAP/WHOIS cost, no port-43 for an IP), `test_concurrency_gate.py` (gate
   503s, what takes no slot, pool isolation, the legs each MCP tool runs),
   `test_subdomain_targets.py` (which targets may reach crt.sh),
-  `test_reputation.py` (list parsers, intervals, grade, the 0-100 score,
+  `test_dnssecurity.py` (each grading rule, the CAA climb, DO/AD, DKIM key
+  lengths), `test_dns_security_leg.py` (which lookups run the leg, a broken
+  leg is unknown, the JSON key), `test_reputation.py` (list parsers, intervals, grade, the 0-100 score,
   download guard, surfaces), `test_abuseipdb.py` (cache, quota, failures,
   which lookups ask, surfaces)
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding

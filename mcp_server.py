@@ -298,6 +298,21 @@ def compact_ssl(ssl_data: dict | None) -> dict | None:
     }
 
 
+def compact_dns_security(data: dict | None) -> dict | None:
+    """dnssecurity.evaluate()'s verdicts without the records behind them: a
+    state, a summary and the findings' text per check."""
+    if not data:
+        return None
+    return {
+        check: {
+            "state": result.get("state"),
+            "summary": result.get("summary"),
+            "findings": [f.get("text") for f in result.get("findings") or []],
+        }
+        for check, result in data.items()
+    }
+
+
 def compact_reputation(reputation: dict | None) -> dict | None:
     """The lists an address is on, the ones it is not on, and the ones that
     could not be checked, with the grade from the first. None when the feature
@@ -374,13 +389,13 @@ _GATHER_CONCURRENCY = LookupGate("MCP", MCP_LOOKUP_CONCURRENCY)
 _GATHER_TIMEOUT_SECONDS = RDAP_TIMEOUT_SECONDS + WHOIS_TIMEOUT_SECONDS + 5
 
 # What each narrow tool reads of gather()'s answer, so what it asks for.
-# dns_records reads `domain` and the resolution that led to it; for an IP,
-# "dns" alone also runs the PTR the sweep needs (lookup._run_legs).
+# dns_records reads `domain`, the resolution that led to it and `dns_security`;
+# for an IP, "dns" alone also runs the PTR the sweep needs (lookup._run_legs).
 # ssl_certificate reads `ssl`. Neither reads the registration, GeoIP or
 # reputation, so neither spends an RDAP query, the other's leg (a TLS
 # handshake, a DNS sweep) or an AbuseIPDB request on an answer it discards.
 # `lookup` reads everything and passes None.
-_DNS_LEGS = frozenset({"resolve", "dns"})
+_DNS_LEGS = frozenset({"resolve", "dns", "security"})
 _TLS_LEGS = frozenset({"resolve", "tls"})
 
 
@@ -457,6 +472,13 @@ async def lookup(target: str) -> dict[str, Any]:
     that as safe either. Lists under `could_not_check` were not consulted, and
     a null level or a null score means none could be.
 
+    `dns_security` (a domain only) grades SPF, DMARC, DKIM, CAA, DNSSEC,
+    MTA-STS, TLS-RPT and BIMI: each `pass`, `warn`, `fail`, `info` (an
+    optional record not published) or `unknown`, with a `summary` and
+    `findings`. `unknown` means the query failed or, for DKIM, that no key was
+    found at the common selectors this server asks: DNS cannot list a
+    domain's selectors, so never report that as "no DKIM".
+
     For an IP address given directly (not a domain's), `reputation.abuseipdb`
     adds AbuseIPDB's abuse confidence (0-100) and how many reports, from how
     many users, it has had in the last `window_days`. The confidence counts
@@ -504,6 +526,8 @@ async def lookup(target: str) -> dict[str, Any]:
     }
     if data.get("reputation"):
         result["reputation"] = compact_reputation(data["reputation"])
+    if data.get("dns_security"):
+        result["dns_security"] = compact_dns_security(data["dns_security"])
     return result
 
 
@@ -523,12 +547,14 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     not enough.
     NS come from `zone`, the DNS zone serving the name. MX rows marked
     `from_zone` belong to that zone, not the name: it has no MX of its own.
+    An `spf` record marked `from_zone` is the zone's; SPF is checked for the
+    exact sending name, so it does not cover this one.
     `dmarc` is the v=DMARC1 TXT record at _dmarc.<name> or, when the name has
     none, at its registrable domain (RFC 7489). Each record's `queried_name`
     says which name answered: relay an inherited policy as that domain's.
-    Report the policy as published (p=none asks for reports only); nothing
-    here grades it. DMARC is asked for a domain only: for an IP address the
-    key is left out.
+    Report the policy as published (p=none asks for reports only);
+    `dns_security.dmarc` is the grade, the record itself is not. DMARC is
+    asked for a domain only: for an IP address the key is left out.
     `cname_chain` is every CNAME hop the public resolver followed to answer
     the A query for `queried_name` (the AAAA query when A raised), in order,
     each with the TTL left in the resolver's cache; `canonical_name` is the
@@ -542,6 +568,12 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     `resolution` is how the name reached `resolved_ip`: "ok", "nxdomain" (the
     name does not exist), "noanswer" (no A or AAAA record), "timeout",
     "servfail" or "error"; "literal" when the target is itself an IP.
+    `dns_security` (a domain only) grades SPF, DMARC, DKIM, CAA, DNSSEC,
+    MTA-STS, TLS-RPT and BIMI: each `pass`, `warn`, `fail`, `info` (an
+    optional record not published) or `unknown`, with a `summary` and
+    `findings`. `unknown` means the query failed or, for DKIM, that no key was
+    found at the common selectors this server asks: DNS cannot list a
+    domain's selectors, so never report that as "no DKIM".
     Runs only the DNS queries: no registration lookup, TLS handshake or
     reputation check is spent on it, so it is the cheap tool for a DNS question.
     """
@@ -579,7 +611,7 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
 
     records = data["domain"] or {}
     status = records.get("status") or {}
-    return {
+    result = {
         "domain": data["address"],
         "resolved_ip": data["resolved_ip"],
         "resolution": data.get("resolution"),
@@ -602,6 +634,10 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
             if k in wanted
         },
     }
+    if data.get("dns_security"):
+        # Not a record type, so `types` does not filter it.
+        result["dns_security"] = compact_dns_security(data["dns_security"])
+    return result
 
 
 @mcp.tool(title="TLS certificate", annotations=_READ_ONLY)

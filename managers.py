@@ -1026,9 +1026,11 @@ class DomainManager:
             records["cname"], status["cname"] = f_cname.result()
             records["txt"], records["spf"], status["txt"] = f_txt.result()
             base_spf, base_spf_status = f_base_spf.result()
+            # Marked as the zone's, as a zone MX row is: SPF is checked for
+            # the exact sending name, so the zone's record is not the name's.
             for entry in base_spf:
                 if not any(s["text"] == entry["text"] for s in records["spf"]):
-                    records["spf"].append(entry)
+                    records["spf"].append({**entry, "from_zone": True})
             status["spf"] = spf_status(status["txt"], base_spf_status)
             if f_ptr is not None:
                 records["ptr"], status["ptr"] = f_ptr.result()

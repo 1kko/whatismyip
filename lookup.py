@@ -20,8 +20,15 @@ import idna
 import whois
 
 import abuseipdb
+import dnssecurity
 from abuseipdb import AbuseIPDBClient
-from concurrency import abuseipdb_pool, lookup_gate, registration_pool, run_in
+from concurrency import (
+    abuseipdb_pool,
+    dns_security_pool,
+    lookup_gate,
+    registration_pool,
+    run_in,
+)
 from config import (
     ABUSEIPDB_TIMEOUT_SECONDS,
     RDAP_TIMEOUT_SECONDS,
@@ -647,12 +654,30 @@ async def abuse_report(ip: str) -> dict:
 # domain with its DMARC record, or of an IP's PTR name without one); "geo",
 # "tls" and "whois" are what they say; "reputation" is the address checked
 # against the lists in memory, and for an address looked up directly, against
-# AbuseIPDB too.
-LEGS = frozenset({"resolve", "geo", "ptr", "dns", "tls", "whois", "reputation"})
+# AbuseIPDB too; "security" is a domain's DNS security posture (dnssecurity.py),
+# checked beside its sweep.
+LEGS = frozenset(
+    {"resolve", "geo", "ptr", "dns", "tls", "whois", "reputation", "security"}
+)
 
 
 async def _skipped() -> None:
     return None
+
+
+def _security_raw(name: str) -> dict:
+    """dnssecurity.fetch() for a domain, with the zone it signs by and the
+    registrable domain its CAA climb stops at. Run in a thread."""
+    return dnssecurity.fetch(
+        name, domain_manager.zone_apex(name), domain_manager.registrable_domain(name)
+    )
+
+
+async def _run_security(name: str) -> dict:
+    """_security_raw on a pool of its own (concurrency.dns_security_pool), not
+    the default executor that the gating A query, the sweep and the TLS
+    handshake share."""
+    return await run_in(dns_security_pool, _security_raw, name)
 
 
 async def gather(target: str, legs: Collection[str] | None = None) -> dict:
@@ -740,6 +765,10 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
     resolution = None
     domain_data = None
     reverse_dns_hostname = None
+    # fetch()'s answers, and whether the security leg ran at all: a leg that
+    # broke is graded unknown, one that never ran is no dns_security.
+    security_raw = None
+    security_ran = False
 
     try:
         if kind == "domain" and want - {"whois"}:
@@ -795,11 +824,14 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
             if resolved_ip and not is_safe_ip(resolved_ip):
                 raise refused_address(target, resolved_ip)
 
-            # The record sweep and the TLS handshake are independent. Only a
-            # domain target's sweep asks for the DMARC record: an IP target's
-            # PTR name below, and the visitor's own on the self page, get no
-            # query they did not get before.
-            domain_data, ssl_data = await asyncio.gather(
+            # The record sweep, the TLS handshake and the security leg are
+            # independent. Only a domain target's sweep asks for the DMARC
+            # record: an IP target's PTR name below, and the visitor's own on
+            # the self page, get no query they did not get before. A name that
+            # does not exist has no posture to grade, and the page already
+            # says it does not exist.
+            security_ran = "security" in want and resolution != "nxdomain"
+            domain_data, ssl_data, security_raw = await asyncio.gather(
                 asyncio.to_thread(
                     lambda: domain_manager.get_records(
                         target, ip=resolved_ip, dmarc=True
@@ -810,6 +842,7 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
                 asyncio.to_thread(SSLManager.get_ssl_info, target, resolved_ip)
                 if "tls" in want
                 else _skipped(),
+                _run_security(target) if security_ran else _skipped(),
                 return_exceptions=True,
             )
             # return_exceptions hands the errors back as values, so these log
@@ -829,6 +862,13 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
                     exc_info=ssl_data,
                 )
                 ssl_data = None
+            if isinstance(security_raw, BaseException):
+                logging.exception(
+                    "Error checking DNS security for %s",
+                    sanitize_log_input(target),
+                    exc_info=security_raw,
+                )
+                security_raw = None
         elif kind != "domain":
             logging.debug("ip=%s", sanitize_log_input(target))
             # The sweep is of the PTR name, so it needs the PTR too.
@@ -871,6 +911,13 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
     if abuse_task is not None:
         reputation = abuseipdb.merge(reputation, await abuse_task)
 
+    # SPF and DMARC are graded from the sweep, so only when the sweep ran.
+    dns_security = (
+        dnssecurity.evaluate(domain_data if "dns" in want else None, security_raw)
+        if security_ran
+        else None
+    )
+
     return {
         "address": target,
         "domain": domain_data,
@@ -881,4 +928,5 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
         "resolution": resolution,
         "reverse_dns": reverse_dns_hostname,
         "reputation": reputation,
+        "dns_security": dns_security,
     }

@@ -53,6 +53,13 @@ subdomain_pool = ThreadPoolExecutor(
 abuseipdb_pool = ThreadPoolExecutor(
     max_workers=ABUSEIPDB_WORKERS, thread_name_prefix="abuseipdb"
 )
+# The DNS security leg (dnssecurity.fetch, after zone_apex's SOA walk): one
+# thread per lookup holding a slot, waiting on the fetch's own pool of queries.
+# A lookup runs it beside its sweep and handshake for up to two query budgets,
+# so on the default executor a burst of them would starve those two legs.
+dns_security_pool = ThreadPoolExecutor(
+    max_workers=LOOKUP_CONCURRENCY, thread_name_prefix="dnssecurity"
+)
 
 
 async def run_in(pool: Executor, func, /, *args, **kwargs):
