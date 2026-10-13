@@ -24,13 +24,13 @@ opentelemetry-instrumentation-logging = ">=0.50b0,<1.0"
 maxminddb = "^3.2.0"
 whoisit = "^4.0.5"
 mcp = "^2.3.0"
-dnspython = "^2.8"
+dnspython = "^2.9"
 cryptography = "^50.0.2"
 idna = "^3.20"
 
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.16.10"
+ruff = "^0.17.0"
 pytest = "^9.1.1"
 pip-audit = "^2.10.1"
 pytest-asyncio = "^1.4.0"
