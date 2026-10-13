@@ -1304,3 +1304,42 @@ class TestSecurityClassification:
         assert response.status_code == 403
         assert main.ip_ban_manager.is_banned(CLIENT_IP)
         assert _ran(mocks) == set()
+
+
+class TestDnsSecurityFields:
+    NAMES = [
+        f"{c}_state"
+        for c in ("spf", "dmarc", "dkim", "caa", "dnssec", "mta_sts", "tls_rpt", "bimi")
+    ]
+
+    def test_legs(self):
+        assert textfmt.legs_for(["caa_state"], "domain") == frozenset(
+            {"dns", "security"}
+        )
+        assert textfmt.legs_for(["caa_state"], "ip") == frozenset()
+
+    def test_not_in_block(self):
+        for name in self.NAMES:
+            assert name in textfmt._NOT_IN_BLOCK
+
+    def test_values_and_unknown(self):
+        data = {
+            "address": "example.com",
+            "dns_security": {
+                "spf": {"state": "pass", "summary": "SPF: -all", "findings": []},
+                "dkim": {
+                    "state": "unknown",
+                    "summary": "DKIM: not found at the common selectors",
+                    "findings": [],
+                },
+            },
+        }
+        values, errors = textfmt.field_values(data, "domain")
+        assert values["spf_state"] == "pass"
+        assert values["dkim_state"] is None
+        assert errors["dkim_state"] == "DKIM: not found at the common selectors"
+        assert values["caa_state"] is None and "caa_state" not in errors
+
+    def test_ip_is_dash(self):
+        values, errors = textfmt.field_values({"address": "1.1.1.1"}, "ip")
+        assert values["spf_state"] is None and "spf_state" not in errors
