@@ -6,11 +6,16 @@ fake resolver. No network.
 
 import base64
 
+import dns.flags
+import dns.rdatatype
+import dns.resolver
+import dns.rrset
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 import dnssecurity
+import managers
 
 
 def _domain(spf=(), dmarc=(), status=None, queried="example.com", zone="example.com"):
@@ -318,3 +323,128 @@ class TestOptionalMail:
     def test_failure_is_unknown(self):
         result = dnssecurity.evaluate(_domain(), _raw(bimi=_txt(status="timeout")))
         assert _state(result, "bimi") == "unknown"
+
+
+class _Answer:
+    def __init__(self, name, rdtype, values, ad=False):
+        self.rrset = dns.rrset.from_text(name + ".", 300, "IN", rdtype, *values)
+        self.response = type("R", (), {"flags": dns.flags.AD if ad else 0})()
+
+    def __iter__(self):
+        return iter(self.rrset)
+
+
+class _Resolver:
+    def __init__(self, records, fail=None, ad=False):
+        self.records, self.fail, self.ad, self.queries = records, fail or {}, ad, []
+
+    def resolve(self, qname, rdtype="A", *a, **k):
+        name = str(qname).rstrip(".").lower()
+        rdtype = dns.rdatatype.to_text(dns.rdatatype.RdataType.make(rdtype))
+        self.queries.append((name, rdtype))
+        if (name, rdtype) in self.fail:
+            raise self.fail[name, rdtype]()
+        if (name, rdtype) in self.records:
+            return _Answer(name, rdtype, self.records[name, rdtype], ad=self.ad)
+        raise dns.resolver.NoAnswer()
+
+
+@pytest.fixture
+def resolver(monkeypatch):
+    def install(records, fail=None, ad=False):
+        fake = _Resolver(records, fail, ad)
+        monkeypatch.setattr(managers, "_recursive_resolver", lambda: fake)
+        monkeypatch.setattr(dnssecurity, "_validating_resolver", lambda: fake)
+        return fake
+
+    return install
+
+
+class TestCaaNames:
+    def test_walks_up_to_the_registrable_domain(self):
+        assert dnssecurity.caa_names("a.b.example.com", "example.com") == [
+            "a.b.example.com",
+            "b.example.com",
+            "example.com",
+        ]
+
+    def test_without_a_registrable_domain_asks_the_name_only(self):
+        assert dnssecurity.caa_names("example.com", None) == ["example.com"]
+
+
+class TestFetch:
+    def test_nearest_caa_wins(self, resolver):
+        resolver(
+            {
+                ("example.com", "CAA"): ['0 issue "letsencrypt.org"'],
+                ("www.example.com", "CAA"): ['0 issue "pki.goog"'],
+            }
+        )
+        raw = dnssecurity.fetch("www.example.com", "example.com", "example.com")
+        assert raw["caa"]["queried_name"] == "www.example.com"
+        assert raw["caa"]["records"] == [
+            {"flags": 0, "tag": "issue", "value": "pki.goog"}
+        ]
+
+    def test_a_failure_below_the_answer_makes_caa_unknown(self, resolver):
+        resolver(
+            {("example.com", "CAA"): ['0 issue "letsencrypt.org"']},
+            fail={("www.example.com", "CAA"): dns.resolver.NoNameservers},
+        )
+        raw = dnssecurity.fetch("www.example.com", "example.com", "example.com")
+        assert raw["caa"]["status"] == "servfail"
+
+    def test_dnssec_reads_ds_and_the_ad_flag(self, resolver):
+        resolver(
+            {
+                ("example.com", "DS"): [
+                    "370 13 2 BE74359954660069D5C63D200C39F5603827D7DD02B56F120EE9F3A86764247C"  # noqa: E501
+                ],
+                ("example.com", "DNSKEY"): [
+                    "257 3 13 mdsswUyr3DPW132mOi8V9xESWE8jTo0dxCjjnopKl+GqJxpVXckHAeF+KkxLbxILfDLUT0rAK9iUzy1L53eKGQ=="  # noqa: E501
+                ],
+            },
+            ad=True,
+        )
+        raw = dnssecurity.fetch("example.com", "example.com", "example.com")
+        assert raw["dnssec"] == {
+            "zone": "example.com",
+            "ds": "ok",
+            "dnskey": "ok",
+            "validated": True,
+        }
+
+    def test_dkim_asks_every_selector_and_keeps_keys(self, resolver):
+        fake = resolver(
+            {("google._domainkey.example.com", "TXT"): ['"v=DKIM1; k=rsa; " "p=AAAA"']}
+        )
+        raw = dnssecurity.fetch("example.com", "example.com", "example.com")
+        asked = {q for q, t in fake.queries if t == "TXT" and "._domainkey." in q}
+        assert asked == {
+            f"{s}._domainkey.example.com" for s in dnssecurity.DKIM_SELECTORS
+        }
+        assert raw["dkim"] == {
+            "keys": [{"selector": "google", "text": "v=DKIM1; k=rsa; p=AAAA"}],
+            "status": "ok",
+        }
+
+    def test_dkim_all_failed_is_the_failure(self, resolver):
+        fail = {
+            (f"{s}._domainkey.example.com", "TXT"): dns.resolver.LifetimeTimeout
+            for s in dnssecurity.DKIM_SELECTORS
+        }
+        resolver({}, fail=fail)
+        raw = dnssecurity.fetch("example.com", "example.com", "example.com")
+        assert raw["dkim"]["status"] == "timeout"
+
+    def test_optional_txt_names(self, resolver):
+        resolver({("_mta-sts.example.com", "TXT"): ['"v=STSv1; id=1"']})
+        raw = dnssecurity.fetch("example.com", "example.com", "example.com")
+        assert raw["mta_sts"] == {"records": ["v=STSv1; id=1"], "status": "ok"}
+        assert raw["tls_rpt"]["status"] == "noanswer"
+
+    def test_end_to_end_is_gradable(self, resolver):
+        resolver({})
+        raw = dnssecurity.fetch("example.com", "example.com", "example.com")
+        result = dnssecurity.evaluate(None, raw)
+        assert tuple(result) == dnssecurity.CHECKS

@@ -13,10 +13,14 @@ Must not import lookup or main (lookup imports this).
 import base64
 import binascii
 import re
+from concurrent.futures import ThreadPoolExecutor
 
+import dns.flags
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
-from managers import DNS_FAILURES
+import managers
+from config import DKIM_SELECTORS
+from managers import DNS_FAILURES, dns_status
 from viewmodel import _parse_dmarc, dmarc_policy
 
 CHECKS = ("spf", "dmarc", "dkim", "caa", "dnssec", "mta_sts", "tls_rpt", "bimi")
@@ -365,3 +369,120 @@ def evaluate(domain: dict | None, raw: dict | None) -> dict[str, dict]:
         "dnssec": _dnssec(raw_or("dnssec")),
         **{check: _optional_txt(check, raw_or(check)) for check in OPTIONAL_TXT},
     }
+
+
+# One thread per query: about 17 for a typical name (10 DKIM selectors, CAA up
+# the labels, DS, DNSKEY, three TXT). This call's own pool, never the caller's.
+_FETCH_WORKERS = 20
+
+
+def _validating_resolver():
+    """The public resolvers, asked with DO and AD set: both validate DNSSEC,
+    and the AD bit in the answer says they did."""
+    resolver = managers._recursive_resolver()
+    resolver.use_edns(0, dns.flags.DO, 1232)
+    resolver.flags = dns.flags.RD | dns.flags.AD
+    return resolver
+
+
+def _query(name: str, rdtype: str, resolver_factory=None):
+    try:
+        factory = resolver_factory or managers._recursive_resolver
+        return factory().resolve(name, rdtype), "ok"
+    except Exception as exc:
+        return None, dns_status(exc)
+
+
+def _txt(answer) -> list[str]:
+    if answer is None:
+        return []
+    # Joined with no separator: a string over 255 bytes arrives split.
+    return [b"".join(r.strings).decode("utf-8", "replace") for r in answer]
+
+
+def caa_names(name: str, registrable: str | None) -> list[str]:
+    """The names RFC 8659 §3 climbs for CAA: the name, then each parent, down
+    to the registrable domain (never a public suffix)."""
+    names = [name]
+    while registrable and name != registrable and name.endswith("." + registrable):
+        name = name.split(".", 1)[1]
+        names.append(name)
+    return names
+
+
+def _caa(results: list[tuple[str, object, str]]) -> dict:
+    """The first non-empty CAA set, nearest the name first. A failure before
+    it means the relevant set is unknown."""
+    for name, answer, status in results:
+        if status in DNS_FAILURES:
+            return {"records": [], "queried_name": None, "status": status}
+        if answer is not None:
+            records = [
+                {
+                    "flags": r.flags,
+                    "tag": r.tag.decode("ascii", "replace"),
+                    "value": r.value.decode("utf-8", "replace"),
+                }
+                for r in answer
+            ]
+            return {"records": records, "queried_name": name, "status": "ok"}
+    return {"records": [], "queried_name": None, "status": "noanswer"}
+
+
+def _dkim(results: list[tuple[str, object, str]]) -> dict:
+    keys = []
+    statuses = []
+    for selector, answer, status in results:
+        statuses.append(status)
+        for text in _txt(answer):
+            tags = _dkim_tags(text)
+            if tags.get("v", "DKIM1") == "DKIM1" and "p" in tags:
+                keys.append({"selector": selector, "text": text})
+    if keys:
+        return {"keys": keys, "status": "ok"}
+    # Every selector failed: unknown. One definite answer is enough to say
+    # "not found" rather than "could not ask".
+    definite = [s for s in statuses if s not in DNS_FAILURES]
+    return {
+        "keys": [],
+        "status": "noanswer" if definite or not statuses else statuses[0],
+    }
+
+
+def fetch(name: str, zone: str, registrable: str | None) -> dict:
+    """Every answer evaluate() needs beyond the record sweep's, for `name`,
+    whose DNS zone is `zone` and registrable domain `registrable`."""
+    with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
+        caa = [(n, pool.submit(_query, n, "CAA")) for n in caa_names(name, registrable)]
+        dkim = [
+            (s, pool.submit(_query, f"{s}._domainkey.{name}", "TXT"))
+            for s in DKIM_SELECTORS
+        ]
+        ds = pool.submit(_query, zone, "DS", _validating_resolver)
+        dnskey = pool.submit(_query, zone, "DNSKEY", _validating_resolver)
+        optional = {
+            check: pool.submit(_query, f"{label}.{name}", "TXT")
+            for check, (label, _) in OPTIONAL_TXT.items()
+        }
+
+        ds_answer, ds_status = ds.result()
+        dnskey_answer, dnskey_status = dnskey.result()
+        response = getattr(dnskey_answer, "response", None)
+        return {
+            "caa": _caa([(n, *f.result()) for n, f in caa]),
+            "dnssec": {
+                "zone": zone,
+                "ds": ds_status,
+                "dnskey": dnskey_status,
+                "validated": bool(
+                    response is not None and response.flags & dns.flags.AD
+                ),
+            },
+            "dkim": _dkim([(s, *f.result()) for s, f in dkim]),
+            **{
+                check: {"records": _txt(answer), "status": status}
+                for check, (answer, status) in (
+                    (check, f.result()) for check, f in optional.items()
+                )
+            },
+        }
