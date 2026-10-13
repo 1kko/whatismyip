@@ -2230,6 +2230,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
 
     if data.get("reputation") is not None:
         response_data["reputation"] = data["reputation"]
+    if data.get("dns_security") is not None:
+        response_data["dns_security"] = data["dns_security"]
     if subdomain_task is not None:
         response_data["subdomains"] = await subdomain_task
 

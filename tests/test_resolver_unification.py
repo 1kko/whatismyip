@@ -155,6 +155,7 @@ async def test_gather_gating_a_query_goes_to_the_public_resolver(
     monkeypatch.setattr(lookup.domain_manager, "is_valid_domain", lambda d: True)
     monkeypatch.setattr(lookup.domain_manager, "get_records", lambda *a, **k: {})
     monkeypatch.setattr(lookup.SSLManager, "get_ssl_info", lambda *a, **k: None)
+    monkeypatch.setattr(lookup, "_security_raw", lambda name: {})
     monkeypatch.setattr(lookup.geo_ip_manager, "fetch_location", lambda ip: {"ip": ip})
 
     async def fake_whois(target):
