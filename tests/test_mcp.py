@@ -909,7 +909,7 @@ def test_each_tool_asks_gather_for_the_legs_it_reads():
                     client, "tools/call", {"name": name, "arguments": arguments}
                 )
                 assert response.status_code == 200
-    assert asked == [None, {"resolve", "dns"}, {"resolve", "tls"}]
+    assert asked == [None, {"resolve", "dns", "security"}, {"resolve", "tls"}]
 
 
 def test_ssl_certificate_reports_the_expiry_clock():
@@ -1416,3 +1416,48 @@ class TestRegistrationShaping:
         doc = " ".join(mcp_server.lookup.__doc__.split())
         assert "status_explained" in doc
         assert "clientHold" in doc and "RFC 8056" in doc
+
+
+SECURITY = {
+    "spf": {
+        "state": "pass",
+        "summary": "SPF: -all",
+        "findings": [],
+        "record": "v=spf1 -all",
+    },
+    "dkim": {
+        "state": "unknown",
+        "summary": "DKIM: not found at the common selectors",
+        "findings": [{"severity": "info", "text": "DNS cannot list selectors"}],
+    },
+}
+
+
+def test_compact_dns_security_drops_records():
+    assert mcp_server.compact_dns_security(SECURITY) == {
+        "spf": {"state": "pass", "summary": "SPF: -all", "findings": []},
+        "dkim": {
+            "state": "unknown",
+            "summary": "DKIM: not found at the common selectors",
+            "findings": ["DNS cannot list selectors"],
+        },
+    }
+    assert mcp_server.compact_dns_security(None) is None
+
+
+def test_dns_records_and_lookup_carry_dns_security():
+    async def fake_gather(target, legs=None):
+        return {**FAKE_LOOKUP, "dns_security": SECURITY}
+
+    with TestClient(app) as client:
+        client.post("/mcp", json=INIT, headers=MCP_HEADERS)
+        with patch("mcp_server.gather", fake_gather):
+            for name, arguments in (
+                ("lookup", {"target": "example.com"}),
+                ("dns_records", {"domain": "example.com"}),
+            ):
+                response = _rpc(
+                    client, "tools/call", {"name": name, "arguments": arguments}
+                )
+                result = response.json()["result"]["structuredContent"]
+                assert result["dns_security"]["spf"]["state"] == "pass"
