@@ -1962,3 +1962,57 @@ class TestMailRow:
     def test_a_record_without_a_policy_says_so(self):
         domain = _dmarc_domain("v=DMARC1; rua=mailto:d@example.com")
         assert _mail_fact(domain) == ("SPF — · DMARC no p= tag", "default")
+
+
+class TestDnsSecurityView:
+    DATA = {
+        "spf": {"state": "pass", "summary": "SPF: -all", "findings": []},
+        "dmarc": {
+            "state": "warn",
+            "summary": "DMARC: p=none",
+            "findings": [{"severity": "warn", "text": "p=none asks for reports only"}],
+        },
+        "dkim": {
+            "state": "unknown",
+            "summary": "DKIM: not found at the common selectors",
+            "findings": [],
+        },
+        "caa": {"state": "fail", "summary": "x", "findings": []},
+    }
+
+    def test_none_is_none(self):
+        assert viewmodel.dns_security_view(None) is None
+
+    def test_rows_labels_tones(self):
+        view = viewmodel.dns_security_view(self.DATA)
+        assert [(r["label"], r["tone"]) for r in view["rows"]] == [
+            ("SPF", "success"),
+            ("DMARC", "warning"),
+            ("DKIM", "muted"),
+            ("CAA", "danger"),
+        ]
+        assert view["rows"][1]["findings"] == [
+            {"text": "p=none asks for reports only", "tone": "warning"}
+        ]
+
+    def test_hint_counts_in_order(self):
+        assert (
+            viewmodel.dns_security_view(self.DATA)["hint"]
+            == "1 pass · 1 warn · 1 fail · 1 unknown"
+        )
+
+    def test_accordion_follows_dns(self):
+        response = {"address": "example.com", "dns_security": self.DATA}
+        ids = [
+            a["id"] for a in viewmodel.build_view(response, is_self=False)["accordions"]
+        ]
+        assert ids[ids.index("dns") + 1] == "security"
+
+    def test_no_accordion_without_data(self):
+        ids = [
+            a["id"]
+            for a in viewmodel.build_view({"address": "1.1.1.1"}, is_self=False)[
+                "accordions"
+            ]
+        ]
+        assert "security" not in ids

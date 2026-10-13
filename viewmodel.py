@@ -1423,6 +1423,57 @@ def reputation_view(reputation: dict | None) -> dict | None:
     }
 
 
+# dnssecurity.LABELS and its state words, repeated so this module keeps its
+# imports to config and the pure helpers.
+_SECURITY_LABELS = {
+    "spf": "SPF",
+    "dmarc": "DMARC",
+    "dkim": "DKIM",
+    "caa": "CAA",
+    "dnssec": "DNSSEC",
+    "mta_sts": "MTA-STS",
+    "tls_rpt": "TLS-RPT",
+    "bimi": "BIMI",
+}
+_SECURITY_TONES = {
+    "pass": "success",
+    "warn": "warning",
+    "fail": "danger",
+    "info": "muted",
+    "unknown": "muted",
+}
+_SECURITY_STATES = ("pass", "warn", "fail", "info", "unknown")
+
+
+def dns_security_view(data: dict | None) -> dict | None:
+    """The DNS security accordion: one row per check, with its state, summary
+    and findings, and the counts for the hint. None when nothing was graded
+    (an IP, the self page, a name that does not exist)."""
+    if not data:
+        return None
+    rows = []
+    for check, result in data.items():
+        state = result.get("state", "unknown")
+        rows.append(
+            {
+                "label": _SECURITY_LABELS.get(check, check),
+                "state": state,
+                "tone": _SECURITY_TONES.get(state, "muted"),
+                "summary": result.get("summary", ""),
+                "findings": [
+                    {
+                        "text": f.get("text", ""),
+                        "tone": _SECURITY_TONES.get(f.get("severity"), "muted"),
+                    }
+                    for f in result.get("findings") or []
+                ],
+            }
+        )
+    counts = [(s, sum(r["state"] == s for r in rows)) for s in _SECURITY_STATES]
+    hint = " · ".join(f"{n} {s}" for s, n in counts if n)
+    return {"hint": hint, "rows": rows}
+
+
 def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
     domain = response.get("domain") or {}
     headers = response.get("headers") or {}
@@ -1470,6 +1521,12 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
         {"id": "ssl", "title": "SSL certificate", "hint": ssl_hint},
         {"id": "geoip", "title": "GeoIP", "hint": geoip_hint},
     ]
+    # Beside the DNS records it grades (dnssecurity.py).
+    security = dns_security_view(response.get("dns_security"))
+    if security:
+        accordions.insert(
+            2, {"id": "security", "title": "DNS security", "hint": security["hint"]}
+        )
     reputation = reputation_view(response.get("reputation"))
     if reputation:
         accordions.append(
@@ -1579,6 +1636,7 @@ def build_view(
         # chain); an IP's sweep is of its PTR name, and its location is its own.
         "geoip_rows": geoip_rows(location, None if is_ip else domain),
         "reputation": reputation_view(response.get("reputation")),
+        "dns_security": dns_security_view(response.get("dns_security")),
         "subdomains": response.get("subdomains"),
         "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],
     }
