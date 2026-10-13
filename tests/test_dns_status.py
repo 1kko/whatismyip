@@ -749,7 +749,12 @@ class TestDmarcOnThePage:
         html = client.get("/example.com", headers=BROWSER_UA).text
 
         assert _facts_value(html, "Mail") == ("default", "SPF yes · DMARC —")
-        assert "<td>DMARC</td>" not in html
+        # The DNS table only: the DNS security panel grades DMARC in a row of
+        # its own, which says "no record" there.
+        table = re.search(
+            r'<table class="records records--dns">.*?</table>', html, re.S
+        )
+        assert "<td>DMARC</td>" not in table.group(0)
 
     @pytest.mark.parametrize(
         "outcome, text", [("timeout", "(timed out)"), ("servfail", "(server failure)")]
