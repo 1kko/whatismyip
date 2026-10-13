@@ -355,6 +355,17 @@ SITE_DOMAIN_FALLBACK = os.getenv("SITE_DOMAIN_FALLBACK", "ip.1kko.com")
 # tag off; the WHOIS panel's Age row and the age fields stay.
 YOUNG_DOMAIN_DAYS = max(int(os.getenv("YOUNG_DOMAIN_DAYS", "30")), 0)
 
+# The DKIM selectors dnssecurity.py asks for. DNS cannot list a domain's
+# selectors, so a miss at all of these is "not found", never "no DKIM".
+DKIM_SELECTORS = tuple(
+    s.strip().lower()
+    for s in os.getenv(
+        "DKIM_SELECTORS",
+        "google,selector1,selector2,default,k1,s1,s2,dkim,mail,smtp",
+    ).split(",")
+    if s.strip()
+)
+
 # The desktop hero text sits over the left half of the band, so the map is
 # focused right of centre and fitted into the free width beside it. Both canvases
 # fetch tiles at native zoom (tile_zoom_offset 0) so roads and place names stay
