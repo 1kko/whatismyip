@@ -217,7 +217,7 @@ class TestDmarc:
         )
         result = dnssecurity.evaluate(domain, _raw())
         assert _state(result, "dmarc") == "warn"
-        assert "example.com" in result["dmarc"]["summary"]
+        assert result["dmarc"]["summary"] == "DMARC: sp=none (example.com)"
 
 
 class TestDkim:
