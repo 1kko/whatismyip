@@ -195,7 +195,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `MCP_LOOKUP_CONCURRENCY` of the global slots. A full gate is `LookupBusy` —
   a `503` with `Retry-After` over HTTP, never a ban. RDAP/WHOIS
   (`registration_pool`), crt.sh (`subdomain_pool`) and AbuseIPDB
-  (`abuseipdb_pool`) run on their own pools, not the default executor; GeoIP
+  (`abuseipdb_pool`) and the DNS security leg (`dns_security_pool`) run on
+  their own pools, not the default executor; GeoIP
   runs inline. Imports only `config`, so
   `subdomains.py` may use it.
 - `textfmt.py`: `?format=text` and `?fields=`. The field table (names are
@@ -399,8 +400,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   through `_with_host_ips`, capped at `DNS_HOST_RESOLVE_LIMIT`; rows past the
   cap carry `ip_skipped`. A TXT string
   over 255 bytes arrives split and is joined with no separator (RFC 7208).
-- NS, the zone's SPF, and MX for a name with none of its own come from the zone
-  apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
+- NS, the zone's SPF (marked `from_zone`, like a zone MX row), and MX for a
+  name with none of its own come from the zone apex (`DomainManager.zone_apex`: an SOA lookup, never a label count — that
   turned naver.co.kr into co.kr), floored at the registrable domain. Zone MX
   rows carry `from_zone`; the response names `queried_name` and `zone`, and,
   read off the A answer (the AAAA answer when the A query raised) at no query
@@ -458,20 +459,26 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - A domain target only: an IP's sweep is of its PTR name, the self page
   checks nothing, and a name whose A query was `nxdomain` gets no
   `dns_security` key (the page already says it does not exist). The leg runs
-  beside the sweep and the TLS handshake (about 17 queries, in parallel); a
+  beside the sweep and the TLS handshake (about 17 queries, in parallel), on
+  `concurrency.dns_security_pool`, never the default executor; a
   leg that raised is logged and grades its six checks `unknown`.
 - A query that failed (`DNS_FAILURES`) makes a check `unknown`, never `fail`.
   DKIM with no key at any of `DKIM_SELECTORS` (env `DKIM_SELECTORS`) is
   `unknown`, "not found at the common selectors": DNS cannot list selectors,
   so it is never "no DKIM".
-- SPF and DMARC are graded from the sweep's records, never re-fetched. SPF:
-  none, two records at the apex (the sweep appends the zone's below it, so
-  only at the apex are two a permerror) or `+all` fail; `?all`, no `all`
-  without `redirect=`, or `ptr` warn. DMARC: none or two records fail;
+- SPF and DMARC are graded from the sweep's records, never re-fetched. SPF
+  is graded on the name's own records only: the sweep appends the zone's
+  marked `from_zone`, and SPF is not inherited (RFC 7208). None of its own,
+  two or more, or `+all` fail; `?all`, no `all` without `redirect=`, or `ptr`
+  warn. A name below the apex with no SPF and no MX of its own (`www`, `api`)
+  is `info`, not `fail`. DMARC: none or two records fail;
   `p=none`, `pct` < 100 or no `rua` warn; `viewmodel.dmarc_policy` reads the
   policy, `sp=` for an inherited one. DKIM: an RSA key under 1024 bits fails,
-  under 2048 warns, Ed25519 passes; a key that does not parse warns. CAA:
-  none warns. DNSSEC: DS present and the DNSKEY answer's AD bit set passes;
+  under 2048 warns, Ed25519 passes; a key that does not parse, or is EC or
+  DSA, warns. CAA: none, or a set with no `issue` property (iodef or
+  `issuewild` alone, RFC 8659 §4), warns; the climb stops after
+  `CAA_MAX_NAMES` (8) names, and a deeper name with no answer in them is
+  `unknown`. DNSSEC: DS present and the DNSKEY answer's AD bit set passes;
   no DS, or DS without AD, warns; a failed query is `unknown` (a SERVFAIL may
   be a broken chain). MTA-STS, TLS-RPT and BIMI: present passes, absent is
   `info`. No overall score.

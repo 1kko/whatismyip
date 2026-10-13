@@ -16,6 +16,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 import dns.flags
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
 import managers
@@ -68,20 +69,37 @@ def _unknown(label: str, status: str) -> dict:
 def _spf(domain: dict | None) -> dict:
     if domain is None:
         return _check("unknown", "SPF: not checked")
-    status = (domain.get("status") or {}).get("spf")
-    records = [r["text"] for r in domain.get("spf") or []]
+    status = domain.get("status") or {}
+    entries = domain.get("spf") or []
+    # SPF is checked for the exact MAIL FROM / HELO name (RFC 7208 §4): the
+    # zone's record, which get_records() appends marked from_zone, says
+    # nothing about mail from a name below it.
+    records = [r["text"] for r in entries if not r.get("from_zone")]
+    zone_has_spf = any(r.get("from_zone") for r in entries)
     if not records:
-        if status in DNS_FAILURES:
-            return _unknown("SPF", status)
+        # The name's own TXT query; "spf" for a sweep that has no "txt".
+        own_status = status.get("txt", status.get("spf"))
+        if own_status in DNS_FAILURES:
+            return _unknown("SPF", own_status)
+        zone = domain.get("zone")
+        below_apex = zone and domain.get("queried_name") != zone
+        own_mx = any(not m.get("from_zone") for m in domain.get("mx") or [])
+        if below_apex and not own_mx:
+            # A host that receives no mail of its own (www, api) is rarely
+            # used as a sender either: worth knowing, not a failure.
+            note = (
+                f"No v=spf1 record for this name; {zone} has one, but SPF is "
+                "not inherited."
+                if zone_has_spf
+                else "No v=spf1 record for this name."
+            )
+            return _check("info", "SPF: none for this name", [("info", note)])
         return _check(
             "fail",
             "SPF: no record",
             [("fail", "No v=spf1 record: any server can send mail as this domain.")],
         )
-    # get_records() appends the zone's SPF after the name's own, so below the
-    # apex a second record is the zone's, not a duplicate.
-    at_apex = domain.get("queried_name") == domain.get("zone")
-    if at_apex and len(records) > 1:
+    if len(records) > 1:
         return _check(
             "fail",
             f"SPF: {len(records)} records",
@@ -211,8 +229,11 @@ def _dkim_key(text: str) -> tuple[str, int | None]:
         key = load_der_public_key(der)
     except (ValueError, TypeError):
         return "invalid", None
-    bits = getattr(key, "key_size", None)
-    return ("rsa", bits) if bits else ("invalid", None)
+    # DKIM signs with RSA or Ed25519 only (RFC 6376, RFC 8463): an EC or DSA
+    # key is unusable, not a short RSA key.
+    if not isinstance(key, rsa.RSAPublicKey):
+        return "invalid", None
+    return "rsa", key.key_size
 
 
 def _grade_dkim(raw: dict | None) -> dict:
@@ -268,6 +289,12 @@ def _grade_caa(raw: dict | None) -> dict:
     records = raw.get("records") or []
     if status in DNS_FAILURES:
         return _unknown("CAA", status)
+    if raw.get("truncated") and not records:
+        return _check(
+            "unknown",
+            "CAA: name too deep to check",
+            [("info", f"Only the nearest {CAA_MAX_NAMES} names were asked.")],
+        )
     if not records:
         return _check(
             "warn",
@@ -279,19 +306,33 @@ def _grade_caa(raw: dict | None) -> dict:
                 )
             ],
         )
-    issuers = []
+    # issue governs every name, issuewild only wildcard ones (RFC 8659 §4):
+    # a set with no issue property, iodef or issuewild alone, leaves a plain
+    # name open to any CA.
+    issuers, wildcard = [], []
+    has_issue = False
     for record in records:
-        if record["tag"].lower() in ("issue", "issuewild"):
-            issuer = record["value"].split(";")[0].strip()
-            if issuer and issuer not in issuers:
-                issuers.append(issuer)
-    summary = f"CAA: {', '.join(issuers)}" if issuers else "CAA: no CA may issue"
+        tag = record["tag"].lower()
+        if tag not in ("issue", "issuewild"):
+            continue
+        has_issue |= tag == "issue"
+        issuer = record["value"].split(";")[0].strip()
+        target = issuers if tag == "issue" else wildcard
+        if issuer and issuer not in target:
+            target.append(issuer)
     findings = []
     if raw.get("queried_name"):
         findings.append(("info", f"Published at {raw['queried_name']}."))
-    return _graded(
-        summary, findings, issuers=issuers, queried_name=raw.get("queried_name")
-    )
+    extra = {"issuers": issuers, "queried_name": raw.get("queried_name")}
+    if not has_issue:
+        findings.append(
+            ("warn", "No issue property: any certificate authority may issue.")
+        )
+        return _graded("CAA: no issue property", findings, **extra)
+    summary = f"CAA: {', '.join(issuers)}" if issuers else "CAA: no CA may issue"
+    if wildcard:
+        summary += f"; wildcard: {', '.join(wildcard)}"
+    return _graded(summary, findings, **extra)
 
 
 def _dnssec(raw: dict | None) -> dict:
@@ -370,6 +411,10 @@ def evaluate(domain: dict | None, raw: dict | None) -> dict[str, dict]:
         **{check: _optional_txt(check, raw_or(check)) for check in OPTIONAL_TXT},
     }
 
+
+# The CAA climb asks one name per label, and a wildcard zone answers any depth,
+# so the climb stops here: past it the set is unknown, never open.
+CAA_MAX_NAMES = 8
 
 # One thread per query: about 17 for a typical name (10 DKIM selectors, CAA up
 # the labels, DS, DNSKEY, three TXT). This call's own pool, never the caller's.
@@ -453,7 +498,8 @@ def fetch(name: str, zone: str, registrable: str | None) -> dict:
     """Every answer evaluate() needs beyond the record sweep's, for `name`,
     whose DNS zone is `zone` and registrable domain `registrable`."""
     with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
-        caa = [(n, pool.submit(_query, n, "CAA")) for n in caa_names(name, registrable)]
+        climb = caa_names(name, registrable)
+        caa = [(n, pool.submit(_query, n, "CAA")) for n in climb[:CAA_MAX_NAMES]]
         dkim = [
             (s, pool.submit(_query, f"{s}._domainkey.{name}", "TXT"))
             for s in DKIM_SELECTORS
@@ -468,8 +514,11 @@ def fetch(name: str, zone: str, registrable: str | None) -> dict:
         ds_answer, ds_status = ds.result()
         dnskey_answer, dnskey_status = dnskey.result()
         response = getattr(dnskey_answer, "response", None)
+        caa_set = _caa([(n, *f.result()) for n, f in caa])
+        if len(climb) > CAA_MAX_NAMES and caa_set["status"] == "noanswer":
+            caa_set["truncated"] = True
         return {
-            "caa": _caa([(n, *f.result()) for n, f in caa]),
+            "caa": caa_set,
             "dnssec": {
                 "zone": zone,
                 "ds": ds_status,

@@ -281,6 +281,14 @@ class TestSpfAndPtr:
         assert records["status"]["spf"] == "ok"
         assert [s["text"] for s in records["spf"]] == ["v=spf1 -all"]
 
+    def test_the_zones_spf_is_marked_as_the_zones(self, fake_dns):
+        records = managers.DomainManager().get_records("www.example.com")
+
+        assert records["spf"] == [
+            {"text": "v=spf1 include:_spf.example.net -all", "ttl": 300},
+            {"text": "v=spf1 -all", "ttl": 300, "from_zone": True},
+        ]
+
     def test_no_spf_and_a_failed_query_is_that_failure(self, fake_dns):
         fake_dns.fail("www.example.com", "servfail", "TXT")
         fake_dns.fail("example.com", "noanswer", "TXT")

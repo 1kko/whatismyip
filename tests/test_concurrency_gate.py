@@ -267,6 +267,18 @@ class TestSlowLegsHaveTheirOwnPools:
         assert threads["rdap"].startswith("registration")
         assert threads["whois"].startswith("registration")
 
+    async def test_dns_security_runs_on_its_own_pool(self, monkeypatch):
+        threads = {}
+
+        def fetch(name, zone, registrable):
+            threads["fetch"] = threading.current_thread().name
+            return {}
+
+        monkeypatch.setattr(lookup.dnssecurity, "fetch", fetch)
+        monkeypatch.setattr(lookup.domain_manager, "zone_apex", lambda name: name)
+        await lookup._run_security("example.com")
+        assert threads["fetch"].startswith("dnssecurity")
+
     async def test_crtsh_runs_on_its_own_pool(self, monkeypatch):
         threads = []
 

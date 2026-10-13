@@ -22,7 +22,13 @@ import whois
 import abuseipdb
 import dnssecurity
 from abuseipdb import AbuseIPDBClient
-from concurrency import abuseipdb_pool, lookup_gate, registration_pool, run_in
+from concurrency import (
+    abuseipdb_pool,
+    dns_security_pool,
+    lookup_gate,
+    registration_pool,
+    run_in,
+)
 from config import (
     ABUSEIPDB_TIMEOUT_SECONDS,
     RDAP_TIMEOUT_SECONDS,
@@ -667,6 +673,13 @@ def _security_raw(name: str) -> dict:
     )
 
 
+async def _run_security(name: str) -> dict:
+    """_security_raw on a pool of its own (concurrency.dns_security_pool), not
+    the default executor that the gating A query, the sweep and the TLS
+    handshake share."""
+    return await run_in(dns_security_pool, _security_raw, name)
+
+
 async def gather(target: str, legs: Collection[str] | None = None) -> dict:
     """Everything known about one domain or IP, with no rendering concerns.
 
@@ -829,9 +842,7 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
                 asyncio.to_thread(SSLManager.get_ssl_info, target, resolved_ip)
                 if "tls" in want
                 else _skipped(),
-                asyncio.to_thread(_security_raw, target)
-                if security_ran
-                else _skipped(),
+                _run_security(target) if security_ran else _skipped(),
                 return_exceptions=True,
             )
             # return_exceptions hands the errors back as values, so these log

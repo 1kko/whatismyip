@@ -18,11 +18,21 @@ import dnssecurity
 import managers
 
 
-def _domain(spf=(), dmarc=(), status=None, queried="example.com", zone="example.com"):
+def _domain(
+    spf=(),
+    dmarc=(),
+    status=None,
+    queried="example.com",
+    zone="example.com",
+    zone_spf=(),
+    mx=(),
+):
     return {
         "queried_name": queried,
         "zone": zone,
-        "spf": [{"text": t, "ttl": 300} for t in spf],
+        "spf": [{"text": t, "ttl": 300} for t in spf]
+        + [{"text": t, "ttl": 300, "from_zone": True} for t in zone_spf],
+        "mx": list(mx),
         "dmarc": [
             {"text": t, "ttl": 300, "queried_name": f"_dmarc.{q}"} for t, q in dmarc
         ],
@@ -120,11 +130,49 @@ class TestSpf:
 
     def test_subdomain_with_zone_spf_is_not_two_records(self):
         domain = _domain(
-            spf=["v=spf1 -all", "v=spf1 include:x ~all"],
+            spf=["v=spf1 -all"],
+            zone_spf=["v=spf1 include:x ~all"],
             queried="www.example.com",
-            zone="example.com",
         )
-        assert _state(dnssecurity.evaluate(domain, _raw()), "spf") == "pass"
+        result = dnssecurity.evaluate(domain, _raw())
+        assert _state(result, "spf") == "pass"
+        assert result["spf"]["record"] == "v=spf1 -all"
+
+    def test_the_zones_spf_is_not_the_subdomains(self):
+        """SPF is checked for the exact MAIL FROM domain (RFC 7208): the zone's
+        record says nothing about mail from www.example.com."""
+        domain = _domain(zone_spf=["v=spf1 -all"], queried="www.example.com")
+        result = dnssecurity.evaluate(domain, _raw())
+        assert _state(result, "spf") == "info"
+        assert result["spf"]["summary"] == "SPF: none for this name"
+        assert "example.com has one" in result["spf"]["findings"][0]["text"]
+
+    def test_a_subdomain_with_its_own_mx_and_no_spf_fails(self):
+        domain = _domain(
+            zone_spf=["v=spf1 -all"],
+            queried="mail.example.com",
+            mx=[{"hostname": "mx.example.com.", "priority": 10}],
+        )
+        assert _state(dnssecurity.evaluate(domain, _raw()), "spf") == "fail"
+
+    def test_the_zones_mx_does_not_make_a_subdomain_a_mail_domain(self):
+        domain = _domain(
+            queried="www.example.com",
+            mx=[{"hostname": "mx.example.com.", "priority": 10, "from_zone": True}],
+        )
+        assert _state(dnssecurity.evaluate(domain, _raw()), "spf") == "info"
+
+    def test_two_own_records_below_the_apex_is_fail(self):
+        domain = _domain(spf=["v=spf1 -all", "v=spf1 ~all"], queried="www.example.com")
+        assert _state(dnssecurity.evaluate(domain, _raw()), "spf") == "fail"
+
+    def test_own_txt_failed_is_unknown_even_with_the_zones(self):
+        domain = _domain(
+            zone_spf=["v=spf1 -all"],
+            queried="www.example.com",
+            status={"txt": "timeout"},
+        )
+        assert _state(dnssecurity.evaluate(domain, _raw()), "spf") == "unknown"
 
 
 class TestDmarc:
@@ -217,6 +265,24 @@ class TestDkim:
         )
         assert _state(result, "dkim") == "warn"
 
+    def test_an_ec_key_is_unreadable_not_a_short_rsa_key(self):
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        der = (
+            ec.generate_private_key(ec.SECP256R1())
+            .public_key()
+            .public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        )
+        p = base64.b64encode(der).decode()
+        result = dnssecurity.evaluate(
+            _domain(), _raw(dkim=self._keys(("ec", f"p={p}")))
+        )
+        assert _state(result, "dkim") == "warn"
+        assert result["dkim"]["keys"][0]["kind"] == "invalid"
+
     def test_dkim_unparseable_key_warns(self):
         result = dnssecurity.evaluate(
             _domain(), _raw(dkim=self._keys(("s1", "p=not*base64")))
@@ -265,6 +331,57 @@ class TestCaa:
         result = dnssecurity.evaluate(_domain(), _raw(caa=caa))
         assert _state(result, "caa") == "pass"
         assert result["caa"]["summary"] == "CAA: letsencrypt.org, pki.goog"
+
+    def _caa(self, *records):
+        return {
+            "records": [{"flags": 0, "tag": t, "value": v} for t, v in records],
+            "queried_name": "example.com",
+            "status": "ok",
+        }
+
+    def test_iodef_only_restricts_nothing(self):
+        """RFC 8659 §4: a set with no issue property leaves issuance open."""
+        result = dnssecurity.evaluate(
+            _domain(), _raw(caa=self._caa(("iodef", "mailto:s@example.com")))
+        )
+        assert _state(result, "caa") == "warn"
+        assert result["caa"]["summary"] == "CAA: no issue property"
+
+    def test_issue_semicolon_forbids_every_ca(self):
+        result = dnssecurity.evaluate(_domain(), _raw(caa=self._caa(("issue", ";"))))
+        assert _state(result, "caa") == "pass"
+        assert result["caa"]["summary"] == "CAA: no CA may issue"
+
+    def test_issuewild_alone_leaves_plain_names_open(self):
+        result = dnssecurity.evaluate(
+            _domain(), _raw(caa=self._caa(("issuewild", ";")))
+        )
+        assert _state(result, "caa") == "warn"
+        assert result["caa"]["summary"] == "CAA: no issue property"
+
+    def test_wildcard_issuers_are_named_as_such(self):
+        result = dnssecurity.evaluate(
+            _domain(),
+            _raw(
+                caa=self._caa(
+                    ("issue", "letsencrypt.org"), ("issuewild", "digicert.com")
+                )
+            ),
+        )
+        assert result["caa"]["summary"] == (
+            "CAA: letsencrypt.org; wildcard: digicert.com"
+        )
+
+    def test_a_name_too_deep_to_climb_is_unknown(self):
+        caa = {
+            "records": [],
+            "queried_name": None,
+            "status": "noanswer",
+            "truncated": True,
+        }
+        assert (
+            _state(dnssecurity.evaluate(_domain(), _raw(caa=caa)), "caa") == "unknown"
+        )
 
     def test_failure_is_unknown(self):
         caa = {"records": [], "queried_name": None, "status": "servfail"}
@@ -367,6 +484,16 @@ class TestCaaNames:
             "b.example.com",
             "example.com",
         ]
+
+    def test_the_climb_is_capped(self, resolver):
+        """A wildcard zone answers any depth, so the climb must not grow with
+        the name: past CAA_MAX_NAMES the set is unknown, not open."""
+        fake = resolver({})
+        deep = ".".join(["a"] * 40) + ".example.com"
+        raw = dnssecurity.fetch(deep, "example.com", "example.com")
+        caa_asked = [q for q, t in fake.queries if t == "CAA"]
+        assert len(caa_asked) == dnssecurity.CAA_MAX_NAMES
+        assert raw["caa"]["truncated"] is True
 
     def test_without_a_registrable_domain_asks_the_name_only(self):
         assert dnssecurity.caa_names("example.com", None) == ["example.com"]

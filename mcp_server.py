@@ -547,6 +547,8 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     not enough.
     NS come from `zone`, the DNS zone serving the name. MX rows marked
     `from_zone` belong to that zone, not the name: it has no MX of its own.
+    An `spf` record marked `from_zone` is the zone's; SPF is checked for the
+    exact sending name, so it does not cover this one.
     `dmarc` is the v=DMARC1 TXT record at _dmarc.<name> or, when the name has
     none, at its registrable domain (RFC 7489). Each record's `queried_name`
     says which name answered: relay an inherited policy as that domain's.
