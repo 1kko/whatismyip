@@ -254,7 +254,7 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   per origin, then the card of the route's origin AS, else GeoLite2's) and
   `for_asn(asn, full=)`. Also `status()`, `stale_datasets()`, `hosts()` (for
   `/privacy`; it lists the hosts whether or not the manager is enabled, so
-  the caller checks `enabled`), `parse_asn` and the answer shape
+  the caller checks `enabled`), the dataset parsers (`parse_asnames` and the like) and the answer shape
   (`ANSWER_KEYS`). Imports `config` and the standard library only; must not
   import `lookup` or `main`, for `subdomains.py`'s reason.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
