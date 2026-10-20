@@ -64,6 +64,7 @@ from config import (
     ASINFO_CAIDA_ORG_URL,
     ASINFO_CAIDA_REL_MAX_AGE_DAYS,
     ASINFO_CAIDA_REL_URL,
+    ASINFO_CHECK_INTERVAL_SECONDS,
     ASINFO_DIR,
     ASINFO_ENABLED,
     ASINFO_LIST_LIMIT,
@@ -391,8 +392,9 @@ def rov_state(
 
 
 # Bumped when the tables change, so a reader can tell a file built by an older
-# release (stored as PRAGMA user_version).
-SCHEMA_VERSION = 1
+# release (stored as PRAGMA user_version), and refresh() rebuilds it from the
+# copies. 2 added route_plen.
+SCHEMA_VERSION = 2
 
 # Every dataset the build reads, in build order. `meta` has a row for each,
 # built or not, so a reader can tell "not in this build" from "no row for
@@ -405,7 +407,9 @@ DATASET_IDS = ("asnames", "nro", "ris_v4", "ris_v6", "rpki", "caida_rel", "caida
 # route's primary key orders it by address, so the build appends its rows in
 # key order and needs no second index for a longest-prefix match: that asks
 # (family, plen, start) for each length, longest first, and an equality on
-# all three uses the key whatever its column order. rpki_state is valid,
+# all three uses the key whatever its column order. route_plen lists the
+# lengths each family has, written at build: finding them in route scans the
+# whole table, too slow for the first read of a file. rpki_state is valid,
 # invalid or not-found, NULL when the build had no VRPs; rpki_reason is origin
 # or length beside invalid.
 # registry holds the NRO's ranges as they are, first..last inclusive: the one
@@ -443,6 +447,9 @@ CREATE TABLE route (
     rpki_state TEXT,
     rpki_reason TEXT,
     PRIMARY KEY (family, start, plen, origin)
+) WITHOUT ROWID;
+CREATE TABLE route_plen (
+    family INTEGER NOT NULL, plen INTEGER NOT NULL, PRIMARY KEY (family, plen)
 ) WITHOUT ROWID;
 CREATE TABLE rel (
     a INTEGER NOT NULL, b INTEGER NOT NULL, kind INTEGER NOT NULL,
@@ -711,6 +718,7 @@ def build_database(
             con.execute(f"PRAGMA {schema}.cache_spill = -{_CACHE_KIB}")
         con.execute("BEGIN")
         rows = _load(con, sources, min_peers)
+        con.execute("INSERT INTO route_plen SELECT DISTINCT family, plen FROM route")
         for sql in _LATE_INDEXES:
             con.execute(sql)
         _insert(
@@ -1266,12 +1274,9 @@ class AsInfoManager:
             d.id: d.label for d in (*default_datasets(caida=True), *self.datasets)
         }
         self._local = threading.local()
-        # (file, prefix lengths per family) for the file last opened. Finding
-        # them scans every route, so it is done once per file, not per thread.
+        # The last file that failed to read, logged once rather than per lookup.
         # A file is named by its device, inode, mtime and size: a swap changes
         # them.
-        self._plens: tuple[tuple, dict[int, tuple[int, ...]]] | None = None
-        # The last file that failed to read, logged once rather than per lookup.
         self._unreadable: tuple | None = None
 
     def _file_key(self) -> tuple | None:
@@ -1294,20 +1299,17 @@ class AsInfoManager:
         held = getattr(self._local, "held", None)
         if held is None or held[0] != key:
             self._release()
-            held = (key, *self._open(key))
+            held = (key, *self._open())
             self._local.held = held
         return held[1], held[2]
 
     def _uri(self) -> str:
         return f"file:{urllib.parse.quote(os.path.abspath(self.path))}?mode=ro"
 
-    def _open(self, key: tuple) -> tuple[_Copy | None, str | None]:
+    def _open(self) -> tuple[_Copy | None, str | None]:
         con = sqlite3.connect(self._uri(), uri=True)
         try:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            # Whether the file open is the one `key` names: a swap between
-            # the stat and the connect opens the next build instead.
-            named = self._file_key() == key
             if version != SCHEMA_VERSION:
                 logging.warning(
                     "Not reading the AS database %s: schema %s, expected %s",
@@ -1323,35 +1325,23 @@ class AsInfoManager:
                     "SELECT dataset, built, rows, fetched_at, source_date FROM meta"
                 )
             }
-            plens = self._prefix_lengths(con, key if named else None)
+            # Read through `con`, so they are the lengths of the file it has
+            # open, even when a swap came between the stat and the connect.
+            plens = {
+                family: tuple(
+                    plen
+                    for (plen,) in con.execute(
+                        "SELECT plen FROM route_plen WHERE family = ?"
+                        " ORDER BY plen DESC",
+                        (family,),
+                    )
+                )
+                for family in (4, 6)
+            }
         except sqlite3.Error:
             con.close()
             raise
         return _Copy(con, meta, plens), None
-
-    def _prefix_lengths(
-        self, con: sqlite3.Connection, key: tuple | None
-    ) -> dict[int, tuple[int, ...]]:
-        """The lengths `con`'s routes have per family, longest first: shared
-        by every connection to the file `key` names, or read afresh, and not
-        shared, when `key` is None (it is not known which file `con` has)."""
-        cached = self._plens
-        if key is not None and cached is not None and cached[0] == key:
-            return cached[1]
-        plens = {
-            family: tuple(
-                plen
-                for (plen,) in con.execute(
-                    "SELECT DISTINCT plen FROM route WHERE family = ?"
-                    " ORDER BY plen DESC",
-                    (family,),
-                )
-            )
-            for family in (4, 6)
-        }
-        if key is not None:
-            self._plens = (key, plens)
-        return plens
 
     def _release(self) -> None:
         """Close this thread's connection, which holds its file open (on disk,
@@ -1579,11 +1569,14 @@ class AsInfoManager:
         takes about half a minute of CPU.
 
         A dataset is due when it has no copy, or its copy was last checked
-        `interval_hours` ago. A due dataset still waits while its last request
-        is under ASINFO_RETRY_SECONDS old. That time is the mtime of
-        `<file>.requested`, written before the request is sent, so the wait
-        holds across a restart and a failed request counts as much as one
-        that worked.
+        `interval_hours` ago, less half of ASINFO_CHECK_INTERVAL_SECONDS: the
+        job runs on that interval, and without the slack a copy checked a
+        moment into one run would wait an extra run, so the daily datasets
+        would drift into runs (and rebuilds) of their own. A due dataset still
+        waits while its last request is under ASINFO_RETRY_SECONDS old. That
+        time is the mtime of `<file>.requested`, written before the request is
+        sent, so the wait holds across a restart and a failed request counts
+        as much as one that worked.
 
         Checking a dataset downloads its file to `<file>.tmp`. For CAIDA it
         first reads the listing (under the listing's stamp), and downloads
@@ -1646,7 +1639,8 @@ class AsInfoManager:
         record = copies.get(dataset.id)
         if record is not None:
             checked = _epoch(record["checked_at"])
-            if now - checked < dataset.interval_hours * 3600:
+            due = dataset.interval_hours * 3600 - ASINFO_CHECK_INTERVAL_SECONDS / 2
+            if now - checked < due:
                 return True
         stamp = os.path.join(self.directory, _request_name(dataset) + ".requested")
         last = _mtime(stamp)

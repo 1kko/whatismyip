@@ -698,11 +698,28 @@ def test_build_without_a_dataset_leaves_its_tables_empty_and_says_so_in_meta(tmp
     assert stats["rpki_valid"] == stats["rpki_not_found"] == stats["providers"] == 0
 
 
+def test_build_records_the_prefix_lengths_each_family_has(tmp_path):
+    db, _ = _build(tmp_path)
+    stored = [tuple(r) for r in db.execute("SELECT family, plen FROM route_plen")]
+    found = db.execute("SELECT DISTINCT family, plen FROM route ORDER BY 1, 2")
+    assert stored == [tuple(r) for r in found]
+    assert {family for family, _ in stored} == {4, 6}
+
+
 def test_build_from_nothing_is_an_empty_database(tmp_path):
     db, rows = _build(tmp_path, {})
     assert rows == {}
     assert db.execute("SELECT count(*) FROM meta WHERE built = 0").fetchone()[0] == 7
-    for table in ("asn", "registry", "org", "asn_org", "route", "rel", "asn_stats"):
+    for table in (
+        "asn",
+        "registry",
+        "org",
+        "asn_org",
+        "route",
+        "route_plen",
+        "rel",
+        "asn_stats",
+    ):
         assert db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0  # noqa: S608
 
 
@@ -740,6 +757,7 @@ def test_build_replaces_a_leftover_file(tmp_path):
 def test_built_database_answers_the_reads_from_indexes(tmp_path):
     db, _ = _build(tmp_path)
     reads = [
+        ("SELECT plen FROM route_plen WHERE family = ? ORDER BY plen DESC", (4,)),
         (
             "SELECT prefix FROM route WHERE family = 4 AND plen = 24 AND start = ?",
             (bytes([211, 252, 112, 0]),),
@@ -1221,6 +1239,26 @@ def test_a_rebuild_with_a_new_prefix_length_finds_the_longer_route(tmp_path):
     )
 
 
+def test_a_read_takes_the_prefix_lengths_from_the_build(tmp_path, monkeypatch):
+    # Finding them in the routes scans the whole table (about 160 ms on the
+    # real data), on the event loop, on the first read of every new file.
+    manager = build_manager(tmp_path)
+    statements = []
+    connect = sqlite3.connect
+
+    def traced(*args, **kwargs):
+        con = connect(*args, **kwargs)
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(asinfo.sqlite3, "connect", traced)
+    assert manager.for_address("211.252.112.1")["route"]["prefix"] == (
+        "211.252.112.0/24"
+    )
+    assert any("route_plen" in sql for sql in statements)
+    assert not any("DISTINCT" in sql.upper() for sql in statements)
+
+
 def test_a_file_swapped_in_as_a_reader_opens_is_read_with_its_own_lengths(
     tmp_path, monkeypatch
 ):
@@ -1557,6 +1595,34 @@ def test_refresh_skips_a_fresh_copy_and_waits_after_a_failed_request(
     assert _database_file(tmp_path) != built
     assert restarted.for_asn(4766)["name"] == "KIXS-AS-KR-KR - KT Corporation"
     assert restarted.status()["datasets"]["asnames"]["fetched_at"] == iso(clock())
+
+
+def test_a_daily_dataset_is_due_up_to_half_a_check_interval_early(
+    tmp_path, monkeypatch
+):
+    # The job runs every ASINFO_CHECK_INTERVAL_SECONDS. Due only a full day
+    # after its check, a copy checked a moment into one run waits for the
+    # run after that one's day is up, and the daily datasets drift into runs
+    # of their own, each with a rebuild.
+    monkeypatch.setattr(asinfo, "ASINFO_CHECK_INTERVAL_SECONDS", 3600)
+    clock = Clock()
+    manager = refreshed_manager(tmp_path, clock)
+    manager._fetch = fetch = fake_fetch()
+    clock.advance(hours=23)
+    assert manager.refresh() is True
+    assert fetch.calls == []  # checked 23 hours ago: not due
+    clock.advance(seconds=40 * 60)
+    assert manager.refresh() is True
+    # Checked 23 hours 40 minutes ago: every dataset is due in this one run.
+    assert _requested(fetch) == [
+        URLS["asnames"],
+        URLS["nro"],
+        URLS["ris_v4"],
+        URLS["ris_v6"],
+        URLS["rpki"],
+        URLS["caida_rel"],
+        URLS["caida_org"],
+    ]
 
 
 def test_caida_is_downloaded_again_only_when_a_newer_file_is_listed(tmp_path):
