@@ -70,6 +70,7 @@ def test_importing_main_touches_no_network(tmp_path):
         "GEOIP_ASN_DB_FILE": str(data / "GeoLite2-ASN.mmdb"),
         "TLD_NAMES_DIR": str(data / "tld"),
         "REPUTATION_DIR": str(data / "reputation"),
+        "ASINFO_DIR": str(data / "asinfo"),
         "SUBDOMAIN_STORE_FILE": str(data / "subdomains.sqlite3"),
         "BANNED_IPS_FILE": str(data / "banned_ips.json"),
         "GEO_RULES_FILE": str(data / "geo_rules.json"),
@@ -78,6 +79,7 @@ def test_importing_main_touches_no_network(tmp_path):
         # must stay offline with them on.
         "BACKGROUND_REFRESH_ENABLED": "true",
         "REPUTATION_ENABLED": "true",
+        "ASINFO_ENABLED": "true",
     }
     # The interpreter running this suite, on a fixed script.
     result = subprocess.run(  # noqa: S603

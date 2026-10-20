@@ -22,6 +22,7 @@ import whois
 import abuseipdb
 import dnssecurity
 from abuseipdb import AbuseIPDBClient
+from asinfo import AsInfoManager
 from concurrency import (
     abuseipdb_pool,
     dns_security_pool,
@@ -392,6 +393,10 @@ domain_manager = DomainManager()
 # Loads the copies of the reputation lists a previous run left in the data
 # volume; main.py's scheduler keeps them current.
 reputation_manager = ReputationManager()
+# Opens the AS database a previous run built in the data volume, if there is
+# one; main.py's scheduler downloads the datasets and rebuilds it. Reads
+# `data/` only.
+asinfo_manager = AsInfoManager()
 # AbuseIPDB's API, asked only for an address looked up directly (see
 # _run_legs). Off without ABUSEIPDB_API_KEY.
 abuseipdb_client = AbuseIPDBClient()

@@ -105,6 +105,21 @@ def reset_security_state():
 
 
 @pytest.fixture
+def asinfo_enabled(monkeypatch, tmp_path):
+    """The AS feature on, over a freshly built database in `tmp_path`: the
+    suite runs with ASINFO_ENABLED=false, so a test of the `as` section asks
+    for this. Returns the manager (its clock reads tests/asinfo_fixtures.NOW)."""
+    import lookup
+    import main
+    from asinfo_fixtures import build_manager
+
+    manager = build_manager(tmp_path)
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    return manager
+
+
+@pytest.fixture
 def reset_state():
     """Return the reset callable for tests that inspect its coverage."""
     return _reset_mutable_state

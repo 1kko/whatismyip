@@ -27,14 +27,11 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
-from mapgeom import build_canvas
-from rdap import rdap_breaker, refresh_rdap_bootstrap
-from viewmodel import build_view, dns_failure_text, dns_names, whois_display, whois_fill
 from concurrency import LookupBusy, lookup_gate
 from config import (
     ABUSEIPDB_CACHE_TTL,
     APP_VERSION,
+    ASINFO_CHECK_INTERVAL_SECONDS,
     BACKGROUND_REFRESH_ENABLED,
     BAN_DURATION_RATE_LIMIT,
     BAN_DURATION_SUSPICIOUS,
@@ -68,20 +65,13 @@ from config import (
     WEBRTC_STUN_URL,
     WHOIS_CACHE_TTL,
 )
-from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
-from mcp_server import (
-    McpBarePathRoute,
-    McpDisabled,
-    build_mcp,
-    mcp_dispatch,
-    registered_tool_names,
-)
-from models import GeoRulesUpdate
+from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from lookup import (
     EMAIL_LIKE_TARGET,
     InvalidTargetError,
     PrivateAddressError,
     abuseipdb_client,
+    asinfo_manager,
     cached_whois,
     canonical_hostname,
     classify_target,
@@ -98,6 +88,28 @@ from lookup import (
     sanitize_log_input,
     tld_names_manager,
 )
+from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
+from mapgeom import build_canvas
+from mcp_server import (
+    McpBarePathRoute,
+    McpDisabled,
+    build_mcp,
+    mcp_dispatch,
+    registered_tool_names,
+)
+from models import GeoRulesUpdate
+from rdap import rdap_breaker, refresh_rdap_bootstrap
+from security import (
+    GeoBlockManager,
+    IPBanManager,
+    IpRuleManager,
+    RateLimiter,
+    SuspiciousPatternDetector,
+    WhitelistManager,
+    _peer_is_trusted,
+    blocked_ban_log,
+    get_client_ip,
+)
 from subdomains import get_subdomains, invalid_target_reason
 from textfmt import (
     InvalidFieldError,
@@ -110,17 +122,7 @@ from textfmt import (
     render_lines,
 )
 from textfmt import render_error as render_text_error
-from security import (
-    GeoBlockManager,
-    IPBanManager,
-    IpRuleManager,
-    RateLimiter,
-    SuspiciousPatternDetector,
-    WhitelistManager,
-    _peer_is_trusted,
-    blocked_ban_log,
-    get_client_ip,
-)
+from viewmodel import build_view, dns_failure_text, dns_names, whois_display, whois_fill
 
 # Load environment variables from .env file
 load_dotenv()
@@ -907,6 +909,24 @@ scheduler.add_job(
     misfire_grace_time=None,
     id="refresh-reputation",
 )
+# AS information (asinfo.py). The same shape as the reputation job: each
+# dataset is downloaded once its copy is due, the job only checks often enough
+# to bound how late a refresh or a retry runs, the first run is at boot and
+# fetches only what is missing or stale, and a request's time is kept on disk
+# so a restart repeats nothing. max_instances=1 keeps two runs from sharing a
+# `.tmp` name (a run that outlasts the interval is skipped, not stacked), and
+# ASINFO_ENABLED=false makes refresh() a no-op.
+scheduler.add_job(
+    asinfo_manager.refresh,
+    "interval",
+    seconds=ASINFO_CHECK_INTERVAL_SECONDS,
+    next_run_time=datetime.datetime.now(),
+    # Due at import, run after the lifespan starts the scheduler: see above.
+    misfire_grace_time=None,
+    max_instances=1,
+    coalesce=True,
+    id="refresh-asinfo",
+)
 
 
 def _fetch_unloaded_geoip_dbs():
@@ -1528,6 +1548,24 @@ def health_reasons() -> list[dict[str, str]]:
             )
     for message in reputation_manager.stale_lists():
         reasons.append(_reason("reputation_list_stale", message))
+    for message in asinfo_manager.stale_datasets():
+        reasons.append(_reason("asinfo_dataset_stale", message))
+    asinfo = asinfo_manager.status()
+    # No database after a build was tried is a failed build; a database file
+    # that will not read (database false with the file on disk) is just as
+    # unusable. A fresh volume before the first refresh is neither.
+    if (
+        asinfo["enabled"]
+        and not asinfo["database"]
+        and (asinfo_manager.build_attempted or os.path.exists(asinfo_manager.path))
+    ):
+        reasons.append(
+            _reason(
+                "asinfo_unavailable",
+                "the AS database is missing or unreadable, so lookups carry "
+                "no AS information",
+            )
+        )
     for message in abuseipdb_client.problems():
         reasons.append(_reason("abuseipdb_key_rejected", message))
     open_hosts = rdap_breaker.open_hosts()
@@ -1567,6 +1605,7 @@ async def healthz():
         "databases": geo_ip_manager.database_status(),
         "public_suffix_list": tld_names_manager.status(),
         "reputation": reputation_manager.status(),
+        "asinfo": asinfo_manager.status(),
         "abuseipdb": abuseipdb_client.status(),
     }
 
