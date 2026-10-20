@@ -42,6 +42,11 @@ os.environ["BACKGROUND_REFRESH_ENABLED"] = "false"
 # are exactly what they were before the feature; test_reputation.py builds
 # enabled managers over synthetic lists of its own.
 os.environ["REPUTATION_ENABLED"] = "false"
+# The AS datasets are tens of MB from RIPE, CAIDA and rpki-client: no test run
+# may download them, even from a lifespan test that starts a real scheduler.
+# Off, the lookup responses are what they were before the feature;
+# test_asinfo.py builds managers over synthetic files of its own.
+os.environ["ASINFO_ENABLED"] = "false"
 # A developer's .env may hold a real AbuseIPDB key, and load_dotenv() never
 # overrides a variable already set: empty, no test spends its quota.
 # test_abuseipdb.py builds enabled clients over a fake transport.
@@ -97,6 +102,21 @@ def reset_security_state():
     _reset_mutable_state()
     yield
     _reset_mutable_state()
+
+
+@pytest.fixture
+def asinfo_enabled(monkeypatch, tmp_path):
+    """The AS feature on, over a freshly built database in `tmp_path`: the
+    suite runs with ASINFO_ENABLED=false, so a test of the `as` section asks
+    for this. Returns the manager (its clock reads tests/asinfo_fixtures.NOW)."""
+    import lookup
+    import main
+    from asinfo_fixtures import build_manager
+
+    manager = build_manager(tmp_path)
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    return manager
 
 
 @pytest.fixture

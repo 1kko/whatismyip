@@ -99,6 +99,9 @@ function ipv6Host(value) {
 }
 
 function isLookupTarget(value) {
+  if (/^as[0-9]{1,10}$/i.test(value)) {
+    return Number(value.slice(2)) <= 4294967295;
+  }
   const octets = value.match(IPV4);
   if (octets) {
     return octets.slice(1).every((part) => Number(part) <= 255);

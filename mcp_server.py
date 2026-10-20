@@ -28,6 +28,7 @@ from mcp.types import CallToolResult, Icon, TextContent, ToolAnnotations
 from concurrency import LookupBusy, LookupGate
 from config import (
     APP_VERSION,
+    ASINFO_ENABLED,
     MCP_ALLOWED_HOSTS,
     MCP_ALLOWED_ORIGINS,
     MCP_ICON_URL,
@@ -41,13 +42,17 @@ from config import (
     SUBDOMAIN_MCP_MAX_LIMIT,
     WHOIS_TIMEOUT_SECONDS,
 )
+import lookup as lookup_module
 from eppstatus import explain_status
 from lookup import (
     InvalidTargetError,
     PrivateAddressError,
+    address_as_info,
+    as_info_for_asn,
     gather,
     ip_reputation,
     lookup_location,
+    parse_asn,
     sanitize_log_input,
 )
 from managers import DNS_FAILURES
@@ -171,6 +176,15 @@ def _fail(message: str, **extra: Any) -> CallToolResult:
         structured_content=payload,
         is_error=True,
     )
+
+
+def _invalid_target_fail(exc: InvalidTargetError) -> CallToolResult:
+    """An invalid target's failed call. Only an AS number carries its `code`
+    (`asn_target`: a model can then be sent to `as_info`); every other invalid
+    target has always been the message alone."""
+    if exc.code == "asn_target":
+        return _fail(exc.message, code=exc.code)
+    return _fail(exc.message)
 
 
 def _iso(value: Any) -> str | None:
@@ -399,6 +413,86 @@ _DNS_LEGS = frozenset({"resolve", "dns", "security"})
 _TLS_LEGS = frozenset({"resolve", "tls"})
 
 
+def _compact_list(entry: dict | None, full: bool) -> dict | None:
+    """A downstream or peer entry: its count, and the (already capped) list
+    only when `full`. None stays None: an unread dataset is not "none"."""
+    if entry is None:
+        return None
+    out: dict[str, Any] = {"count": entry.get("count")}
+    if full:
+        out["list"] = entry.get("list") or []
+    return out
+
+
+def compact_as_info(info: dict | None, full: bool = False) -> dict | None:
+    """asinfo's card for an LLM context: the numbers and names, without the
+    dataset dates or the long lists (`full` keeps the downstream, peer and
+    prefix lists, capped at ASINFO_LIST_LIMIT). A section that could not be
+    read stays null and `unavailable` says why: null is never "none". A
+    special-purpose AS number is `{asn, special}`, plus the route when an
+    address was announced from it. An address with no AS (`asn` null: no
+    route, and GeoLite2 has no number) is `{asn, route, announced, source,
+    unavailable}`: the AS sections would be nulls about no AS."""
+    if not info:
+        return None
+    route = info.get("route")
+    compact_route = None
+    if route:
+        compact_route = {
+            "prefix": route.get("prefix"),
+            "origins": [
+                {
+                    "asn": origin.get("asn"),
+                    "ris_peers": origin.get("ris_peers"),
+                    "rpki": (origin.get("rpki") or {}).get("state"),
+                }
+                for origin in route.get("origins") or []
+            ],
+        }
+    special = info.get("special")
+    if special:
+        out: dict[str, Any] = {"asn": info.get("asn"), "special": special}
+        if compact_route:
+            out["route"] = compact_route
+        return out
+    unavailable = [
+        {"dataset": item.get("dataset"), "reason": item.get("reason")}
+        for item in info.get("unavailable") or []
+    ]
+    if info.get("asn") is None:
+        return {
+            "asn": None,
+            "route": compact_route,
+            "announced": info.get("announced"),
+            "source": info.get("source"),
+            "unavailable": unavailable,
+        }
+    org = info.get("org")
+    out = {
+        "asn": info.get("asn"),
+        "name": info.get("name"),
+        "country": info.get("country"),
+        "registry": info.get("registry"),
+        "org": None
+        if org is None
+        else {"name": org.get("name"), "sibling_count": org.get("sibling_count")},
+        "route": compact_route,
+        "announced": info.get("announced"),
+        "source": info.get("source"),
+        "prefixes": info.get("prefixes"),
+        "rpki": info.get("rpki"),
+        "upstreams": info.get("upstreams"),
+        "downstreams": _compact_list(info.get("downstreams"), full),
+        "peers": _compact_list(info.get("peers"), full),
+        "asn_drop": info.get("asn_drop"),
+        "unavailable": unavailable,
+        "attribution": info.get("attribution") or [],
+    }
+    if full:
+        out["prefix_list"] = info.get("prefix_list")
+    return out
+
+
 async def _bounded_gather(target: str, legs: frozenset[str] | None = None) -> dict:
     """gather() under MCP's share of the gate and the wall-clock ceiling.
 
@@ -494,13 +588,25 @@ async def lookup(target: str) -> dict[str, Any]:
     or about to be dropped), `default` otherwise, and null for a registry's own
     word outside RFC 8056 (DENIC's "connect"). An IP allocation's statuses are
     not EPP codes and get no `status_explained`.
+
+    `as_info` (when the server has AS data) describes the network the address
+    is announced from: the route (prefix, origin AS and its RPKI state), the AS
+    name, country, registry record, organization, prefix and RPKI counts,
+    upstreams, and whether the AS is on Spamhaus ASN-DROP. It is read from
+    public BGP and RPKI datasets refreshed daily (CAIDA's relationships and
+    organizations monthly), not from live routing, so a route that changed
+    today may not show. A null section was not readable and is named in
+    `unavailable`: never report null as "none". An `asn` of null means no AS
+    was found for the address, and the card is then its route, `announced`,
+    `source` and `unavailable` alone. An AS number is not a target here: use
+    `as_info`.
     """
     try:
         data = await _bounded_gather(target)
     except PrivateAddressError as exc:
         return _fail(exc.message, code=exc.code)
     except InvalidTargetError as exc:
-        return _fail(exc.message)
+        return _invalid_target_fail(exc)
     except TimeoutError:
         return _fail("Lookup timed out")
     except LookupBusy as exc:
@@ -528,6 +634,8 @@ async def lookup(target: str) -> dict[str, Any]:
         result["reputation"] = compact_reputation(data["reputation"])
     if data.get("dns_security"):
         result["dns_security"] = compact_dns_security(data["dns_security"])
+    if data.get("as_info"):
+        result["as_info"] = compact_as_info(data["as_info"])
     return result
 
 
@@ -600,7 +708,7 @@ async def dns_records(domain: str, types: list[str] | None = None) -> dict[str, 
     except PrivateAddressError as exc:
         return _fail(exc.message, code=exc.code)
     except InvalidTargetError as exc:
-        return _fail(exc.message)
+        return _invalid_target_fail(exc)
     except TimeoutError:
         return _fail("Lookup timed out")
     except LookupBusy as exc:
@@ -661,7 +769,7 @@ async def ssl_certificate(domain: str) -> dict[str, Any]:
     except PrivateAddressError as exc:
         return _fail(exc.message, code=exc.code)
     except InvalidTargetError as exc:
-        return _fail(exc.message)
+        return _invalid_target_fail(exc)
     except TimeoutError:
         return _fail("Lookup timed out")
     except LookupBusy as exc:
@@ -854,6 +962,9 @@ async def whoami_caller() -> dict[str, Any]:
     }
     if reputation:
         payload["reputation"] = compact_reputation(reputation)
+    as_card = address_as_info(ip, loc)
+    if as_card:
+        payload["as_info"] = compact_as_info(as_card)
     return payload
 
 
@@ -873,9 +984,51 @@ whoami_caller.__doc__ = (
     "It has no AbuseIPDB "
     "part: the caller's own address is not sent to anyone. `geo` is graded as in "
     '`lookup`: at `precision` "country" only the country is reliable, and the '
-    "coordinates and time zone are null."
+    "coordinates and time zone are null. `as_info`, when present, is as in "
+    "`lookup`."
 )
 mcp.tool(title="Caller address", annotations=_READ_ONLY_LOCAL)(whoami_caller)
+
+
+async def as_info(asn: str | int, full: bool = False) -> dict[str, Any]:
+    """An autonomous system: its name, country, registry record, organization
+    and sibling ASes, how many prefixes it announces and their RPKI coverage,
+    its upstreams, the number of downstreams and peers, and whether it is on
+    Spamhaus ASN-DROP. Pass "AS4766", "as4766", "4766" or 4766. With `full`,
+    the downstream, peer and announced-prefix lists come too, capped; `count`
+    always gives the true total.
+
+    The data is read from public BGP and RPKI datasets (RIPE RIS, RIPE NCC,
+    rpki-client) refreshed daily, with CAIDA's relationships and organizations
+    monthly: it is not live routing, and a recent change may not show. A null
+    section was not readable and is named in `unavailable`; never report null
+    as "none". A special-purpose AS number (private, documentation, reserved)
+    answers with `special`, what it is for, and no network data. A malformed
+    or out-of-range number is refused.
+    """
+    # A model may send the number as a JSON integer; it is read as its digits.
+    text = str(asn).strip().lower()
+    if text.isascii() and text.isdigit():
+        text = "as" + text
+    number = parse_asn(text)
+    if number is None:
+        return _fail(
+            "Not an AS number: pass AS followed by 1 to 10 digits, up to "
+            "4294967295 (AS4766 or 4766)",
+            code="invalid_target",
+        )
+    card = as_info_for_asn(number, full=full)
+    if card is None:
+        if not lookup_module.asinfo_manager.enabled:
+            return _fail("AS information is turned off", code="asinfo_disabled")
+        return _fail("AS information is unavailable", code="invalid_target")
+    return compact_as_info(card, full=full) or {"asn": number}
+
+
+# Registered conditionally, after whoami_caller so tools/list keeps its order,
+# like subdomains: with ASINFO_ENABLED=false an agent sees no such tool.
+if ASINFO_ENABLED:
+    mcp.tool(title="Autonomous system", annotations=_READ_ONLY_LOCAL)(as_info)
 
 
 def build_mcp():

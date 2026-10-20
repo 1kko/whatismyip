@@ -27,14 +27,14 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
-from mapgeom import build_canvas
-from rdap import rdap_breaker, refresh_rdap_bootstrap
-from viewmodel import build_view, dns_failure_text, dns_names, whois_display, whois_fill
 from concurrency import LookupBusy, lookup_gate
 from config import (
     ABUSEIPDB_CACHE_TTL,
     APP_VERSION,
+    ASINFO_CAIDA_ORG_MAX_AGE_DAYS,
+    ASINFO_CAIDA_REL_MAX_AGE_DAYS,
+    ASINFO_CHECK_INTERVAL_SECONDS,
+    ASINFO_MAX_AGE_HOURS,
     BACKGROUND_REFRESH_ENABLED,
     BAN_DURATION_RATE_LIMIT,
     BAN_DURATION_SUSPICIOUS,
@@ -68,20 +68,15 @@ from config import (
     WEBRTC_STUN_URL,
     WHOIS_CACHE_TTL,
 )
-from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
-from mcp_server import (
-    McpBarePathRoute,
-    McpDisabled,
-    build_mcp,
-    mcp_dispatch,
-    registered_tool_names,
-)
-from models import GeoRulesUpdate
+from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from lookup import (
     EMAIL_LIKE_TARGET,
     InvalidTargetError,
     PrivateAddressError,
     abuseipdb_client,
+    address_as_info,
+    as_info_for_asn,
+    asinfo_manager,
     cached_whois,
     canonical_hostname,
     classify_target,
@@ -94,22 +89,22 @@ from lookup import (
     lookup_location,
     lookup_whois,
     normalize_lookup_target,
+    parse_asn,
     reputation_manager,
     sanitize_log_input,
     tld_names_manager,
 )
-from subdomains import get_subdomains, invalid_target_reason
-from textfmt import (
-    InvalidFieldError,
-    block_fields,
-    field_values,
-    legs_for,
-    parse_fields,
-    render_block,
-    render_json,
-    render_lines,
+from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
+from mapgeom import build_canvas
+from mcp_server import (
+    McpBarePathRoute,
+    McpDisabled,
+    build_mcp,
+    mcp_dispatch,
+    registered_tool_names,
 )
-from textfmt import render_error as render_text_error
+from models import GeoRulesUpdate
+from rdap import rdap_breaker, refresh_rdap_bootstrap
 from security import (
     GeoBlockManager,
     IPBanManager,
@@ -120,6 +115,27 @@ from security import (
     _peer_is_trusted,
     blocked_ban_log,
     get_client_ip,
+)
+from subdomains import get_subdomains, invalid_target_reason
+from textfmt import (
+    InvalidFieldError,
+    as_block,
+    block_fields,
+    field_values,
+    legs_for,
+    parse_fields,
+    render_block,
+    render_json,
+    render_lines,
+)
+from textfmt import render_error as render_text_error
+from viewmodel import (
+    as_page_view,
+    build_view,
+    dns_failure_text,
+    dns_names,
+    whois_display,
+    whois_fill,
 )
 
 # Load environment variables from .env file
@@ -346,18 +362,32 @@ def lookup_href(value: str | None) -> str | None:
     links to the 400 page. A name links in its canonical spelling
     (canonical_hostname: lower case, A-label), the one its own page has; DNS
     names arrive with their trailing dot (ns1.naver.com.), and RDAP name
-    servers often in upper case. Only ':' is left unescaped, for an IPv6
+    servers often in upper case. An AS number (AS4766) links to its own page,
+    the special-purpose ones included. Only ':' is left unescaped, for an IPv6
     address; a hostname cannot contain one.
     """
     if not isinstance(value, str):
         return None
     target = value.strip().rstrip(".")
+    asn = parse_asn(target.lower())
+    if asn is not None:
+        # Its page explains a special-purpose number too, so no is_safe_ip
+        # here. Written as `AS<n>`, with no leading zeros.
+        return f"/AS{asn}"
     kind = classify_target(target)
     if kind == "domain":
         target = canonical_hostname(target)
     elif kind not in ("ipv4", "ipv6") or not is_safe_ip(target):
         return None
     return "/" + quote(target, safe=":")
+
+
+def _lookup_href_without_as(value: str | None) -> str | None:
+    """lookup_href for a page drawn with ASINFO_ENABLED=false: /AS4766 would be
+    a 400 there, so an AS number stays text."""
+    if isinstance(value, str) and parse_asn(value.strip().lower()) is not None:
+        return None
+    return lookup_href(value)
 
 
 def _record_target(kind: str, record) -> str | None:
@@ -563,14 +593,25 @@ def site_domain(request: Request) -> str:
     return host if host and not is_ip else SITE_DOMAIN_FALLBACK
 
 
+def _script_json(data: object, indent: int | None = 2) -> str:
+    """`data` as JSON for a <script type="application/json"> block. Every <, >
+    and & is a \\u escape, so no third-party text in it (a WHOIS field, an AS
+    name) can end the element, or open a "<!--<script" that would make the
+    tokenizer swallow the scripts after it; JSON.parse reads the escapes back."""
+    text = json.dumps(data, indent=indent, default=str)
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
+    as_info = response_data.get("as_info") or {}
     view = build_view(
         response_data,
         is_self=is_self,
         subdomains_enabled=SUBDOMAIN_ENABLED,
-        link_for=lookup_href,
+        link_for=lookup_href if asinfo_manager.enabled else _lookup_href_without_as,
+        credit_links=asinfo_manager.credit_links(as_info.get("datasets") or {}),
     )
 
     # map.js labels the pins with the two IPs and draws the distance on the arc.
@@ -605,10 +646,27 @@ def render_page(request: Request, response_data: dict, is_self: bool):
             "dns_rows": _dns_rows(response_data),
             "headers": response_data.get("headers") or {},
             "whois": whois_display(whois_data),
-            "json_data": json.dumps(response_data, indent=2, default=str).replace(
-                "</", "<\\/"
-            ),
-            "map_data": json.dumps(map_data, default=str).replace("</", "<\\/"),
+            "json_data": _script_json(response_data),
+            "map_data": _script_json(map_data, indent=None),
+            "nonce": getattr(request.state, "csp_nonce", ""),
+        },
+    )
+
+
+def render_as_page(request: Request, response_data: dict):
+    """Render as.html, the /AS<n> page, from viewmodel.as_page_view. Its
+    numbers link to their own pages through lookup_href: the page exists only
+    while AS lookups are on."""
+    credit_links = asinfo_manager.credit_links(response_data.get("datasets") or {})
+    return templates.TemplateResponse(
+        request,
+        "as.html",
+        {
+            "view": as_page_view(response_data, lookup_href, credit_links),
+            "mcp_tools": registered_tool_names(),
+            "api_base": public_base_url(request),
+            "site_domain": site_domain(request),
+            "json_data": _script_json(response_data),
             "nonce": getattr(request.state, "csp_nonce", ""),
         },
     )
@@ -907,6 +965,24 @@ scheduler.add_job(
     misfire_grace_time=None,
     id="refresh-reputation",
 )
+# AS information (asinfo.py). The same shape as the reputation job: each
+# dataset is downloaded once its copy is due, the job only checks often enough
+# to bound how late a refresh or a retry runs, the first run is at boot and
+# fetches only what is missing or stale, and a request's time is kept on disk
+# so a restart repeats nothing. max_instances=1 keeps two runs from sharing a
+# `.tmp` name (a run that outlasts the interval is skipped, not stacked), and
+# ASINFO_ENABLED=false makes refresh() a no-op.
+scheduler.add_job(
+    asinfo_manager.refresh,
+    "interval",
+    seconds=ASINFO_CHECK_INTERVAL_SECONDS,
+    next_run_time=datetime.datetime.now(),
+    # Due at import, run after the lifespan starts the scheduler: see above.
+    misfire_grace_time=None,
+    max_instances=1,
+    coalesce=True,
+    id="refresh-asinfo",
+)
 
 
 def _fetch_unloaded_geoip_dbs():
@@ -1167,6 +1243,9 @@ def _suspicious_path_is_ordinary(request_path: str) -> bool:
         return False
     target = request_path.lstrip("/")
     if not target:  # "/" itself
+        return True
+    # An AS number ("/AS4766") has no public suffix, but is a lookup target.
+    if classify_target(normalize_lookup_target(target)) == "asn":
         return True
     return domain_manager.is_valid_domain(target) or domain_manager.is_ipv4(target)
 
@@ -1528,6 +1607,24 @@ def health_reasons() -> list[dict[str, str]]:
             )
     for message in reputation_manager.stale_lists():
         reasons.append(_reason("reputation_list_stale", message))
+    for message in asinfo_manager.stale_datasets():
+        reasons.append(_reason("asinfo_dataset_stale", message))
+    asinfo = asinfo_manager.status()
+    # No database after a build was tried is a failed build; a database file
+    # that will not read (database false with the file on disk) is just as
+    # unusable. A fresh volume before the first refresh is neither.
+    if (
+        asinfo["enabled"]
+        and not asinfo["database"]
+        and (asinfo_manager.build_attempted or os.path.exists(asinfo_manager.path))
+    ):
+        reasons.append(
+            _reason(
+                "asinfo_unavailable",
+                "the AS database is missing or unreadable, so lookups carry "
+                "no AS information",
+            )
+        )
     for message in abuseipdb_client.problems():
         reasons.append(_reason("abuseipdb_key_rejected", message))
     open_hosts = rdap_breaker.open_hosts()
@@ -1567,6 +1664,7 @@ async def healthz():
         "databases": geo_ip_manager.database_status(),
         "public_suffix_list": tld_names_manager.status(),
         "reputation": reputation_manager.status(),
+        "asinfo": asinfo_manager.status(),
         "abuseipdb": abuseipdb_client.status(),
     }
 
@@ -1643,6 +1741,23 @@ async def privacy(request: Request):
                 reputation_manager.hosts() if reputation_manager.enabled else []
             ),
             "reputation_max_age": _span(int(REPUTATION_MAX_AGE_HOURS * 3600)),
+            "asinfo_hosts": (asinfo_manager.hosts() if asinfo_manager.enabled else []),
+            "asinfo_caida": any(
+                dataset.id.startswith("caida") for dataset in asinfo_manager.datasets
+            ),
+            # CAIDA's dataset pages, which the AS card's citations link to too.
+            "asinfo_credit_urls": {
+                dataset.id: dataset.credit_url
+                for dataset in asinfo_manager.datasets
+                if dataset.credit_url
+            },
+            "asinfo_max_age": _span(int(ASINFO_MAX_AGE_HOURS * 3600)),
+            "asinfo_caida_rel_max_age": _span(
+                int(ASINFO_CAIDA_REL_MAX_AGE_DAYS * 86400)
+            ),
+            "asinfo_caida_org_max_age": _span(
+                int(ASINFO_CAIDA_ORG_MAX_AGE_DAYS * 86400)
+            ),
             "abuseipdb_enabled": abuseipdb_client.enabled,
             "abuseipdb_cache": _span(ABUSEIPDB_CACHE_TTL),
             "stun_url": WEBRTC_STUN_URL,
@@ -1772,6 +1887,10 @@ async def _self_fields(client_ip: str, names: list[str]) -> dict:
             "ssl": None,
             "reputation": ip_reputation(client_ip, location or None)
             if "reputation" in legs
+            else None,
+            # A local read of the AS database, so no gate slot.
+            "as_info": address_as_info(client_ip, location or None)
+            if "asinfo" in legs
             else None,
         }
 
@@ -1922,6 +2041,72 @@ async def _self_whois_only(client_ip: str) -> dict:
         return await asyncio.shield(task)
 
 
+# What an AS target answers in place of a lookup: AS lookups turned off
+# (ASINFO_ENABLED=false), and the two query parameters that belong to an
+# address or a domain.
+AS_LOOKUPS_OFF = "AS lookups are turned off on this server"
+AS_FIELDS_UNSUPPORTED = (
+    "fields are not available for an AS lookup: ask for the whole answer as "
+    "JSON or with ?format=text"
+)
+AS_SUBDOMAINS_UNSUPPORTED = "subdomains apply to a domain name, not an AS number"
+
+
+def _as_lookup(
+    asn: int, request: Request, fmt: str, names: list[str] | None
+) -> Response | dict:
+    """GET /AS<n>: the AS card from the local AS database
+    (lookup.as_info_for_asn, with its full lists), as JSON, as the text block
+    (textfmt.as_block) or as the AS page, its address spelled AS<n>.
+
+    A read of a local file and nothing else, so it takes no slot at the lookup
+    gate and runs right here, as a GeoIP read does; the rate limit is the
+    middleware's, as for any lookup. A special-purpose number answers what it
+    is for and reads no dataset. With AS lookups off every number is a 400 of
+    its own (asinfo_disabled), the special-purpose ones included, its JSON
+    shaped like a refused address's. ?fields= and ?subdomains= are refused:
+    the field table is an address's and a domain's, and an AS has no
+    subdomains.
+    """
+    if names is not None:
+        return _invalid_field(InvalidFieldError(AS_FIELDS_UNSUPPORTED), fmt)
+    if "subdomains" in request.query_params:
+        if fmt == "text":
+            return _text_error(AS_SUBDOMAINS_UNSUPPORTED)
+        raise HTTPException(status_code=400, detail=AS_SUBDOMAINS_UNSUPPORTED)
+    started = time.perf_counter()
+    as_info = as_info_for_asn(asn, full=True)
+    if as_info is None:
+        if fmt == "text":
+            return _text_error(AS_LOOKUPS_OFF)
+        if fmt == "html":
+            return render_error(
+                request,
+                400,
+                "AS lookups are off",
+                "This server does not look up AS numbers. Enter a domain name "
+                "or an IP address instead.",
+            )
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": AS_LOOKUPS_OFF,
+                "error": AS_LOOKUPS_OFF,
+                "code": "asinfo_disabled",
+            },
+        )
+    response_data = {
+        "address": f"AS{asn}",
+        **as_info,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
+    }
+    if fmt == "text":
+        return PlainTextResponse(as_block(response_data))
+    if fmt == "html":
+        return render_as_page(request, response_data)
+    return response_data
+
+
 async def _target_fields(target: str, names: list[str] | None, fmt: str):
     """/{domain_ip} as text or as ?fields=: only the legs the fields need, and
     none of the map, the visitor's own location or the subdomain list, which
@@ -1929,7 +2114,7 @@ async def _target_fields(target: str, names: list[str] | None, fmt: str):
     kind = "domain" if classify_target(target) == "domain" else "ip"
     block = names is None
     if block:
-        names = block_fields(kind)
+        names = block_fields(kind, as_info=asinfo_manager.enabled)
     try:
         data = await gather(target, legs=legs_for(names, kind))
     except InvalidTargetError as exc:
@@ -2099,6 +2284,11 @@ async def get_self_info(request: Request):
     reputation = ip_reputation(client_ip, ip_data)
     if reputation is not None:
         response_data["reputation"] = reputation
+    # The route and AS of the visitor's address: a read of the local AS
+    # database, likewise.
+    as_info = address_as_info(client_ip, ip_data)
+    if as_info is not None:
+        response_data["as_info"] = as_info
 
     if fmt == "html":
         return render_page(request, response_data, is_self=True)
@@ -2116,6 +2306,9 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     # for its MCP callers; normalize_lookup_target is idempotent,
     # see test_normalize_lookup_target_is_idempotent in tests/test_lookup.py.
     domain_ip = normalize_lookup_target(domain_ip)
+    # An AS number (classify_target's "asn": as4766, as04766) is answered by
+    # _as_lookup below, and spelled AS4766 from here on, the log line included.
+    asn = parse_asn(domain_ip)
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
@@ -2127,7 +2320,7 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         "client=%s lookup=%s",
         sanitize_log_input(client_ip),
         # A target with an "@" in it is logged as a marker: see loggable_target.
-        loggable_target(domain_ip),
+        f"AS{asn}" if asn is not None else loggable_target(domain_ip),
     )
 
     fmt = negotiate(request)
@@ -2141,6 +2334,11 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         names = parse_fields(request.query_params.getlist("fields"))
     except InvalidFieldError as exc:
         return _invalid_field(exc, fmt)
+
+    if asn is not None:
+        # Before _target_fields and gather(): both take a target that is not a
+        # domain for an IP address.
+        return _as_lookup(asn, request, fmt, names)
 
     if mode == "only":
         # Skips gather() entirely: this mode exists so the page's toggle can ask
@@ -2232,6 +2430,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         response_data["reputation"] = data["reputation"]
     if data.get("dns_security") is not None:
         response_data["dns_security"] = data["dns_security"]
+    if data.get("as_info") is not None:
+        response_data["as_info"] = data["as_info"]
     if subdomain_task is not None:
         response_data["subdomains"] = await subdomain_task
 

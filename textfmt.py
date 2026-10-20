@@ -25,6 +25,8 @@ from viewmodel import DASH, DNS_FAILURE_TEXT, dmarc_policy, fcrdns_state
 _BOTH = frozenset({"domain", "ip"})
 _DOMAIN = frozenset({"domain"})
 _IP = frozenset({"ip"})
+# The geo leg is there for the card's fallback AS (GeoLite2's number).
+_ROUTE_LEGS = frozenset({"resolve", "geo", "asinfo"})
 
 # Every field, in the order the text block lists them, with the lookup.gather()
 # legs it needs and the kinds of target it applies to. An IP gets no registrar,
@@ -47,6 +49,12 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "asn_number": (frozenset({"geo"}), _BOTH),
     "asn_name": (frozenset({"geo"}), _BOTH),
     "cidr": (frozenset({"geo"}), _BOTH),
+    # The announced route covering the address (RIPE RIS), the origin the AS
+    # card describes, and that origin's RPKI state. A local read, so they cost
+    # nothing and sit in the block, while AS information is on (block_fields).
+    "route_prefix": (_ROUTE_LEGS, _BOTH),
+    "route_origin": (_ROUTE_LEGS, _BOTH),
+    "rpki_state": (_ROUTE_LEGS, _BOTH),
     "registrar": (frozenset({"whois"}), _DOMAIN),
     "registrant": (frozenset({"whois"}), _BOTH),
     "domain_expires": (frozenset({"whois"}), _DOMAIN),
@@ -81,7 +89,10 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
         )
     },
 }
-_SECURITY_FIELDS = tuple(name for name in FIELDS if name.endswith("_state"))
+# rpki_state ends in _state too, and is not one of them.
+_SECURITY_FIELDS = tuple(
+    name for name in FIELDS if name.endswith("_state") and name != "rpki_state"
+)
 
 # Asked for by name only, never in the text block. A bare "risk_level: none"
 # or "risk_score: 0" among the other lines reads as a clean bill, which the
@@ -110,6 +121,8 @@ _NOT_IN_BLOCK = frozenset(
 # confirm) and "unknown" is "?": the PTR name's A/AAAA query failed.
 _FCRDNS_ANSWERS = frozenset({"confirmed", "unconfirmed"})
 _FCRDNS_FAILED = "the PTR name's A/AAAA query failed"
+
+_ROUTE_FIELDS = ("route_prefix", "route_origin", "rpki_state")
 
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires", "domain_age_days")
 
@@ -173,12 +186,17 @@ def parse_fields(values: list[str]) -> list[str] | None:
     return names
 
 
-def block_fields(kind: str) -> list[str]:
-    """The keys of the text block for a target of `kind` ("domain" or "ip")."""
+def block_fields(kind: str, *, as_info: bool) -> list[str]:
+    """The keys of the text block for a target of `kind` ("domain" or "ip").
+    The route fields are among them only with `as_info`, AS information on
+    (main passes asinfo_manager.enabled): off, nothing reads them, and a "-"
+    would read as "not announced". Asked for by name they still read "-", as
+    the risk fields do with the reputation lists off."""
+    left_out = _NOT_IN_BLOCK if as_info else _NOT_IN_BLOCK | set(_ROUTE_FIELDS)
     return [
         name
         for name, (_, kinds) in FIELDS.items()
-        if kind in kinds and name not in _NOT_IN_BLOCK
+        if kind in kinds and name not in left_out
     ]
 
 
@@ -217,6 +235,14 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     domain = data.get("domain") or {}
     dmarc = dmarc_policy(domain) or {}
     security = data.get("dns_security") or {}
+    as_info = data.get("as_info")
+    route = (as_info or {}).get("route") or {}
+    # The origin the card describes: the one seen by the most RIS peers.
+    origins = route.get("origins") or []
+    origin = next(
+        (o for o in origins if o.get("asn") == (as_info or {}).get("asn")),
+        origins[0] if origins else {},
+    )
     fcrdns = fcrdns_state(
         data.get("reverse_dns"), data.get("domain"), data.get("address") or ""
     )
@@ -232,6 +258,9 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "asn_number": geo["asn_number"],
         "asn_name": geo["asn_name"],
         "cidr": geo["cidr"],
+        "route_prefix": route.get("prefix"),
+        "route_origin": origin.get("asn"),
+        "rpki_state": (origin.get("rpki") or {}).get("state"),
         "registrar": registration.get("registrar"),
         "registrant": registration.get("registrant"),
         "domain_expires": _date(registration.get("expires")),
@@ -285,6 +314,22 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     for name in _REGISTRATION_FIELDS:
         if error and kind in FIELDS[name][1]:
             errors[name] = str(error)
+    # A route dataset that could not be read: whether the address is announced
+    # (and its origin's RPKI state) is unknown, not "-". Not announced is an
+    # answer and stays "-".
+    if as_info is not None:
+        unavailable = {
+            entry.get("dataset"): entry.get("reason") or "unavailable"
+            for entry in as_info.get("unavailable") or []
+        }
+        if as_info.get("announced") is None:
+            family = "ris_v6" if ":" in str(data.get("resolved_ip") or "") else "ris_v4"
+            reason = unavailable.get(family) or "the route dataset is unavailable"
+            for name in _ROUTE_FIELDS:
+                if kind in FIELDS[name][1]:
+                    errors[name] = reason
+        elif route and not origin.get("rpki") and "rpki" in unavailable:
+            errors["rpki_state"] = unavailable["rpki"]
     # No list could be read: the level is unknown, not "none".
     if reputation and reputation.get("level") is None:
         for name in _RISK_FIELDS:
@@ -367,3 +412,84 @@ def render_json(names: list[str], values: dict, errors: dict) -> dict[str, Any]:
 def render_error(message: str) -> str:
     """A refused request as a text client reads it: one line."""
     return f"error: {_clean(message)}\n"
+
+
+# The /AS<n> text block: the card's scalars and the upstream list, in this
+# order, each with the asinfo datasets it reads. A value is "?" when one of
+# them could not be used (the card's `unavailable`), "-" when they were read
+# and hold nothing for this AS. ?fields= does not apply: the field table above
+# is an address's and a domain's.
+_AS_BLOCK = (
+    ("asn", ()),
+    ("name", ("asnames",)),
+    ("country", ("asnames",)),
+    ("rir", ("nro",)),
+    ("assigned", ("nro",)),
+    ("org", ("caida_org",)),
+    ("prefixes_v4", ("ris_v4", "ris_v6")),
+    ("prefixes_v6", ("ris_v4", "ris_v6")),
+    ("rpki_valid", ("rpki", "ris_v4", "ris_v6")),
+    ("rpki_invalid", ("rpki", "ris_v4", "ris_v6")),
+    ("rpki_not_found", ("rpki", "ris_v4", "ris_v6")),
+    ("upstreams", ("caida_rel",)),
+    ("downstreams", ("caida_rel",)),
+    ("peers", ("caida_rel",)),
+    ("asn_drop", ()),
+)
+
+
+def as_block(as_info: dict) -> str:
+    """GET /AS<n>?format=text: `key: value` lines from as_info_for_asn's card.
+
+    The upstreams are AS numbers, space-separated; downstreams and peers are
+    counts. asn_drop is "true" or "false", "?" when Spamhaus's list was not
+    read (off, stale or never downloaded). A special-purpose number is its
+    code, its range (AS64512-AS65534, or AS23456 alone), the document that
+    defines it and its purpose: nothing was read for it."""
+    special = as_info.get("special")
+    if special:
+        first, last = special.get("first"), special.get("last")
+        values = {
+            "asn": as_info.get("asn"),
+            "special": special.get("code"),
+            "range": f"AS{first}" if first == last else f"AS{first}-AS{last}",
+            "defined_in": special.get("defined_in"),
+            "purpose": special.get("purpose"),
+        }
+        return render_block(list(values), values, {})
+    registry = as_info.get("registry") or {}
+    org = as_info.get("org") or {}
+    prefixes = as_info.get("prefixes") or {}
+    rpki = as_info.get("rpki") or {}
+    upstreams = as_info.get("upstreams") or []
+    listed = as_info.get("asn_drop")
+    values = {
+        "asn": as_info.get("asn"),
+        "name": as_info.get("name"),
+        "country": as_info.get("country"),
+        "rir": registry.get("rir"),
+        "assigned": registry.get("assigned"),
+        "org": org.get("name") or org.get("id"),
+        "prefixes_v4": prefixes.get("v4"),
+        "prefixes_v6": prefixes.get("v6"),
+        "rpki_valid": rpki.get("valid"),
+        "rpki_invalid": rpki.get("invalid"),
+        "rpki_not_found": rpki.get("not_found"),
+        "upstreams": " ".join(str(entry.get("asn")) for entry in upstreams) or None,
+        "downstreams": (as_info.get("downstreams") or {}).get("count"),
+        "peers": (as_info.get("peers") or {}).get("count"),
+        "asn_drop": None if listed is None else str(listed).lower(),
+    }
+    unavailable = {
+        entry.get("dataset"): entry.get("reason") or "unavailable"
+        for entry in as_info.get("unavailable") or []
+    }
+    errors = {}
+    for name, datasets in _AS_BLOCK:
+        for dataset in datasets:
+            if dataset in unavailable:
+                errors[name] = unavailable[dataset]
+                break
+    if listed is None:
+        errors["asn_drop"] = "the ASN-DROP list could not be checked"
+    return render_block([name for name, _ in _AS_BLOCK], values, errors)
