@@ -1,9 +1,14 @@
-"""asinfo.py's dataset table, source parsers, database build and reads. No
-network."""
+"""asinfo.py's dataset table, source parsers, database build, reads and
+refresh. No network: downloads go to a fake fetch, or to a server on
+loopback."""
 
 import bz2
+import dataclasses
 import datetime
 import gzip
+import http.server
+import json
+import logging
 import os
 import sqlite3
 import threading
@@ -13,6 +18,7 @@ import pytest
 
 import asinfo
 from asinfo import (
+    DATABASE_NAME,
     DATASET_IDS,
     SCHEMA_VERSION,
     AsInfoManager,
@@ -29,20 +35,38 @@ from asinfo import (
     rov_state,
 )
 from asinfo_fixtures import (
+    ASNAMES,
+    CAIDA_DATE,
+    CAIDA_ORG,
     CAIDA_ORG_NAME,
+    CAIDA_REL,
     CAIDA_REL_NAME,
     DAY,
     HOUR,
     KT_ORG_ID,
     NOW,
     RIS_V4,
+    Clock,
     build_live,
     build_manager,
+    fake_fetch,
     fixture_meta,
+    good_ris_v4_bytes,
     iso,
     rebuild,
+    refresh_datasets,
+    refreshed_manager,
     write_sources,
 )
+from config import REPUTATION_USER_AGENT
+
+
+@pytest.fixture(autouse=True)
+def _caida_on(monkeypatch):
+    """The tests here take CAIDA's datasets as fetched, the default; a
+    developer's .env must not turn them off underneath. A test about turning
+    them off sets the flag itself."""
+    monkeypatch.setattr(asinfo, "ASINFO_CAIDA_ENABLED", True)
 
 
 def test_asnames_splits_the_country_off_the_last_comma():
@@ -243,6 +267,9 @@ def test_default_datasets_table():
     assert by_id["caida_rel"].max_age_hours == 75 * 24
     assert by_id["caida_org"].max_age_hours == 200 * 24
     assert by_id["nro"].max_bytes > 57 * 1024 * 1024
+    # Room for the CSV unzipped (about 50 MB), from a server that ignores
+    # Accept-Encoding.
+    assert by_id["rpki"].max_bytes == 128 * 1024 * 1024
     assert by_id["caida_rel"].pattern and by_id["caida_org"].pattern
     assert all(d.pattern is None for d in datasets[:5])
     assert by_id["nro"].credit == "Source: RIPE NCC"
@@ -799,6 +826,7 @@ def test_for_address_answers_every_section_of_the_routes_origin(tmp_path):
             "name": "Korea Telecom",
             "country": "KR",
             "siblings": [9760],
+            "sibling_count": 1,
         },
         "prefixes": {"v4": 2, "v6": 1, "v4_addresses": 131072, "v6_48s": 65536},
         "rpki": {"valid": 2, "invalid": 0, "not_found": 1},
@@ -962,6 +990,22 @@ def test_age_is_the_sources_own_date_else_when_it_was_fetched(tmp_path):
     assert "asnames" not in info["datasets"]
 
 
+@pytest.mark.parametrize(
+    "hours, reason",
+    [
+        (72.4, "73 hours old, past its limit of 72 hours"),
+        (95.5, "96 hours old, past its limit of 72 hours"),
+        (96.5, "5 days old, past its limit of 72 hours"),
+    ],
+)
+def test_a_stale_age_is_rounded_up_past_its_limit(tmp_path, hours, reason):
+    # Rounded to the nearest, 72.4 hours would read "72 hours old, past its
+    # limit of 72 hours".
+    old = iso(NOW - hours * HOUR)
+    manager = build_manager(tmp_path, meta={"rpki": {"source_date": old}})
+    assert _unavailable(manager.for_asn(4766)) == {"rpki": reason}
+
+
 @pytest.mark.parametrize("how", ["left out", "stale"])
 def test_without_current_vrps_rpki_is_unavailable_never_not_found(tmp_path, how):
     if how == "left out":
@@ -971,7 +1015,7 @@ def test_without_current_vrps_rpki_is_unavailable_never_not_found(tmp_path, how)
         old = iso(NOW - 100 * HOUR)
         meta = {"rpki": {"fetched_at": old, "source_date": old}}
         manager = build_manager(tmp_path, meta=meta)
-        reason = "4 days old, past its limit of 72 hours"
+        reason = "5 days old, past its limit of 72 hours"  # 4 days and 4 hours
     info = manager.for_address("2606:4700::1")
     assert info["route"]["origins"] == [{"asn": 13335, "ris_peers": 150, "rpki": None}]
     assert info["rpki"] is None
@@ -984,7 +1028,8 @@ def test_without_current_vrps_rpki_is_unavailable_never_not_found(tmp_path, how)
 
 def test_caida_turned_off_reads_none_of_its_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(asinfo, "ASINFO_CAIDA_ENABLED", False)
-    manager = build_manager(tmp_path)  # the file still holds CAIDA's rows
+    # The file still holds CAIDA's rows.
+    manager = build_manager(tmp_path, datasets=asinfo.default_datasets())
     info = manager.for_asn(4766)
     assert info["org"] is None and info["upstreams"] is None
     assert info["downstreams"] is None and info["peers"] is None
@@ -1098,7 +1143,9 @@ def test_a_database_removed_under_a_reader_is_no_database(tmp_path):
     assert set(_unavailable(info).values()) == {"not downloaded yet"}
 
 
-def test_a_read_that_fails_once_is_read_again_from_a_fresh_open(tmp_path, monkeypatch):
+def test_a_read_that_fails_once_is_read_again_from_a_fresh_open(
+    tmp_path, monkeypatch, caplog
+):
     # macOS's own SQLite fails the next read of a file swapped out from under
     # an open connection (SQLITE_IOERR_VNODE), though the file then at the
     # path is a complete build.
@@ -1114,8 +1161,66 @@ def test_a_read_that_fails_once_is_read_again_from_a_fresh_open(tmp_path, monkey
         return real(reader, sql, args)
 
     monkeypatch.setattr(asinfo._Reader, "_execute", fail_once)
-    assert manager.for_address("211.252.112.1") == expected
+    with caplog.at_level(logging.WARNING):
+        assert manager.for_address("211.252.112.1") == expected
     assert len(failed) == 1
+    # Answered in full, but the failure is still logged.
+    [record] = [r for r in caplog.records if "AS database" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert "disk I/O error" in record.getMessage()
+
+
+def test_a_programming_error_is_raised_not_read_as_an_unreadable_file(
+    tmp_path, monkeypatch
+):
+    # A bug in a query is not a file that failed to read.
+    manager = build_manager(tmp_path)
+
+    def misuse(reader, sql, args):
+        raise sqlite3.ProgrammingError("Incorrect number of bindings supplied")
+
+    monkeypatch.setattr(asinfo._Reader, "_execute", misuse)
+    with pytest.raises(sqlite3.ProgrammingError):
+        manager.for_address("211.252.112.1")
+
+
+def test_a_rebuild_with_a_new_prefix_length_finds_the_longer_route(tmp_path):
+    manager = build_manager(tmp_path)
+    assert manager.for_address("211.252.112.1")["route"]["prefix"] == (
+        "211.252.112.0/24"
+    )
+    rebuild(tmp_path, texts={"ris_v4": RIS_V4 + "4766\t211.252.112.0/28\t50\n"})
+    route = manager.for_address("211.252.112.1")["route"]
+    assert (route["prefix"], route["origins"][0]["ris_peers"]) == (
+        "211.252.112.0/28",
+        50,
+    )
+
+
+def test_a_file_swapped_in_as_a_reader_opens_is_read_with_its_own_lengths(
+    tmp_path, monkeypatch
+):
+    manager = build_manager(tmp_path)
+    # Reading caches this file's prefix lengths, which have no /28.
+    assert manager.for_address("211.252.112.1")["route"]["prefix"] == (
+        "211.252.112.0/24"
+    )
+    manager._release()
+    # The next build, which adds a /28, lands between the reader's stat of the
+    # path and its connect.
+    following = tmp_path / "following"
+    build_live(following, texts={"ris_v4": RIS_V4 + "4766\t211.252.112.0/28\t50\n"})
+    connect = sqlite3.connect
+
+    def connect_after_a_swap(*args, **kwargs):
+        if (following / DATABASE_NAME).exists():
+            os.replace(following / DATABASE_NAME, tmp_path / DATABASE_NAME)
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(asinfo.sqlite3, "connect", connect_after_a_swap)
+    assert manager.for_address("211.252.112.1")["route"]["prefix"] == (
+        "211.252.112.0/28"
+    )
 
 
 def test_a_database_that_keeps_failing_is_unavailable_never_raised(
@@ -1182,6 +1287,19 @@ def test_for_asn_full_caps_lists_and_reports_counts(tmp_path, monkeypatch):
         ],
     }
     assert (info["source"], info["route"], info["announced"]) == ("asn", None, True)
+
+
+def test_org_siblings_are_capped_and_counted_in_full(tmp_path, monkeypatch):
+    monkeypatch.setattr(asinfo, "ASINFO_LIST_LIMIT", 2)
+    more = [
+        {"type": "ASN", "asn": str(asn), "name": "KT", "organizationId": KT_ORG_ID}
+        for asn in (23577, 3559, 5051)
+    ]
+    caida_org = "".join(json.dumps(r) + "\n" for r in [*CAIDA_ORG, *more])
+    info = build_manager(tmp_path, texts={"caida_org": caida_org}).for_asn(4766)
+    # The lowest numbers, the AS itself left out; the count is all of them.
+    assert info["org"]["siblings"] == [3559, 5051]
+    assert info["org"]["sibling_count"] == 4  # 3559, 5051, 9760, 23577
 
 
 def test_for_asn_without_full_lists_no_prefixes(tmp_path):
@@ -1256,3 +1374,409 @@ def test_hosts_names_each_dataset_server_once():
         "console.rpki-client.org",
         "publicdata.caida.org",
     ]
+
+
+# Download and refresh.
+
+URLS = {d.id: d.url for d in default_datasets(caida=True)}
+# Each copy is named after the last segment of the URL it came from.
+COPIES = {
+    "asnames": "asn.txt",
+    "nro": "nro-delegated-stats",
+    "ris_v4": "riswhoisdump.IPv4.gz",
+    "ris_v6": "riswhoisdump.IPv6.gz",
+    "rpki": "rpki.csv",
+    "caida_rel": CAIDA_REL_NAME,
+    "caida_org": CAIDA_ORG_NAME,
+}
+# A request's stamp: CAIDA's is its listing's, written before the listing is.
+STAMPS = [
+    "as-organizations.requested",
+    "asn.txt.requested",
+    "nro-delegated-stats.requested",
+    "riswhoisdump.IPv4.gz.requested",
+    "riswhoisdump.IPv6.gz.requested",
+    "rpki.csv.requested",
+    "serial-2.requested",
+]
+KT_RENAMED = ASNAMES.replace("Korea Telecom", "KT Corporation").encode()
+
+
+def _manager(directory, clock, fetch, enabled=True):
+    return AsInfoManager(
+        directory=str(directory),
+        datasets=refresh_datasets(),
+        enabled=enabled,
+        fetch=fetch,
+        clock=clock,
+    )
+
+
+def _requested(fetch):
+    return [url for url, _ in fetch.calls]
+
+
+def _database_file(directory):
+    """The live database's identity: a rebuild swaps in another file."""
+    stat = (directory / DATABASE_NAME).stat()
+    return stat.st_ino, stat.st_mtime_ns
+
+
+def test_refresh_downloads_every_missing_dataset_and_builds(tmp_path):
+    fetch = fake_fetch(
+        last_modified={
+            "asnames": "Mon, 19 Oct 2026 22:15:00 GMT",
+            # The dump's own line and the file name outrank the header.
+            "ris_v4": "Tue, 20 Oct 2026 09:28:09 GMT",
+            "caida_rel": "Fri, 02 Oct 2026 03:00:00 GMT",
+        }
+    )
+    manager = _manager(tmp_path, Clock(), fetch)
+    assert manager.build_attempted is False
+    assert manager.refresh() is True
+    assert manager.build_attempted is True
+
+    assert fetch.calls == [
+        (URLS["asnames"], False),
+        (URLS["nro"], False),
+        (URLS["ris_v4"], False),
+        (URLS["ris_v6"], False),
+        (URLS["rpki"], True),  # Accept-Encoding: gzip
+        (URLS["caida_rel"], False),  # the listing, then its newest file
+        (URLS["caida_rel"] + CAIDA_REL_NAME, False),
+        (URLS["caida_org"], False),
+        (URLS["caida_org"] + CAIDA_ORG_NAME, False),
+    ]
+    names = set(os.listdir(tmp_path))
+    assert {*COPIES.values(), DATABASE_NAME, *STAMPS} <= names
+    assert not [name for name in names if name.endswith(".tmp")]
+    # rpki.csv is kept as it came, gzipped; reading sniffs that.
+    assert (tmp_path / "rpki.csv").read_bytes()[:2] == b"\x1f\x8b"
+
+    info = manager.for_address("211.252.112.1")
+    assert info["route"]["prefix"] == "211.252.112.0/24"
+    assert info["route"]["origins"][0]["rpki"] == {"state": "valid", "reason": None}
+    assert info["name"] == "KIXS-AS-KR-KR - Korea Telecom"
+    assert _asns(info["upstreams"]) == [174, 701]
+    assert info["org"]["name"] == "Korea Telecom"
+    assert info["unavailable"] == []
+
+    fetched = iso(NOW)
+    generated = "2026-10-19T08:00:00+00:00"
+    status = manager.status()["datasets"]
+    assert {
+        dataset_id: (d["fetched_at"], d["source_date"], d["rows"], d["stale"])
+        for dataset_id, d in status.items()
+    } == {
+        "asnames": (fetched, "2026-10-19T22:15:00+00:00", 8, False),  # Last-Modified
+        "nro": (fetched, fetched, 4, False),  # nothing better than the fetch
+        "ris_v4": (fetched, generated, 3, False),  # the dump's "generated at"
+        "ris_v6": (fetched, generated, 2, False),
+        "rpki": (fetched, fetched, 2, False),
+        "caida_rel": (fetched, CAIDA_DATE, 6, False),  # the file name's date
+        "caida_org": (fetched, CAIDA_DATE, 5, False),
+    }
+
+
+def test_each_request_is_recorded_before_it_is_sent(tmp_path):
+    clock = Clock()
+    serve = fake_fetch()
+    stamped = []
+
+    def fetch(url, dest_path, max_bytes, accept_gzip=False):
+        stamped.append({n for n in os.listdir(tmp_path) if n.endswith(".requested")})
+        return serve(url, dest_path, max_bytes, accept_gzip)
+
+    _manager(tmp_path, clock, fetch).refresh()
+    assert stamped[0] == {"asn.txt.requested"}
+    # The listing's stamp covers the file it names.
+    assert "serial-2.requested" in stamped[6]
+    stamps = {name: os.path.getmtime(tmp_path / name) for name in STAMPS}
+    assert set(stamps.values()) == {NOW}
+
+
+def test_refresh_skips_a_fresh_copy_and_waits_after_a_failed_request(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(asinfo, "ASINFO_RETRY_SECONDS", 3600)
+    clock = Clock()
+    manager = refreshed_manager(tmp_path, clock)
+    built = _database_file(tmp_path)
+
+    manager._fetch = fetch = fake_fetch()
+    clock.advance(hours=23)
+    assert manager.refresh() is True
+    assert fetch.calls == []  # every copy was checked under a day ago
+
+    # A day on, each dataset is checked again, and the AS names fail.
+    manager._fetch = fetch = fake_fetch(asnames=OSError("connection reset"))
+    clock.advance(hours=2)
+    assert manager.refresh() is False
+    assert _requested(fetch)[:3] == [URLS["asnames"], URLS["nro"], URLS["ris_v4"]]
+    # The rest came back unchanged, so nothing was built.
+    assert _database_file(tmp_path) == built
+    assert manager.for_asn(4766)["name"] == "KIXS-AS-KR-KR - Korea Telecom"
+    assert manager.for_asn(4766)["unavailable"] == []
+
+    # For an hour after the failed request, the AS names wait, also across a
+    # restart; the others are fresh.
+    clock.advance(seconds=3599)
+    restarted = _manager(tmp_path, clock, fake_fetch())
+    assert restarted.refresh() is False
+    assert restarted._fetch.calls == []
+
+    # Then they are asked for again, and new rows build a new database.
+    restarted._fetch = fetch = fake_fetch(asnames=KT_RENAMED)
+    clock.advance(seconds=1)
+    assert restarted.refresh() is True
+    assert _requested(fetch) == [URLS["asnames"]]
+    assert _database_file(tmp_path) != built
+    assert restarted.for_asn(4766)["name"] == "KIXS-AS-KR-KR - KT Corporation"
+    assert restarted.status()["datasets"]["asnames"]["fetched_at"] == iso(clock())
+
+
+def test_caida_is_downloaded_again_only_when_a_newer_file_is_listed(tmp_path):
+    clock = Clock()
+    manager = refreshed_manager(tmp_path, clock)
+    built = _database_file(tmp_path)
+
+    # A day on, the listings name the same files: neither is downloaded again.
+    manager._fetch = fetch = fake_fetch()
+    clock.advance(hours=25)
+    assert manager.refresh() is True
+    caida = [url for url in _requested(fetch) if "caida" in url]
+    assert caida == [URLS["caida_rel"], URLS["caida_org"]]
+    assert _database_file(tmp_path) == built
+
+    # That check counts: the listings are not read again for another day.
+    manager._fetch = fetch = fake_fetch()
+    clock.advance(hours=23)
+    assert manager.refresh() is True
+    assert fetch.calls == []
+
+    # Then a newer month is listed: it is downloaded, replaces the old file,
+    # and is built in under its own date.
+    newer = "20261101.as-rel2.txt.bz2"
+    caida_rel = bz2.compress((CAIDA_REL + "1299|4766|-1|bgp\n").encode())
+    manager._fetch = fetch = fake_fetch(
+        listed={"caida_rel": newer}, caida_rel=caida_rel
+    )
+    clock.advance(hours=2)
+    assert manager.refresh() is True
+    caida = [url for url in _requested(fetch) if "caida" in url]
+    assert caida == [URLS["caida_rel"], URLS["caida_rel"] + newer, URLS["caida_org"]]
+    assert (tmp_path / newer).exists()
+    assert not (tmp_path / CAIDA_REL_NAME).exists()
+    info = manager.for_asn(4766)
+    assert _asns(info["upstreams"]) == [174, 701, 1299]
+    assert "The CAIDA UCSD AS Relationships Dataset, 2026-11-01" in info["attribution"]
+    assert manager.status()["datasets"]["caida_rel"]["source_date"] == "2026-11-01"
+
+
+def test_a_caida_listing_without_its_file_keeps_the_copy(tmp_path):
+    clock = Clock()
+    manager = refreshed_manager(tmp_path, clock)
+    manager._fetch = fetch = fake_fetch(listed={"caida_rel": None})
+    clock.advance(hours=25)
+    assert manager.refresh() is False
+    assert URLS["caida_rel"] in _requested(fetch)
+    assert (tmp_path / CAIDA_REL_NAME).exists()
+    assert _asns(manager.for_asn(4766)["upstreams"]) == [174, 701]
+
+
+@pytest.mark.parametrize("download", ["truncated", "reformatted", "thin"])
+def test_a_truncated_or_thin_download_keeps_the_old_copy(tmp_path, download):
+    # Review Focus 4.
+    clock = Clock()
+    manager = refreshed_manager(tmp_path, clock)  # one good refresh
+    copy = tmp_path / "riswhoisdump.IPv4.gz"
+    db = tmp_path / "asinfo.sqlite3"
+    before = (copy.read_bytes(), db.stat().st_mtime_ns)
+    if download == "truncated":
+        bad = good_ris_v4_bytes()[:200]  # gzip cut short
+        assert len(bad) < len(good_ris_v4_bytes())
+    elif download == "reformatted":
+        bad = gzip.compress(RIS_V4.replace("\t", ",").encode())  # no row parses
+    else:
+        bad = gzip.compress(RIS_V4.replace("\t340\n", "\t3\n").encode())  # 2 of 3
+    manager._fetch = fake_fetch(ris_v4=bad)
+    clock.advance(hours=25)
+    assert manager.refresh() is False
+    assert (copy.read_bytes(), db.stat().st_mtime_ns) == before
+    info = manager.for_address("211.252.112.1")
+    assert info["route"] is not None
+    # The previous copy is still the one read.
+    assert info["unavailable"] == []
+    assert not (tmp_path / "riswhoisdump.IPv4.gz.tmp").exists()
+
+
+def test_a_download_past_its_cap_keeps_the_old_copy(tmp_path):
+    clock = Clock()
+    manager = refreshed_manager(tmp_path, clock)
+    before = (tmp_path / "asn.txt").read_bytes()
+    datasets = [dataclasses.replace(d, max_bytes=len(before)) for d in manager.datasets]
+    manager.datasets = tuple(datasets)
+    manager._fetch = fake_fetch(asnames=before + b"65000 ONE-MORE, NL\n")
+    clock.advance(hours=25)
+    assert manager.refresh() is False
+    assert (tmp_path / "asn.txt").read_bytes() == before
+
+
+def test_a_failed_build_keeps_the_old_database(tmp_path, monkeypatch, caplog):
+    clock = Clock()
+    manager = refreshed_manager(tmp_path, clock)
+    built = _database_file(tmp_path)
+    build = asinfo.build_database
+
+    def fail(sources, out_path, min_peers, meta):
+        with open(out_path, "wb") as handle:
+            handle.write(b"half a database")
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(asinfo, "build_database", fail)
+    manager._fetch = fake_fetch(asnames=KT_RENAMED)
+    clock.advance(hours=25)
+    assert manager.refresh() is False
+    assert _database_file(tmp_path) == built
+    assert not (tmp_path / "asinfo.sqlite3.tmp").exists()
+    assert "database or disk is full" in caplog.text
+    assert manager.for_asn(4766)["name"] == "KIXS-AS-KR-KR - Korea Telecom"
+
+    # The new copy stays, and the next refresh builds it in, downloading
+    # nothing.
+    monkeypatch.setattr(asinfo, "build_database", build)
+    manager._fetch = fetch = fake_fetch()
+    clock.advance(hours=1)
+    assert manager.refresh() is True
+    assert fetch.calls == []
+    assert manager.for_asn(4766)["name"] == "KIXS-AS-KR-KR - KT Corporation"
+
+
+def test_a_database_from_another_release_is_rebuilt_from_the_copies(tmp_path):
+    clock = Clock()
+    manager = refreshed_manager(tmp_path, clock)
+    db = sqlite3.connect(tmp_path / DATABASE_NAME)
+    db.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    db.close()
+    assert manager.for_address("211.252.112.1")["route"] is None
+    manager._fetch = fetch = fake_fetch()
+    clock.advance(hours=1)
+    assert manager.refresh() is True
+    assert fetch.calls == []
+    assert manager.for_address("211.252.112.1")["route"]["prefix"] == (
+        "211.252.112.0/24"
+    )
+
+
+def test_a_first_refresh_builds_what_it_could_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(asinfo, "ASINFO_RETRY_SECONDS", 3600)
+    clock = Clock()
+    manager = _manager(tmp_path, clock, fake_fetch(ris_v6=OSError("timed out")))
+    assert manager.refresh() is False
+    assert manager.for_address("1.1.1.1")["route"]["prefix"] == "1.1.1.0/24"
+    info = manager.for_address("2606:4700::1")
+    assert info["route"] is None and info["announced"] is None
+    assert _unavailable(info) == {"ris_v6": "not downloaded yet"}
+
+    # An hour on, the missing dataset is asked for again and built in.
+    manager._fetch = fetch = fake_fetch()
+    clock.advance(hours=1)
+    assert manager.refresh() is True
+    assert _requested(fetch) == [URLS["ris_v6"]]
+    info = manager.for_address("2606:4700::1")
+    assert info["route"]["prefix"] == "2606:4700::/32"
+    assert info["unavailable"] == []
+
+
+def test_a_first_refresh_that_downloads_nothing_leaves_no_database(tmp_path):
+    down = {dataset_id: OSError("unreachable") for dataset_id in DATASET_IDS}
+    listed = {"caida_rel": OSError("unreachable"), "caida_org": OSError("x")}
+    manager = _manager(tmp_path, Clock(), fake_fetch(listed=listed, **down))
+    assert manager.refresh() is False
+    assert manager.build_attempted is True
+    assert not (tmp_path / DATABASE_NAME).exists()
+    reasons = _unavailable(manager.for_address("1.1.1.1"))
+    assert set(reasons.values()) == {"the database has not been built"}
+    assert manager.status()["database"] is False
+
+
+def test_disabled_refresh_does_nothing(tmp_path):
+    directory = tmp_path / "asinfo"
+    fetch = fake_fetch()
+    manager = _manager(directory, Clock(), fetch, enabled=False)
+    assert manager.refresh() is True
+    assert fetch.calls == []
+    assert not directory.exists()
+    assert manager.build_attempted is False
+
+
+def test_the_default_fetch_is_the_real_download():
+    assert AsInfoManager(enabled=False)._fetch is asinfo._download
+
+
+class _Source(http.server.BaseHTTPRequestHandler):
+    """A dataset's server on loopback, answering every GET with `reply`."""
+
+    seen: list[dict] = []
+    reply = (200, {}, b"")
+
+    def do_GET(self):  # noqa: N802 - the stdlib's name
+        type(self).seen.append(dict(self.headers.items()))
+        status, headers, body = type(self).reply
+        self.send_response(status)
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def source():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Source)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    _Source.seen = []
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/rpki.csv"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_download_streams_the_body_to_its_file(tmp_path, source):
+    body = os.urandom(3 * 1024 * 1024 + 5)  # several chunks
+    last_modified = "Tue, 20 Oct 2026 09:28:09 GMT"
+    _Source.reply = (200, {"Last-Modified": last_modified}, body)
+    dest = tmp_path / "copy.tmp"
+    answer = asinfo._download(source, str(dest), len(body))
+    assert answer == {"last_modified": last_modified}
+    assert dest.read_bytes() == body
+    [sent] = _Source.seen
+    assert sent["User-Agent"] == REPUTATION_USER_AGENT
+    assert sent.get("Accept-Encoding") != "gzip"
+
+
+def test_download_asks_for_gzip_only_when_told(tmp_path, source):
+    _Source.reply = (200, {}, gzip.compress(b"ASN,IP Prefix\n"))
+    answer = asinfo._download(source, str(tmp_path / "rpki"), 100, accept_gzip=True)
+    assert answer == {"last_modified": None}
+    [sent] = _Source.seen
+    assert sent["Accept-Encoding"] == "gzip"
+
+
+@pytest.mark.parametrize("stated", [True, False])
+def test_download_refuses_a_body_past_its_cap(tmp_path, source, stated):
+    # With a Content-Length it is refused unread; without one, once the
+    # body runs past the cap.
+    headers = {"Content-Length": "101"} if stated else {}
+    _Source.reply = (200, headers, b"y" * 101)
+    with pytest.raises(ValueError, match="100"):
+        asinfo._download(source, str(tmp_path / "copy.tmp"), 100)
+
+
+def test_download_raises_on_an_error_status(tmp_path, source):
+    _Source.reply = (404, {}, b"not here")
+    with pytest.raises(OSError):
+        asinfo._download(source, str(tmp_path / "copy.tmp"), 100)

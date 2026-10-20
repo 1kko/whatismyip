@@ -8,15 +8,26 @@ providers 174 and 701, its peer 9318, three customers, and AS13335.
 `build_manager` builds them into a directory's database the way a refresh
 does (into a .tmp file, then os.replace) and returns a manager over it whose
 clock reads `now`; `rebuild` builds again over the live file.
+
+`refreshed_manager` gets there through `refresh()` instead, downloading the
+same sources from `fake_fetch`, a fetch that serves them by URL, on a `Clock`
+the test moves by hand.
 """
 
 import bz2
+import dataclasses
 import datetime
 import gzip
 import json
 import os
 
-from asinfo import DATABASE_NAME, DATASET_IDS, AsInfoManager, build_database
+from asinfo import (
+    DATABASE_NAME,
+    DATASET_IDS,
+    AsInfoManager,
+    build_database,
+    default_datasets,
+)
 
 CAIDA_REL_NAME = "20261001.as-rel2.txt.bz2"
 CAIDA_ORG_NAME = "20261001.as-org2info.jsonl.gz"
@@ -50,9 +61,16 @@ ripencc|NL|asn|1101|10|19930901|assigned|x|e-stats
 arin||asn|7|1||available||e-stats
 """
 
+# The dumps open with RIPE's header, whose "generated at" line is their date.
 RIS_V4 = """\
-% RIS whois dump, generated at 2026-10-19 08:00 UTC
-% origin\tprefix\tseen by peers
+%
+% This file was generated at Mon Oct 19 08:00:00 UTC 2026.
+% A more recent copy may be available
+% from http://www.ris.ripe.net/dumps/riswhoisdump.IPv4.gz
+%
+% Full dump of combined RIS IPv4 routing tables
+% Format:  <origin> <tab> <prefix> <tab> <seen by #rispeers>
+%
 
 4766\t211.252.112.0/24\t326
 4766\t211.252.0.0/15\t330
@@ -62,7 +80,9 @@ RIS_V4 = """\
 """
 
 RIS_V6 = """\
-% RIS whois dump, generated at 2026-10-19 08:00 UTC
+%
+% This file was generated at Mon Oct 19 08:00:00 UTC 2026.
+%
 4766\t2001:2d8::/32\t120
 13335\t2606:4700::/32\t150
 """
@@ -195,11 +215,13 @@ def build_live(
 
 
 def build_manager(directory, now: float = NOW, clock=None, datasets=None, **build):
-    """A manager over a freshly built `directory`, its clock at `now`."""
+    """A manager over a freshly built `directory`, its clock at `now`. It
+    fetches every dataset, CAIDA's included, whatever ASINFO_CAIDA_ENABLED
+    a developer's .env sets, unless `datasets` says otherwise."""
     build_live(directory, now=now, **build)
     return AsInfoManager(
         directory=str(directory),
-        datasets=datasets,
+        datasets=default_datasets(caida=True) if datasets is None else datasets,
         enabled=True,
         clock=clock or (lambda: now),
     )
@@ -214,3 +236,146 @@ def rebuild(directory, ris_v4_peers: int | None = None, **build) -> None:
             "211.252.112.0/24\t326", f"211.252.112.0/24\t{ris_v4_peers}"
         )
     build_live(directory, texts=texts, **build)
+
+
+# Refresh: the sources as the servers send them, through a fake fetch.
+
+# The rows each source holds after its parser's filters.
+FIXTURE_ROWS = {
+    "asnames": 8,
+    "nro": 4,
+    "ris_v4": 3,
+    "ris_v6": 2,
+    "rpki": 2,
+    "caida_rel": 6,
+    "caida_org": 5,
+}
+
+# What each CAIDA listing names besides the dataset's newest file: its older
+# months, and files that are not the dataset (another format, a README).
+_OLDER = {
+    "caida_rel": ("20260801.as-rel2.txt.bz2", "20260901.as-rel2.txt.bz2"),
+    "caida_org": ("20260701.as-org2info.jsonl.gz",),
+}
+_NOT_THE_DATASET = {
+    "caida_rel": ("20261001.ppdc-ases.txt.bz2", "README.txt"),
+    "caida_org": ("20261001.as-org2info.txt.gz", "README.txt"),
+}
+
+
+def _gz(text: str) -> bytes:
+    # A fixed mtime: the same text gzips to the same bytes, as a server's
+    # unchanged file downloads to the same bytes.
+    return gzip.compress(text.encode(), mtime=0)
+
+
+def good_ris_v4_bytes() -> bytes:
+    """The IPv4 dump as RIPE serves it, gzipped."""
+    return _gz(RIS_V4)
+
+
+def good_sources() -> dict[str, bytes]:
+    """Each dataset's file as its server sends it (rpki before gzip)."""
+    return {
+        "asnames": ASNAMES.encode(),
+        "nro": NRO.encode(),
+        "ris_v4": good_ris_v4_bytes(),
+        "ris_v6": _gz(RIS_V6),
+        "rpki": RPKI.encode(),
+        "caida_rel": bz2.compress(CAIDA_REL.encode()),
+        "caida_org": _gz("".join(json.dumps(r) + "\n" for r in CAIDA_ORG)),
+    }
+
+
+def listing(dataset_id: str, newest: str | None) -> bytes:
+    """A CAIDA directory listing whose newest file for the dataset is
+    `newest`, after older ones; None lists no file of the dataset at all."""
+    names = list(_NOT_THE_DATASET[dataset_id])
+    if newest:
+        names += [*_OLDER[dataset_id], newest]
+    rows = "".join(f'<tr><td><a href="{n}">{n}</a></td></tr>\n' for n in names)
+    return (
+        '<html><body><table>\n<tr><th><a href="?C=N;O=D">Name</a></th></tr>\n'
+        f'<tr><td><a href="/datasets/">Parent Directory</a></td></tr>\n{rows}'
+        "</table></body></html>\n"
+    ).encode()
+
+
+def refresh_datasets():
+    """Every dataset, CAIDA's included, each wanting exactly the rows its
+    fixture source has: one row fewer is a thin download."""
+    return tuple(
+        dataclasses.replace(d, min_rows=FIXTURE_ROWS[d.id])
+        for d in default_datasets(caida=True)
+    )
+
+
+class Clock:
+    """The time as a test sets it: NOW until advanced."""
+
+    def __init__(self, now: float = NOW):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, hours: float = 0, seconds: float = 0) -> None:
+        self.now += hours * HOUR + seconds
+
+
+def fake_fetch(listed=None, last_modified=None, **served):
+    """A fetch serving the fixture sources by URL, as `_download` does: it
+    writes the body to `dest_path` and answers {"last_modified"}.
+
+    `served[id]` replaces a dataset's body: bytes, or an exception to raise.
+    A CAIDA URL is a listing whose newest file is `listed[id]` (the fixture's
+    name unless given; None lists none; an exception fails the listing), and
+    a file under it is served that dataset's body. rpki comes gzipped when
+    asked for gzip, as console.rpki-client.org sends it. `last_modified[id]`
+    is the Last-Modified header. `fetch.calls` has (url, accept_gzip) per
+    request, in order."""
+    datasets = default_datasets(caida=True)
+    bodies = {**good_sources(), **served}
+    newest = {"caida_rel": CAIDA_REL_NAME, "caida_org": CAIDA_ORG_NAME}
+    newest.update(listed or {})
+    calls = []
+
+    def fetch(url, dest_path, max_bytes, accept_gzip=False):
+        calls.append((url, accept_gzip))
+        for dataset in datasets:
+            listed_file = dataset.pattern and url.startswith(dataset.url)
+            if url == dataset.url and dataset.pattern:
+                body = newest[dataset.id]
+                if not isinstance(body, BaseException):
+                    body = listing(dataset.id, body)
+            elif url == dataset.url or listed_file:
+                body = bodies[dataset.id]
+                if dataset.id == "rpki" and accept_gzip:
+                    body = gzip.compress(body, mtime=0)
+            else:
+                continue
+            if isinstance(body, BaseException):
+                raise body
+            if len(body) > max_bytes:
+                raise ValueError(f"{url} is larger than {max_bytes} bytes")
+            with open(dest_path, "wb") as handle:
+                handle.write(body)
+            return {"last_modified": (last_modified or {}).get(dataset.id)}
+        raise OSError(f"no fixture at {url}")
+
+    fetch.calls = calls
+    return fetch
+
+
+def refreshed_manager(directory, clock=None, fetch=None, datasets=None):
+    """A manager over `directory` after one refresh through `fetch` (the
+    fixture sources unless given) that brought every dataset in."""
+    manager = AsInfoManager(
+        directory=str(directory),
+        datasets=refresh_datasets() if datasets is None else datasets,
+        enabled=True,
+        fetch=fetch or fake_fetch(),
+        clock=clock or Clock(),
+    )
+    assert manager.refresh() is True
+    return manager

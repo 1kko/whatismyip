@@ -25,17 +25,26 @@ so a lookup only reads them, and the VRPs are not kept.
 past its `max_age_hours`, is unavailable: every section that reads it is None
 and `unavailable` says why, so "not known" never reads as "none".
 
+`AsInfoManager.refresh()`, run by the scheduler, keeps a copy of each source
+beside the database and rebuilds the database when a copy changes. A download
+replaces its copy only once its parser finds `min_rows` rows in it, and a
+build replaces the database only once complete, so a broken source or a
+failed build leaves lookups reading what they read before.
+
 Imports config and the standard library only: lookup.py builds the singleton.
 """
 
 import bz2
 import contextlib
 import datetime
+import email.utils
+import filecmp
 import gzip
 import ipaddress
 import itertools
 import json
 import logging
+import math
 import operator
 import os
 import re
@@ -43,6 +52,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+import urllib.request
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
@@ -57,10 +67,13 @@ from config import (
     ASINFO_ENABLED,
     ASINFO_LIST_LIMIT,
     ASINFO_MAX_AGE_HOURS,
+    ASINFO_MIN_RIS_PEERS,
     ASINFO_NRO_URL,
+    ASINFO_RETRY_SECONDS,
     ASINFO_RIS_V4_URL,
     ASINFO_RIS_V6_URL,
     ASINFO_RPKI_URL,
+    REPUTATION_USER_AGENT,
 )
 
 _RIPE_CREDIT = "Source: RIPE NCC"
@@ -143,7 +156,9 @@ def default_datasets(caida: bool | None = None) -> tuple[Dataset, ...]:
             24,
             daily,
             300_000,
-            64 * _MB,
+            # Asked for gzipped (5 MB), but about 50 MB from a server that
+            # ignores Accept-Encoding.
+            128 * _MB,
             "RPKI data validated by rpki-client.org",
         ),
     ]
@@ -723,6 +738,143 @@ def build_database(
     return rows
 
 
+# Downloads. A dataset's copy is named after the last segment of its URL, or
+# for CAIDA of the file its listing names, and kept beside the database.
+
+DOWNLOAD_TIMEOUT_SECONDS = 30
+_CHUNK = 1024 * 1024
+# A directory listing is a page of links.
+_LISTING_MAX_BYTES = 4 * _MB
+# Each dataset's copy: its file, when it was downloaded, the source's own date
+# (both stored in the database's meta), and when it was last checked against
+# its server.
+_COPIES_NAME = "copies.json"
+_RECORD_KEYS = ("file", "fetched_at", "source_date", "checked_at")
+
+# What a download must parse to, through the parser the build reads it with.
+_PARSERS: dict[str, Callable[[Iterable[str]], Iterator]] = {
+    "asnames": parse_asnames,
+    "nro": parse_nro,
+    "ris_v4": lambda lines: parse_ris(lines, ASINFO_MIN_RIS_PEERS),
+    "ris_v6": lambda lines: parse_ris(lines, ASINFO_MIN_RIS_PEERS),
+    "rpki": parse_vrps,
+    "caida_rel": parse_as_rel,
+    "caida_org": parse_as_org,
+}
+
+# The RIS dumps' header says "% This file was generated at Tue Oct 20 09:12:30
+# UTC 2026." (`date` in the C locale, so English names).
+_GENERATED_AT = re.compile(
+    r"generated at \w{3} (\w{3}) +(\d{1,2}) (\d{2}:\d{2}:\d{2}) UTC (\d{4})"
+)
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def _download(
+    url: str, dest_path: str, max_bytes: int, accept_gzip: bool = False
+) -> dict:
+    """GET `url` into `dest_path`, streamed in chunks; {"last_modified": the
+    response's Last-Modified header, or None}. Raises past `max_bytes`, unread
+    when the response says up front that it is longer. Sends
+    REPUTATION_USER_AGENT and, with `accept_gzip`, Accept-Encoding: gzip; a
+    gzipped body is kept as it came, and open_text reads it. The URL is
+    operator config, or a file name a listing gave that matched its
+    dataset's pattern, never user input."""
+    headers = {"User-Agent": REPUTATION_USER_AGENT}
+    if accept_gzip:
+        headers["Accept-Encoding"] = "gzip"
+    request = urllib.request.Request(url, headers=headers)  # noqa: S310
+    with urllib.request.urlopen(  # noqa: S310
+        request, timeout=DOWNLOAD_TIMEOUT_SECONDS
+    ) as response:
+        stated = response.headers.get("Content-Length", "")
+        if stated.isdigit() and int(stated) > max_bytes:
+            raise ValueError(f"{url} is {stated} bytes, more than {max_bytes}")
+        size = 0
+        with open(dest_path, "wb") as handle:
+            while chunk := response.read(_CHUNK):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError(f"{url} is larger than {max_bytes} bytes")
+                handle.write(chunk)
+        return {"last_modified": response.headers.get("Last-Modified")}
+
+
+def _request_name(dataset: Dataset) -> str:
+    """The last segment of the dataset's URL: its copy's name, or for CAIDA
+    its listing's (`serial-2`). Its `.requested` stamp is named after it."""
+    path = urllib.parse.urlparse(dataset.url).path
+    return path.rstrip("/").rsplit("/", 1)[-1] or dataset.id
+
+
+def _iso(epoch: float) -> str:
+    when = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
+    return when.isoformat(timespec="seconds")
+
+
+def _http_date(value: str | None) -> str | None:
+    """A Last-Modified header as an ISO 8601 UTC time; None if none parses."""
+    if not value:
+        return None
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return when.astimezone(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def _generated_at(path: str) -> str | None:
+    """When a RIS dump says it was generated, read off its comment header, as
+    an ISO 8601 UTC time; None when it does not say."""
+    with contextlib.closing(open_text(path)) as lines:
+        for line in lines:
+            if line and not line.startswith("%"):
+                return None
+            match = _GENERATED_AT.search(line)
+            if match is None:
+                continue
+            month, day, clock, year = match.groups()
+            if month not in _MONTHS:
+                return None
+            month_number = _MONTHS.index(month) + 1
+            text = f"{year}-{month_number:02d}-{int(day):02d}T{clock}+00:00"
+            try:
+                return datetime.datetime.fromisoformat(text).isoformat()
+            except ValueError:
+                return None
+    return None
+
+
+def _count_rows(dataset_id: str, path: str) -> int:
+    """The rows the build would read from `path`: its parser's, after the
+    parser's filters (RIS rows seen by too few peers are not counted). A file
+    that ends early raises, a gzip or bzip2 cut short included."""
+    with contextlib.closing(open_text(path)) as lines:
+        return sum(1 for _ in _PARSERS[dataset_id](lines))
+
+
+def _mtime(path: str) -> float | None:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def _is_record(record) -> bool:
+    """Whether a copies.json entry is whole: four strings, a bare file name,
+    a check time that reads as one."""
+    if not isinstance(record, dict):
+        return False
+    if not all(isinstance(record.get(key), str) for key in _RECORD_KEYS):
+        return False
+    name = record["file"]
+    if name in ("", ".", "..") or os.path.basename(name) != name:
+        return False
+    return _epoch(record["checked_at"]) is not None
+
+
 # The live database in the manager's directory. A refresh builds it as
 # DATABASE_NAME + ".tmp" and swaps it in with os.replace.
 DATABASE_NAME = "asinfo.sqlite3"
@@ -842,9 +994,17 @@ def _day(value) -> str:
 
 
 # Hours below four days, so a daily dataset just past its 72 hours does not
-# read "3 days old, past its limit of 3 days".
+# read "3 days old, past its limit of 3 days"; rounded up, so an age past its
+# limit never reads as the limit itself.
 def _age_text(hours: float) -> str:
-    return f"{hours:.0f} hours" if hours < 96 else f"{hours / 24:.0f} days"
+    if hours < 96:
+        return f"{math.ceil(hours)} hours"
+    return f"{math.ceil(hours / 24)} days"
+
+
+def _sqlite_error(exc: Exception) -> str:
+    name = getattr(exc, "sqlite_errorname", None)
+    return f"{name}: {exc}" if name else str(exc)
 
 
 def _date(row: tuple) -> object:
@@ -981,6 +1141,9 @@ class _Reader:
         return answer
 
     def _org(self, asn: int) -> dict | None:
+        """The AS's organization and its other ASes: the lowest numbers, up
+        to ASINFO_LIST_LIMIT (one organization has over 1,000), and their
+        count."""
         row = self._execute("SELECT org_id FROM asn_org WHERE asn = ?", (asn,))
         org_id = (row.fetchone() or (None,))[0]
         if org_id is None:
@@ -988,7 +1151,12 @@ class _Reader:
         org = self._execute("SELECT name, country FROM org WHERE id = ?", (org_id,))
         name, country = org.fetchone() or (None, None)
         siblings = self._execute(
-            "SELECT asn FROM asn_org WHERE org_id = ? AND asn != ? ORDER BY asn",
+            "SELECT asn FROM asn_org WHERE org_id = ? AND asn != ? ORDER BY asn"
+            " LIMIT ?",
+            (org_id, asn, ASINFO_LIST_LIMIT),
+        )
+        count = self._execute(
+            "SELECT count(*) FROM asn_org WHERE org_id = ? AND asn != ?",
             (org_id, asn),
         )
         return {
@@ -996,6 +1164,7 @@ class _Reader:
             "name": name or None,
             "country": country,
             "siblings": [sibling for (sibling,) in siblings],
+            "sibling_count": count.fetchone()[0],
         }
 
     def _neighbours(self, sql: str, args: tuple) -> list[dict]:
@@ -1057,8 +1226,10 @@ class AsInfoManager:
     unavailable. So is one this deployment does not fetch (CAIDA's, under
     ASINFO_CAIDA_ENABLED=false), however the file was built.
 
-    Disabled (ASINFO_ENABLED=false), it opens nothing and the reads answer
-    None, which leaves AS information out of every response.
+    refresh() downloads the datasets and builds the database; see there.
+
+    Disabled (ASINFO_ENABLED=false), it opens nothing, downloads nothing, and
+    the reads answer None, which leaves AS information out of every response.
     """
 
     def __init__(
@@ -1066,17 +1237,19 @@ class AsInfoManager:
         directory: str = ASINFO_DIR,
         datasets: Iterable[Dataset] | None = None,
         enabled: bool = ASINFO_ENABLED,
-        fetch: Callable[[str, str, int], dict] | None = None,
+        fetch: Callable[..., dict] | None = None,
         clock: Callable[[], float] = time.time,
     ):
         self.directory = directory
         self.path = os.path.join(directory, DATABASE_NAME)
         self.datasets = default_datasets() if datasets is None else tuple(datasets)
         self.enabled = enabled
-        self._fetch = fetch
+        # fetch(url, dest_path, max_bytes, accept_gzip=False), as _download.
+        self._fetch = fetch or _download
         self._clock = clock
-        # Whether a build has been tried since start. Before one, a missing
-        # database is a fresh volume, not a fault.
+        # Whether a refresh has run since start, which is what tries to build
+        # the database. Before one, a missing database is a fresh volume, not
+        # a fault.
         self.build_attempted = False
         # Every dataset's label, fetched here or not, for `unavailable`.
         self._labels = {
@@ -1115,11 +1288,16 @@ class AsInfoManager:
             self._local.held = held
         return held[1], held[2]
 
+    def _uri(self) -> str:
+        return f"file:{urllib.parse.quote(os.path.abspath(self.path))}?mode=ro"
+
     def _open(self, key: tuple) -> tuple[_Copy | None, str | None]:
-        uri = f"file:{urllib.parse.quote(os.path.abspath(self.path))}?mode=ro"
-        con = sqlite3.connect(uri, uri=True)
+        con = sqlite3.connect(self._uri(), uri=True)
         try:
             version = con.execute("PRAGMA user_version").fetchone()[0]
+            # Whether the file open is the one `key` names: a swap between
+            # the stat and the connect opens the next build instead.
+            named = self._file_key() == key
             if version != SCHEMA_VERSION:
                 logging.warning(
                     "Not reading the AS database %s: schema %s, expected %s",
@@ -1135,17 +1313,20 @@ class AsInfoManager:
                     "SELECT dataset, built, rows, fetched_at, source_date FROM meta"
                 )
             }
-            plens = self._prefix_lengths(con, key)
+            plens = self._prefix_lengths(con, key if named else None)
         except sqlite3.Error:
             con.close()
             raise
         return _Copy(con, meta, plens), None
 
     def _prefix_lengths(
-        self, con: sqlite3.Connection, key: tuple
+        self, con: sqlite3.Connection, key: tuple | None
     ) -> dict[int, tuple[int, ...]]:
+        """The lengths `con`'s routes have per family, longest first: shared
+        by every connection to the file `key` names, or read afresh, and not
+        shared, when `key` is None (it is not known which file `con` has)."""
         cached = self._plens
-        if cached is not None and cached[0] == key:
+        if key is not None and cached is not None and cached[0] == key:
             return cached[1]
         plens = {
             family: tuple(
@@ -1158,9 +1339,7 @@ class AsInfoManager:
             )
             for family in (4, 6)
         }
-        # Shared only when the file was not swapped while this one opened, so
-        # `key` surely names what the connection read.
-        if self._file_key() == key:
+        if key is not None:
             self._plens = (key, plens)
         return plens
 
@@ -1200,23 +1379,34 @@ class AsInfoManager:
     def _with_database[T](self, use: Callable[[_Copy | None, str | None], T]) -> T:
         """`use(copy, problem)`, on this thread's copy of the database. When it
         fails to read, the file is opened afresh and `use` runs once more (a
-        swap fails a read on macOS); a second failure is logged and `use` gets
-        no database. Never raises sqlite3.Error; a file that does not read is
-        logged once."""
+        swap fails a read on macOS), and the failure is logged as a warning;
+        a second failure is logged as an error, once per file, and `use` gets
+        no database. A file that does not read never raises, but a
+        ProgrammingError, a fault in a query rather than in the file, does."""
         error = None
         for _ in range(2):
             try:
-                return use(*self._database())
-            except sqlite3.Error as exc:
+                answer = use(*self._database())
+            except sqlite3.DatabaseError as exc:
+                if isinstance(exc, sqlite3.ProgrammingError):
+                    raise
                 error = exc
                 self._release()
+                continue
+            if error is not None:
+                logging.warning(
+                    "Read the AS database %s again after an error (%s)",
+                    self.path,
+                    _sqlite_error(error),
+                )
+            return answer
         key = self._file_key()
         if key != self._unreadable:
             self._unreadable = key
             logging.error(
                 "Cannot read the AS database %s (%s)",
                 self.path,
-                getattr(error, "sqlite_errorname", error),
+                _sqlite_error(error),
                 exc_info=error,
             )
         return use(None, _UNREADABLE)
@@ -1354,3 +1544,233 @@ class AsInfoManager:
             if host not in hosts:
                 hosts.append(host)
         return hosts
+
+    def refresh(self) -> bool:
+        """Bring each dataset's copy up to date, and build the database from
+        the copies when one changed; whether every dataset is current
+        afterwards. Run by the scheduler, one run at a time, never by a
+        request: it downloads tens of MB, parses each download, and a build
+        takes about half a minute of CPU.
+
+        A dataset is due when it has no copy, or its copy was last checked
+        `interval_hours` ago. A due dataset still waits while its last request
+        is under ASINFO_RETRY_SECONDS old. That time is the mtime of
+        `<file>.requested`, written before the request is sent, so the wait
+        holds across a restart and a failed request counts as much as one
+        that worked.
+
+        Checking a dataset downloads its file to `<file>.tmp`. For CAIDA it
+        first reads the listing (under the listing's stamp), and downloads
+        the newest file there only when that is not the copy's. A download
+        that is the copy byte for byte only marks the copy checked. Any other
+        must give its parser `min_rows` rows before it replaces the copy, so
+        a truncated, thin or reformatted file leaves the copy as it was.
+
+        The database is built from the copies when it is missing or from
+        another release, or when a copy is newer than what it was built from
+        (replaced in this run, or in one whose build failed). The build goes
+        to asinfo.sqlite3.tmp and replaces the database only once complete;
+        a build that fails is logged and leaves the old file.
+        """
+        if not self.enabled:
+            return True
+        try:
+            copies = self._read_copies()
+            current = True
+            for dataset in self.datasets:
+                current = self._refresh_dataset(dataset, copies) and current
+            return self._build_if_behind(copies) and current
+        finally:
+            self.build_attempted = True
+
+    def _copies_path(self) -> str:
+        return os.path.join(self.directory, _COPIES_NAME)
+
+    def _read_copies(self) -> dict[str, dict]:
+        """Each dataset's copy, from copies.json: {file, fetched_at,
+        source_date, checked_at}. One whose file is gone is left out, which
+        makes its dataset due."""
+        try:
+            with open(self._copies_path(), encoding="utf-8") as handle:
+                records = json.load(handle)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError):
+            logging.exception("Ignoring the unreadable %s", self._copies_path())
+            return {}
+        if not isinstance(records, dict):
+            return {}
+        return {
+            dataset_id: record
+            for dataset_id, record in records.items()
+            if _is_record(record)
+            and os.path.isfile(os.path.join(self.directory, record["file"]))
+        }
+
+    def _write_copies(self, copies: dict[str, dict]) -> None:
+        path = self._copies_path()
+        with open(path + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump(copies, handle, indent=1, sort_keys=True)
+        os.replace(path + ".tmp", path)
+
+    def _refresh_dataset(self, dataset: Dataset, copies: dict[str, dict]) -> bool:
+        """Check one dataset if it is due (see refresh()), updating its entry
+        in `copies` and copies.json; whether its copy is current."""
+        now = self._clock()
+        record = copies.get(dataset.id)
+        if record is not None:
+            checked = _epoch(record["checked_at"])
+            if now - checked < dataset.interval_hours * 3600:
+                return True
+        stamp = os.path.join(self.directory, _request_name(dataset) + ".requested")
+        last = _mtime(stamp)
+        if last is not None and now - last < ASINFO_RETRY_SECONDS:
+            return False
+        try:
+            os.makedirs(self.directory, exist_ok=True)
+            with open(stamp, "w", encoding="utf-8") as handle:
+                handle.write(dataset.url + "\n")
+            os.utime(stamp, (now, now))
+        except OSError:
+            # Unrecorded, nothing would stop the next run, or the next
+            # restart, from asking again at once, so nothing is asked.
+            logging.exception(
+                "Cannot record a request for %s; not downloading it", dataset.id
+            )
+            return False
+        tmp = None
+        try:
+            name, url = self._source_file(dataset)
+            path = os.path.join(self.directory, name)
+            same_file = record is not None and record["file"] == name
+            if same_file and dataset.pattern:
+                # The listing names no newer file.
+                record["checked_at"] = _iso(now)
+            else:
+                tmp = path + ".tmp"
+                answer = self._fetch(
+                    url, tmp, dataset.max_bytes, accept_gzip=dataset.id == "rpki"
+                )
+                if same_file and filecmp.cmp(tmp, path, shallow=False):
+                    record["checked_at"] = _iso(now)
+                else:
+                    copies[dataset.id] = self._accept(dataset, name, tmp, answer, now)
+                    tmp = None
+            self._write_copies(copies)
+            return True
+        except Exception:
+            logging.exception(
+                "Error updating the AS dataset %s from %s", dataset.id, dataset.url
+            )
+            return False
+        finally:
+            if tmp is not None:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
+
+    def _source_file(self, dataset: Dataset) -> tuple[str, str]:
+        """(copy name, URL) of the dataset's file: its URL's, or for CAIDA the
+        newest file its listing names that fully matches its pattern."""
+        if dataset.pattern is None:
+            return _request_name(dataset), dataset.url
+        listing = os.path.join(self.directory, _request_name(dataset) + ".tmp")
+        try:
+            self._fetch(dataset.url, listing, _LISTING_MAX_BYTES, accept_gzip=False)
+            with open(listing, encoding="utf-8", errors="replace") as handle:
+                name = newest_file(handle.read(), dataset.pattern)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(listing)
+        if name is None:
+            raise ValueError(f"{dataset.url} lists no file like {dataset.pattern}")
+        return name, urllib.parse.urljoin(dataset.url, name)
+
+    def _accept(
+        self, dataset: Dataset, name: str, tmp: str, answer: dict, now: float
+    ) -> dict:
+        """Swap a download in as the dataset's copy, once its parser finds
+        `min_rows` rows in it, and return the copy's record. Raises when the
+        download falls short."""
+        rows = _count_rows(dataset.id, tmp)
+        if rows < dataset.min_rows:
+            raise ValueError(
+                f"{name} has {rows} rows, fewer than the {dataset.min_rows} expected"
+            )
+        # The source's own date: the dump's, the file name's, the server's.
+        source_date = (
+            (_generated_at(tmp) if dataset.id in ("ris_v4", "ris_v6") else None)
+            or (_iso_date(name[:8]) if dataset.pattern else None)
+            or _http_date(answer.get("last_modified"))
+            or _iso(now)
+        )
+        os.replace(tmp, os.path.join(self.directory, name))
+        if dataset.pattern:
+            # A newer month's file replaces the older one's.
+            for other in os.listdir(self.directory):
+                if other != name and re.fullmatch(dataset.pattern, other):
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(self.directory, other))
+        logging.info("AS dataset %s updated: %s, %d rows", dataset.id, name, rows)
+        return {
+            "file": name,
+            "fetched_at": _iso(now),
+            "source_date": source_date,
+            "checked_at": _iso(now),
+        }
+
+    def _built(self) -> dict[str, tuple] | None:
+        """(fetched_at, source_date) of each dataset in the live database, as
+        its meta table has them; None when there is no database this release
+        reads."""
+        try:
+            con = sqlite3.connect(self._uri(), uri=True)
+        except sqlite3.Error:
+            return None
+        try:
+            if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                return None
+            rows = con.execute(
+                "SELECT dataset, fetched_at, source_date FROM meta WHERE built = 1"
+            )
+            return {row[0]: tuple(row[1:]) for row in rows}
+        except sqlite3.Error:
+            return None
+        finally:
+            con.close()
+
+    def _build_if_behind(self, copies: dict[str, dict]) -> bool:
+        """Build the database from the copies of the datasets fetched here,
+        unless it was built from exactly these; whether it is current."""
+        records = {d.id: copies[d.id] for d in self.datasets if d.id in copies}
+        built = self._built()
+        if not records:
+            return built is not None
+        if built is not None and all(
+            built.get(dataset_id) == (record["fetched_at"], record["source_date"])
+            for dataset_id, record in records.items()
+        ):
+            return True
+        sources = {
+            dataset_id: os.path.join(self.directory, record["file"])
+            for dataset_id, record in records.items()
+        }
+        meta = {
+            dataset_id: {
+                "fetched_at": record["fetched_at"],
+                "source_date": record["source_date"],
+            }
+            for dataset_id, record in records.items()
+        }
+        tmp = self.path + ".tmp"
+        try:
+            rows = build_database(sources, tmp, ASINFO_MIN_RIS_PEERS, meta)
+            os.replace(tmp, self.path)
+        except Exception:
+            logging.exception("Cannot build the AS database; keeping %s", self.path)
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            return False
+        # This thread's own connection, if it read, would hold the old file.
+        self._release()
+        logging.info("AS database built: %s", rows)
+        return True
