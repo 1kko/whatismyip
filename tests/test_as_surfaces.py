@@ -1388,8 +1388,7 @@ def _privacy_text() -> str:
 
 def test_privacy_lists_the_as_datasets_and_says_never_per_lookup(asinfo_enabled):
     hosts = asinfo_enabled.hosts()
-    assert "ftp.ripe.net" in hosts
-    assert "publicdata.caida.org" in hosts
+    assert {"ftp.ripe.net", "publicdata.caida.org"} <= set(hosts)
     text = _privacy_text()
     for host in hosts:
         assert re.search(rf"(?<![\w.]){re.escape(host)}(?![\w])", text), host
