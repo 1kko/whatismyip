@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 import config
 import lookup
 import main
+import mcp_server
 import viewmodel
 from asinfo import ANSWER_KEYS, AsInfoManager
 from asinfo_fixtures import (
@@ -33,6 +34,7 @@ from asinfo_fixtures import (
     rebuild,
 )
 from test_boot import IMPORT_PROBE
+from test_mcp_iserror import _call, _failed
 from test_reputation import SPAMHAUS_META, make_manager
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1098,3 +1100,154 @@ def test_self_fields_answer_the_route_fields(asinfo_enabled, legs, monkeypatch):
     monkeypatch.setattr(asinfo_enabled, "for_address", reads)
     as_peer(KT_IP).get("/?fields=country_code", headers=CURL)
     reads.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# MCP: the as_info tool, and as_info in lookup and whoami_caller.
+# ---------------------------------------------------------------------------
+
+
+def _with_as_info_tool():
+    """patch.dict puts the registry back as it was: the tool is registered at
+    import only under ASINFO_ENABLED, which the suite turns off."""
+    stack = ExitStack()
+    stack.enter_context(patch.dict(mcp_server.mcp._tool_manager._tools))
+    mcp_server.mcp.add_tool(
+        mcp_server.as_info,
+        name="as_info",
+        title="Autonomous system",
+        annotations=mcp_server._READ_ONLY_LOCAL,
+    )
+    return stack
+
+
+def test_as_info_tool_returns_the_compact_card(asinfo_enabled, monkeypatch):
+    # Five calls in a burst: more than the MCP bucket allows a second.
+    monkeypatch.setattr(main.mcp_rate_limiter, "requests_per_second", 100)
+    with _with_as_info_tool(), TestClient(main.app) as mcp_client:
+        result = _call(mcp_client, "as_info", {"asn": "AS4766"})
+        assert not result.get("isError")
+        card = result["structuredContent"]
+        # "as4766" and the bare number are the same AS.
+        for spelling in ("as4766", " 4766 "):
+            again = _call(mcp_client, "as_info", {"asn": spelling})
+            assert again["structuredContent"] == card
+        full = _call(mcp_client, "as_info", {"asn": "4766", "full": True})
+    assert card["asn"] == 4766
+    assert card["name"] == "KIXS-AS-KR-KR - Korea Telecom"
+    assert card["country"] == "KR"
+    assert card["org"] == {"name": "Korea Telecom", "sibling_count": 1}
+    assert card["prefixes"]["v4"] == 2
+    assert card["rpki"] == {"valid": 2, "invalid": 0, "not_found": 1}
+    assert [up["asn"] for up in card["upstreams"]] == [174, 701]
+    # Counts only, no lists, and no dataset dates.
+    assert card["downstreams"] == {"count": 3}
+    assert card["peers"] == {"count": 1}
+    assert "datasets" not in card and "siblings" not in (card["org"] or {})
+    assert "prefix_list" not in card
+    assert card["unavailable"] == []
+    assert "Source: RIPE NCC" in card["attribution"]
+    # `full` adds the capped lists.
+    full_card = full["structuredContent"]
+    assert [d["asn"] for d in full_card["downstreams"]["list"]] == [17858, 38661, 45400]
+    assert full_card["downstreams"]["count"] == 3
+    assert full_card["peers"]["list"][0]["asn"] == 9318
+    assert full_card["prefix_list"]["count"] == len(full_card["prefix_list"]["list"])
+
+
+def test_as_info_tool_explains_a_special_asn(asinfo_enabled):
+    with _with_as_info_tool(), TestClient(main.app) as mcp_client:
+        result = _call(mcp_client, "as_info", {"asn": "AS64512"})
+    assert not result.get("isError")
+    card = result["structuredContent"]
+    assert set(card) == {"asn", "special"}
+    assert card["asn"] == 64512
+    assert card["special"]["code"] == "private_asn"
+
+
+@pytest.mark.parametrize(
+    "value", ["", "AS", "AS4294967296", "AS99999999999", "example.com", "4766x", "-1"]
+)
+def test_as_info_tool_refuses_malformed_asns(asinfo_enabled, value):
+    with _with_as_info_tool(), TestClient(main.app) as mcp_client:
+        result = _call(mcp_client, "as_info", {"asn": value})
+    assert _failed(result)["code"] == "invalid_target"
+
+
+def test_as_info_tool_fails_with_a_code_when_the_manager_is_off():
+    # config says on, the manager says off: the only way the tool can be asked.
+    with _with_as_info_tool(), TestClient(main.app) as mcp_client:
+        result = _call(mcp_client, "as_info", {"asn": "AS4766"})
+    assert _failed(result)["code"] == "asinfo_disabled"
+
+
+@pytest.mark.parametrize("tool", ["lookup", "dns_records", "ssl_certificate"])
+def test_lookup_tools_refuse_an_as_target_with_asn_target_code(tool):
+    argument = "target" if tool == "lookup" else "domain"
+    with TestClient(main.app) as mcp_client:
+        result = _call(mcp_client, tool, {argument: "AS4766"})
+    assert _failed(result)["code"] == "asn_target"
+
+
+def test_lookup_and_whoami_carry_compact_as_info(asinfo_enabled, legs):
+    async def fake_location(ip):
+        return copy.deepcopy(_location(ip))
+
+    with TestClient(main.app, client=(KT_IP, 41234)) as mcp_client:
+        looked_up = _call(mcp_client, "lookup", {"target": KT_IP})["structuredContent"]
+        with patch("mcp_server.lookup_location", fake_location):
+            caller = _call(mcp_client, "whoami_caller", {})["structuredContent"]
+    for payload in (looked_up, caller):
+        card = payload["as_info"]
+        assert card["asn"] == 4766
+        assert card["route"] == {
+            "prefix": "211.252.112.0/24",
+            "origins": [{"asn": 4766, "ris_peers": 326, "rpki": "valid"}],
+        }
+        assert card["source"] == "route"
+        assert card["downstreams"] == {"count": 3}
+        assert "datasets" not in card
+        assert "special" not in card
+
+
+def test_compact_as_info_keeps_null_and_the_reasons_for_it():
+    card = {
+        **dict.fromkeys(ANSWER_KEYS),
+        "asn": 4766,
+        "unavailable": [{"dataset": "caida_rel", "label": "x", "reason": "stale"}],
+        "attribution": [],
+        "special": None,
+    }
+    compact = mcp_server.compact_as_info(card)
+    assert compact["upstreams"] is None
+    assert compact["downstreams"] is None
+    assert compact["org"] is None
+    assert compact["rpki"] is None
+    assert compact["unavailable"] == [{"dataset": "caida_rel", "reason": "stale"}]
+    assert mcp_server.compact_as_info(None) is None
+
+
+def test_compact_as_info_for_a_special_address_card_keeps_the_route(asinfo_enabled):
+    card = {
+        **dict.fromkeys(ANSWER_KEYS),
+        "asn": 64512,
+        "special": lookup.special_asn(64512),
+        "route": {
+            "prefix": "45.67.89.0/24",
+            "origins": [
+                {"asn": 64512, "ris_peers": 50, "rpki": {"state": "not-found"}}
+            ],
+        },
+    }
+    assert mcp_server.compact_as_info(card) == {
+        "asn": 64512,
+        "special": card["special"],
+        "route": {
+            "prefix": "45.67.89.0/24",
+            "origins": [{"asn": 64512, "ris_peers": 50, "rpki": "not-found"}],
+        },
+    }
+
+
+def test_as_info_tool_absent_when_disabled():
+    assert "as_info" not in mcp_server.registered_tool_names()
