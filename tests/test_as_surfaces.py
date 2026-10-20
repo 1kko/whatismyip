@@ -188,6 +188,7 @@ AS_SECTIONS = (
     "registry",
     "org",
     "prefixes",
+    "rpki",
     "upstreams",
     "downstreams",
     "peers",
@@ -453,6 +454,9 @@ def test_an_ip_routed_from_a_special_asn_keeps_its_route_and_names_the_purpose(
     assert raw["upstreams"] == [
         {"asn": 174, "name": "COGENT-174 - Cogent Communications"}
     ]
+    # The AS's RPKI coverage: counts over every prefix it originates, which
+    # for a private number are strangers' routes.
+    assert raw["rpki"] == {"valid": 0, "invalid": 0, "not_found": 1}
     assert lists.asn_listed(64512) is True
 
     response = client.get(f"/{LEAKED_IP}", headers=CURL)
@@ -477,7 +481,8 @@ def test_an_ip_routed_from_a_special_asn_keeps_its_route_and_names_the_purpose(
             }
         ],
     }
-    assert as_info["rpki"] == raw["rpki"]
+    # The coverage counts are the AS's, not the route's: gone with the rest.
+    assert as_info["rpki"] is None
     assert as_info["announced"] is True
     assert as_info["source"] == "route"
 

@@ -726,13 +726,16 @@ def ip_reputation(ip: str, location: dict | None = None) -> dict | None:
 
 # What an AS card says about the AS itself. A special-purpose number names no
 # one -- AS64512 is every private network's at once -- so an address routed
-# from one keeps its route and carries `special` in place of these.
+# from one keeps its route, with RPKI's verdict on each origin, and carries
+# `special` in place of these. `rpki` here is the AS's coverage counts over
+# every prefix it originates, which for AS64512 add up strangers' routes.
 _AS_CARD_SECTIONS = (
     "name",
     "country",
     "registry",
     "org",
     "prefixes",
+    "rpki",
     "upstreams",
     "downstreams",
     "peers",
