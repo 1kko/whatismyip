@@ -1,14 +1,21 @@
-"""asinfo.py's dataset table, source parsers and database build. No network."""
+"""asinfo.py's dataset table, source parsers, database build and reads. No
+network."""
 
 import bz2
+import datetime
 import gzip
+import os
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+import asinfo
 from asinfo import (
     DATASET_IDS,
     SCHEMA_VERSION,
+    AsInfoManager,
     build_database,
     default_datasets,
     newest_file,
@@ -21,7 +28,21 @@ from asinfo import (
     parse_vrps,
     rov_state,
 )
-from asinfo_fixtures import CAIDA_ORG_NAME, CAIDA_REL_NAME, KT_ORG_ID, write_sources
+from asinfo_fixtures import (
+    CAIDA_ORG_NAME,
+    CAIDA_REL_NAME,
+    DAY,
+    HOUR,
+    KT_ORG_ID,
+    NOW,
+    RIS_V4,
+    build_live,
+    build_manager,
+    fixture_meta,
+    iso,
+    rebuild,
+    write_sources,
+)
 
 
 def test_asnames_splits_the_country_off_the_last_comma():
@@ -234,8 +255,6 @@ def test_default_datasets_are_every_dataset_the_build_reads():
 
 
 def test_default_datasets_drops_caida_when_disabled(monkeypatch):
-    import asinfo
-
     monkeypatch.setattr(asinfo, "ASINFO_CAIDA_ENABLED", False)
     assert [d.id for d in asinfo.default_datasets()] == [
         "asnames",
@@ -704,3 +723,536 @@ def test_built_database_answers_the_reads_from_indexes(tmp_path):
         plan = " ".join(r[3] for r in db.execute("EXPLAIN QUERY PLAN " + sql, args))
         assert plan.startswith("SEARCH"), (sql, plan)
         assert "TEMP B-TREE" not in plan, (sql, plan)
+
+
+# Reads.
+
+RIPE_CREDIT = "Source: RIPE NCC"
+RPKI_CREDIT = "RPKI data validated by rpki-client.org"
+CAIDA_REL_CREDIT = "The CAIDA UCSD AS Relationships Dataset, 2026-10-01"
+CAIDA_ORG_CREDIT = "The CAIDA UCSD AS Organizations Dataset, 2026-10-01"
+EVERY_CREDIT = [RIPE_CREDIT, RPKI_CREDIT, CAIDA_REL_CREDIT, CAIDA_ORG_CREDIT]
+AS_SECTIONS = (
+    "name",
+    "country",
+    "registry",
+    "org",
+    "prefixes",
+    "rpki",
+    "upstreams",
+    "downstreams",
+    "peers",
+)
+CAIDA_EPOCH = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc).timestamp()
+
+
+def _unavailable(info):
+    return {u["dataset"]: u["reason"] for u in info["unavailable"]}
+
+
+def _asns(entries):
+    return [entry["asn"] for entry in entries]
+
+
+def _seen_by(manager):
+    """How many RIS peers see the route covering 211.252.112.1."""
+    return manager.for_address("211.252.112.1")["route"]["origins"][0]["ris_peers"]
+
+
+def test_for_address_finds_the_longest_covering_route(tmp_path):
+    info = build_manager(tmp_path).for_address("211.252.112.1")
+    # The /24 sits in 211.252.0.0/15, whose VRP lets AS4766 announce up to /24.
+    assert info["route"] == {
+        "prefix": "211.252.112.0/24",
+        "origins": [
+            {"asn": 4766, "ris_peers": 326, "rpki": {"state": "valid", "reason": None}}
+        ],
+    }
+    assert info["asn"] == 4766 and info["source"] == "route"
+    assert [u["asn"] for u in info["upstreams"]] == [174, 701]
+    assert info["registry"] == {
+        "rir": "apnic",
+        "country": "KR",
+        "assigned": "1996-04-22",
+        "status": "assigned",
+    }
+
+
+def test_for_address_answers_every_section_of_the_routes_origin(tmp_path):
+    info = build_manager(tmp_path).for_address("211.252.112.1")
+    dates = {
+        dataset_id: fields["source_date"]
+        for dataset_id, fields in fixture_meta().items()
+    }
+    assert info == {
+        "asn": 4766,
+        "name": "KIXS-AS-KR-KR - Korea Telecom",
+        "country": "KR",
+        "registry": {
+            "rir": "apnic",
+            "country": "KR",
+            "assigned": "1996-04-22",
+            "status": "assigned",
+        },
+        "org": {
+            "id": KT_ORG_ID,
+            "name": "Korea Telecom",
+            "country": "KR",
+            "siblings": [9760],
+        },
+        "prefixes": {"v4": 2, "v6": 1, "v4_addresses": 131072, "v6_48s": 65536},
+        "rpki": {"valid": 2, "invalid": 0, "not_found": 1},
+        "upstreams": [
+            {"asn": 174, "name": "COGENT-174 - Cogent Communications"},
+            {"asn": 701, "name": "UUNET - Verizon Business"},
+        ],
+        "downstreams": {
+            "count": 3,
+            "list": [
+                {"asn": 17858, "name": "POWERVIS-AS-KR - LG POWERCOMM"},
+                {"asn": 38661, "name": "KRNIC-AS-KR - Example Customer One"},
+                {"asn": 45400, "name": "KT-CUSTOMER-AS - Example Customer Two"},
+            ],
+        },
+        "peers": {
+            "count": 1,
+            "list": [{"asn": 9318, "name": "SKB-AS-KR - SK Broadband Co Ltd"}],
+        },
+        "asn_drop": None,
+        "route": {
+            "prefix": "211.252.112.0/24",
+            "origins": [
+                {
+                    "asn": 4766,
+                    "ris_peers": 326,
+                    "rpki": {"state": "valid", "reason": None},
+                }
+            ],
+        },
+        "announced": True,
+        "source": "route",
+        "datasets": dates,
+        "unavailable": [],
+        "attribution": EVERY_CREDIT,
+        "prefix_list": None,
+    }
+    assert list(info) == list(asinfo.ANSWER_KEYS)
+
+
+def test_for_address_falls_back_to_a_shorter_route_and_reads_ipv6(tmp_path):
+    manager = build_manager(tmp_path)
+    assert manager.for_address("211.253.0.1")["route"]["prefix"] == "211.252.0.0/15"
+    info = manager.for_address("2606:4700::1111")
+    assert info["route"] == {
+        "prefix": "2606:4700::/32",
+        "origins": [
+            {
+                "asn": 13335,
+                "ris_peers": 150,
+                "rpki": {"state": "not-found", "reason": None},
+            }
+        ],
+    }
+    assert (info["asn"], info["name"], info["country"]) == (
+        13335,
+        "CLOUDFLARENET - Cloudflare, Inc.",
+        "US",
+    )
+
+
+def test_an_ipv4_mapped_address_is_matched_as_ipv4(tmp_path):
+    info = build_manager(tmp_path).for_address("::ffff:211.252.112.1")
+    assert info["route"]["prefix"] == "211.252.112.0/24"
+
+
+def test_a_multi_origin_route_describes_the_origin_most_peers_see(tmp_path):
+    texts = {"ris_v4": RIS_V4 + "9318\t211.252.112.0/24\t40\n"}
+    info = build_manager(tmp_path, texts=texts).for_address("211.252.112.1")
+    assert info["route"]["origins"] == [
+        {"asn": 4766, "ris_peers": 326, "rpki": {"state": "valid", "reason": None}},
+        {
+            "asn": 9318,
+            "ris_peers": 40,
+            "rpki": {"state": "invalid", "reason": "origin"},
+        },
+    ]
+    assert (info["asn"], info["source"]) == (4766, "route")
+
+
+def test_an_unannounced_address_falls_back_to_geolite2s_asn(tmp_path):
+    manager = build_manager(tmp_path)
+    info = manager.for_address("192.0.2.1", fallback_asn=13335)
+    assert info["route"] is None and info["announced"] is False
+    assert (info["asn"], info["source"]) == (13335, "geolite2")
+    assert info["name"] == "CLOUDFLARENET - Cloudflare, Inc."
+    assert info["prefixes"] == {"v4": 1, "v6": 1, "v4_addresses": 256, "v6_48s": 65536}
+    assert info["unavailable"] == []
+    # A route outranks GeoLite2's number.
+    assert manager.for_address("1.1.1.1", fallback_asn=4766)["asn"] == 13335
+
+
+def test_an_unannounced_address_with_no_asn_describes_no_as(tmp_path):
+    info = build_manager(tmp_path).for_address("192.0.2.1")
+    assert (info["asn"], info["source"], info["announced"]) == (None, None, False)
+    assert all(info[key] is None for key in AS_SECTIONS)
+    assert info["unavailable"] == []
+    # Only the routes were read, so only their source is dated and credited.
+    assert list(info["datasets"]) == ["ris_v4"]
+    assert info["attribution"] == [RIPE_CREDIT]
+
+
+def test_an_assignable_asn_with_no_rows_reads_as_empty_not_unavailable(tmp_path):
+    info = build_manager(tmp_path).for_asn(200500)
+    assert (info["asn"], info["source"], info["announced"]) == (200500, "asn", False)
+    assert info["name"] is info["country"] is info["registry"] is info["org"] is None
+    assert info["prefixes"] == {"v4": 0, "v6": 0, "v4_addresses": 0, "v6_48s": 0}
+    assert info["rpki"] == {"valid": 0, "invalid": 0, "not_found": 0}
+    assert info["upstreams"] == []
+    assert info["downstreams"] == info["peers"] == {"count": 0, "list": []}
+    assert info["unavailable"] == []
+    assert info["attribution"] == EVERY_CREDIT
+
+
+def test_a_dataset_left_out_of_the_build_is_unavailable(tmp_path):
+    info = build_manager(tmp_path, drop=("nro", "caida_org")).for_asn(4766)
+    assert info["registry"] is None and info["org"] is None
+    assert _unavailable(info) == {
+        "nro": "not downloaded yet",
+        "caida_org": "not downloaded yet",
+    }
+    assert {u["label"] for u in info["unavailable"]} == {
+        "NRO delegated statistics",
+        "CAIDA AS organizations",
+    }
+    assert info["name"] == "KIXS-AS-KR-KR - Korea Telecom"
+    assert "nro" not in info["datasets"] and "caida_org" not in info["datasets"]
+    assert info["attribution"] == [RIPE_CREDIT, RPKI_CREDIT, CAIDA_REL_CREDIT]
+
+
+def test_a_stale_dataset_is_unavailable_never_empty(tmp_path):
+    now = CAIDA_EPOCH + 76 * DAY  # relationships allow 75 days, organizations 200
+    info = build_manager(tmp_path, now=now).for_address("211.252.112.1")
+    assert info["upstreams"] is None
+    assert info["downstreams"] is None and info["peers"] is None
+    assert _unavailable(info) == {"caida_rel": "76 days old, past its limit of 75 days"}
+    assert info["org"]["name"] == "Korea Telecom"
+    assert "caida_rel" not in info["datasets"]
+    assert CAIDA_REL_CREDIT not in info["attribution"]
+    assert CAIDA_ORG_CREDIT in info["attribution"]
+
+    fresh = AsInfoManager(
+        directory=str(tmp_path), enabled=True, clock=lambda: CAIDA_EPOCH + 74 * DAY
+    )
+    assert _asns(fresh.for_address("211.252.112.1")["upstreams"]) == [174, 701]
+
+
+def test_age_is_the_sources_own_date_else_when_it_was_fetched(tmp_path):
+    meta = {
+        # Fetched long ago, but the source dates itself an hour back.
+        "ris_v4": {"fetched_at": iso(NOW - 100 * HOUR), "source_date": iso(NOW - HOUR)},
+        # No date of its own: its fetch time is its age.
+        "asnames": {"fetched_at": iso(NOW - 80 * HOUR), "source_date": None},
+    }
+    info = build_manager(tmp_path, meta=meta).for_address("211.252.112.1")
+    assert info["route"]["prefix"] == "211.252.112.0/24"
+    assert _unavailable(info) == {"asnames": "80 hours old, past its limit of 72 hours"}
+    assert info["name"] is None and info["country"] is None
+    # Neighbours are CAIDA's; only their names are lost.
+    assert info["upstreams"] == [{"asn": 174, "name": None}, {"asn": 701, "name": None}]
+    assert "asnames" not in info["datasets"]
+
+
+@pytest.mark.parametrize("how", ["left out", "stale"])
+def test_without_current_vrps_rpki_is_unavailable_never_not_found(tmp_path, how):
+    if how == "left out":
+        manager = build_manager(tmp_path, drop=("rpki",))
+        reason = "not downloaded yet"
+    else:
+        old = iso(NOW - 100 * HOUR)
+        meta = {"rpki": {"fetched_at": old, "source_date": old}}
+        manager = build_manager(tmp_path, meta=meta)
+        reason = "4 days old, past its limit of 72 hours"
+    info = manager.for_address("2606:4700::1")
+    assert info["route"]["origins"] == [{"asn": 13335, "ris_peers": 150, "rpki": None}]
+    assert info["rpki"] is None
+    assert _unavailable(info) == {"rpki": reason}
+    assert RPKI_CREDIT not in info["attribution"]
+    full = manager.for_asn(4766, full=True)
+    assert [p["rpki"] for p in full["prefix_list"]["list"]] == [None, None, None]
+    assert full["prefixes"]["v4"] == 2
+
+
+def test_caida_turned_off_reads_none_of_its_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(asinfo, "ASINFO_CAIDA_ENABLED", False)
+    manager = build_manager(tmp_path)  # the file still holds CAIDA's rows
+    info = manager.for_asn(4766)
+    assert info["org"] is None and info["upstreams"] is None
+    assert info["downstreams"] is None and info["peers"] is None
+    assert _unavailable(info) == {"caida_rel": "turned off", "caida_org": "turned off"}
+    assert [u["label"] for u in info["unavailable"]] == [
+        "CAIDA AS relationships",
+        "CAIDA AS organizations",
+    ]
+    assert info["attribution"] == [RIPE_CREDIT, RPKI_CREDIT]
+    assert set(manager.status()["datasets"]) == {
+        "asnames",
+        "nro",
+        "ris_v4",
+        "ris_v6",
+        "rpki",
+    }
+    assert manager.stale_datasets() == []
+
+
+def test_no_database_yet_is_every_section_unavailable(tmp_path):
+    manager = AsInfoManager(directory=str(tmp_path), enabled=True)
+    info = manager.for_address("211.252.112.1")
+    assert info["route"] is None and info["upstreams"] is None
+    assert info["registry"] is None
+    assert {u["dataset"] for u in info["unavailable"]} == {
+        d.id for d in default_datasets()
+    }
+    assert all(info[key] is None for key in AS_SECTIONS)
+    assert (info["asn"], info["source"], info["announced"]) == (None, None, None)
+    assert set(_unavailable(info).values()) == {"not downloaded yet"}
+    assert info["datasets"] == {} and info["attribution"] == []
+
+    geolite2 = manager.for_address("211.252.112.1", fallback_asn=4766)
+    assert (geolite2["asn"], geolite2["source"]) == (4766, "geolite2")
+    assert all(geolite2[key] is None for key in AS_SECTIONS)
+    by_asn = manager.for_asn(4766, full=True)
+    assert all(by_asn[key] is None for key in (*AS_SECTIONS, "prefix_list"))
+    assert len(by_asn["unavailable"]) == len(DATASET_IDS)
+
+    assert manager.build_attempted is False
+    status = manager.status()
+    assert (status["enabled"], status["database"]) == (True, False)
+    assert all(d["stale"] and d["rows"] == 0 for d in status["datasets"].values())
+    # A missing database is /healthz's asinfo_unavailable, not a stale dataset.
+    assert manager.stale_datasets() == []
+
+
+def test_a_missing_directory_is_no_database(tmp_path):
+    manager = AsInfoManager(directory=str(tmp_path / "not-there"), enabled=True)
+    assert manager.for_asn(4766)["registry"] is None
+    assert manager.status()["database"] is False
+
+
+def test_a_database_from_another_release_is_not_read(tmp_path):
+    build_live(tmp_path)
+    db = sqlite3.connect(tmp_path / asinfo.DATABASE_NAME)
+    db.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    db.close()
+    manager = AsInfoManager(directory=str(tmp_path), enabled=True, clock=lambda: NOW)
+    info = manager.for_address("211.252.112.1")
+    assert info["route"] is None
+    assert set(_unavailable(info).values()) == {"the database is from another release"}
+    assert manager.status()["database"] is False
+
+
+def test_a_rebuild_swapped_in_is_read_without_error(tmp_path):
+    manager = build_manager(tmp_path)
+    assert _seen_by(manager) == 326
+    rebuild(tmp_path, ris_v4_peers=400)
+    assert _seen_by(manager) == 400
+
+
+def test_a_rebuild_is_seen_by_a_thread_that_read_the_old_file(tmp_path):
+    manager = build_manager(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=1) as one_thread:
+        assert one_thread.submit(_seen_by, manager).result() == 326
+        rebuild(tmp_path, ris_v4_peers=400)
+        assert _seen_by(manager) == 400  # this thread opens the new file first
+        assert one_thread.submit(_seen_by, manager).result() == 400
+
+
+def test_reads_racing_rebuilds_never_raise(tmp_path):
+    manager = build_manager(tmp_path)
+    built = {326}
+    stop = threading.Event()
+
+    def read_until_stopped():
+        seen = set()
+        while not stop.is_set():
+            seen.add(_seen_by(manager))
+        return seen
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        readers = [pool.submit(read_until_stopped) for _ in range(4)]
+        for peers in range(400, 410):
+            rebuild(tmp_path, ris_v4_peers=peers)
+            built.add(peers)
+        stop.set()
+        seen = set().union(*(reader.result() for reader in readers))
+    assert seen <= built
+    assert _seen_by(manager) == 409
+
+
+def test_a_database_removed_under_a_reader_is_no_database(tmp_path):
+    manager = build_manager(tmp_path)
+    assert manager.for_asn(4766)["name"] == "KIXS-AS-KR-KR - Korea Telecom"
+    os.remove(tmp_path / asinfo.DATABASE_NAME)
+    info = manager.for_asn(4766)
+    assert info["name"] is None
+    assert set(_unavailable(info).values()) == {"not downloaded yet"}
+
+
+def test_a_read_that_fails_once_is_read_again_from_a_fresh_open(tmp_path, monkeypatch):
+    # macOS's own SQLite fails the next read of a file swapped out from under
+    # an open connection (SQLITE_IOERR_VNODE), though the file then at the
+    # path is a complete build.
+    manager = build_manager(tmp_path)
+    expected = manager.for_address("211.252.112.1")
+    real = asinfo._Reader._execute
+    failed = []
+
+    def fail_once(reader, sql, args):
+        if not failed:
+            failed.append(sql)
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(reader, sql, args)
+
+    monkeypatch.setattr(asinfo._Reader, "_execute", fail_once)
+    assert manager.for_address("211.252.112.1") == expected
+    assert len(failed) == 1
+
+
+def test_a_database_that_keeps_failing_is_unavailable_never_raised(
+    tmp_path, monkeypatch, caplog
+):
+    manager = build_manager(tmp_path)
+
+    def fail(reader, sql, args):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(asinfo._Reader, "_execute", fail)
+    info = manager.for_address("211.252.112.1", fallback_asn=4766)
+    assert info["route"] is None and info["announced"] is None
+    assert all(info[key] is None for key in AS_SECTIONS)
+    assert (info["asn"], info["source"]) == (4766, "geolite2")
+    assert set(_unavailable(info).values()) == {"the database could not be read"}
+    assert "Cannot read the AS database" in caplog.text
+    caplog.clear()
+    manager.for_asn(4766)
+    assert "Cannot read the AS database" not in caplog.text  # once per file
+
+
+def test_a_file_that_is_not_a_database_is_unreadable_never_raised(tmp_path):
+    (tmp_path / asinfo.DATABASE_NAME).write_bytes(b"not a database. " * 512)
+    manager = AsInfoManager(directory=str(tmp_path), enabled=True)
+    info = manager.for_asn(4766)
+    assert info["registry"] is None
+    assert set(_unavailable(info).values()) == {"the database could not be read"}
+    assert manager.status()["database"] is False
+    assert manager.stale_datasets() == []
+
+
+def test_for_asn_full_caps_lists_and_reports_counts(tmp_path, monkeypatch):
+    monkeypatch.setattr(asinfo, "ASINFO_LIST_LIMIT", 2)
+    caida_rel = (
+        "174|4766|-1|bgp\n701|4766|-1|bgp\n1299|4766|-1|bgp\n"
+        "4766|17858|-1|bgp\n4766|38661|-1|bgp\n4766|45400|-1|bgp\n"
+        # Customers of their own: 45400 has two, 38661 one, 17858 none.
+        "45400|200001|-1|bgp\n45400|200002|-1|bgp\n38661|200003|-1|bgp\n"
+        # Peers, listed either way round: 9318 has a customer, 3356 none.
+        "4766|9318|0|bgp\n3356|4766|0|bgp\n9318|200004|-1|bgp\n"
+    )
+    info = build_manager(tmp_path, texts={"caida_rel": caida_rel}).for_asn(
+        4766, full=True
+    )
+    assert _asns(info["upstreams"]) == [174, 701, 1299]  # never capped
+    assert info["downstreams"]["count"] == 3
+    assert _asns(info["downstreams"]["list"]) == [45400, 38661]
+    assert info["peers"]["count"] == 2
+    assert _asns(info["peers"]["list"]) == [9318, 3356]
+    assert info["prefix_list"] == {
+        "count": 3,
+        "list": [
+            {
+                "prefix": "211.252.0.0/15",
+                "ris_peers": 330,
+                "rpki": {"state": "valid", "reason": None},
+            },
+            {
+                "prefix": "211.252.112.0/24",
+                "ris_peers": 326,
+                "rpki": {"state": "valid", "reason": None},
+            },
+        ],
+    }
+    assert (info["source"], info["route"], info["announced"]) == ("asn", None, True)
+
+
+def test_for_asn_without_full_lists_no_prefixes(tmp_path):
+    info = build_manager(tmp_path).for_asn(4766)
+    assert info["prefix_list"] is None
+    assert info["prefixes"]["v4"] == 2
+    assert list(info) == list(asinfo.ANSWER_KEYS)
+
+
+def test_reads_refuse_what_is_not_an_address_or_an_as_number(tmp_path):
+    manager = build_manager(tmp_path)
+    assert manager.for_address("not-an-address") is None
+    assert manager.for_asn(-1) is None
+    assert manager.for_asn(2**32) is None
+
+
+def test_disabled_manager_answers_none(tmp_path):
+    build_live(tmp_path)
+    manager = AsInfoManager(directory=str(tmp_path), enabled=False, clock=lambda: NOW)
+    assert manager.enabled is False
+    assert manager.for_address("211.252.112.1") is None
+    assert manager.for_address("211.252.112.1", fallback_asn=4766) is None
+    assert manager.for_asn(4766) is None
+    assert manager.for_asn(4766, full=True) is None
+    assert manager.status() == {"enabled": False}
+    assert manager.stale_datasets() == []
+
+
+def test_status_reports_each_dataset(tmp_path):
+    status = build_manager(tmp_path).status()
+    assert (status["enabled"], status["database"]) == (True, True)
+    assert list(status["datasets"]) == list(DATASET_IDS)
+    meta = fixture_meta()
+    assert status["datasets"]["ris_v4"] == {
+        "label": "RIPE RIS routes (IPv4)",
+        "fetched_at": meta["ris_v4"]["fetched_at"],
+        "source_date": meta["ris_v4"]["source_date"],
+        "age_hours": 2.0,
+        "rows": 3,
+        "stale": False,
+    }
+    assert status["datasets"]["caida_rel"] == {
+        "label": "CAIDA AS relationships",
+        "fetched_at": meta["caida_rel"]["fetched_at"],
+        "source_date": "2026-10-01",
+        "age_hours": 19.5 * 24,
+        "rows": 6,
+        "stale": False,
+    }
+
+
+def test_status_and_stale_datasets_name_what_lookups_cannot_read(tmp_path):
+    now = CAIDA_EPOCH + 76 * DAY
+    manager = build_manager(tmp_path, now=now, drop=("nro",))
+    status = manager.status()["datasets"]
+    assert [i for i, d in status.items() if d["stale"]] == ["nro", "caida_rel"]
+    assert status["caida_rel"]["age_hours"] == 76 * 24
+    assert status["nro"]["rows"] == 0
+    assert manager.stale_datasets() == [
+        "the NRO delegated statistics dataset is unavailable to lookups: "
+        "not downloaded yet",
+        "the CAIDA AS relationships dataset is unavailable to lookups: "
+        "76 days old, past its limit of 75 days",
+    ]
+    assert build_manager(tmp_path / "fresh").stale_datasets() == []
+
+
+def test_hosts_names_each_dataset_server_once():
+    assert AsInfoManager(enabled=False).hosts() == [
+        "ftp.ripe.net",
+        "www.ris.ripe.net",
+        "console.rpki-client.org",
+        "publicdata.caida.org",
+    ]

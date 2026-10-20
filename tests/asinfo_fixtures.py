@@ -4,15 +4,28 @@
 of the dataset's URL (CAIDA's carry a date), gzipped or bzipped where the
 source is. They describe a handful of ASes the tests share: AS4766 (KT), its
 providers 174 and 701, its peer 9318, three customers, and AS13335.
+
+`build_manager` builds them into a directory's database the way a refresh
+does (into a .tmp file, then os.replace) and returns a manager over it whose
+clock reads `now`; `rebuild` builds again over the live file.
 """
 
 import bz2
+import datetime
 import gzip
 import json
 import os
 
+from asinfo import DATABASE_NAME, DATASET_IDS, AsInfoManager, build_database
+
 CAIDA_REL_NAME = "20261001.as-rel2.txt.bz2"
 CAIDA_ORG_NAME = "20261001.as-org2info.jsonl.gz"
+# The CAIDA files' own date, from their names.
+CAIDA_DATE = "2026-10-01"
+# The tests' present: nineteen and a half days after the CAIDA files.
+NOW = datetime.datetime(2026, 10, 20, 12, tzinfo=datetime.timezone.utc).timestamp()
+HOUR = 3600
+DAY = 24 * HOUR
 # CAIDA names an organization after one of its ASes; AS4766 is in this one.
 KT_ORG_ID = "@aut-4766-APNIC"
 
@@ -135,3 +148,69 @@ def write_sources(directory) -> dict[str, str]:
         handle.write(CAIDA_REL)
     _gzip(paths["caida_org"], "".join(json.dumps(r) + "\n" for r in CAIDA_ORG))
     return paths
+
+
+def iso(epoch: float) -> str:
+    return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).isoformat()
+
+
+def fixture_meta(now: float = NOW, overrides: dict | None = None) -> dict[str, dict]:
+    """build_database's `meta` as a refresh at `now` records it: every dataset
+    fetched an hour ago; the daily ones dated two hours ago by their source,
+    CAIDA's by their file names. `overrides` replaces fields per dataset."""
+    meta = {
+        dataset_id: {
+            "fetched_at": iso(now - HOUR),
+            "source_date": (
+                CAIDA_DATE if dataset_id.startswith("caida_") else iso(now - 2 * HOUR)
+            ),
+        }
+        for dataset_id in DATASET_IDS
+    }
+    for dataset_id, fields in (overrides or {}).items():
+        meta[dataset_id] = {**meta[dataset_id], **fields}
+    return meta
+
+
+def build_live(
+    directory, now: float = NOW, meta=None, texts=None, drop=(), min_peers: int = 10
+) -> None:
+    """Build the fixture sources into `directory`'s database: to a .tmp file,
+    then os.replace over the live one. `texts` replaces a dataset's source
+    with plain text, `drop` leaves datasets out, `meta` overrides fields of
+    `fixture_meta(now)`."""
+    directory = str(directory)
+    source_dir = os.path.join(directory, "src")
+    os.makedirs(source_dir, exist_ok=True)
+    sources = write_sources(source_dir)
+    for dataset_id, text in (texts or {}).items():
+        sources[dataset_id] = os.path.join(source_dir, f"{dataset_id}.txt")
+        with open(sources[dataset_id], "w", encoding="utf-8") as handle:
+            handle.write(text)
+    for dataset_id in drop:
+        del sources[dataset_id]
+    live = os.path.join(directory, DATABASE_NAME)
+    build_database(sources, live + ".tmp", min_peers, fixture_meta(now, meta))
+    os.replace(live + ".tmp", live)
+
+
+def build_manager(directory, now: float = NOW, clock=None, datasets=None, **build):
+    """A manager over a freshly built `directory`, its clock at `now`."""
+    build_live(directory, now=now, **build)
+    return AsInfoManager(
+        directory=str(directory),
+        datasets=datasets,
+        enabled=True,
+        clock=clock or (lambda: now),
+    )
+
+
+def rebuild(directory, ris_v4_peers: int | None = None, **build) -> None:
+    """Build again over the live file; `ris_v4_peers` changes how many RIS peers
+    see 211.252.112.0/24."""
+    texts = dict(build.pop("texts", None) or {})
+    if ris_v4_peers is not None:
+        texts["ris_v4"] = RIS_V4.replace(
+            "211.252.112.0/24\t326", f"211.252.112.0/24\t{ris_v4_peers}"
+        )
+    build_live(directory, texts=texts, **build)

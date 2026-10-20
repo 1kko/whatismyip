@@ -21,20 +21,29 @@ source into batched inserts. Each route's RPKI state (RFC 6811) and each AS's
 prefix, address space, RPKI and neighbour counts are worked out at build time,
 so a lookup only reads them, and the VRPs are not kept.
 
+`AsInfoManager` reads that file for lookups. A dataset the file lacks, or holds
+past its `max_age_hours`, is unavailable: every section that reads it is None
+and `unavailable` says why, so "not known" never reads as "none".
+
 Imports config and the standard library only: lookup.py builds the singleton.
 """
 
 import bz2
 import contextlib
+import datetime
 import gzip
 import ipaddress
 import itertools
 import json
+import logging
 import operator
 import os
 import re
 import sqlite3
-from collections.abc import Iterable, Iterator
+import threading
+import time
+import urllib.parse
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 from config import (
@@ -44,6 +53,9 @@ from config import (
     ASINFO_CAIDA_ORG_URL,
     ASINFO_CAIDA_REL_MAX_AGE_DAYS,
     ASINFO_CAIDA_REL_URL,
+    ASINFO_DIR,
+    ASINFO_ENABLED,
+    ASINFO_LIST_LIMIT,
     ASINFO_MAX_AGE_HOURS,
     ASINFO_NRO_URL,
     ASINFO_RIS_V4_URL,
@@ -72,7 +84,11 @@ class Dataset:
     credit: str
 
 
-def default_datasets() -> tuple[Dataset, ...]:
+def default_datasets(caida: bool | None = None) -> tuple[Dataset, ...]:
+    """The datasets this deployment fetches: CAIDA's two only under
+    ASINFO_CAIDA_ENABLED, unless `caida` says otherwise."""
+    if caida is None:
+        caida = ASINFO_CAIDA_ENABLED
     daily = ASINFO_MAX_AGE_HOURS
     datasets = [
         Dataset(
@@ -131,7 +147,7 @@ def default_datasets() -> tuple[Dataset, ...]:
             "RPKI data validated by rpki-client.org",
         ),
     ]
-    if ASINFO_CAIDA_ENABLED:
+    if caida:
         datasets += [
             Dataset(
                 "caida_rel",
@@ -705,3 +721,636 @@ def build_database(
     finally:
         con.close()
     return rows
+
+
+# The live database in the manager's directory. A refresh builds it as
+# DATABASE_NAME + ".tmp" and swaps it in with os.replace.
+DATABASE_NAME = "asinfo.sqlite3"
+
+# An answer's keys, in order. A section is None when a dataset it reads is
+# unavailable, and `unavailable` then names that dataset; an available dataset
+# with nothing to say gives None for a record (name, country, registry, org),
+# 0 for a count and [] for a list. When there is no AS to describe (`asn` is
+# None), every AS section is None.
+ANSWER_KEYS = (
+    "asn",
+    "name",
+    "country",
+    "registry",
+    "org",
+    "prefixes",
+    "rpki",
+    "upstreams",
+    "downstreams",
+    "peers",
+    "asn_drop",
+    "route",
+    "announced",
+    "source",
+    "datasets",
+    "unavailable",
+    "attribution",
+    "prefix_list",
+)
+_AS_SECTIONS = ANSWER_KEYS[1:10]
+
+_NOT_DOWNLOADED = "not downloaded yet"
+_UNREADABLE = "the database could not be read"
+
+# A route of length plen covers an address when its start is the address with
+# every bit past plen cleared. Several rows are several origins of one prefix.
+_ROUTE = """
+SELECT prefix, origin, ris_peers, rpki_state, rpki_reason FROM route
+WHERE family = ? AND plen = ? AND start = ?
+ORDER BY ris_peers DESC, origin
+"""
+# The range covering an ASN is the one with the greatest first <= it, if its
+# last reaches it. `first <= ? AND last >= ?` would scan every lower range
+# for an ASN in none.
+_REGISTRY = """
+SELECT last, rir, country, assigned, status FROM registry
+WHERE first <= ? ORDER BY first DESC LIMIT 1
+"""
+_STATS = """
+SELECT v4_prefixes, v6_prefixes, v4_addresses, v6_48s, rpki_valid,
+    rpki_invalid, rpki_not_found, customers, peers
+FROM asn_stats WHERE asn = ?
+"""
+_STATS_COLUMNS = (
+    "v4_prefixes",
+    "v6_prefixes",
+    "v4_addresses",
+    "v6_48s",
+    "rpki_valid",
+    "rpki_invalid",
+    "rpki_not_found",
+    "customers",
+    "peers",
+)
+# Neighbours come largest first, by each one's own customer count.
+_UPSTREAMS = """
+SELECT r.a FROM rel AS r LEFT JOIN asn_stats AS s ON s.asn = r.a
+WHERE r.b = ? AND r.kind = -1
+ORDER BY coalesce(s.customers, 0) DESC, r.a
+"""
+_DOWNSTREAMS = """
+SELECT r.b FROM rel AS r LEFT JOIN asn_stats AS s ON s.asn = r.b
+WHERE r.a = ? AND r.kind = -1
+ORDER BY coalesce(s.customers, 0) DESC, r.b LIMIT ?
+"""
+_PEERS = """
+SELECT n.asn FROM (
+    SELECT b AS asn FROM rel WHERE a = ? AND kind = 0
+    UNION SELECT a FROM rel WHERE b = ? AND kind = 0
+) AS n LEFT JOIN asn_stats AS s ON s.asn = n.asn
+ORDER BY coalesce(s.customers, 0) DESC, n.asn LIMIT ?
+"""
+_PREFIXES = """
+SELECT prefix, ris_peers, rpki_state, rpki_reason FROM route
+WHERE origin = ? ORDER BY family, start, plen LIMIT ?
+"""
+
+
+def _is_asn(value) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 0xFFFFFFFF
+    )
+
+
+def _epoch(value) -> float | None:
+    """A date as the meta table holds it, in epoch seconds: an ISO 8601 date
+    or date and time (UTC unless it names a zone), or a number of seconds."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return when.timestamp()
+
+
+def _day(value) -> str:
+    """The UTC day of a date `_epoch` reads, as YYYY-MM-DD."""
+    when = datetime.datetime.fromtimestamp(_epoch(value), tz=datetime.timezone.utc)
+    return when.strftime("%Y-%m-%d")
+
+
+# Hours below four days, so a daily dataset just past its 72 hours does not
+# read "3 days old, past its limit of 3 days".
+def _age_text(hours: float) -> str:
+    return f"{hours:.0f} hours" if hours < 96 else f"{hours / 24:.0f} days"
+
+
+def _date(row: tuple) -> object:
+    """A meta row's date: the source's own (source_date), else when it was
+    fetched. Rows are (built, rows, fetched_at, source_date)."""
+    return row[3] if row[3] is not None else row[2]
+
+
+def _judge(
+    dataset: Dataset, row: tuple | None, now: float
+) -> tuple[float | None, str | None]:
+    """(age in hours, why lookups may not read the dataset), the reason None
+    when they may. `row` is its meta row, None when the database has none."""
+    if row is None or not row[0]:
+        return None, _NOT_DOWNLOADED
+    epoch = _epoch(_date(row))
+    if epoch is None:
+        return None, "no date recorded"
+    age = max(now - epoch, 0.0) / 3600
+    if age > dataset.max_age_hours:
+        limit = _age_text(dataset.max_age_hours)
+        return age, f"{_age_text(age)} old, past its limit of {limit}"
+    return age, None
+
+
+def _rpki(state: str | None, reason: str | None) -> dict | None:
+    return None if state is None else {"state": state, "reason": reason}
+
+
+@dataclass(frozen=True)
+class _Copy:
+    """The database as one thread has it open: the connection, its meta rows
+    by dataset, and the prefix lengths each family has, longest first."""
+
+    con: sqlite3.Connection
+    meta: dict[str, tuple]
+    plens: dict[int, tuple[int, ...]]
+
+
+class _Reader:
+    """The reads behind one answer. `dates` has the date of each dataset
+    lookups may read; can() says whether a section's datasets are all among
+    them, and notes them as used, for the answer's datasets and attribution."""
+
+    def __init__(self, copy: _Copy | None, dates: dict[str, object]):
+        self.copy = copy
+        self.dates = dates
+        self.used: set[str] = set()
+        self._stats: dict[int, dict[str, int]] = {}
+
+    def can(self, *dataset_ids: str) -> bool:
+        if all(dataset_id in self.dates for dataset_id in dataset_ids):
+            self.used.update(dataset_ids)
+            return True
+        return False
+
+    def _execute(self, sql: str, args: tuple) -> sqlite3.Cursor:
+        return self.copy.con.execute(sql, args)
+
+    def stats(self, asn: int) -> dict[str, int]:
+        """The AS's counts; zeros for an AS that has no row."""
+        if asn not in self._stats:
+            row = self._execute(_STATS, (asn,)).fetchone()
+            values = row or (0,) * len(_STATS_COLUMNS)
+            self._stats[asn] = dict(zip(_STATS_COLUMNS, values, strict=True))
+        return self._stats[asn]
+
+    def route(self, address) -> tuple[dict | None, bool | None]:
+        """The longest announced prefix covering `address`, and whether one
+        does: (None, None) when its family's routes are unavailable."""
+        if not self.can(f"ris_v{address.version}"):
+            return None, None
+        value, bits = int(address), address.max_prefixlen
+        for plen in self.copy.plens[address.version]:
+            host_bits = bits - plen
+            start = (value >> host_bits << host_bits).to_bytes(bits // 8, "big")
+            rows = self._execute(_ROUTE, (address.version, plen, start)).fetchall()
+            if rows:
+                break
+        else:
+            return None, False
+        checked = self.can("rpki")
+        origins = [
+            {
+                "asn": origin,
+                "ris_peers": peers,
+                "rpki": _rpki(state, reason) if checked else None,
+            }
+            for _, origin, peers, state, reason in rows
+        ]
+        return {"prefix": rows[0][0], "origins": origins}, True
+
+    def describe(self, asn: int | None) -> dict:
+        """`asn` through `asn_drop` (which lookup.py fills) for the AS."""
+        answer = {"asn": asn, **dict.fromkeys(_AS_SECTIONS), "asn_drop": None}
+        if asn is None:
+            return answer
+        if self.can("asnames"):
+            row = self._execute("SELECT name, country FROM asn WHERE asn = ?", (asn,))
+            answer["name"], answer["country"] = row.fetchone() or (None, None)
+        if self.can("nro"):
+            row = self._execute(_REGISTRY, (asn,)).fetchone()
+            if row is not None and row[0] >= asn:
+                keys = ("rir", "country", "assigned", "status")
+                answer["registry"] = dict(zip(keys, row[1:], strict=True))
+        if self.can("caida_org"):
+            answer["org"] = self._org(asn)
+        if self.can("ris_v4", "ris_v6"):
+            stats = self.stats(asn)
+            answer["prefixes"] = {
+                "v4": stats["v4_prefixes"],
+                "v6": stats["v6_prefixes"],
+                "v4_addresses": stats["v4_addresses"],
+                "v6_48s": stats["v6_48s"],
+            }
+        if self.can("ris_v4", "ris_v6", "rpki"):
+            stats = self.stats(asn)
+            answer["rpki"] = {
+                "valid": stats["rpki_valid"],
+                "invalid": stats["rpki_invalid"],
+                "not_found": stats["rpki_not_found"],
+            }
+        if self.can("caida_rel"):
+            stats, limit = self.stats(asn), ASINFO_LIST_LIMIT
+            answer["upstreams"] = self._neighbours(_UPSTREAMS, (asn,))
+            answer["downstreams"] = {
+                "count": stats["customers"],
+                "list": self._neighbours(_DOWNSTREAMS, (asn, limit)),
+            }
+            answer["peers"] = {
+                "count": stats["peers"],
+                "list": self._neighbours(_PEERS, (asn, asn, limit)),
+            }
+        return answer
+
+    def _org(self, asn: int) -> dict | None:
+        row = self._execute("SELECT org_id FROM asn_org WHERE asn = ?", (asn,))
+        org_id = (row.fetchone() or (None,))[0]
+        if org_id is None:
+            return None
+        org = self._execute("SELECT name, country FROM org WHERE id = ?", (org_id,))
+        name, country = org.fetchone() or (None, None)
+        siblings = self._execute(
+            "SELECT asn FROM asn_org WHERE org_id = ? AND asn != ? ORDER BY asn",
+            (org_id, asn),
+        )
+        return {
+            "id": org_id,
+            "name": name or None,
+            "country": country,
+            "siblings": [sibling for (sibling,) in siblings],
+        }
+
+    def _neighbours(self, sql: str, args: tuple) -> list[dict]:
+        """`{asn, name}` for each ASN the query lists; the names are None when
+        the AS names are unavailable."""
+        asns = [asn for (asn,) in self._execute(sql, args)]
+        names: dict[int, str] = {}
+        if asns and self.can("asnames"):
+            marks = ", ".join("?" * len(asns))
+            names = dict(
+                self._execute(
+                    f"SELECT asn, name FROM asn WHERE asn IN ({marks})",  # noqa: S608 - placeholders only
+                    tuple(asns),
+                )
+            )
+        return [{"asn": asn, "name": names.get(asn)} for asn in asns]
+
+    def originates(self, asn: int) -> bool | None:
+        if not self.can("ris_v4", "ris_v6"):
+            return None
+        stats = self.stats(asn)
+        return stats["v4_prefixes"] + stats["v6_prefixes"] > 0
+
+    def prefix_list(self, asn: int) -> dict | None:
+        """The prefixes the AS originates, by address, capped at
+        ASINFO_LIST_LIMIT, with the full count."""
+        if not self.can("ris_v4", "ris_v6"):
+            return None
+        checked = self.can("rpki")
+        stats = self.stats(asn)
+        rows = self._execute(_PREFIXES, (asn, ASINFO_LIST_LIMIT))
+        return {
+            "count": stats["v4_prefixes"] + stats["v6_prefixes"],
+            "list": [
+                {
+                    "prefix": prefix,
+                    "ris_peers": peers,
+                    "rpki": _rpki(state, reason) if checked else None,
+                }
+                for prefix, peers, state, reason in rows
+            ],
+        }
+
+
+class AsInfoManager:
+    """The AS database in ASINFO_DIR, read for lookups.
+
+    Each thread reads through a read-only connection of its own, reopened
+    when the file has changed: a rebuild is written beside the file and
+    swapped in with os.replace. A connection still open on the old file goes
+    on reading it until that thread's next read sees the swap, except on
+    macOS, whose own SQLite fails a read of a file swapped out from under it
+    (SQLITE_IOERR_VNODE); a read that fails therefore opens the file afresh,
+    a complete build, and reads once more. The old file's disk space comes
+    back once every thread that had it open has read again (or ended).
+
+    A dataset the database lacks, or holds past its `max_age_hours` (counted
+    from the source's own date, else from when it was fetched), is
+    unavailable. So is one this deployment does not fetch (CAIDA's, under
+    ASINFO_CAIDA_ENABLED=false), however the file was built.
+
+    Disabled (ASINFO_ENABLED=false), it opens nothing and the reads answer
+    None, which leaves AS information out of every response.
+    """
+
+    def __init__(
+        self,
+        directory: str = ASINFO_DIR,
+        datasets: Iterable[Dataset] | None = None,
+        enabled: bool = ASINFO_ENABLED,
+        fetch: Callable[[str, str, int], dict] | None = None,
+        clock: Callable[[], float] = time.time,
+    ):
+        self.directory = directory
+        self.path = os.path.join(directory, DATABASE_NAME)
+        self.datasets = default_datasets() if datasets is None else tuple(datasets)
+        self.enabled = enabled
+        self._fetch = fetch
+        self._clock = clock
+        # Whether a build has been tried since start. Before one, a missing
+        # database is a fresh volume, not a fault.
+        self.build_attempted = False
+        # Every dataset's label, fetched here or not, for `unavailable`.
+        self._labels = {
+            d.id: d.label for d in (*default_datasets(caida=True), *self.datasets)
+        }
+        self._local = threading.local()
+        # (file, prefix lengths per family) for the file last opened. Finding
+        # them scans every route, so it is done once per file, not per thread.
+        # A file is named by its device, inode, mtime and size: a swap changes
+        # them.
+        self._plens: tuple[tuple, dict[int, tuple[int, ...]]] | None = None
+        # The last file that failed to read, logged once rather than per lookup.
+        self._unreadable: tuple | None = None
+
+    def _file_key(self) -> tuple | None:
+        try:
+            stat = os.stat(self.path)
+        except OSError:
+            return None
+        return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+    def _database(self) -> tuple[_Copy | None, str | None]:
+        """This thread's open copy of the database, opened again when the file
+        has changed since; or None and why there is none. Raises
+        sqlite3.Error when the file does not read."""
+        key = self._file_key()
+        if key is None:
+            self._release()
+            if self.build_attempted:
+                return None, "the database has not been built"
+            return None, _NOT_DOWNLOADED
+        held = getattr(self._local, "held", None)
+        if held is None or held[0] != key:
+            self._release()
+            held = (key, *self._open(key))
+            self._local.held = held
+        return held[1], held[2]
+
+    def _open(self, key: tuple) -> tuple[_Copy | None, str | None]:
+        uri = f"file:{urllib.parse.quote(os.path.abspath(self.path))}?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            version = con.execute("PRAGMA user_version").fetchone()[0]
+            if version != SCHEMA_VERSION:
+                logging.warning(
+                    "Not reading the AS database %s: schema %s, expected %s",
+                    self.path,
+                    version,
+                    SCHEMA_VERSION,
+                )
+                con.close()
+                return None, "the database is from another release"
+            meta = {
+                row[0]: row[1:]
+                for row in con.execute(
+                    "SELECT dataset, built, rows, fetched_at, source_date FROM meta"
+                )
+            }
+            plens = self._prefix_lengths(con, key)
+        except sqlite3.Error:
+            con.close()
+            raise
+        return _Copy(con, meta, plens), None
+
+    def _prefix_lengths(
+        self, con: sqlite3.Connection, key: tuple
+    ) -> dict[int, tuple[int, ...]]:
+        cached = self._plens
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        plens = {
+            family: tuple(
+                plen
+                for (plen,) in con.execute(
+                    "SELECT DISTINCT plen FROM route WHERE family = ?"
+                    " ORDER BY plen DESC",
+                    (family,),
+                )
+            )
+            for family in (4, 6)
+        }
+        # Shared only when the file was not swapped while this one opened, so
+        # `key` surely names what the connection read.
+        if self._file_key() == key:
+            self._plens = (key, plens)
+        return plens
+
+    def _release(self) -> None:
+        """Close this thread's connection, which holds its file open (on disk,
+        even after a swap unlinked it) until then."""
+        held = getattr(self._local, "held", None)
+        self._local.held = None
+        if held is not None and held[1] is not None:
+            held[1].con.close()
+
+    def _availability(
+        self, copy: _Copy | None, problem: str | None
+    ) -> tuple[dict[str, object], dict[str, str]]:
+        """(dates, reasons): the date, as stored, of each dataset lookups may
+        read, and why each other one may not be read."""
+        now = self._clock()
+        fetched = {dataset.id: dataset for dataset in self.datasets}
+        dates: dict[str, object] = {}
+        reasons: dict[str, str] = {}
+        for dataset_id in self._labels:
+            dataset = fetched.get(dataset_id)
+            if dataset is None:
+                reasons[dataset_id] = "turned off"
+                continue
+            if copy is None:
+                reasons[dataset_id] = problem
+                continue
+            row = copy.meta.get(dataset_id)
+            _, reason = _judge(dataset, row, now)
+            if reason is None:
+                dates[dataset_id] = _date(row)
+            else:
+                reasons[dataset_id] = reason
+        return dates, reasons
+
+    def _with_database[T](self, use: Callable[[_Copy | None, str | None], T]) -> T:
+        """`use(copy, problem)`, on this thread's copy of the database. When it
+        fails to read, the file is opened afresh and `use` runs once more (a
+        swap fails a read on macOS); a second failure is logged and `use` gets
+        no database. Never raises sqlite3.Error; a file that does not read is
+        logged once."""
+        error = None
+        for _ in range(2):
+            try:
+                return use(*self._database())
+            except sqlite3.Error as exc:
+                error = exc
+                self._release()
+        key = self._file_key()
+        if key != self._unreadable:
+            self._unreadable = key
+            logging.error(
+                "Cannot read the AS database %s (%s)",
+                self.path,
+                getattr(error, "sqlite_errorname", error),
+                exc_info=error,
+            )
+        return use(None, _UNREADABLE)
+
+    def _answer(self, read: Callable[[_Reader], dict]) -> dict:
+        """Run `read` on this thread's copy, and add which datasets it used,
+        which were unavailable, and the credits the used ones ask for."""
+        return self._with_database(lambda copy, problem: self._run(read, copy, problem))
+
+    def _run(
+        self, read: Callable[[_Reader], dict], copy: _Copy | None, problem: str | None
+    ) -> dict:
+        dates, reasons = self._availability(copy, problem)
+        reader = _Reader(copy, dates)
+        answer = read(reader)
+        answer["datasets"] = {i: dates[i] for i in self._labels if i in reader.used}
+        answer["unavailable"] = [
+            {"dataset": i, "label": self._labels[i], "reason": reason}
+            for i, reason in reasons.items()
+        ]
+        attribution: list[str] = []
+        for dataset in self.datasets:
+            if dataset.id in reader.used:
+                credit = dataset.credit.format(date=_day(dates[dataset.id]))
+                if credit not in attribution:
+                    attribution.append(credit)
+        answer["attribution"] = attribution
+        return {key: answer[key] for key in ANSWER_KEYS}
+
+    def for_address(self, ip: str, fallback_asn: int | None = None) -> dict | None:
+        """The announced route covering `ip`, and the AS it describes: the
+        route's origin seen by the most RIS peers (`source: "route"`), else
+        `fallback_asn`, GeoLite2's number (`"geolite2"`), else none (`asn`
+        and `source` None). `announced` says whether a route covers `ip`, None
+        when its family's routes are unavailable. An IPv4-mapped IPv6 address
+        is read as the IPv4 address it carries.
+
+        Read from the database only. None when disabled, or when `ip` is not
+        an address."""
+        if not self.enabled:
+            return None
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return None
+        if address.version == 6 and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        if not _is_asn(fallback_asn):
+            fallback_asn = None
+
+        def read(reader: _Reader) -> dict:
+            route, announced = reader.route(address)
+            if route is not None:
+                asn, source = route["origins"][0]["asn"], "route"
+            elif fallback_asn is not None:
+                asn, source = fallback_asn, "geolite2"
+            else:
+                asn, source = None, None
+            return {
+                **reader.describe(asn),
+                "route": route,
+                "announced": announced,
+                "source": source,
+                "prefix_list": None,
+            }
+
+        return self._answer(read)
+
+    def for_asn(self, asn: int, full: bool = False) -> dict | None:
+        """The AS on its own (`source: "asn"`, no `route`). `announced` says
+        whether it originates any route; `full` adds `prefix_list`. None when
+        disabled, or when `asn` is not a 32-bit AS number."""
+        if not self.enabled or not _is_asn(asn):
+            return None
+
+        def read(reader: _Reader) -> dict:
+            return {
+                **reader.describe(asn),
+                "route": None,
+                "announced": reader.originates(asn),
+                "source": "asn",
+                "prefix_list": reader.prefix_list(asn) if full else None,
+            }
+
+        return self._answer(read)
+
+    def status(self) -> dict:
+        """Per dataset fetched here: its dates as stored, age, rows, and
+        whether lookups cannot read it (`stale`: not in the database, or past
+        its age), for /healthz."""
+        if not self.enabled:
+            return {"enabled": False}
+        return self._with_database(lambda copy, _: self._status(copy))
+
+    def _status(self, copy: _Copy | None) -> dict:
+        now = self._clock()
+        datasets = {}
+        for dataset in self.datasets:
+            row = copy.meta.get(dataset.id) if copy is not None else None
+            age, reason = _judge(dataset, row, now)
+            datasets[dataset.id] = {
+                "label": dataset.label,
+                "fetched_at": row[2] if row else None,
+                "source_date": row[3] if row else None,
+                "age_hours": None if age is None else round(age, 1),
+                "rows": row[1] if row else 0,
+                "stale": reason is not None,
+            }
+        return {"enabled": True, "database": copy is not None, "datasets": datasets}
+
+    def stale_datasets(self) -> list[str]:
+        """One message per dataset fetched here that lookups cannot read, for
+        /healthz. Empty when there is no database at all: that is the
+        database's absence to report, not each dataset's."""
+        if not self.enabled:
+            return []
+        copy, _ = self._with_database(lambda copy, problem: (copy, problem))
+        if copy is None:
+            return []
+        now = self._clock()
+        messages = []
+        for dataset in self.datasets:
+            _, reason = _judge(dataset, copy.meta.get(dataset.id), now)
+            if reason is not None:
+                messages.append(
+                    f"the {dataset.label} dataset is unavailable to lookups: {reason}"
+                )
+        return messages
+
+    def hosts(self) -> list[str]:
+        """The servers the datasets come from, for /privacy."""
+        hosts = []
+        for dataset in self.datasets:
+            host = urllib.parse.urlparse(dataset.url).hostname or dataset.url
+            if host not in hosts:
+                hosts.append(host)
+        return hosts
