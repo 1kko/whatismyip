@@ -100,6 +100,13 @@ RDAP registration data and the full TLS certificate, expanded.
   `ABUSEIPDB_API_KEY`, an IP address looked up directly also gets AbuseIPDB's
   abuse confidence score and report counts (see
   [IP reputation](#ip-reputation)).
+- **AS information** — the announced route that covers an address (prefix, origin
+  AS, how many RIPE RIS peers see it, its RPKI state) and the AS behind it: holder,
+  country, registry and assignment date, organization and sibling ASes, prefix
+  counts, RPKI coverage, upstreams, downstreams and peers, and whether it is on
+  Spamhaus ASN-DROP. `/AS4766` looks an AS up on its own. Everything is read from
+  public datasets the server downloads on a schedule, so a lookup asks no one
+  (see [AS information](#as-information)).
 - Every independent leg runs concurrently; the response reports its own
   `elapsed_ms`.
 
@@ -182,7 +189,7 @@ RDAP registration data and the full TLS certificate, expanded.
 - Plain text for a shell with `?format=text`, and `?fields=` to ask for single
   values without paying for the rest of the lookup (see
   [Plain text and `?fields=`](#plain-text-and-fields)).
-- An MCP server at `/mcp` with five tools (see [MCP](#mcp-model-context-protocol)).
+- An MCP server at `/mcp` with five tools, six with AS information (see [MCP](#mcp-model-context-protocol)).
 - Discovery metadata in `<head>`, so an agent that lands on the page can find the
   machine interface without scraping the body.
 
@@ -389,6 +396,15 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # REPUTATION_WEIGHT_TOR_EXIT=50      # and _SPAMHAUS_DROP, _SPAMHAUS_ASNDROP, _VPN, _DATACENTER
 # REPUTATION_LEVEL_HIGH=80           # and _MEDIUM (40), _LOW (10)
 
+# AS information datasets (see "AS information" below); false drops the feature
+# ASINFO_ENABLED=true
+# ASINFO_DIR=./data/asinfo
+# ASINFO_MIN_RIS_PEERS=10            # routes seen by fewer RIS peers are dropped
+# ASINFO_MAX_AGE_HOURS=72            # older daily datasets are "unknown" + degraded
+# ASINFO_CAIDA_ENABLED=true          # false: relationships and organizations are unknown
+# ASINFO_CAIDA_REL_MAX_AGE_DAYS=75   # and ASINFO_CAIDA_ORG_MAX_AGE_DAYS (200)
+# ASINFO_LIST_LIMIT=100              # cap on the downstream, peer and prefix lists
+
 # AbuseIPDB (see "IP reputation" below); off without a key
 # ABUSEIPDB_API_KEY=your_api_key
 # ABUSEIPDB_DAILY_LIMIT=1000         # the free plan's checks per UTC day
@@ -505,6 +521,21 @@ ones. A name with no A record resolves through its AAAA record instead; this
 server has no IPv6 route out, so such a name gets no TLS handshake, and `ssl`
 says so (see below).
 
+### `GET /AS<n>`
+
+An autonomous system on its own: `/AS4766`, or `/as4766` (a bare `/4766` is not
+an AS lookup). The answer is the AS card of the
+[AS information](#as-information) section, with the full upstream, downstream and
+peer lists (capped at `ASINFO_LIST_LIMIT`) and the announced prefixes with each
+one's RPKI state, as a page, as JSON, or as `?format=text`. `?fields=` and
+`?subdomains=` are `400`s on it. An AS no dataset knows is a `200` saying so.
+
+A special-purpose number (0, `AS_TRANS` 23456, the documentation, private-use and
+reserved ranges) is a `200` too, with `special` saying what it is for and which
+RFC defines it; no dataset is read for it. It takes no slot at the lookup gate
+and counts against the ordinary rate limit. With `ASINFO_ENABLED=false` every AS
+number is a `400` with the code `asinfo_disabled`.
+
 ### Response format
 
 `/` and `/{domain_or_ip}` answer HTML, JSON or plain text from the same URL. The
@@ -616,6 +647,9 @@ $ curl 'https://ip.1kko.com/8.8.8.8?fields=asn_number,asn_name'
 | `risk_signals` | the ids of the lists the address is on, comma-separated, e.g. `tor_exit,datacenter` | the lists in memory (an A query for a domain) | both |
 | `risk_score` | the summed signal weights, capped at 100, where 100 is the most dangerous; `0` is the `none` band, not a clean bill; `?` when no list could be checked | the lists in memory (an A query for a domain) | both |
 | `abuse_score` | AbuseIPDB's abuse confidence, 0-100; `?` when AbuseIPDB did not answer, `-` without `ABUSEIPDB_API_KEY` | AbuseIPDB's API (cached a day) | ip |
+| `route_prefix` | the announced prefix covering the address, e.g. `211.252.112.0/24`; `-` when no RIS peer routes it; `?` when the RIS dump is unavailable | the AS database (local) | both |
+| `route_origin` | the origin AS number of that route (the one seen by the most RIS peers, when there are several); `-` as for `route_prefix` | the AS database (local) | both |
+| `rpki_state` | `valid`, `invalid` or `not-found`: RPKI's verdict on the route and that origin; `-` when not announced; `?` when the VRPs are unavailable | the AS database (local) | both |
 | `dmarc_policy` | `none`, `quarantine` or `reject`: the DMARC policy that governs the name, as published — its own `_dmarc` record's `p=`, or, for a name that inherits its registrable domain's record, that record's `sp=` when it has one; `-` with no record, or with two (RFC 7489 then applies neither); `?` when the `_dmarc` query failed (a failed A query leaves it standing: the record does not depend on the address) | an A query, then the DNS record sweep with `_dmarc` | domain |
 
 The names are the MCP tools' own, flattened: the `lookup` tool's `tls.expires`
@@ -747,6 +781,8 @@ is a stable `code` plus a `message` naming what is wrong:
 | `refresh_failing` | a dataset refresh (GeoLite2, suffix list) has failed twice in a row, i.e. its hourly retry failed too |
 | `rdap_breaker_open` | RDAP servers currently skipped after repeated failures, so lookups routed to them fail fast |
 | `reputation_list_stale` | a reputation list was never downloaded, or is older than `REPUTATION_MAX_AGE_HOURS` (72), so lookups report it as not checked; one reason per list |
+| `asinfo_dataset_stale` | an AS dataset is older than its maximum age (`ASINFO_MAX_AGE_HOURS` for the daily ones, 75 days for CAIDA's relationships, 200 for its organizations), so the card reports that part as unknown; one reason per dataset |
+| `asinfo_unavailable` | AS information is on but there is no usable database after the first build attempt, so lookups carry none |
 
 None of these checks makes a network call, so the endpoint stays cheap to poll.
 
@@ -1040,12 +1076,81 @@ other users' free text. A timeout, an error or a spent quota puts AbuseIPDB in
 `unavailable` with the reason. `/healthz` shows the day's count under
 `abuseipdb`, and a rejected key makes it `degraded`.
 
+### AS information
+
+An IP lookup, the self lookup, and a domain's resolved address carry an `as_info`
+object (absent with `ASINFO_ENABLED=false`); `GET /AS<n>` answers the same object
+at the top level, with the full lists:
+
+```json
+"as_info": {
+  "asn": 4766,
+  "name": "KIXS-AS-KR-KR - Korea Telecom",
+  "country": "KR",
+  "registry": { "rir": "apnic", "country": "KR", "assigned": "1996-04-22", "status": "assigned" },
+  "org": { "id": "@aut-4766-APNIC", "name": "Korea Telecom", "country": "KR", "siblings": [3559, 3757], "sibling_count": 12 },
+  "route": {
+    "prefix": "211.252.112.0/24",
+    "origins": [ { "asn": 4766, "ris_peers": 326, "rpki": { "state": "valid", "reason": null } } ]
+  },
+  "announced": true,
+  "source": "route",
+  "prefixes": { "v4": 2400, "v6": 83, "v4_addresses": 11534336, "v6_48s": 65536 },
+  "rpki": { "valid": 2300, "invalid": 3, "not_found": 180 },
+  "upstreams": [ { "asn": 174, "name": "COGENT-174 - Cogent Communications" } ],
+  "downstreams": { "count": 565, "list": [ { "asn": 17858, "name": "POWERVIS-AS-KR - LG POWERCOMM" } ] },
+  "peers": { "count": 81, "list": [ { "asn": 9318, "name": "SKB-AS-KR - SK Broadband Co Ltd" } ] },
+  "asn_drop": false,
+  "datasets": { "ris_v4": "2026-10-20T10:00:00+00:00", "caida_rel": "2026-10-01", "...": "each source's own date" },
+  "unavailable": [],
+  "attribution": [ "Source: RIPE NCC", "RPKI data validated by rpki-client.org", "..." ],
+  "special": null
+}
+```
+
+The card describes the route's origin AS; an address no RIS peer routes
+(`announced: false`) is described by GeoLite2-ASN's number instead, and `source`
+says which. RPKI state belongs to a (prefix, origin) pair, so a prefix announced
+by two origins lists both, each with its own verdict. `location.asn_*` is
+unchanged. `asn_drop` is read on the card's AS, `reputation`'s on GeoLite2's
+number, so the two can differ for one address when the ASNs do. An address
+routed from a special-purpose AS keeps its route and RPKI state; `special`
+replaces the AS sections.
+
+| Dataset | Source | Refreshed |
+| --- | --- | --- |
+| AS names | RIPE NCC `asn.txt` | daily |
+| Registry, assignment date | NRO extended delegated statistics | daily |
+| Routes and peers seen | RIPE RIS whois dumps (IPv4, IPv6) | daily |
+| RPKI VRPs | rpki-client's `rpki.csv` | daily |
+| Upstreams, downstreams, peers | CAIDA AS relationships | checked daily, downloaded when CAIDA lists a newer file (monthly) |
+| Organization, siblings | CAIDA AS organizations | checked daily, downloaded when CAIDA lists a newer file (quarterly) |
+
+They are downloaded into `data/asinfo/` by the scheduler, never by a lookup, and
+built into one SQLite file that is swapped in whole: a lookup is a read of that
+file (no outbound request, nothing about the address leaves the server). A
+download that ends short of its stated length, or parses to far fewer rows than
+the dataset has, is refused and the previous copy stays in use. RIS rows seen by
+fewer than `ASINFO_MIN_RIS_PEERS` (10) peers are dropped as leaks and noise.
+A refresh takes about a minute and a quarter and leaves about 240 MB on disk
+(measured on macOS).
+
+A dataset that is missing, failed to build, or is past its maximum age is in
+`unavailable` with the reason and its section is `null`; the page says
+"Unknown", never "0 upstreams". With the data loaded, a section that lacks the
+AS reads "Not in <dataset>". The data are public routing and registry facts,
+not live routing: they are one or more days old, and say nothing about
+reputation. Credits are on the page and on `/privacy`: "Source: RIPE NCC",
+"RPKI data validated by rpki-client.org", and CAIDA's citations, "The CAIDA UCSD
+AS Relationships Dataset" and "The CAIDA UCSD AS Organizations Dataset", each
+with the file's date.
+
 ### Response codes
 
 | Code | Meaning |
 | --- | --- |
 | `200` | success |
-| `400` | private or reserved address (the body also carries `code`, the address's IANA block, and `error`), not a domain name or IP address, a `.onion` or `home.arpa` name (`special_use_name`), or an invalid `format`, `fields` or `subdomains` parameter |
+| `400` | private or reserved address (the body also carries `code`, the address's IANA block, and `error`), not a domain name, IP address or AS number, an AS lookup with AS information off (`asinfo_disabled`), a `.onion` or `home.arpa` name (`special_use_name`), or an invalid `format`, `fields` or `subdomains` parameter |
 | `403` | banned IP, geo-blocked, or suspicious request |
 | `404` | unknown endpoint — also the answer to a wrong admin API key |
 | `413` | `POST /mcp` body over `MCP_MAX_BODY_BYTES` |
@@ -1102,6 +1207,7 @@ is unaffected.)
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR / DMARC sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. `dmarc` is a domain's `v=DMARC1` record, or its registrable domain's when it has none, each labelled with the `queried_name` that answered. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, the certificate's age in days (`age_days`), and whether it is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way and the same reputation `score` (no AbuseIPDB part). |
+| `as_info(asn, full=false)` | The AS card for `"AS4766"`, `"as4766"` or `4766`: holder, country, registry, organization, prefix counts, RPKI coverage, upstreams, neighbour counts (`full` adds the capped neighbour and prefix lists), ASN-DROP and which datasets could not be read. Public BGP and RPKI data refreshed daily, not live routing; the description says a `null` section is unknown, not "none". A special-purpose number returns its `special` entry. Hidden when `ASINFO_ENABLED=false`. `lookup` and `whoami_caller` carry a compact `as_info` for an address; `lookup`, `dns_records` and `ssl_certificate` refuse an AS target with the code `asn_target`, naming this tool. |
 | `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |
 
 A call that could not answer at all (a private or malformed target, a timeout,
@@ -1115,8 +1221,8 @@ it, such as one DNS type timing out, the registration lookup failing inside
 Every tool is annotated read-only (`readOnlyHint: true`, `destructiveHint:
 false`, `idempotentHint: true`) and carries a display `title`. `openWorldHint`
 is `true` for the four that ask another system (DNS, RDAP/WHOIS, a TLS
-handshake, crt.sh) and `false` for `whoami_caller`, which reads only the GeoIP
-database and the reputation lists in memory. Annotations are hints a client may
+handshake, crt.sh) and `false` for `whoami_caller` and `as_info`, which read only
+the GeoIP database, the AS database and the reputation lists in memory. Annotations are hints a client may
 ignore, not a promise it enforces; without them the spec has a client assume
 every tool may write.
 

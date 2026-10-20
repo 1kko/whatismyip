@@ -50,6 +50,15 @@ during a deploy. A real outage still fails every check.
 
 The `reasons` codes the probe prints are listed in README → `GET /healthz`.
 
+Two of them come from the AS datasets (`data/asinfo/`, refreshed by the
+`refresh-asinfo` job). `asinfo_dataset_stale` is one reason per dataset past its
+maximum age: 72 hours for the daily ones, 75 days for CAIDA's relationships and
+200 for its organizations, counted from the file's own date. A failed download
+does not degrade `/healthz` by itself; staleness does, once the copy is old
+enough, because the job's own interval is the retry. `asinfo_unavailable` means
+there is no usable AS database after the first build attempt, so lookups carry
+no AS information. Both fail the probe, as any `degraded` reason does.
+
 ## 2. SigNoz alerts (create by hand)
 
 ### Before you start

@@ -119,6 +119,22 @@
             <a href="https://www.spamhaus.org/drop/terms/" rel="noopener noreferrer">its DROP
             terms</a>.</p>
         {% endif %}
+        {% if asinfo_hosts %}
+        <p>It also downloads the public datasets behind a lookup's AS card, on a schedule and
+            never for a particular lookup: RIPE NCC's AS names, the NRO's delegation statistics
+            and RIPE RIS's routing tables, the RPKI route validations published by rpki-client{% if asinfo_caida %},
+            and CAIDA's AS relationships and organizations{% endif %} (from
+            {{ asinfo_hosts | join(", ") }}). Reading an address's route or an AS reads this
+            server's copy, so none of those servers learns what was looked up. A dataset older
+            than {{ asinfo_max_age }}{% if asinfo_caida %} (CAIDA's, than its own release cycle){% endif %} is reported as
+            unknown rather than used. Source: RIPE NCC. RPKI data validated by rpki-client.org.
+            {% if asinfo_caida %}
+            <a href="https://www.caida.org/catalog/datasets/as-relationships/" rel="noopener noreferrer">The CAIDA UCSD AS Relationships Dataset</a>
+            and
+            <a href="https://www.caida.org/catalog/datasets/as-organizations/" rel="noopener noreferrer">The CAIDA UCSD AS Organizations Dataset</a>
+            are used under CAIDA's acceptable use terms; the AS card names the date of the file it
+            read.{% endif %}</p>
+        {% endif %}
 
         <h2>Who else your browser contacts</h2>
         <ul>

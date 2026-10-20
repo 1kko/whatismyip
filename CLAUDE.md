@@ -186,7 +186,15 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   labels such as `_dmarc` bypass the encoder. `normalize_lookup_target`
   applies it after cutting a pasted URL to its host, so DNS, TLS SNI,
   registration, the cache and echoed address all see one spelling.
-  `abuse_report` asks AbuseIPDB, from `_run_legs` and only for an IP target. The self page (`GET /`) does not use
+  `abuse_report` asks AbuseIPDB, from `_run_legs` and only for an IP target.
+  The `asinfo` leg (in `LEGS`) reads `address_as_info(ip, location)`, the
+  route and AS card of an address from `asinfo_manager`; `as_info_for_asn(asn,
+  full=)` is the card of a number. `classify_target` also answers `"asn"`
+  (`parse_asn`: `as` plus 1 to 10 digits, 0 to 4294967295, any case; a bare
+  number stays `invalid`). `special_asn(n)` reads `_SPECIAL_ASN`, the
+  special-purpose ASN table beside `_SPECIAL_PURPOSE`, and is `None` for an
+  ordinary number. `gather()` refuses an `asn` target with
+  `InvalidTargetError(code="asn_target")`, since it would treat it as an IP. The self page (`GET /`) does not use
   `gather()`: `main._self_lookup` runs its legs.
 - `concurrency.py`: the lookup gate and the slow-leg thread pools. At most
   `LOOKUP_CONCURRENCY` lookups run at once: `gather()` holds a slot for its
@@ -204,7 +212,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   legs it needs and the target kinds it applies to) and the text/flat-JSON
   rendering. Pure: `main.py` runs the lookup. `dmarc_policy` reads
   `viewmodel.dmarc_policy()`, so the field and the page's Mail row agree.
-  `-` is "no value", `?` is "the
+  `as_block` is the `/AS<n>` text block (the card's scalars and its
+  upstreams); `route_prefix`, `route_origin` and `rpki_state` are address
+  fields, in the text block because the data is local. `-` is "no value", `?` is "the
   lookup failed": `field_values` marks the registration fields for a broken
   RDAP/WHOIS lookup, every field read from the address (chosen by leg, so a
   new field follows; `_NAME_LEGS`, whois and the dns sweep, ask about the
@@ -226,7 +236,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `data/reputation/` (gitignored) the way `TldNamesManager` keeps the suffix
   list, and answers `check(ip, asn)` from sorted intervals in memory.
   `risk_score` (`SCORE_MAX = 100`) is the sum of signal weights capped at 100,
-  and 100 is the most dangerous. Imports only `config` and the standard
+  and 100 is the most dangerous. `asn_listed(asn)` is the ASN-DROP read the AS
+  card uses: `None` when that list could not be read by `check()`'s own rule.
+  Imports only `config` and the standard
   library; `lookup.py` builds the singleton.
 - `abuseipdb.py`: AbuseIPDB's abuse confidence score and report counts for an
   address, the one reputation source asked per lookup (`AbuseIPDBClient`, with
@@ -234,21 +246,36 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   answer to a `check()` result. Off without `ABUSEIPDB_API_KEY`. Imports
   `config`, `reputation` and the standard library; `lookup.py` builds the
   client.
+- `asinfo.py`: the AS information database (see [AS information](#as-information)).
+  `AsInfoManager` owns the seven datasets (`default_datasets()`), their
+  downloads (`refresh()`: due check, `.requested` stamp, streamed copy,
+  `min_rows`, build, `os.replace()`), the SQLite file they are built into, and
+  the reads: `for_address(ip, geolite_asn)` (longest-prefix route, RPKI state
+  per origin, then the card of the route's origin AS, else GeoLite2's) and
+  `for_asn(asn, full=)`. Also `status()`, `stale_datasets()`, `hosts()` (for
+  `/privacy`; it lists the hosts whether or not the manager is enabled, so
+  the caller checks `enabled`), `parse_asn` and the answer shape
+  (`ANSWER_KEYS`). Imports `config` and the standard library only; must not
+  import `lookup` or `main`, for `subdomains.py`'s reason.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
-  Streamable HTTP, stateless). Five tools: `lookup` over `lookup.gather()`,
+  Streamable HTTP, stateless). Five tools, six with `ASINFO_ENABLED`: `lookup` over `lookup.gather()`,
   `dns_records` and `ssl_certificate` over `gather(legs=)` narrowed to their
   own legs (`_DNS_LEGS`, `_TLS_LEGS`), `subdomains` over
   `subdomains.get_subdomains()` (registered only under `SUBDOMAIN_ENABLED`),
   and `whoami_caller` over `lookup.lookup_location()` and
-  `lookup.ip_reputation()`. Each reshapes its data for an LLM context (the
-  `compact_*` functions). `compact_registration` adds `status_explained`
+  `lookup.ip_reputation()`, and `as_info` over `lookup.as_info_for_asn()`
+  (registered only under `ASINFO_ENABLED`, as `subdomains` is under
+  `SUBDOMAIN_ENABLED`; it takes `"AS4766"`, `"as4766"` or `4766`). Each reshapes
+  its data for an LLM context (the `compact_*` functions, `compact_as_info`
+  among them; `lookup` and `whoami_caller` carry a compact `as_info`). `compact_registration` adds `status_explained`
   (`eppstatus.explain_status`: `[{code, meaning, severity}]`) beside a domain's
   raw `status`; an IP allocation, an error and `registered: false` carry none.
   A new output key is not a listing change, so `server.json` is not bumped for
   it. `build_mcp`, `McpDispatch`, `McpBarePathRoute` and `McpDisabled` are the
   mount plumbing `main.py` wires.
 - `viewmodel.py`: `build_view()` turns a response dict into what
-  `templates/browser.html` renders. Pure, with no I/O, and it imports only
+  `templates/browser.html` renders (`as_view` is the "AS" accordion's rows,
+  hint and credits; `as_page_view` the `/AS<n>` page's). Pure, with no I/O, and it imports only
   `config`, `eppstatus`, `reputation.grade` and the standard library, so
   `mcp_server.py` reuses its certificate helpers without a cycle. The one
   decision that needs `lookup` — which values link to their own lookup —
@@ -271,7 +298,11 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   and `healthz`, `build_map_payload`, `render_page`, `render_error` and
   `render_refused_target`, `lookup_href` and `_dns_rows` (the page's lookup
   links), `_self_lookup`, and the routes `get_self_info`, `get_ip_info` and
-  `head_lookup`.
+  `head_lookup`; for AS numbers `_as_lookup` (the `/AS<n>` handler),
+  `render_as_page` (`templates/as.html`, with `templates/_raw_json.html`, the
+  Raw JSON panel it shares with `browser.html`) and `_script_json`, which
+  escapes `<`, `>` and `&` in the JSON a page embeds in a `<script>`, since
+  third-party text (an AS name) reaches it.
 
 **Endpoints** (single-segment fixed routes are declared before the
 `/{domain_ip}` catch-all, which would otherwise swallow them):
@@ -289,6 +320,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `lookup.gather()`
 - `GET /{domain_ip}?subdomains=include|only` - opt-in Certificate Transparency
   subdomain list; see [Subdomain lookup](#subdomain-lookup)
+- `GET /AS<n>` (`AS4766`, `as4766`; `lookup.parse_asn`) - an autonomous
+  system, from the local AS database through `main._as_lookup`, which takes no
+  `lookup_gate` slot. A special-purpose number is a `200` that says what it is
+  for. `?fields=` and `?subdomains=` are `400`s on it. `HEAD` answers as for any
+  target. With `ASINFO_ENABLED=false` every number is a `400` with the code
+  `asinfo_disabled`
 - `?format=html|json|text` and `?fields=` on both lookup routes
 - `HEAD /`, `HEAD /{domain_ip}` - `main.head_lookup`: `200` with the
   Content-Type GET would answer with (JSON for the `?whois=only` and
@@ -310,7 +347,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    `example.com:443`, `[2001:db8::1]:8443`; one colon only, so never a bare
    IPv6 address's last group) and gives a name its canonical spelling (lower case, no trailing
    root dot, UTS 46 A-labels); `lookup.classify_target` then calls it a domain,
-   `ipv4`, `ipv6` or `invalid` before any network work; an invalid target is a
+   `ipv4`, `ipv6`, `asn` or `invalid` before any network work (an `asn` target
+   goes to `main._as_lookup` and never to `gather()`); an invalid target is a
    `400` (`InvalidTargetError`), and so is a private or reserved address
    (`PrivateAddressError`, from `is_safe_ip`): its JSON keeps `detail`
    unchanged and adds `error` and `code`, the IANA block from
@@ -376,7 +414,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - Jobs: GeoLite2-City and -ASN every 3 days; the public suffix list daily
   (re-fetched once older than `TLD_MAX_AGE_DAYS`); the RDAP bootstrap daily;
   the reputation lists every `REPUTATION_CHECK_INTERVAL_SECONDS` (first run at
-  start); expired-ban cleanup; and cleanup of both rate-limiter buckets.
+  start); `refresh-asinfo` every `ASINFO_CHECK_INTERVAL_SECONDS` (first run at
+  start, in the background: a fresh volume serves lookups with the AS card
+  unavailable until the first build; like the reputation job it is not in
+  `_refresh_with_retry` and adds nothing to `_refresh_failures`); expired-ban cleanup; and cleanup of both rate-limiter buckets.
   `_refresh_with_retry` retries a failed GeoLite2 or suffix-list refresh on a
   one-shot timer and counts consecutive failures for `/healthz`
   (`_refresh_failures`).
@@ -812,7 +853,8 @@ below by text:
   constant), so the description and `instructions` cannot drift and
   `tools/list` keeps its order (`test_tools_list_exposes_the_five_tools`
   pins it). Most clients ignore `instructions`; the descriptions keep their
-  caveats.
+  caveats. With `ASINFO_ENABLED` the list has a sixth tool, `as_info`, after
+  `whoami_caller`; conftest turns the switch off, so that test keeps its five.
 - `cache_hints` lets a 2026-07-28 client keep `tools/list` for
   `TOOLS_LIST_TTL_MS` (a day, `public`); the handshake-era wire (2025-11-25
   and earlier) has no `ttlMs` field, so the test reads the hint through the
@@ -883,6 +925,7 @@ whatismyip/
 ├── subdomain_store.py   # SQLite cache for subdomains.py (data/subdomains.sqlite3)
 ├── reputation.py        # IP reputation lists (data/reputation/), bisect lookups; score 0-100
 ├── abuseipdb.py         # AbuseIPDB score for a directly looked-up IP: cache, daily quota
+├── asinfo.py            # AS information: seven datasets -> one SQLite file (data/asinfo/), route and AS reads
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
@@ -895,6 +938,8 @@ whatismyip/
 ├── templates/
 │   ├── browser.html     # server-rendered lookup page (no client-side templating)
 │   ├── error.html       # 400/403/429/503 page for browsers, same status as the JSON
+│   ├── as.html          # /AS<n>: the AS card, its lists and prefixes
+│   ├── _raw_json.html   # the Raw JSON panel, shared by browser.html and as.html
 │   ├── privacy.html     # /privacy, filled from the constants the code runs on
 │   ├── _search.html     # search box included by browser.html and error.html (app.js finds it by id)
 │   └── _footer.html     # footer included by all three pages
@@ -909,6 +954,7 @@ whatismyip/
 │   ├── image/, favicons    # logo (also og:image), icons, web manifest
 │   └── geo/                # cities.json, countries.json (generated, committed)
 ├── tests/                  # see Testing Strategy for each file
+│   ├── asinfo_fixtures.py  # synthetic files in each source format + build_manager(), for the asinfo tests
 │   ├── conftest.py         # env switches and a state dir per run, set before main is imported;
 │   │                       # per-test reset of module state; offline defaults and the network guard
 │   └── fixtures/           # MaxMind's GeoLite2 test mmdbs, the MCP server.json schema
@@ -920,7 +966,7 @@ whatismyip/
 │   │                    # GitHub Actions one group, Docker ungrouped
 │   └── workflows/       # ci, deploy, healthz-probe, mcp-publish, security-audit
 ├── data/                # Volume mount for persistent data (Docker); gitignored contents:
-│                        # GeoLite2 mmdbs, tld/, reputation/, subdomains.sqlite3, bans/rules
+│                        # GeoLite2 mmdbs, tld/, reputation/, asinfo/, subdomains.sqlite3, bans/rules
 ├── Dockerfile           # single stage: poetry export + uv pip, non-root, OTel entrypoint
 ├── Makefile             # Docker workflow automation
 └── pyproject.toml       # Poetry dependencies and ruff/pytest config
@@ -1091,6 +1137,109 @@ lists; a score of 0 is `checked`, not a signal, and a failure is in
 developer's `.env` never reaches a test; `tests/test_abuseipdb.py` builds
 enabled clients over a fake transport.
 
+### AS information
+
+**Downloaded by the scheduler, read from one SQLite file.** The
+`refresh-asinfo` job (`AsInfoManager.refresh()`) downloads seven datasets into
+`data/asinfo/`, builds `asinfo.sqlite3.tmp` from the copies and swaps it in
+with `os.replace()`; a request reads the live file through
+`lookup.address_as_info` / `lookup.as_info_for_asn`, which make no outbound
+request and add no SSRF surface. A failed download keeps the previous copy and
+a failed build the previous database. The datasets, with the credit each one's
+card line carries (`asinfo.Dataset.credit`):
+
+- RIPE NCC AS names (`asn.txt`), the NRO delegated statistics, and the RIPE RIS
+  whois dumps for IPv4 and IPv6: daily. "Source: RIPE NCC".
+- RPKI VRPs from rpki-client's `rpki.csv`, asked for with `Accept-Encoding:
+  gzip`: daily. "RPKI data validated by rpki-client.org".
+- CAIDA AS relationships (`YYYYMM01.as-rel2.txt.bz2`) and organizations
+  (`YYYYMMDD.as-org2info.jsonl.gz`): the directory listing is read daily and a
+  file is downloaded only when the listing names a newer one than the copy.
+  "The CAIDA UCSD AS Relationships Dataset, <file date>" and "... AS
+  Organizations Dataset, <file date>", the date being the file's own.
+- Spamhaus ASN-DROP is not downloaded here: `ReputationManager.asn_listed`
+  reads the list `reputation.py` keeps.
+
+**Download rules.** Each request's time is written to `<file>.requested`
+before the request is sent, so a failed request and a restart both count, and a
+dataset is not asked again within `ASINFO_RETRY_SECONDS`. A download is
+streamed to `<file>.tmp` under a byte cap per dataset (NRO is 57 MB, so
+`reputation.MAX_LIST_BYTES` would be too small), refused when it ends short of
+its `Content-Length` (`http.client` answers a dropped connection with an early
+end of file, and a plain-text list cut in half can still clear `min_rows`), and
+refused when its parser returns fewer than the dataset's `min_rows`. `min_rows`
+counts rows after the parser's filters, so a reformatted file that parses to
+almost nothing is rejected too. All sources are sent `REPUTATION_USER_AGENT`;
+every URL is overridable by env (`ASINFO_*_URL`).
+
+**Build rules.** A RIS row seen by fewer than `ASINFO_MIN_RIS_PEERS` (10) peers
+is dropped: most are leaks and more-specific noise. So is a prefix shorter than
+/8 (IPv4) or /16 (IPv6), whatever its count, and a row whose origin is not a
+plain integer (an AS_SET). RPKI state (RFC 6811: `valid`, `invalid` with reason
+`origin` or `length`, `not-found`) is computed at build time **per (prefix,
+origin)**, so a prefix announced by two origins keeps both, each with its own
+state and peer count, and the VRPs are not stored. Per-AS aggregates (prefix
+counts, address space, RPKI counts, neighbour counts) are computed at build
+time too. An IPv4-mapped IPv6 address is matched as the IPv4 address it
+carries, as `ReputationManager.check` does.
+
+**"Unavailable" is never empty.** A dataset that is missing, failed to build or
+is past its maximum age (`ASINFO_MAX_AGE_HOURS` 72 for the daily ones; CAIDA's
+75 days for relationships and 200 for organizations, from the file's own date)
+is in the card's `unavailable` with its reason, and its section is `None`. A
+`None` section whose dataset is in `unavailable` reads **Unknown**; with the
+dataset available it reads "Not in <dataset>" (`viewmodel`). Neither is ever
+"0 upstreams" or an empty list. An address no RIS peer routes is `route: null`
+and `announced: false`, which is a finding, not a gap. A fresh volume (enabled,
+no database yet) answers with every section `None` and every dataset
+unavailable, and `/healthz` says `asinfo_unavailable` only after the first
+build attempt (`AsInfoManager.build_attempted`) or when a database file exists
+and will not open. `asinfo_dataset_stale` is one reason per stale dataset.
+
+**Which AS the card describes.** The route's origin AS (a multi-origin prefix:
+the origin seen by the most peers), else GeoLite2-ASN's number for the address;
+`source` says which (`route` or `geolite2`). The AS facts follow that number,
+and `location.asn_*` is unchanged. So the card's `asn_drop` (ASN-DROP matched
+on the card's AS) can disagree for one address with `reputation`'s ASN-DROP
+signal (matched on GeoLite2's number) when the two ASNs differ; neither is
+wrong, and `reputation` is not changed by AS data.
+
+**Special-purpose ASNs.** `lookup._SPECIAL_ASN` (0, `AS_TRANS`, documentation,
+private use, the reserved ranges) answer `200` from `/AS<n>` with `special`
+(`code, label, first, last, defined_in, purpose`) and read no dataset: a
+private ASN that leaked into RIS, or an AS0 ROA, would otherwise draw a card
+that looks like someone's network. An IP routed from one keeps its route and
+RPKI state; its `as_info` carries `special` and the AS sections are `None`,
+and only the datasets the route came from are credited.
+
+**Performance and size.** Reads run inline on the event-loop thread, like
+GeoIP; nothing in them is slow enough to need a pool. The build runs in the
+scheduler's thread. Measured on real data (2026-10-20, macOS, not yet on the
+Debian image): a refresh of all seven datasets takes about 72 s, raises the
+process's peak RSS by about 55 MB, leaves about 241 MB in `data/asinfo/`
+(database 152 MB, copies 82 MB) and about 383 MB while the new database sits
+beside the old one. SQLite's build temp files (about 140 to 210 MB, `PRAGMA
+temp_store = FILE`) go to the system temp directory, not the volume; nothing
+sets `SQLITE_TMPDIR`.
+
+**Credits and terms.** The card carries the credit lines above, and
+`/privacy` the hosts (`asinfo_manager.hosts()`, shown only when the manager is
+enabled), that nothing is downloaded for a particular lookup, and, when CAIDA's
+datasets are in use, their citations with links to their dataset pages. CAIDA's terms ask that a
+publication cite the dataset and report it to CAIDA; this page is such a
+publication, so report it after launch (data-info@caida.org).
+`ASINFO_CAIDA_ENABLED=false` turns the relationship and organization rows into
+`unavailable` if CAIDA declines. The service is personal and non-commercial,
+which is what these terms assume. The page-embedded JSON is escaped with
+`main._script_json` (`<`, `>`, `&`), because an AS name is third-party text.
+
+**Tests.** `tests/conftest.py` sets `ASINFO_ENABLED=false`, so the scheduler
+downloads nothing and no lookup grows an `as_info` key; a test of the feature
+asks for the `asinfo_enabled` fixture (a manager over `asinfo_fixtures`'
+synthetic files, patched into `lookup` and `main`, clock at
+`asinfo_fixtures.NOW`) or builds its own manager. Nothing in the suite touches
+the network.
+
 ### Dependencies
 
 **Runtime** (`pyproject.toml`):
@@ -1161,7 +1310,7 @@ Every test runs on FastAPI's `TestClient`; most use one module-level client,
 which never runs the lifespan, and the MCP tests use `with TestClient(app)`,
 which does. `tests/conftest.py` sets the environment before any test module
 imports `main`: `BACKGROUND_REFRESH_ENABLED=false` (no lifespan starts the
-scheduler or downloads anything), `REPUTATION_ENABLED=false`, an empty
+scheduler or downloads anything), `REPUTATION_ENABLED=false`, `ASINFO_ENABLED=false`, an empty
 `ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo/IP-rule
 files under a per-run temporary `STATE_DIR`; geo-blocking mode, country lists,
 and unknown-country handling are pinned off. `pytest_sessionfinish` removes
@@ -1257,7 +1406,15 @@ Test files:
   lengths), `test_dns_security_leg.py` (which lookups run the leg, a broken
   leg is unknown, the JSON key), `test_reputation.py` (list parsers, intervals, grade, the 0-100 score,
   download guard, surfaces), `test_abuseipdb.py` (cache, quota, failures,
-  which lookups ask, surfaces)
+  which lookups ask, surfaces), `test_asinfo.py` (the dataset parsers, the
+  build and RPKI state, route and AS reads, staleness and `unavailable`,
+  download and refresh rules, swapping the file under readers),
+  `test_as_target.py` (`/AS<n>`: classification, JSON, text, page, `HEAD`,
+  the special-purpose numbers, never a ban), `test_as_surfaces.py` (every
+  other surface: `as_info` on IP, domain and self lookups, the page's AS panel
+  and links, `?fields=`, MCP, `/healthz` and `/privacy`, the credits),
+  `asinfo_fixtures.py` (not a test module: the synthetic files and
+  `build_manager()`, with conftest's `asinfo_enabled` fixture on top)
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding
   guards, the admin key, bans, the blocked-ban log dedupe, rate limiting,
   geo-blocking, the probe detector and whitelist, per-IP rules, response

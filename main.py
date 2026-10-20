@@ -32,6 +32,7 @@ from config import (
     ABUSEIPDB_CACHE_TTL,
     APP_VERSION,
     ASINFO_CHECK_INTERVAL_SECONDS,
+    ASINFO_MAX_AGE_HOURS,
     BACKGROUND_REFRESH_ENABLED,
     BAN_DURATION_RATE_LIMIT,
     BAN_DURATION_SUSPICIOUS,
@@ -1735,6 +1736,11 @@ async def privacy(request: Request):
                 reputation_manager.hosts() if reputation_manager.enabled else []
             ),
             "reputation_max_age": _span(int(REPUTATION_MAX_AGE_HOURS * 3600)),
+            "asinfo_hosts": (asinfo_manager.hosts() if asinfo_manager.enabled else []),
+            "asinfo_caida": any(
+                dataset.id.startswith("caida") for dataset in asinfo_manager.datasets
+            ),
+            "asinfo_max_age": _span(int(ASINFO_MAX_AGE_HOURS * 3600)),
             "abuseipdb_enabled": abuseipdb_client.enabled,
             "abuseipdb_cache": _span(ABUSEIPDB_CACHE_TTL),
             "stun_url": WEBRTC_STUN_URL,

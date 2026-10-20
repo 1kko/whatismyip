@@ -23,7 +23,7 @@ import lookup
 import main
 import mcp_server
 import viewmodel
-from asinfo import ANSWER_KEYS, AsInfoManager
+from asinfo import ANSWER_KEYS, AsInfoManager, default_datasets
 from asinfo_fixtures import (
     ASNAMES,
     CAIDA_REL,
@@ -35,7 +35,7 @@ from asinfo_fixtures import (
 )
 from test_boot import IMPORT_PROBE
 from test_mcp_iserror import _call, _failed
-from test_reputation import SPAMHAUS_META, make_manager
+from test_reputation import CHROME, SPAMHAUS_META, make_manager, page_text
 
 ROOT = Path(__file__).resolve().parent.parent
 client = TestClient(main.app)
@@ -1251,3 +1251,63 @@ def test_compact_as_info_for_a_special_address_card_keeps_the_route(asinfo_enabl
 
 def test_as_info_tool_absent_when_disabled():
     assert "as_info" not in mcp_server.registered_tool_names()
+
+
+# --- /privacy and the credits ---------------------------------------------------
+
+
+def _privacy_text() -> str:
+    return page_text(client.get("/privacy", headers=CHROME).text)
+
+
+def test_privacy_lists_the_as_datasets_and_says_never_per_lookup(asinfo_enabled):
+    hosts = asinfo_enabled.hosts()
+    assert "ftp.ripe.net" in hosts
+    assert "publicdata.caida.org" in hosts
+    text = _privacy_text()
+    for host in hosts:
+        assert re.search(rf"(?<![\w.]){re.escape(host)}(?![\w])", text), host
+    assert "never for a particular lookup" in text
+    assert "Source: RIPE NCC" in text
+    assert "RPKI data validated by rpki-client.org" in text
+    assert "The CAIDA UCSD AS Relationships Dataset" in text
+    assert "The CAIDA UCSD AS Organizations Dataset" in text
+    html = client.get("/privacy", headers=CHROME).text
+    assert "https://www.caida.org/catalog/datasets/as-relationships/" in html
+    assert "https://www.caida.org/catalog/datasets/as-organizations/" in html
+
+
+def test_privacy_omits_them_when_disabled(monkeypatch, tmp_path):
+    # The default suite switch is off; a manager that is off keeps its dataset
+    # table, so the page must not read the hosts from it.
+    off = AsInfoManager(directory=str(tmp_path), enabled=False)
+    assert off.hosts()
+    monkeypatch.setattr(main, "asinfo_manager", off)
+    text = _privacy_text()
+    assert "ris.ripe.net" not in text
+    assert "publicdata.caida.org" not in text
+    assert "CAIDA" not in text
+    assert "rpki-client" not in text
+
+
+def test_as_panel_carries_each_credit(asinfo_enabled, legs):
+    html = client.get(f"/{KT_IP}", headers=BROWSER).text
+    for credit in (
+        "Source: RIPE NCC",
+        "RPKI data validated by rpki-client.org",
+        "The CAIDA UCSD AS Relationships Dataset, 2026-10-01",
+        "The CAIDA UCSD AS Organizations Dataset, 2026-10-01",
+    ):
+        assert credit in html, credit
+
+
+def test_privacy_names_caida_only_while_its_datasets_are_in_use(monkeypatch, tmp_path):
+    manager = AsInfoManager(
+        directory=str(tmp_path),
+        enabled=True,
+        datasets=[d for d in default_datasets(caida=True) if "caida" not in d.id],
+    )
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    text = _privacy_text()
+    assert "RPKI data validated by rpki-client.org" in text
+    assert "CAIDA" not in text
