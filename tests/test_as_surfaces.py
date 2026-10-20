@@ -831,3 +831,46 @@ def test_network_org_row_stays_text_when_as_lookups_are_off(legs):
     html = client.get(f"/{KT_IP}", headers=BROWSER).text
     assert 'href="/AS4766"' not in html
     assert "AS4766 GeoLite2&#39;s name" in html
+
+
+def _special_card(**overrides):
+    card = {
+        **dict.fromkeys(KT_CARD),
+        "asn": 64512,
+        "unavailable": [
+            {"dataset": "ris_v4", "label": "RIPE RIS routes (IPv4)", "reason": "x"}
+        ],
+        "attribution": [],
+        "special": {
+            "code": "private_asn",
+            "label": "Private use",
+            "first": 64512,
+            "last": 65534,
+            "defined_in": "RFC 6996",
+            "purpose": "For a network's own internal BGP.",
+        },
+    }
+    return {**card, **overrides}
+
+
+def test_special_card_without_a_route_draws_no_route_or_rpki_rows():
+    view = viewmodel.as_view(_special_card())
+    assert [r["label"] for r in view["rows"]] == ["AS", "Purpose"]
+
+
+def test_special_card_from_geolite2_keeps_not_announced():
+    view = viewmodel.as_view(
+        _special_card(announced=False, source="geolite2"), lambda v: f"/{v}"
+    )
+    rows = _rows(view)
+    assert [r["label"] for r in view["rows"]] == ["Route", "RPKI", "AS", "Purpose"]
+    assert rows["Route"]["value"] == "Not announced in RIS"
+
+
+def test_special_card_with_a_route_keeps_its_route_rows():
+    route = {
+        "prefix": "45.67.89.0/24",
+        "origins": [{"asn": 64512, "ris_peers": 40, "rpki": {"state": "not_found"}}],
+    }
+    view = viewmodel.as_view(_special_card(route=route, announced=True))
+    assert [r["label"] for r in view["rows"]][:2] == ["Route", "RPKI"]

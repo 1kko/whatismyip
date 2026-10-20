@@ -1525,6 +1525,10 @@ def _as_route_rows(as_info: dict, link_for: LinkFor | None) -> list[dict]:
                 _as_row("Route", [_part("Not announced in RIS")], "muted"),
                 _as_row("RPKI", [_part("No route to validate")], "muted"),
             ]
+        if as_info.get("special"):
+            # A bare special-purpose number (/AS64512) was never looked up in
+            # the route data: no gap to print.
+            return []
         reason = _as_absent(as_info, ("ris_v4", "ris_v6"))
         return [
             _as_row("Route", [_part(reason)], "muted"),
