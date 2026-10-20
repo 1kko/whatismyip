@@ -434,11 +434,28 @@ def test_as_html_page_names_the_as_and_links_neighbours(asinfo_enabled):
     ) in upstreams
     assert "Showing" not in upstreams
 
-    # The datasets' credits, after the card.
+    # The datasets' credits, after the card; CAIDA's citations link to their
+    # dataset pages, and the JSON keeps the plain lines.
     data = client.get("/AS4766", headers=CURL).json()
-    assert data["attribution"]
-    for line in data["attribution"]:
-        assert f'<p class="api-note tone-muted">{line}</p>' in html
+    card = html.split('id="acc-as"')[1].split("</details>")[0]
+    credits = re.findall(
+        r'<p class="api-note tone-muted">(.*?)</p>', card.split("</table>")[1]
+    )
+    caida = "https://www.caida.org/catalog/datasets/"
+    assert data["attribution"] == [
+        "Source: RIPE NCC",
+        "RPKI data validated by rpki-client.org",
+        "The CAIDA UCSD AS Relationships Dataset, 2026-10-01",
+        "The CAIDA UCSD AS Organizations Dataset, 2026-10-01",
+    ]
+    assert credits == [
+        "Source: RIPE NCC",
+        "RPKI data validated by rpki-client.org",
+        f'<a href="{caida}as-relationships/" rel="noopener noreferrer">'
+        "The CAIDA UCSD AS Relationships Dataset, 2026-10-01</a>",
+        f'<a href="{caida}as-organizations/" rel="noopener noreferrer">'
+        "The CAIDA UCSD AS Organizations Dataset, 2026-10-01</a>",
+    ]
 
     # No map, and none of an address's or a domain's panels.
     for absent in (

@@ -603,11 +603,13 @@ def _script_json(data: object, indent: int | None = 2) -> str:
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
+    as_info = response_data.get("as_info") or {}
     view = build_view(
         response_data,
         is_self=is_self,
         subdomains_enabled=SUBDOMAIN_ENABLED,
         link_for=lookup_href if asinfo_manager.enabled else _lookup_href_without_as,
+        credit_links=asinfo_manager.credit_links(as_info.get("datasets") or {}),
     )
 
     # map.js labels the pins with the two IPs and draws the distance on the arc.
@@ -653,11 +655,12 @@ def render_as_page(request: Request, response_data: dict):
     """Render as.html, the /AS<n> page, from viewmodel.as_page_view. Its
     numbers link to their own pages through lookup_href: the page exists only
     while AS lookups are on."""
+    credit_links = asinfo_manager.credit_links(response_data.get("datasets") or {})
     return templates.TemplateResponse(
         request,
         "as.html",
         {
-            "view": as_page_view(response_data, lookup_href),
+            "view": as_page_view(response_data, lookup_href, credit_links),
             "mcp_tools": registered_tool_names(),
             "api_base": public_base_url(request),
             "site_domain": site_domain(request),
@@ -1740,6 +1743,12 @@ async def privacy(request: Request):
             "asinfo_caida": any(
                 dataset.id.startswith("caida") for dataset in asinfo_manager.datasets
             ),
+            # CAIDA's dataset pages, which the AS card's citations link to too.
+            "asinfo_credit_urls": {
+                dataset.id: dataset.credit_url
+                for dataset in asinfo_manager.datasets
+                if dataset.credit_url
+            },
             "asinfo_max_age": _span(int(ASINFO_MAX_AGE_HOURS * 3600)),
             "abuseipdb_enabled": abuseipdb_client.enabled,
             "abuseipdb_cache": _span(ABUSEIPDB_CACHE_TTL),

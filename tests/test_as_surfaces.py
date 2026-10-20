@@ -662,7 +662,8 @@ def test_as_view_rows_and_hint():
     assert rows["Peers"]["value"].startswith("1 peer")
     assert rows["ASN-DROP"]["value"] == "Not listed"
     assert view["hint"] == "AS4766 · 3 prefixes · RPKI 50% valid"
-    assert view["attribution"] == ["Source: RIPE NCC"]
+    # The credits as the template draws them; without credit_links none links.
+    assert view["attribution"] == [{"text": "Source: RIPE NCC"}]
     # Every AS number in a list links; the anchor wraps the number alone.
     parts = [p for p in rows["Upstreams"]["parts"] if p.get("href")]
     assert [(p["text"], p["href"]) for p in parts] == [
@@ -679,6 +680,28 @@ def test_as_view_rows_and_hint():
     plain = viewmodel.as_view(KT_CARD)
     assert not any(p.get("href") for r in plain["rows"] for p in r["parts"])
     assert "href" not in _rows(plain)["AS"]
+
+
+CAIDA_CITATIONS = {
+    "The CAIDA UCSD AS Relationships Dataset, 2026-10-01": (
+        "https://www.caida.org/catalog/datasets/as-relationships/"
+    ),
+    "The CAIDA UCSD AS Organizations Dataset, 2026-10-01": (
+        "https://www.caida.org/catalog/datasets/as-organizations/"
+    ),
+}
+
+
+def test_as_view_links_the_credits_credit_links_name():
+    card = {**KT_CARD, "attribution": ["Source: RIPE NCC", *CAIDA_CITATIONS]}
+    view = viewmodel.as_view(card, credit_links=CAIDA_CITATIONS)
+    assert view["attribution"] == [
+        {"text": "Source: RIPE NCC"},
+        *({"text": text, "href": href} for text, href in CAIDA_CITATIONS.items()),
+    ]
+    # The JSON's lines are what is drawn: a link for a line it lacks adds none.
+    alone = viewmodel.as_view(KT_CARD, credit_links=CAIDA_CITATIONS)
+    assert alone["attribution"] == [{"text": "Source: RIPE NCC"}]
 
 
 def test_as_view_unknown_sections_name_their_reason():
@@ -824,7 +847,8 @@ def test_network_org_row_links_its_as_number(asinfo_enabled, legs):
 def test_as_links_are_nofollow_lookup_links(asinfo_enabled, legs):
     html = client.get(f"/{KT_IP}", headers=BROWSER).text
     body = html.split('id="acc-as"')[1].split("</details>")[0]
-    anchors = re.findall(r"<a [^>]*>", body)
+    # The card's rows; the credits after them link out (see below).
+    anchors = re.findall(r"<a [^>]*>", body.split("</table>")[0])
     assert anchors
     for anchor in anchors:
         assert 'class="lookup-link"' in anchor
@@ -1290,15 +1314,28 @@ def test_privacy_omits_them_when_disabled(monkeypatch, tmp_path):
     assert "rpki-client" not in text
 
 
+def _credits_on(html: str) -> list[str]:
+    """The credit paragraphs after the AS card's table."""
+    panel = html.split('id="acc-as"')[1].split("</details>")[0]
+    return re.findall(
+        r'<p class="api-note tone-muted">(.*?)</p>', panel.split("</table>")[1]
+    )
+
+
 def test_as_panel_carries_each_credit(asinfo_enabled, legs):
+    # CAIDA's citations link to their dataset pages, as CAIDA's terms ask;
+    # the JSON keeps the plain lines.
     html = client.get(f"/{KT_IP}", headers=BROWSER).text
-    for credit in (
+    assert _credits_on(html) == [
         "Source: RIPE NCC",
         "RPKI data validated by rpki-client.org",
-        "The CAIDA UCSD AS Relationships Dataset, 2026-10-01",
-        "The CAIDA UCSD AS Organizations Dataset, 2026-10-01",
-    ):
-        assert credit in html, credit
+        *(
+            f'<a href="{href}" rel="noopener noreferrer">{text}</a>'
+            for text, href in CAIDA_CITATIONS.items()
+        ),
+    ]
+    body = client.get(f"/{KT_IP}", headers=CURL).json()
+    assert body["as_info"]["attribution"][2:] == list(CAIDA_CITATIONS)
 
 
 def test_privacy_names_caida_only_while_its_datasets_are_in_use(monkeypatch, tmp_path):

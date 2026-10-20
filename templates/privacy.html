@@ -129,9 +129,9 @@
             than {{ asinfo_max_age }}{% if asinfo_caida %} (CAIDA's, than its own release cycle){% endif %} is reported as
             unknown rather than used. Source: RIPE NCC. RPKI data validated by rpki-client.org.
             {% if asinfo_caida %}
-            <a href="https://www.caida.org/catalog/datasets/as-relationships/" rel="noopener noreferrer">The CAIDA UCSD AS Relationships Dataset</a>
+            <a href="{{ asinfo_credit_urls.caida_rel }}" rel="noopener noreferrer">The CAIDA UCSD AS Relationships Dataset</a>
             and
-            <a href="https://www.caida.org/catalog/datasets/as-organizations/" rel="noopener noreferrer">The CAIDA UCSD AS Organizations Dataset</a>
+            <a href="{{ asinfo_credit_urls.caida_org }}" rel="noopener noreferrer">The CAIDA UCSD AS Organizations Dataset</a>
             are used under CAIDA's acceptable use terms; the AS card names the date of the file it
             read.{% endif %}</p>
         {% endif %}

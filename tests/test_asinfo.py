@@ -275,6 +275,14 @@ def test_default_datasets_table():
     assert by_id["nro"].credit == "Source: RIPE NCC"
     assert by_id["rpki"].credit == "RPKI data validated by rpki-client.org"
     assert "{date}" in by_id["caida_rel"].credit
+    # CAIDA's citations link to their dataset pages; the others link nowhere.
+    assert by_id["caida_rel"].credit_url == (
+        "https://www.caida.org/catalog/datasets/as-relationships/"
+    )
+    assert by_id["caida_org"].credit_url == (
+        "https://www.caida.org/catalog/datasets/as-organizations/"
+    )
+    assert all(d.credit_url is None for d in datasets[:5])
 
 
 def test_default_datasets_are_every_dataset_the_build_reads():
@@ -939,6 +947,22 @@ def test_an_assignable_asn_with_no_rows_reads_as_empty_not_unavailable(tmp_path)
     assert info["downstreams"] == info["peers"] == {"count": 0, "list": []}
     assert info["unavailable"] == []
     assert info["attribution"] == EVERY_CREDIT
+
+
+def test_credit_links_give_each_caida_citation_its_dataset_page(tmp_path):
+    manager = build_manager(tmp_path)
+    info = manager.for_asn(4766)
+    assert manager.credit_links(info["datasets"]) == {
+        CAIDA_REL_CREDIT: "https://www.caida.org/catalog/datasets/as-relationships/",
+        CAIDA_ORG_CREDIT: "https://www.caida.org/catalog/datasets/as-organizations/",
+    }
+    # Only the credits the answer carries.
+    assert set(manager.credit_links(info["datasets"])) <= set(info["attribution"])
+    stale = build_manager(tmp_path / "stale", now=CAIDA_EPOCH + 76 * DAY)
+    assert list(stale.credit_links(stale.for_asn(4766)["datasets"])) == [
+        CAIDA_ORG_CREDIT
+    ]
+    assert manager.credit_links({}) == {}
 
 
 def test_a_dataset_left_out_of_the_build_is_unavailable(tmp_path):

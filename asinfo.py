@@ -14,7 +14,8 @@ Rules the parsers keep:
 - They have no side effects and read no network.
 
 CAIDA's two datasets are credited by file date, so their `credit` carries a
-`{date}` placeholder that the caller fills with the file's own YYYY-MM-DD.
+`{date}` placeholder that the caller fills with the file's own YYYY-MM-DD, and
+each credit links to its dataset's page (`credit_url`), as CAIDA's terms ask.
 
 `build_database` turns the local copies into the SQLite file, streaming each
 source into batched inserts. Each route's RPKI state (RFC 6811) and each AS's
@@ -84,7 +85,8 @@ _MB = 1024 * 1024
 class Dataset:
     """One source. `pattern` set means `url` is a directory listing and the
     file is the newest href matching it. `max_bytes` refuses a download bigger
-    than that unread; `min_rows` is what the build must find to accept it."""
+    than that unread; `min_rows` is what the build must find to accept it.
+    `credit_url` is the page a credit links to, where there is one."""
 
     id: str
     label: str
@@ -95,6 +97,7 @@ class Dataset:
     min_rows: int
     max_bytes: int
     credit: str
+    credit_url: str | None = None
 
 
 def default_datasets(caida: bool | None = None) -> tuple[Dataset, ...]:
@@ -174,6 +177,7 @@ def default_datasets(caida: bool | None = None) -> tuple[Dataset, ...]:
                 300_000,
                 32 * _MB,
                 "The CAIDA UCSD AS Relationships Dataset, {date}",
+                "https://www.caida.org/catalog/datasets/as-relationships/",
             ),
             Dataset(
                 "caida_org",
@@ -185,6 +189,7 @@ def default_datasets(caida: bool | None = None) -> tuple[Dataset, ...]:
                 50_000,
                 64 * _MB,
                 "The CAIDA UCSD AS Organizations Dataset, {date}",
+                "https://www.caida.org/catalog/datasets/as-organizations/",
             ),
         ]
     return tuple(datasets)
@@ -1435,17 +1440,27 @@ class AsInfoManager:
         answer["attribution"] = self.attribution(answer["datasets"])
         return {key: answer[key] for key in ANSWER_KEYS}
 
+    def _credits(self, datasets: dict[str, object]) -> dict[str, str | None]:
+        """Each credit an answer's `datasets` ({id: date}) ask for, once, in
+        dataset order, with the page it links to (None for most)."""
+        credits: dict[str, str | None] = {}
+        for dataset in self.datasets:
+            if dataset.id in datasets:
+                credit = dataset.credit.format(date=_day(datasets[dataset.id]))
+                credits.setdefault(credit, dataset.credit_url)
+        return credits
+
     def attribution(self, datasets: dict[str, object]) -> list[str]:
         """The credits an answer's `datasets` ({id: date}) ask for, each once,
         in dataset order: its `attribution`. lookup.py asks again for the
         datasets an answer still shows once it has dropped some sections."""
-        attribution: list[str] = []
-        for dataset in self.datasets:
-            if dataset.id in datasets:
-                credit = dataset.credit.format(date=_day(datasets[dataset.id]))
-                if credit not in attribution:
-                    attribution.append(credit)
-        return attribution
+        return list(self._credits(datasets))
+
+    def credit_links(self, datasets: dict[str, object]) -> dict[str, str]:
+        """Each line of attribution(datasets) that links to its dataset's page
+        (CAIDA's two), and that page: for the pages, which draw the lines as
+        links. The JSON's `attribution` stays plain text."""
+        return {text: url for text, url in self._credits(datasets).items() if url}
 
     def for_address(self, ip: str, fallback_asn: int | None = None) -> dict | None:
         """The announced route covering `ip`, and the AS it describes: the

@@ -1598,7 +1598,10 @@ def _as_hint(as_info: dict) -> str:
 
 
 def as_view(
-    as_info: dict | None, link_for: LinkFor | None = None, route: bool = True
+    as_info: dict | None,
+    link_for: LinkFor | None = None,
+    route: bool = True,
+    credit_links: dict[str, str] | None = None,
 ) -> dict | None:
     """The AS panel: the route an address is announced on, its RPKI state, and
     the AS behind it (holder, registry, organization, prefixes, neighbours,
@@ -1611,12 +1614,19 @@ def as_view(
     it leaves out are not gaps, so no Unknown row is drawn for them.
 
     `route` False leaves out the Route and RPKI rows, which describe an
-    address: the /AS<n> page lists the AS's prefixes instead."""
+    address: the /AS<n> page lists the AS's prefixes instead.
+
+    `attribution` is the answer's credit lines as {text, href?}: `href` is
+    the dataset page `credit_links` (main passes
+    asinfo_manager.credit_links) gives the line, CAIDA's citations."""
     if not as_info:
         return None
     asn = as_info.get("asn")
     special = as_info.get("special")
-    attribution = as_info.get("attribution") or []
+    links = credit_links or {}
+    attribution = [
+        _part(str(line), links.get(line)) for line in as_info.get("attribution") or []
+    ]
     as_href = _href(link_for, f"AS{asn}") if asn is not None else None
     rows = _as_route_rows(as_info, link_for) if route else []
     lists: dict = {}
@@ -1880,9 +1890,14 @@ def _as_special_rows(special: dict) -> list[dict]:
     ]
 
 
-def as_page_view(as_info: dict, link_for: LinkFor | None = None) -> dict:
+def as_page_view(
+    as_info: dict,
+    link_for: LinkFor | None = None,
+    credit_links: dict[str, str] | None = None,
+) -> dict:
     """The /AS<n> page (templates/as.html) over its answer: as_info_for_asn's
-    card with `address` and `elapsed_ms`. Pure, like build_view.
+    card with `address` and `elapsed_ms`. Pure, like build_view;
+    `credit_links` as for as_view.
 
     The hero is the number, its holder and its tags; the AS panel is as_view's
     card without the Route and RPKI rows, which describe an address; then the
@@ -1927,7 +1942,7 @@ def as_page_view(as_info: dict, link_for: LinkFor | None = None) -> dict:
             for part in (target, name, as_info.get("country"), *_as_counts(as_info))
             if part
         )
-        card = as_view(as_info, link, route=False)
+        card = as_view(as_info, link, route=False, credit_links=credit_links)
         lists = [
             {"id": key, "title": label, **_as_page_list(as_info, key, one, many, link)}
             for key, label, one, many in (
@@ -2122,11 +2137,12 @@ def build_view(
     is_self: bool,
     subdomains_enabled: bool = SUBDOMAIN_ENABLED,
     link_for: LinkFor | None = None,
+    credit_links: dict[str, str] | None = None,
 ) -> dict:
     """The template's view of a response. `link_for` (main.lookup_href) decides
     which hostnames and addresses link to their own lookup -- the rDNS and PTR
     rows, the A → tag and the name servers; the DNS table's rows are main's --
-    and None, the default, links nothing."""
+    and None, the default, links nothing. `credit_links` is as_view's."""
     location = response.get("location") or {}
     domain = response.get("domain") or {}
     address = response.get("address") or ""
@@ -2182,7 +2198,9 @@ def build_view(
         # chain); an IP's sweep is of its PTR name, and its location is its own.
         "geoip_rows": geoip_rows(location, None if is_ip else domain),
         "reputation": reputation_view(response.get("reputation")),
-        "as_info": as_view(response.get("as_info"), link_for),
+        "as_info": as_view(
+            response.get("as_info"), link_for, credit_links=credit_links
+        ),
         "dns_security": dns_security_view(response.get("dns_security")),
         "subdomains": response.get("subdomains"),
         "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],

@@ -309,7 +309,8 @@
                     {% elif item.id == 'as' %}
                     {# viewmodel.as_view: the route, its RPKI state and the AS behind the
                        address. Every AS number links to its own page; the anchor wraps the
-                       number alone. The credits are the datasets' own terms. #}
+                       number alone. The credits are the datasets' own terms, CAIDA's
+                       linked to their dataset pages as its terms ask. #}
                     <table class="records">
                         <tbody>
                         {% for row in view.as_info.rows %}
@@ -317,8 +318,8 @@
                         {% endfor %}
                         </tbody>
                     </table>
-                    {% for line in view.as_info.attribution %}
-                    <p class="api-note tone-muted">{{ line }}</p>
+                    {% for credit in view.as_info.attribution %}
+                    <p class="api-note tone-muted">{% if credit.href %}<a href="{{ credit.href }}" rel="noopener noreferrer">{{ credit.text }}</a>{% else %}{{ credit.text }}{% endif %}</p>
                     {% endfor %}
                     {% elif item.id == 'reputation' %}
                     {# viewmodel.reputation_view: each list the address is on, is not

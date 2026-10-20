@@ -72,7 +72,8 @@
                     {# The AS panel's card (viewmodel.as_view) without Route and RPKI,
                        which describe an address. Every AS number links to its own
                        page; the anchor wraps the number alone. The credits are the
-                       datasets' own terms. #}
+                       datasets' own terms, CAIDA's linked to their dataset pages as
+                       its terms ask. #}
                     <table class="records">
                         <tbody>
                         {% for row in view.card.rows %}
@@ -80,8 +81,8 @@
                         {% endfor %}
                         </tbody>
                     </table>
-                    {% for line in view.card.attribution %}
-                    <p class="api-note tone-muted">{{ line }}</p>
+                    {% for credit in view.card.attribution %}
+                    <p class="api-note tone-muted">{% if credit.href %}<a href="{{ credit.href }}" rel="noopener noreferrer">{{ credit.text }}</a>{% else %}{{ credit.text }}{% endif %}</p>
                     {% endfor %}
                     {% elif item.id == 'prefixes' %}
                     {% set panel = view.prefixes %}
