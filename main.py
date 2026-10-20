@@ -31,6 +31,8 @@ from concurrency import LookupBusy, lookup_gate
 from config import (
     ABUSEIPDB_CACHE_TTL,
     APP_VERSION,
+    ASINFO_CAIDA_ORG_MAX_AGE_DAYS,
+    ASINFO_CAIDA_REL_MAX_AGE_DAYS,
     ASINFO_CHECK_INTERVAL_SECONDS,
     ASINFO_MAX_AGE_HOURS,
     BACKGROUND_REFRESH_ENABLED,
@@ -1750,6 +1752,12 @@ async def privacy(request: Request):
                 if dataset.credit_url
             },
             "asinfo_max_age": _span(int(ASINFO_MAX_AGE_HOURS * 3600)),
+            "asinfo_caida_rel_max_age": _span(
+                int(ASINFO_CAIDA_REL_MAX_AGE_DAYS * 86400)
+            ),
+            "asinfo_caida_org_max_age": _span(
+                int(ASINFO_CAIDA_ORG_MAX_AGE_DAYS * 86400)
+            ),
             "abuseipdb_enabled": abuseipdb_client.enabled,
             "abuseipdb_cache": _span(ABUSEIPDB_CACHE_TTL),
             "stun_url": WEBRTC_STUN_URL,

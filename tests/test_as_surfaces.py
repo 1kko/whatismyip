@@ -1403,6 +1403,22 @@ def test_privacy_lists_the_as_datasets_and_says_never_per_lookup(asinfo_enabled)
     assert "https://www.caida.org/catalog/datasets/as-organizations/" in html
 
 
+def test_privacy_states_each_age_limit_from_the_constants(asinfo_enabled, monkeypatch):
+    def days(value):
+        return main._span(int(value * 86400))
+
+    text = _privacy_text()
+    assert (
+        f"A dataset older than {main._span(int(config.ASINFO_MAX_AGE_HOURS * 3600))}"
+        f" ({days(config.ASINFO_CAIDA_REL_MAX_AGE_DAYS)} for CAIDA's relationships"
+        f" and {days(config.ASINFO_CAIDA_ORG_MAX_AGE_DAYS)} for its organizations,"
+        " which it publishes less often) is reported as unknown rather than used."
+    ) in text
+    # From the constants, not from the template.
+    monkeypatch.setattr(main, "ASINFO_CAIDA_REL_MAX_AGE_DAYS", 40)
+    assert "40 days for CAIDA's relationships" in _privacy_text()
+
+
 def test_privacy_omits_them_when_disabled(monkeypatch, tmp_path):
     # The default suite switch is off; a manager that is off keeps its dataset
     # table, so the page must not read the hosts from it.

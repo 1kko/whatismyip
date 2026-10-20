@@ -126,8 +126,10 @@
             and CAIDA's AS relationships and organizations{% endif %} (from
             {{ asinfo_hosts | join(", ") }}). Reading an address's route or an AS reads this
             server's copy, so none of those servers learns what was looked up. A dataset older
-            than {{ asinfo_max_age }}{% if asinfo_caida %} (CAIDA's, than its own release cycle){% endif %} is reported as
-            unknown rather than used. Source: RIPE NCC. RPKI data validated by rpki-client.org.
+            than {{ asinfo_max_age }}{% if asinfo_caida %} ({{ asinfo_caida_rel_max_age }} for CAIDA's
+            relationships and {{ asinfo_caida_org_max_age }} for its organizations, which it
+            publishes less often){% endif %} is reported as unknown rather than used. Source:
+            RIPE NCC. RPKI data validated by rpki-client.org.
             {% if asinfo_caida %}
             <a href="{{ asinfo_credit_urls.caida_rel }}" rel="noopener noreferrer">The CAIDA UCSD AS Relationships Dataset</a>
             and
