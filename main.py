@@ -71,6 +71,7 @@ from lookup import (
     InvalidTargetError,
     PrivateAddressError,
     abuseipdb_client,
+    address_as_info,
     asinfo_manager,
     cached_whois,
     canonical_hostname,
@@ -2141,6 +2142,11 @@ async def get_self_info(request: Request):
     reputation = ip_reputation(client_ip, ip_data)
     if reputation is not None:
         response_data["reputation"] = reputation
+    # The route and AS of the visitor's address: a read of the local AS
+    # database, likewise.
+    as_info = address_as_info(client_ip, ip_data)
+    if as_info is not None:
+        response_data["as_info"] = as_info
 
     if fmt == "html":
         return render_page(request, response_data, is_self=True)
@@ -2274,6 +2280,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         response_data["reputation"] = data["reputation"]
     if data.get("dns_security") is not None:
         response_data["dns_security"] = data["dns_security"]
+    if data.get("as_info") is not None:
+        response_data["as_info"] = data["as_info"]
     if subdomain_task is not None:
         response_data["subdomains"] = await subdomain_task
 

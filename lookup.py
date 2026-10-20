@@ -22,7 +22,7 @@ import whois
 import abuseipdb
 import dnssecurity
 from abuseipdb import AbuseIPDBClient
-from asinfo import AsInfoManager
+from asinfo import ANSWER_KEYS, AsInfoManager
 from concurrency import (
     abuseipdb_pool,
     dns_security_pool,
@@ -724,6 +724,80 @@ def ip_reputation(ip: str, location: dict | None = None) -> dict | None:
     return reputation_manager.check(ip, location.get("asn_number"))
 
 
+# What an AS card says about the AS itself. A special-purpose number names no
+# one -- AS64512 is every private network's at once -- so an address routed
+# from one keeps its route and carries `special` in place of these.
+_AS_CARD_SECTIONS = (
+    "name",
+    "country",
+    "registry",
+    "org",
+    "prefixes",
+    "upstreams",
+    "downstreams",
+    "peers",
+    "asn_drop",
+)
+
+
+def address_as_info(ip: str, location: dict | None = None) -> dict | None:
+    """The announced route covering `ip` and the AS it describes (asinfo.py),
+    or None when the feature is off. A read of the local database, so it runs
+    inline and sends nothing anywhere.
+
+    The AS is the route's origin, else GeoLite2-ASN's number for the address:
+    taken from `location` when the caller already has it, otherwise read here,
+    as ip_reputation does. `asn_drop` says whether that AS is on Spamhaus
+    ASN-DROP, and `special` what the number is for when it is special-purpose
+    (special_asn); the card then keeps the route and drops the AS sections."""
+    if not asinfo_manager.enabled:
+        return None
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if location is None:
+        location = geo_ip_manager.fetch_location(ip)
+    answer = asinfo_manager.for_address(ip, location.get("asn_number"))
+    if answer is None:
+        return None
+    asn = answer["asn"]
+    special = None if asn is None else special_asn(asn)
+    if special is None:
+        answer["asn_drop"] = reputation_manager.asn_listed(asn)
+    else:
+        answer.update(dict.fromkeys(_AS_CARD_SECTIONS))
+    answer["special"] = special
+    return answer
+
+
+def as_info_for_asn(asn: int, full: bool = False) -> dict | None:
+    """The AS card for AS `asn` (asinfo.py), with `full` its announced
+    prefixes, or None when the feature is off, special-purpose numbers
+    included.
+
+    A special-purpose number reads no dataset: a private ASN leaked into RIS,
+    or an AS0 ROA, would draw a card that looks like someone's network. Its
+    card is every key None but `asn`, `unavailable` (nothing was unavailable;
+    nothing was asked) and `special`."""
+    if not asinfo_manager.enabled:
+        return None
+    special = special_asn(asn)
+    if special is not None:
+        return {
+            **dict.fromkeys(ANSWER_KEYS),
+            "asn": asn,
+            "unavailable": [],
+            "special": special,
+        }
+    answer = asinfo_manager.for_asn(asn, full=full)
+    if answer is None:
+        return None
+    answer["asn_drop"] = reputation_manager.asn_listed(asn)
+    answer["special"] = None
+    return answer
+
+
 # urllib's timeout bounds each socket operation, not the whole request; this
 # bounds the request and any wait for a worker.
 ABUSEIPDB_DEADLINE_SECONDS = ABUSEIPDB_TIMEOUT_SECONDS + 1
@@ -754,9 +828,20 @@ async def abuse_report(ip: str) -> dict:
 # "tls" and "whois" are what they say; "reputation" is the address checked
 # against the lists in memory, and for an address looked up directly, against
 # AbuseIPDB too; "security" is a domain's DNS security posture (dnssecurity.py),
-# checked beside its sweep.
+# checked beside its sweep; "asinfo" is the address's route and AS, read from
+# the local AS database (asinfo.py).
 LEGS = frozenset(
-    {"resolve", "geo", "ptr", "dns", "tls", "whois", "reputation", "security"}
+    {
+        "resolve",
+        "geo",
+        "ptr",
+        "dns",
+        "tls",
+        "whois",
+        "reputation",
+        "security",
+        "asinfo",
+    }
 )
 
 
@@ -1015,6 +1100,14 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
     )
     if abuse_task is not None:
         reputation = abuseipdb.merge(reputation, await abuse_task)
+    # Inline, like GeoIP: a read of the local database on the event loop's
+    # thread, so the process keeps one connection to it rather than one per
+    # worker thread, each holding on to a file a rebuild has swapped out.
+    as_info = (
+        address_as_info(resolved_ip, ip_data if "geo" in want else None)
+        if resolved_ip and "asinfo" in want
+        else None
+    )
 
     # SPF and DMARC are graded from the sweep, so only when the sweep ran.
     dns_security = (
@@ -1034,4 +1127,5 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
         "reverse_dns": reverse_dns_hostname,
         "reputation": reputation,
         "dns_security": dns_security,
+        "as_info": as_info,
     }

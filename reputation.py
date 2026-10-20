@@ -608,6 +608,24 @@ class ReputationManager:
             "attribution": attribution,
         }
 
+    def asn_listed(self, asn: int | None) -> bool | None:
+        """Whether AS `asn` is on Spamhaus ASN-DROP, read from memory only, for
+        the AS card (lookup.address_as_info). None when disabled, with no
+        `asn`, or when the list cannot answer by check()'s rule (never
+        downloaded, or past REPUTATION_MAX_AGE_HOURS), so the card and
+        `reputation` never disagree about whether it could be read."""
+        if not self.enabled or asn is None:
+            return None
+        lists = [
+            self._current(spec)
+            for feed in self.feeds
+            for spec in feed.files
+            if spec.covers == "asn"
+        ]
+        if not lists or None in lists:
+            return None
+        return any(asn in data.asns for data in lists)
+
     def status(self) -> dict:
         """Per list: its age (the oldest of its files), entries and whether
         lookups can read it, for /healthz."""
