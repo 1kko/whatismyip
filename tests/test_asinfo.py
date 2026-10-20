@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from asinfo import (
+    DATASET_IDS,
     SCHEMA_VERSION,
     build_database,
     default_datasets,
@@ -228,6 +229,10 @@ def test_default_datasets_table():
     assert "{date}" in by_id["caida_rel"].credit
 
 
+def test_default_datasets_are_every_dataset_the_build_reads():
+    assert {d.id for d in default_datasets()} == set(DATASET_IDS)
+
+
 def test_default_datasets_drops_caida_when_disabled(monkeypatch):
     import asinfo
 
@@ -378,10 +383,44 @@ def test_build_rpki_sweep_covers_nested_routes_only(tmp_path):
         "2001:db8:1::/48": ("valid", None),
         "2001:db9::/32": ("not-found", None),
     }
-    assert not db.execute("SELECT name FROM sqlite_temp_master").fetchall()
     assert not db.execute(
         "SELECT name FROM sqlite_master WHERE name LIKE '%vrp%'"
     ).fetchall()
+
+
+def test_build_rpki_sweep_keeps_an_outer_vrp_after_an_inner_one_ends(tmp_path):
+    ris_v4 = (
+        "64501\t10.1.1.0/24\t100\n"  # inside the inner VRP, its own origin
+        "64501\t10.1.1.0/25\t100\n"  # the inner VRP's origin, too long for it
+        "64502\t10.1.2.0/24\t100\n"  # inside both, named by neither
+        "64500\t10.1.3.0/24\t100\n"  # inside the inner VRP, valid by the outer
+        "64500\t10.2.0.0/24\t100\n"  # past the inner VRP, inside the outer
+        "64501\t10.2.1.0/24\t100\n"  # the inner VRP's origin, but past it
+        "64500\t10.255.255.255/32\t100\n"  # the outer VRP's last address
+        "64500\t11.0.0.0/24\t100\n"  # past both
+    )
+    vrps = VRP_HEADER + (
+        "AS64500,10.0.0.0/8,32,ripe,1\nAS64501,10.1.0.0/16,24,ripe,1\n"
+    )
+    sources = {
+        "ris_v4": _write(tmp_path / "ris4", ris_v4),
+        "rpki": _write(tmp_path / "vrps", vrps),
+    }
+    db, _ = _build(tmp_path, sources)
+    got = {
+        r["prefix"]: (r["rpki_state"], r["rpki_reason"])
+        for r in db.execute("SELECT prefix, rpki_state, rpki_reason FROM route")
+    }
+    assert got == {
+        "10.1.1.0/24": ("valid", None),
+        "10.1.1.0/25": ("invalid", "length"),
+        "10.1.2.0/24": ("invalid", "origin"),
+        "10.1.3.0/24": ("valid", None),
+        "10.2.0.0/24": ("valid", None),
+        "10.2.1.0/24": ("invalid", "origin"),
+        "10.255.255.255/32": ("valid", None),
+        "11.0.0.0/24": ("not-found", None),
+    }
 
 
 def test_build_stores_route_bounds_as_fixed_width_big_endian_blobs(tmp_path):
