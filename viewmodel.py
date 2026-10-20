@@ -1436,7 +1436,8 @@ def reputation_view(reputation: dict | None) -> dict | None:
 
 
 # asinfo.default_datasets' ids and labels, repeated so this module imports
-# nothing of asinfo (a None section whose dataset loaded is "Not in <label>").
+# nothing of asinfo (a None section whose dataset loaded is "Not in <label>");
+# tests/test_as_surfaces.py keeps the two equal.
 _AS_DATASET_LABELS = {
     "asnames": "RIPE NCC AS names",
     "nro": "NRO delegated statistics",
@@ -1532,10 +1533,6 @@ def _as_route_rows(as_info: dict, link_for: LinkFor | None) -> list[dict]:
                 _as_row("Route", [_part("Not announced in RIS")], "muted"),
                 _as_row("RPKI", [_part("No route to validate")], "muted"),
             ]
-        if as_info.get("special"):
-            # A bare special-purpose number (/AS64512) was never looked up in
-            # the route data: no gap to print.
-            return []
         reason = _as_absent(as_info, ("ris_v4", "ris_v6"))
         return [
             _as_row("Route", [_part(reason)], "muted"),
@@ -1591,7 +1588,7 @@ def _as_hint(as_info: dict) -> str:
     asn = as_info.get("asn")
     special = as_info.get("special")
     if asn is None:
-        return "unknown"
+        return "not announced" if as_info.get("announced") is False else "unknown"
     if special:
         return f"AS{asn} · {str(special.get('label', '')).lower()}"
     return " · ".join([f"AS{asn}", *_as_counts(as_info)])
@@ -1612,6 +1609,10 @@ def as_view(
     'Not in <dataset>' when it could. A special-purpose number (`special`)
     keeps Route and RPKI, names itself and says what it is for; the sections
     it leaves out are not gaps, so no Unknown row is drawn for them.
+
+    An address with no AS (`asn` None: no route covers it and GeoLite2 has
+    no number) stops after the AS row; every row below it would describe an
+    AS there is none of.
 
     `route` False leaves out the Route and RPKI rows, which describe an
     address: the /AS<n> page lists the AS's prefixes instead.
@@ -1654,11 +1655,23 @@ def as_view(
 
     if asn is None:
         rows.append(_as_row("AS", [_part("No AS number found")], "muted"))
-    else:
-        parts = [_as_part(asn, link_for)]
-        if as_info.get("source") == "geolite2":
-            parts.append(_part(" · from GeoLite2, not in the route data"))
-        rows.append(_as_row("AS", parts, href=as_href))
+        return {
+            "hint": _as_hint(as_info),
+            "rows": rows,
+            "lists": lists,
+            "attribution": attribution,
+        }
+    parts = [_as_part(asn, link_for)]
+    if as_info.get("source") == "geolite2":
+        # The route data had no route for the address, or could not be read:
+        # the AS row says which, as the Route row does.
+        why = (
+            "not announced in RIS"
+            if as_info.get("announced") is False
+            else "route data unavailable"
+        )
+        parts.append(_part(f" · from GeoLite2, {why}"))
+    rows.append(_as_row("AS", parts, href=as_href))
 
     name = as_info.get("name")
     if name:

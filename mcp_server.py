@@ -430,7 +430,9 @@ def compact_as_info(info: dict | None, full: bool = False) -> dict | None:
     prefix lists, capped at ASINFO_LIST_LIMIT). A section that could not be
     read stays null and `unavailable` says why: null is never "none". A
     special-purpose AS number is `{asn, special}`, plus the route when an
-    address was announced from it."""
+    address was announced from it. An address with no AS (`asn` null: no
+    route, and GeoLite2 has no number) is `{asn, route, announced, source,
+    unavailable}`: the AS sections would be nulls about no AS."""
     if not info:
         return None
     route = info.get("route")
@@ -453,6 +455,18 @@ def compact_as_info(info: dict | None, full: bool = False) -> dict | None:
         if compact_route:
             out["route"] = compact_route
         return out
+    unavailable = [
+        {"dataset": item.get("dataset"), "reason": item.get("reason")}
+        for item in info.get("unavailable") or []
+    ]
+    if info.get("asn") is None:
+        return {
+            "asn": None,
+            "route": compact_route,
+            "announced": info.get("announced"),
+            "source": info.get("source"),
+            "unavailable": unavailable,
+        }
     org = info.get("org")
     out = {
         "asn": info.get("asn"),
@@ -471,10 +485,7 @@ def compact_as_info(info: dict | None, full: bool = False) -> dict | None:
         "downstreams": _compact_list(info.get("downstreams"), full),
         "peers": _compact_list(info.get("peers"), full),
         "asn_drop": info.get("asn_drop"),
-        "unavailable": [
-            {"dataset": item.get("dataset"), "reason": item.get("reason")}
-            for item in info.get("unavailable") or []
-        ],
+        "unavailable": unavailable,
         "attribution": info.get("attribution") or [],
     }
     if full:
@@ -585,8 +596,10 @@ async def lookup(target: str) -> dict[str, Any]:
     public BGP and RPKI datasets refreshed daily (CAIDA's relationships and
     organizations monthly), not from live routing, so a route that changed
     today may not show. A null section was not readable and is named in
-    `unavailable`: never report null as "none". An AS number is not a target
-    here: use `as_info`.
+    `unavailable`: never report null as "none". An `asn` of null means no AS
+    was found for the address, and the card is then its route, `announced`,
+    `source` and `unavailable` alone. An AS number is not a target here: use
+    `as_info`.
     """
     try:
         data = await _bounded_gather(target)

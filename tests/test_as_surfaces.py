@@ -748,6 +748,63 @@ def test_as_view_unknown_sections_name_their_reason():
     assert _rows(viewmodel.as_view(quiet))["Route"]["value"] == "Not announced in RIS"
 
 
+def test_as_row_says_why_the_as_came_from_geolite2():
+    # The AS row agrees with the Route row: not announced is a finding, route
+    # data that could not be read is not.
+    quiet = {**KT_CARD, "route": None, "announced": False, "source": "geolite2"}
+    assert _rows(viewmodel.as_view(quiet))["AS"]["value"] == (
+        "AS4766 · from GeoLite2, not announced in RIS"
+    )
+    stale = {
+        **quiet,
+        "announced": None,
+        "unavailable": [
+            {"dataset": "ris_v4", "label": "RIPE RIS routes (IPv4)", "reason": "old"}
+        ],
+    }
+    rows = _rows(viewmodel.as_view(stale))
+    assert rows["Route"]["value"] == "Unknown: old"
+    assert rows["AS"]["value"] == "AS4766 · from GeoLite2, route data unavailable"
+
+
+def test_as_view_for_an_address_with_no_as_stops_after_the_as_row(asinfo_enabled):
+    # 192.0.2.1: no route covers it and GeoLite2 gives no number. Every row
+    # below AS would describe an AS there is none of.
+    card = {**asinfo_enabled.for_address("192.0.2.1"), "asn_drop": None}
+    assert (card["asn"], card["announced"], card["source"]) == (None, False, None)
+    view = viewmodel.as_view(card)
+    assert [(row["label"], row["value"]) for row in view["rows"]] == [
+        ("Route", "Not announced in RIS"),
+        ("RPKI", "No route to validate"),
+        ("AS", "No AS number found"),
+    ]
+    assert view["hint"] == "not announced"
+    assert view["lists"] == {}
+    # With the route data unreadable, nothing is known, and the hint says so.
+    unread = {
+        **card,
+        "announced": None,
+        "unavailable": [
+            {"dataset": "ris_v4", "label": "RIPE RIS routes (IPv4)", "reason": "old"}
+        ],
+    }
+    view = viewmodel.as_view(unread)
+    assert [(row["label"], row["value"]) for row in view["rows"]] == [
+        ("Route", "Unknown: old"),
+        ("RPKI", "Unknown: old"),
+        ("AS", "No AS number found"),
+    ]
+    assert view["hint"] == "unknown"
+
+
+def test_as_dataset_labels_are_asinfos():
+    # A dataset id asinfo adds without a label here would make _as_absent
+    # raise, and every page with the panel answer 500.
+    assert viewmodel._AS_DATASET_LABELS == {
+        d.id: d.label for d in default_datasets(caida=True)
+    }
+
+
 def test_rpki_invalid_route_is_a_warning_row_and_no_hero_tag():
     route = {
         "prefix": "211.252.112.0/24",
@@ -883,9 +940,13 @@ def _special_card(**overrides):
     return {**card, **overrides}
 
 
-def test_special_card_without_a_route_draws_no_route_or_rpki_rows():
+def test_special_card_with_route_data_unavailable_says_unknown():
+    # A lookup page's card for an address GeoLite2 puts in a special-purpose
+    # AS, whose route data could not be read: that gap is shown, not hidden.
     view = viewmodel.as_view(_special_card())
-    assert [r["label"] for r in view["rows"]] == ["AS", "Purpose"]
+    assert [r["label"] for r in view["rows"]] == ["Route", "RPKI", "AS", "Purpose"]
+    rows = _rows(view)
+    assert rows["Route"]["value"] == rows["RPKI"]["value"] == "Unknown: x"
 
 
 def test_special_card_from_geolite2_keeps_not_announced():
@@ -1249,6 +1310,29 @@ def test_compact_as_info_keeps_null_and_the_reasons_for_it():
     assert compact["rpki"] is None
     assert compact["unavailable"] == [{"dataset": "caida_rel", "reason": "stale"}]
     assert mcp_server.compact_as_info(None) is None
+
+
+def test_compact_as_info_for_an_address_with_no_as_is_its_route_alone(
+    asinfo_enabled,
+):
+    # No AS: every AS section would be a null that `unavailable` does not
+    # explain, so the card keeps only what was looked up.
+    card = {**asinfo_enabled.for_address("192.0.2.1"), "asn_drop": None}
+    assert mcp_server.compact_as_info(card) == {
+        "asn": None,
+        "route": None,
+        "announced": False,
+        "source": None,
+        "unavailable": [],
+    }
+    unread = {
+        **card,
+        "announced": None,
+        "unavailable": [{"dataset": "ris_v4", "label": "x", "reason": "old"}],
+    }
+    assert mcp_server.compact_as_info(unread)["unavailable"] == [
+        {"dataset": "ris_v4", "reason": "old"}
+    ]
 
 
 def test_compact_as_info_for_a_special_address_card_keeps_the_route(asinfo_enabled):
