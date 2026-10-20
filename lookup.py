@@ -336,6 +336,95 @@ _SPECIAL_PURPOSE = tuple(
 )
 _RESERVED = SpecialPurpose("reserved", "reserved address space", None, None)
 
+# Special-purpose AS numbers, one row per kind: (ranges, code, label, RFC,
+# purpose). Unlike an address, one is answered rather than refused: an AS lookup
+# is local, and "what is AS64512?" is a fair question. The copy is the design
+# spec's table, verbatim.
+_SPECIAL_ASN = (
+    (
+        ((0, 0),),
+        "reserved_asn",
+        "Reserved",
+        "RFC 7607",
+        'Means "no AS". It never originates a route; an RPKI ROA naming AS0 says '
+        "a prefix should not be routed at all.",
+    ),
+    (
+        ((23456, 23456),),
+        "as_trans",
+        "AS_TRANS",
+        "RFC 6793",
+        "A stand-in for a 4-byte AS number, shown to routers that understand "
+        "only 2-byte numbers. It is a placeholder, not a network.",
+    ),
+    (
+        ((64496, 64511), (65536, 65551)),
+        "documentation_asn",
+        "Documentation",
+        "RFC 5398",
+        "Set aside for examples in documentation, as 192.0.2.0/24 is for "
+        "addresses. No network uses it.",
+    ),
+    (
+        ((64512, 65534), (4200000000, 4294967294)),
+        "private_asn",
+        "Private use",
+        "RFC 6996",
+        "For a network's own internal BGP, as 10.0.0.0/8 is for addresses. "
+        "Many networks use the same number at once, so it names no one on the "
+        "public internet.",
+    ),
+    (
+        ((65535, 65535), (4294967295, 4294967295)),
+        "reserved_asn",
+        "Reserved",
+        "RFC 7300",
+        "The last number of its range, reserved and never assigned.",
+    ),
+    (
+        ((65552, 131071),),
+        "reserved_asn",
+        "Reserved",
+        "IANA",
+        "Reserved by IANA and not yet given to any registry.",
+    ),
+)
+MAX_ASN = 4294967295
+_ASN_TARGET = re.compile(r"as([0-9]{1,10})", re.ASCII)
+
+
+def parse_asn(target: str) -> int | None:
+    """The AS number in a normalised target ("as4766"), or None.
+
+    `as` and one to ten ASCII digits, leading zeros allowed, up to 2**32 - 1.
+    A bare number is not an AS: guessing that one was typed as such is a coin
+    toss.
+    """
+    match = _ASN_TARGET.fullmatch(target)
+    if match is None:
+        return None
+    asn = int(match.group(1))
+    return asn if asn <= MAX_ASN else None
+
+
+def special_asn(asn: int) -> dict | None:
+    """What a special-purpose AS number is for, or None for an assignable one.
+
+    `first` and `last` bound the range of the table row the number falls in.
+    """
+    for ranges, code, label, defined_in, purpose in _SPECIAL_ASN:
+        for first, last in ranges:
+            if first <= asn <= last:
+                return {
+                    "code": code,
+                    "label": label,
+                    "first": first,
+                    "last": last,
+                    "defined_in": defined_in,
+                    "purpose": purpose,
+                }
+    return None
+
 
 def special_purpose(ip_str: str) -> SpecialPurpose:
     """The IANA special-purpose block an address is_safe_ip has refused is in.
@@ -458,7 +547,7 @@ def special_use_suffix(target: str) -> str | None:
 
 
 def classify_target(target: str) -> str:
-    """What a lookup target is: "domain", "ipv4", "ipv6" or "invalid".
+    """What a lookup target is: "domain", "ipv4", "ipv6", "asn" or "invalid".
 
     Pure string work, so gather() can turn a target away before it spends a
     WHOIS query, a resolver round trip or a TLS handshake on it. A domain must
@@ -475,9 +564,14 @@ def classify_target(target: str) -> str:
     A hostname under a special-use suffix ("x.onion", "router.home.arpa") is
     invalid too, public suffix or not: nothing public answers for it. gather()
     asks special_use_suffix() which it was, so the refusal can say so.
+
+    "as4766" is an "asn" (parse_asn), checked before the domain test; it has no
+    dot, so it was never a domain.
     """
     if not target or any(unicodedata.category(ch) == "Cc" for ch in target):
         return "invalid"
+    if parse_asn(target) is not None:
+        return "asn"
     try:
         ip = ipaddress.ip_address(target)
     except ValueError:
@@ -714,6 +808,12 @@ async def gather(target: str, legs: Collection[str] | None = None) -> dict:
     # "favicon.ico" or "{target}" cost an RDAP query, a port-43 WHOIS query and
     # an ERROR log line, and came back as an empty 200 page.
     kind = classify_target(target)
+    if kind == "asn":
+        raise InvalidTargetError(
+            target,
+            code="asn_target",
+            message="an AS number: look it up as /AS<n> or with the as_info tool",
+        )
     if kind == "invalid":
         # A .onion or home.arpa name is a hostname under a public suffix that
         # nothing public answers for: say which, not "not a domain name".

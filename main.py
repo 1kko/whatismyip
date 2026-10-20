@@ -1188,6 +1188,9 @@ def _suspicious_path_is_ordinary(request_path: str) -> bool:
     target = request_path.lstrip("/")
     if not target:  # "/" itself
         return True
+    # An AS number ("/AS4766") has no public suffix, but is a lookup target.
+    if classify_target(normalize_lookup_target(target)) == "asn":
+        return True
     return domain_manager.is_valid_domain(target) or domain_manager.is_ipv4(target)
 
 
