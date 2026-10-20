@@ -85,6 +85,7 @@ from lookup import (
     lookup_location,
     lookup_whois,
     normalize_lookup_target,
+    parse_asn,
     reputation_manager,
     sanitize_log_input,
     tld_names_manager,
@@ -349,18 +350,32 @@ def lookup_href(value: str | None) -> str | None:
     links to the 400 page. A name links in its canonical spelling
     (canonical_hostname: lower case, A-label), the one its own page has; DNS
     names arrive with their trailing dot (ns1.naver.com.), and RDAP name
-    servers often in upper case. Only ':' is left unescaped, for an IPv6
+    servers often in upper case. An AS number (AS4766) links to its own page,
+    the special-purpose ones included. Only ':' is left unescaped, for an IPv6
     address; a hostname cannot contain one.
     """
     if not isinstance(value, str):
         return None
     target = value.strip().rstrip(".")
+    asn = parse_asn(target.lower())
+    if asn is not None:
+        # Its page explains a special-purpose number too, so no is_safe_ip
+        # here. Written as `AS<n>`, with no leading zeros.
+        return f"/AS{asn}"
     kind = classify_target(target)
     if kind == "domain":
         target = canonical_hostname(target)
     elif kind not in ("ipv4", "ipv6") or not is_safe_ip(target):
         return None
     return "/" + quote(target, safe=":")
+
+
+def _lookup_href_without_as(value: str | None) -> str | None:
+    """lookup_href for a page drawn with ASINFO_ENABLED=false: /AS4766 would be
+    a 400 there, so an AS number stays text."""
+    if isinstance(value, str) and parse_asn(value.strip().lower()) is not None:
+        return None
+    return lookup_href(value)
 
 
 def _record_target(kind: str, record) -> str | None:
@@ -573,7 +588,7 @@ def render_page(request: Request, response_data: dict, is_self: bool):
         response_data,
         is_self=is_self,
         subdomains_enabled=SUBDOMAIN_ENABLED,
-        link_for=lookup_href,
+        link_for=lookup_href if asinfo_manager.enabled else _lookup_href_without_as,
     )
 
     # map.js labels the pins with the two IPs and draws the distance on the arc.

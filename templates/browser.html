@@ -324,6 +324,20 @@
                         </tbody>
                     </table>
                     <p class="api-note tone-muted">DKIM is checked at common selectors only: DNS cannot list a domain's selectors.</p>
+                    {% elif item.id == 'as' %}
+                    {# viewmodel.as_view: the route, its RPKI state and the AS behind the
+                       address. Every AS number links to its own page; the anchor wraps the
+                       number alone. The credits are the datasets' own terms. #}
+                    <table class="records">
+                        <tbody>
+                        {% for row in view.as_info.rows %}
+                        <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{% for part in row.parts %}{% if part.href %}<a class="lookup-link" href="{{ part.href }}" rel="nofollow">{{ part.text }}</a>{% else %}{{ part.text }}{% endif %}{% endfor %}</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    {% for line in view.as_info.attribution %}
+                    <p class="api-note tone-muted">{{ line }}</p>
+                    {% endfor %}
                     {% elif item.id == 'reputation' %}
                     {# viewmodel.reputation_view: each list the address is on, is not
                        on, or could not be checked, with its source and when the copy

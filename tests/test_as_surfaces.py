@@ -8,6 +8,7 @@ for the `asinfo_enabled` fixture (conftest), or builds its own manager.
 import copy
 import json
 import os
+import re
 import subprocess  # noqa: S404
 import sys
 from contextlib import ExitStack
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 import config
 import lookup
 import main
+import viewmodel
 from asinfo import ANSWER_KEYS, AsInfoManager
 from asinfo_fixtures import (
     ASNAMES,
@@ -571,3 +573,261 @@ def test_as_info_for_a_special_asn_never_reads_the_manager(monkeypatch, asn):
             "special": lookup.special_asn(asn),
         }
         assert card["special"] is not None
+
+
+# --- the AS panel and the links to AS pages ------------------------------------
+
+BROWSER = {"user-agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/130 Safari/537.36"}
+
+KT_CARD = {
+    "asn": 4766,
+    "name": "KIXS-AS-KR-KR - Korea Telecom",
+    "country": "KR",
+    "registry": {
+        "rir": "apnic",
+        "country": "KR",
+        "assigned": "1996-04-22",
+        "status": "assigned",
+    },
+    "org": {
+        "id": "@aut-4766-APNIC",
+        "name": "Korea Telecom",
+        "country": "KR",
+        "siblings": [9760],
+        "sibling_count": 11,
+    },
+    "prefixes": {"v4": 2, "v6": 1, "v4_addresses": 131072, "v6_48s": 65536},
+    "rpki": {"valid": 2, "invalid": 0, "not_found": 2},
+    "upstreams": [{"asn": 174, "name": "COGENT-174"}, {"asn": 701, "name": "UUNET"}],
+    "downstreams": {"count": 565, "list": [{"asn": 17858, "name": "POWERVIS"}]},
+    "peers": {"count": 1, "list": [{"asn": 9318, "name": "SKB-AS-KR"}]},
+    "asn_drop": False,
+    "route": {
+        "prefix": "211.252.112.0/24",
+        "origins": [
+            {"asn": 4766, "ris_peers": 326, "rpki": {"state": "valid", "reason": None}}
+        ],
+    },
+    "announced": True,
+    "source": "route",
+    "datasets": {},
+    "unavailable": [],
+    "attribution": ["Source: RIPE NCC"],
+    "special": None,
+}
+
+
+def _links(asn):
+    return f"/AS{asn}" if isinstance(asn, int) else None
+
+
+def _rows(view):
+    return {row["label"]: row for row in view["rows"]}
+
+
+def test_as_view_rows_and_hint():
+    view = viewmodel.as_view(KT_CARD, lambda value: f"/{value}")
+    assert [row["label"] for row in view["rows"]] == [
+        "Route",
+        "RPKI",
+        "AS",
+        "Holder",
+        "Registry",
+        "Organization",
+        "Prefixes",
+        "RPKI coverage",
+        "Upstreams",
+        "Downstreams",
+        "Peers",
+        "ASN-DROP",
+    ]
+    rows = _rows(view)
+    assert rows["Route"]["value"].startswith("211.252.112.0/24 · originated by AS4766")
+    assert "326" in rows["Route"]["value"]
+    assert rows["RPKI"]["value"] == "Valid"
+    assert rows["AS"]["value"] == "AS4766"
+    assert rows["AS"]["href"] == "/AS4766"
+    assert rows["Holder"]["value"] == "KIXS-AS-KR-KR - Korea Telecom · KR"
+    assert rows["Registry"]["value"] == "APNIC · KR · assigned 1996-04-22"
+    assert rows["Organization"]["value"].startswith("Korea Telecom · 11 sibling ASes")
+    assert rows["Prefixes"]["value"] == "IPv4 2 · IPv6 1"
+    assert rows["RPKI coverage"]["value"].startswith("50% valid")
+    assert "565 customers" in rows["Downstreams"]["value"]
+    assert rows["Peers"]["value"].startswith("1 peer")
+    assert rows["ASN-DROP"]["value"] == "Not listed"
+    assert view["hint"] == "AS4766 · 3 prefixes · RPKI 50% valid"
+    assert view["attribution"] == ["Source: RIPE NCC"]
+    # Every AS number in a list links; the anchor wraps the number alone.
+    parts = [p for p in rows["Upstreams"]["parts"] if p.get("href")]
+    assert [(p["text"], p["href"]) for p in parts] == [
+        ("AS174", "/AS174"),
+        ("AS701", "/AS701"),
+    ]
+    origin = [p for p in rows["Route"]["parts"] if p.get("href")]
+    assert [p["text"] for p in origin] == ["AS4766"]
+    assert [p["text"] for p in rows["Organization"]["parts"] if p.get("href")] == [
+        "AS9760"
+    ]
+    assert viewmodel.as_view(None) is None
+    # Without link_for nothing links.
+    plain = viewmodel.as_view(KT_CARD)
+    assert not any(p.get("href") for r in plain["rows"] for p in r["parts"])
+    assert "href" not in _rows(plain)["AS"]
+
+
+def test_as_view_unknown_sections_name_their_reason():
+    card = {
+        **KT_CARD,
+        "name": None,
+        "registry": None,
+        "org": None,
+        "upstreams": None,
+        "downstreams": None,
+        "peers": None,
+        "prefixes": None,
+        "rpki": None,
+        "asn_drop": None,
+        "route": None,
+        "announced": None,
+        "unavailable": [
+            {"dataset": "asnames", "label": "RIPE NCC AS names", "reason": "stale"},
+            {
+                "dataset": "caida_rel",
+                "label": "CAIDA AS relationships",
+                "reason": "old",
+            },
+            {"dataset": "ris_v4", "label": "RIS IPv4", "reason": "missing"},
+        ],
+    }
+    rows = _rows(viewmodel.as_view(card))
+    assert rows["Holder"]["value"] == "Unknown: stale"
+    assert rows["Holder"]["tone"] == "muted"
+    assert rows["Upstreams"]["value"] == "Unknown: old"
+    assert rows["Peers"]["value"] == "Unknown: old"
+    assert rows["Route"]["value"] == "Unknown: missing"
+    # Available datasets that lack the AS: not "Unknown".
+    assert rows["Registry"]["value"] == "Not in NRO delegated statistics"
+    assert rows["Organization"]["value"] == "Not in CAIDA AS organizations"
+    assert rows["Registry"]["tone"] == "muted"
+    assert rows["ASN-DROP"]["value"] == "Unknown"
+    # A fresh volume: nothing known at all.
+    empty = {k: None for k in KT_CARD}
+    empty["unavailable"] = []
+    assert viewmodel.as_view(empty)["hint"] == "unknown"
+    # Not announced.
+    quiet = {**KT_CARD, "route": None, "announced": False, "source": "geolite2"}
+    assert _rows(viewmodel.as_view(quiet))["Route"]["value"] == "Not announced in RIS"
+
+
+def test_rpki_invalid_route_is_a_warning_row_and_no_hero_tag():
+    route = {
+        "prefix": "211.252.112.0/24",
+        "origins": [
+            {
+                "asn": 4766,
+                "ris_peers": 300,
+                "rpki": {"state": "invalid", "reason": "origin AS differs"},
+            }
+        ],
+    }
+    card = {**KT_CARD, "route": route}
+    row = _rows(viewmodel.as_view(card))["RPKI"]
+    assert row["tone"] == "warning"
+    assert row["value"] == "Invalid: origin AS differs"
+    view = viewmodel.build_view(
+        {"address": "211.252.112.1", "as_info": card, "location": {}}, False
+    )
+    assert not any("RPKI" in tag["text"].upper() for tag in view["tags"])
+
+
+def test_as_view_for_a_special_origin_shows_its_purpose():
+    card = {
+        **dict.fromkeys(KT_CARD),
+        "asn": 64512,
+        "route": {
+            "prefix": "45.67.89.0/24",
+            "origins": [
+                {"asn": 64512, "ris_peers": 40, "rpki": {"state": "not_found"}}
+            ],
+        },
+        "announced": True,
+        "source": "route",
+        "unavailable": [
+            {"dataset": "caida_rel", "label": "CAIDA AS relationships", "reason": "x"}
+        ],
+        "attribution": [],
+        "special": {
+            "code": "private_asn",
+            "label": "Private use",
+            "first": 64512,
+            "last": 65534,
+            "defined_in": "RFC 6996",
+            "purpose": "For a network's own internal BGP.",
+        },
+    }
+    view = viewmodel.as_view(card, lambda value: f"/{value}")
+    assert [r["label"] for r in view["rows"]] == ["Route", "RPKI", "AS", "Purpose"]
+    rows = _rows(view)
+    assert rows["AS"]["value"] == "AS64512 · Private use"
+    assert rows["Purpose"]["value"] == "For a network's own internal BGP. (RFC 6996)"
+    assert rows["AS"]["href"] == "/AS64512"
+    assert view["hint"] == "AS64512 · private use"
+    assert not any("Unknown" in r["value"] for r in view["rows"])
+    assert view["attribution"] == []
+    assert viewmodel.as_view({**card, "attribution": None})["attribution"] == []
+
+
+def test_page_has_the_as_accordion_after_geoip(asinfo_enabled, legs):
+    html = client.get(f"/{KT_IP}", headers=BROWSER).text
+    ids = re.findall(r'<details class="accordion" id="acc-([a-z]+)"', html)
+    assert ids.index("as") == ids.index("geoip") + 1
+    assert 'id="hint-as"' in html
+    assert "AS4766 · 3 prefixes" in html
+    assert "Korea Telecom" in html
+    assert "Source: RIPE NCC" in html
+    assert "RPKI data validated by rpki-client.org" in html
+    assert "The CAIDA UCSD AS Relationships Dataset, 2026-10-01" in html
+
+
+def test_page_has_no_as_accordion_when_disabled(legs):
+    html = client.get(f"/{KT_IP}", headers=BROWSER).text
+    assert 'id="acc-as"' not in html
+
+
+def test_lookup_href_links_as_numbers_special_ones_included():
+    assert main.lookup_href("AS4766") == "/AS4766"
+    assert main.lookup_href("as4766") == "/AS4766"
+    assert main.lookup_href("AS64512") == "/AS64512"
+    assert main.lookup_href("AS0") == "/AS0"
+    assert main.lookup_href("AS04766") == "/AS4766"
+    assert main.lookup_href("AS4294967296") is None
+    assert main.lookup_href("4766") is None
+    assert main.lookup_href("ASxyz") is None
+
+
+def test_network_org_row_links_its_as_number(asinfo_enabled, legs):
+    html = client.get(f"/{KT_IP}", headers=BROWSER).text
+    assert re.search(
+        r'<span class="kv-label">Org</span>\s*<span class="kv-value[^"]*">'
+        r'<a class="lookup-link" href="/AS4766" rel="nofollow">AS4766</a>'
+        r" GeoLite2&#39;s name</span>",
+        html,
+    )
+
+
+def test_as_links_are_nofollow_lookup_links(asinfo_enabled, legs):
+    html = client.get(f"/{KT_IP}", headers=BROWSER).text
+    body = html.split('id="acc-as"')[1].split("</details>")[0]
+    anchors = re.findall(r"<a [^>]*>", body)
+    assert anchors
+    for anchor in anchors:
+        assert 'class="lookup-link"' in anchor
+        assert 'rel="nofollow"' in anchor
+    for asn in (174, 701, 17858, 38661, 9318, 9760, 4766):
+        assert f'href="/AS{asn}"' in body
+
+
+def test_network_org_row_stays_text_when_as_lookups_are_off(legs):
+    html = client.get(f"/{KT_IP}", headers=BROWSER).text
+    assert 'href="/AS4766"' not in html
+    assert "AS4766 GeoLite2&#39;s name" in html
