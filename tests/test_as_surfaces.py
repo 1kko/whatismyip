@@ -392,12 +392,16 @@ def test_fields_without_an_as_field_skip_the_leg(asinfo_enabled, legs, monkeypat
     assert client.get(f"/{KT_IP}?fields=country_code", headers=CURL).json() == {
         "country_code": "KR"
     }
-    assert client.get(f"/{KT_IP}?format=text", headers=CURL).status_code == 200
     assert client.get(f"/{DOMAIN}?fields=country_code", headers=CURL).status_code == 200
     assert as_peer(KT_IP).get("/?fields=country_code", headers=CURL).json() == {
         "country_code": "KR"
     }
     reads.assert_not_called()
+
+    # The text block lists the route fields: it reads the leg, a local read.
+    assert client.get(f"/{KT_IP}?format=text", headers=CURL).status_code == 200
+    assert reads.call_count == 1
+    reads.reset_mock()
 
     # The whole lookup does read it: the count above is not blind.
     assert "as_info" in client.get(f"/{KT_IP}", headers=CURL).json()
@@ -942,3 +946,155 @@ def test_page_scripts_read_the_blocks_with_json_parse():
             assert source[: match.start()].endswith("JSON.parse("), (path, match[0])
         found += len(reads)
     assert found == 5
+
+
+# --- ?fields= and the text block ---------------------------------------------
+
+ROUTE_FIELDS = "route_prefix,route_origin,rpki_state"
+V6_UNCOVERED_IP = "2606:4700::1111"  # in 2606:4700::/32 (AS13335), no VRP
+
+
+def test_fields_route_and_rpki(asinfo_enabled, legs):
+    body = client.get(f"/{KT_IP}", params={"fields": ROUTE_FIELDS}, headers=CURL).json()
+    # The fixture's VRP for AS4766 (211.252.0.0/15, max length 24) covers it.
+    assert body == {
+        "route_prefix": "211.252.112.0/24",
+        "route_origin": 4766,
+        "rpki_state": "valid",
+    }
+    body = client.get(
+        f"/{V6_UNCOVERED_IP}", params={"fields": ROUTE_FIELDS}, headers=CURL
+    ).json()
+    assert body == {
+        "route_prefix": "2606:4700::/32",
+        "route_origin": 13335,
+        "rpki_state": "not-found",
+    }
+
+
+def test_fields_route_for_a_domain_reads_the_resolved_address(asinfo_enabled, legs):
+    body = client.get(
+        f"/{DOMAIN}", params={"fields": ROUTE_FIELDS}, headers=CURL
+    ).json()
+    assert body["route_prefix"] == "211.252.112.0/24"
+    assert body["route_origin"] == 4766
+
+
+def test_rpki_state_is_the_cards_origin(asinfo_enabled, legs, monkeypatch):
+    # Two origins: the card describes the first (most RIS peers); the second's
+    # state must not leak into the field.
+    real = asinfo_enabled.for_address
+
+    def two_origins(ip, fallback=None):
+        answer = real(ip, fallback)
+        answer["route"]["origins"].append(
+            {"asn": 64999, "ris_peers": 11, "rpki": {"state": "invalid", "reason": "x"}}
+        )
+        return answer
+
+    monkeypatch.setattr(asinfo_enabled, "for_address", two_origins)
+    body = client.get(f"/{KT_IP}", params={"fields": ROUTE_FIELDS}, headers=CURL).json()
+    assert body["route_origin"] == 4766
+    assert body["rpki_state"] == "valid"
+
+
+def test_text_block_lists_the_route_fields(asinfo_enabled, legs):
+    lines = client.get(f"/{KT_IP}?format=text", headers=CURL).text.splitlines()
+    keys = [line.split(":", 1)[0] for line in lines]
+    start = keys.index("cidr")
+    assert keys[start + 1 : start + 4] == ["route_prefix", "route_origin", "rpki_state"]
+    values = dict(line.split(": ", 1) for line in lines)
+    assert values["route_prefix"] == "211.252.112.0/24"
+    assert values["route_origin"] == "4766"
+    assert values["rpki_state"] == "valid"
+    lines = client.get(f"/{DOMAIN}?format=text", headers=CURL).text.splitlines()
+    assert "route_prefix: 211.252.112.0/24" in lines
+
+
+def test_route_fields_are_question_marks_when_ris_is_unavailable(
+    tmp_path, monkeypatch, legs
+):
+    from asinfo_fixtures import Clock
+
+    clock = Clock()
+    manager = build_manager(tmp_path, clock=clock)
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    clock.advance(hours=config.ASINFO_MAX_AGE_HOURS + 1)
+    reason = next(
+        e["reason"]
+        for e in manager.for_address(KT_IP)["unavailable"]
+        if e["dataset"] == "ris_v4"
+    )
+    body = client.get(f"/{KT_IP}", params={"fields": ROUTE_FIELDS}, headers=CURL).json()
+    assert body["route_prefix"] is None
+    assert body["errors"] == {name: reason for name in ROUTE_FIELDS.split(",")}
+    text = client.get(
+        f"/{KT_IP}", params={"fields": ROUTE_FIELDS, "format": "text"}, headers=CURL
+    ).text
+    assert text == "?\n?\n?\n"
+
+
+def test_route_fields_are_question_marks_on_a_fresh_volume(tmp_path, monkeypatch, legs):
+    manager = AsInfoManager(
+        directory=str(tmp_path / "empty"), enabled=True, clock=lambda: NOW
+    )
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    text = client.get(
+        f"/{KT_IP}", params={"fields": ROUTE_FIELDS, "format": "text"}, headers=CURL
+    ).text
+    assert text == "?\n?\n?\n"
+
+
+def test_rpki_state_alone_is_a_question_mark_when_the_vrps_are_unavailable(
+    tmp_path, monkeypatch, legs
+):
+    from asinfo_fixtures import iso
+
+    manager = build_manager(
+        tmp_path,
+        meta={
+            "rpki": {"source_date": iso(NOW - (config.ASINFO_MAX_AGE_HOURS + 5) * HOUR)}
+        },
+    )
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    body = client.get(f"/{KT_IP}", params={"fields": ROUTE_FIELDS}, headers=CURL).json()
+    assert body["route_prefix"] == "211.252.112.0/24"
+    assert body["route_origin"] == 4766
+    assert body["rpki_state"] is None
+    assert list(body["errors"]) == ["rpki_state"]
+
+
+def test_route_fields_are_dashes_when_not_announced(asinfo_enabled, legs):
+    text = client.get(
+        f"/{UNANNOUNCED_IP}",
+        params={"fields": ROUTE_FIELDS, "format": "text"},
+        headers=CURL,
+    ).text
+    assert text == "-\n-\n-\n"
+    body = client.get(
+        f"/{UNANNOUNCED_IP}", params={"fields": ROUTE_FIELDS}, headers=CURL
+    ).json()
+    assert body == {"route_prefix": None, "route_origin": None, "rpki_state": None}
+
+
+def test_route_fields_are_dashes_when_the_feature_is_off(legs):
+    # Like the reputation fields with REPUTATION_ENABLED=false: no leg answers,
+    # so the fields read "-" rather than being refused.
+    body = client.get(f"/{KT_IP}", params={"fields": ROUTE_FIELDS}, headers=CURL).json()
+    assert body == {"route_prefix": None, "route_origin": None, "rpki_state": None}
+
+
+def test_self_fields_answer_the_route_fields(asinfo_enabled, legs, monkeypatch):
+    body = as_peer(KT_IP).get("/", params={"fields": ROUTE_FIELDS}, headers=CURL).json()
+    assert body == {
+        "route_prefix": "211.252.112.0/24",
+        "route_origin": 4766,
+        "rpki_state": "valid",
+    }
+    reads = MagicMock(wraps=asinfo_enabled.for_address)
+    monkeypatch.setattr(asinfo_enabled, "for_address", reads)
+    as_peer(KT_IP).get("/?fields=country_code", headers=CURL)
+    reads.assert_not_called()

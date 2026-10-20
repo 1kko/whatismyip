@@ -1865,6 +1865,10 @@ async def _self_fields(client_ip: str, names: list[str]) -> dict:
             "reputation": ip_reputation(client_ip, location or None)
             if "reputation" in legs
             else None,
+            # A local read of the AS database, so no gate slot.
+            "as_info": address_as_info(client_ip, location or None)
+            if "asinfo" in legs
+            else None,
         }
 
 

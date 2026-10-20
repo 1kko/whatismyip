@@ -87,6 +87,9 @@ DOMAIN_KEYS = [
     "asn_number",
     "asn_name",
     "cidr",
+    "route_prefix",
+    "route_origin",
+    "rpki_state",
     "registrar",
     "registrant",
     "domain_expires",
@@ -106,6 +109,9 @@ IP_KEYS = [
     "asn_number",
     "asn_name",
     "cidr",
+    "route_prefix",
+    "route_origin",
+    "rpki_state",
     "registrant",
 ]
 

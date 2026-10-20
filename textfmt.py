@@ -25,6 +25,8 @@ from viewmodel import DASH, DNS_FAILURE_TEXT, dmarc_policy, fcrdns_state
 _BOTH = frozenset({"domain", "ip"})
 _DOMAIN = frozenset({"domain"})
 _IP = frozenset({"ip"})
+# The geo leg is there for the card's fallback AS (GeoLite2's number).
+_ROUTE_LEGS = frozenset({"resolve", "geo", "asinfo"})
 
 # Every field, in the order the text block lists them, with the lookup.gather()
 # legs it needs and the kinds of target it applies to. An IP gets no registrar,
@@ -47,6 +49,12 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "asn_number": (frozenset({"geo"}), _BOTH),
     "asn_name": (frozenset({"geo"}), _BOTH),
     "cidr": (frozenset({"geo"}), _BOTH),
+    # The announced route covering the address (RIPE RIS), the origin the AS
+    # card describes, and that origin's RPKI state. A local read, so they cost
+    # nothing and sit in the block.
+    "route_prefix": (_ROUTE_LEGS, _BOTH),
+    "route_origin": (_ROUTE_LEGS, _BOTH),
+    "rpki_state": (_ROUTE_LEGS, _BOTH),
     "registrar": (frozenset({"whois"}), _DOMAIN),
     "registrant": (frozenset({"whois"}), _BOTH),
     "domain_expires": (frozenset({"whois"}), _DOMAIN),
@@ -81,7 +89,10 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
         )
     },
 }
-_SECURITY_FIELDS = tuple(name for name in FIELDS if name.endswith("_state"))
+# rpki_state ends in _state too, and is not one of them.
+_SECURITY_FIELDS = tuple(
+    name for name in FIELDS if name.endswith("_state") and name != "rpki_state"
+)
 
 # Asked for by name only, never in the text block. A bare "risk_level: none"
 # or "risk_score: 0" among the other lines reads as a clean bill, which the
@@ -110,6 +121,8 @@ _NOT_IN_BLOCK = frozenset(
 # confirm) and "unknown" is "?": the PTR name's A/AAAA query failed.
 _FCRDNS_ANSWERS = frozenset({"confirmed", "unconfirmed"})
 _FCRDNS_FAILED = "the PTR name's A/AAAA query failed"
+
+_ROUTE_FIELDS = ("route_prefix", "route_origin", "rpki_state")
 
 _REGISTRATION_FIELDS = ("registrar", "registrant", "domain_expires", "domain_age_days")
 
@@ -217,6 +230,14 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     domain = data.get("domain") or {}
     dmarc = dmarc_policy(domain) or {}
     security = data.get("dns_security") or {}
+    as_info = data.get("as_info")
+    route = (as_info or {}).get("route") or {}
+    # The origin the card describes: the one seen by the most RIS peers.
+    origins = route.get("origins") or []
+    origin = next(
+        (o for o in origins if o.get("asn") == (as_info or {}).get("asn")),
+        origins[0] if origins else {},
+    )
     fcrdns = fcrdns_state(
         data.get("reverse_dns"), data.get("domain"), data.get("address") or ""
     )
@@ -232,6 +253,9 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "asn_number": geo["asn_number"],
         "asn_name": geo["asn_name"],
         "cidr": geo["cidr"],
+        "route_prefix": route.get("prefix"),
+        "route_origin": origin.get("asn"),
+        "rpki_state": (origin.get("rpki") or {}).get("state"),
         "registrar": registration.get("registrar"),
         "registrant": registration.get("registrant"),
         "domain_expires": _date(registration.get("expires")),
@@ -285,6 +309,22 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     for name in _REGISTRATION_FIELDS:
         if error and kind in FIELDS[name][1]:
             errors[name] = str(error)
+    # A route dataset that could not be read: whether the address is announced
+    # (and its origin's RPKI state) is unknown, not "-". Not announced is an
+    # answer and stays "-".
+    if as_info is not None:
+        unavailable = {
+            entry.get("dataset"): entry.get("reason") or "unavailable"
+            for entry in as_info.get("unavailable") or []
+        }
+        if as_info.get("announced") is None:
+            family = "ris_v6" if ":" in str(data.get("resolved_ip") or "") else "ris_v4"
+            reason = unavailable.get(family) or "the route dataset is unavailable"
+            for name in _ROUTE_FIELDS:
+                if kind in FIELDS[name][1]:
+                    errors[name] = reason
+        elif route and not origin.get("rpki") and "rpki" in unavailable:
+            errors["rpki_state"] = unavailable["rpki"]
     # No list could be read: the level is unknown, not "none".
     if reputation and reputation.get("level") is None:
         for name in _RISK_FIELDS:
