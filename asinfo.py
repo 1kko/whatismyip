@@ -775,7 +775,10 @@ def _download(
 ) -> dict:
     """GET `url` into `dest_path`, streamed in chunks; {"last_modified": the
     response's Last-Modified header, or None}. Raises past `max_bytes`, unread
-    when the response says up front that it is longer. Sends
+    when the response says up front that it is longer, and when the body ends
+    short of its Content-Length: http.client's read(amt) answers a dropped
+    connection with an early b"", not an error, and a plain-text source cut
+    short can still pass its `min_rows`. Sends
     REPUTATION_USER_AGENT and, with `accept_gzip`, Accept-Encoding: gzip; a
     gzipped body is kept as it came, and open_text reads it. The URL is
     operator config, or a file name a listing gave that matched its
@@ -797,6 +800,8 @@ def _download(
                 if size > max_bytes:
                     raise ValueError(f"{url} is larger than {max_bytes} bytes")
                 handle.write(chunk)
+        if stated.isdigit() and size != int(stated):
+            raise ValueError(f"{url} ended after {size} of its {stated} bytes")
         return {"last_modified": response.headers.get("Last-Modified")}
 
 

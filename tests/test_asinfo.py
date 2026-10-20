@@ -1776,6 +1776,46 @@ def test_download_refuses_a_body_past_its_cap(tmp_path, source, stated):
         asinfo._download(source, str(tmp_path / "copy.tmp"), 100)
 
 
+def test_download_refuses_a_body_short_of_its_length(tmp_path, source):
+    # Stated 1000 bytes, closed after 400: http.client's read() answers an
+    # early b"" there, not an error.
+    _Source.reply = (200, {"Content-Length": "1000"}, b"z" * 400)
+    with pytest.raises(ValueError, match="400 of its 1000"):
+        asinfo._download(source, str(tmp_path / "copy.tmp"), 2000)
+
+
+def test_a_plain_text_download_cut_short_keeps_the_old_copy(tmp_path, source):
+    # Review Focus 4 through the real download. asn.txt is plain text, so
+    # the part that arrived parses, and in real data half the file clears
+    # min_rows (50,000 of about 123,000 rows).
+    url = source.rsplit("/", 1)[0] + "/asn.txt"
+    [asnames] = [
+        dataclasses.replace(d, url=url, min_rows=1)
+        for d in refresh_datasets()
+        if d.id == "asnames"
+    ]
+    clock = Clock()
+    manager = AsInfoManager(
+        directory=str(tmp_path),
+        datasets=[asnames],
+        enabled=True,
+        fetch=asinfo._download,
+        clock=clock,
+    )
+    whole = ASNAMES.encode()
+    _Source.reply = (200, {"Content-Length": str(len(whole))}, whole)
+    assert manager.refresh() is True
+
+    half = whole[: len(whole) // 2]
+    _Source.reply = (200, {"Content-Length": str(len(whole))}, half)
+    clock.advance(hours=25)
+    assert manager.refresh() is False
+    assert (tmp_path / "asn.txt").read_bytes() == whole
+    assert not (tmp_path / "asn.txt.tmp").exists()
+    # A row from the half that never came is still read.
+    assert manager.for_asn(13335)["name"] == "CLOUDFLARENET - Cloudflare, Inc."
+
+
 def test_download_raises_on_an_error_status(tmp_path, source):
     _Source.reply = (404, {}, b"not here")
     with pytest.raises(OSError):
