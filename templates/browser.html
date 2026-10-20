@@ -25,21 +25,7 @@
     <meta property="og:image:height" content="512">
     <meta name="twitter:card" content="summary">
 
-    <!-- Agent discovery. The service answers JSON to any non-browser client and
-         speaks MCP at the endpoint below, so an agent that lands on this page
-         can find the machine interface without scraping the HTML.
-         `service-doc` is the IANA-registered relation for human-readable
-         service documentation (RFC 8631); the mcp-* names are this site's own
-         convention, since no registry covers them yet. -->
-    <link rel="service-doc" href="https://github.com/1kko/whatismyip#mcp-model-context-protocol">
-    <meta name="mcp-endpoint" content="{{ api_base }}mcp">
-    <meta name="mcp-transport" content="streamable-http">
-    <meta name="mcp-auth" content="none">
-    <meta name="mcp-tools" content="{{ mcp_tools | join(', ') }}">
-    <meta name="mcp-install" content="claude mcp add --transport http whatismyip {{ api_base }}mcp">
-    <meta name="mcp-note" content="whoami_caller returns whoever opened the connection: your own machine from a local client such as Claude Code, a provider datacenter from a hosted one such as claude.ai. When the address is on a datacenter list the result says it is likely a hosted client; otherwise the server cannot be sure, so do not report it as the user's IP without checking.">
-    <meta name="api-endpoint" content="{{ api_base }}{target}">
-    <meta name="api-note" content="Any non-browser user-agent gets JSON from the same URL; no key required.">
+    {% include "_agent_discovery.html" %}
 
     <link rel="preload" href="/static/fonts/InterVariable-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/static/css/whatismyip.css?v={{ APP_VERSION }}">

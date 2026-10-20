@@ -1065,17 +1065,25 @@ class TestBrowserPage:
         assert "onclick=" not in html
         assert "onsubmit=" not in html
 
-    def test_head_carries_agent_discovery_metadata(self):
+    @pytest.mark.parametrize("path", ["/8.8.8.8", "/AS4766"])
+    def test_head_carries_agent_discovery_metadata(self, request, path):
         # An agent that lands on the HTML should find the machine interface
         # without scraping the page. The footer link was removed, so this block
-        # is now the only in-markup pointer to the MCP endpoint.
-        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
+        # is now the only in-markup pointer to the MCP endpoint. The /AS<n>
+        # page (with AS lookups on) carries the same block.
+        if path.startswith("/AS"):
+            request.getfixturevalue("asinfo_enabled")
+        html = client.get(path, headers=BROWSER_UA).text
         head = html.split("</head>")[0]
         assert '<meta name="description"' in head
         assert 'name="mcp-endpoint"' in head and "/mcp" in head
         assert 'name="mcp-transport" content="streamable-http"' in head
-        assert 'name="mcp-tools"' in head
         assert 'name="mcp-install"' in head
+        assert 'name="mcp-note"' in head
+        assert 'name="api-endpoint"' in head
+        # The tools the server registered, never a list of the page's own.
+        tools = re.findall(r'<meta name="mcp-tools" content="([^"]*)">', head)
+        assert tools == [", ".join(mcp_server.registered_tool_names())]
         # RFC 8631 registered relation, not an invented one.
         assert 'rel="service-doc"' in head
 
