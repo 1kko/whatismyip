@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {#- --bg in static/css/whatismyip.css; tests/test_page.py keeps the two equal. #}
+    <meta name="theme-color" content="#0B0D12">
+    <meta name="color-scheme" content="dark">
+    <title>{{ view.title }}</title>
+    <meta name="description" content="{{ view.description }}">
+    {%- set page_url = api_base ~ view.canonical_path %}
+    <link rel="canonical" href="{{ page_url }}">
+
+    <!-- Link previews, as on a lookup page: they name the AS. -->
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="WhatIsMyIP">
+    <meta property="og:title" content="{{ view.title }}">
+    <meta property="og:description" content="{{ view.description }}">
+    <meta property="og:url" content="{{ page_url }}">
+    <meta property="og:image" content="{{ api_base }}static/image/logo.png">
+    <meta property="og:image:width" content="512">
+    <meta property="og:image:height" content="512">
+    <meta name="twitter:card" content="summary">
+
+    <link rel="preload" href="/static/fonts/InterVariable-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/static/css/whatismyip.css?v={{ APP_VERSION }}">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="shortcut icon" href="/static/favicon.ico">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+    <link rel="manifest" href="/static/site.webmanifest">
+</head>
+<body>
+{# The /AS<n> page (viewmodel.as_page_view): an AS number, read from the local
+   AS database. It has no address, so no map, and none of an address's or a
+   domain's panels. Every name and number below is a dataset's third-party
+   text, autoescaped like the rest. #}
+<div class="progress" id="progress" aria-hidden="true"></div>
+<div class="shell">
+    <section class="band">
+        {% include "_search.html" %}
+
+        <div class="hero inset">
+            <div class="tags">
+                {% for tag in view.tags %}
+                <span class="tag tone-{{ tag.tone }}">{{ tag.text }}</span>
+                {% endfor %}
+            </div>
+            <h1 class="ip mono">{{ view.target }}</h1>
+            {% if view.holder %}
+            <div class="origin">
+                <div class="origin__country">
+                    {% if view.flag %}<span class="origin__flag">{{ view.flag }}</span>{% endif %}
+                    <span>{{ view.holder }}</span>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </section>
+
+    <main class="inset">
+        <section class="accordions">
+            {% for item in view.accordions %}
+            <details class="accordion" id="acc-{{ item.id }}"{% if item.id == 'as' %} open{% endif %}>
+                <summary class="accordion__header">
+                    <span class="accordion__title">{{ item.title }}</span>
+                    <span class="hint" id="hint-{{ item.id }}" title="{{ item.hint }}">{{ item.hint }}</span>
+                </summary>
+                <div class="accordion__body">
+                    {% if item.id == 'raw' %}
+                    {% include "_raw_json.html" %}
+                    {% elif item.id == 'as' %}
+                    {# The AS panel's card (viewmodel.as_view) without Route and RPKI,
+                       which describe an address. Every AS number links to its own
+                       page; the anchor wraps the number alone. The credits are the
+                       datasets' own terms. #}
+                    <table class="records">
+                        <tbody>
+                        {% for row in view.card.rows %}
+                        <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{% for part in row.parts %}{% if part.href %}<a class="lookup-link" href="{{ part.href }}" rel="nofollow">{{ part.text }}</a>{% else %}{{ part.text }}{% endif %}{% endfor %}</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    {% for line in view.card.attribution %}
+                    <p class="api-note tone-muted">{{ line }}</p>
+                    {% endfor %}
+                    {% elif item.id == 'prefixes' %}
+                    {% set panel = view.prefixes %}
+                    <table class="records">
+                        <tbody>
+                        {% for row in panel.rows %}
+                        <tr><td>{{ row.prefix }}</td><td colspan="3"><span class="tone-{{ row.tone }}">{{ row.state }}</span>{% if row.peers %} · {{ row.peers }}{% endif %}</td></tr>
+                        {% else %}
+                        <tr><td colspan="4" class="tone-muted">{{ panel.empty }}</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    {% if panel.note %}<p class="api-note tone-muted">{{ panel.note }}</p>{% endif %}
+                    {% else %}
+                    {# Upstreams, downstreams or peers: each neighbour links to its
+                       own page, with its name beside it. #}
+                    {% set panel = view.lists[item.id] %}
+                    <table class="records">
+                        <tbody>
+                        {% for entry in panel.entries %}
+                        <tr><td>{% if entry.href %}<a class="lookup-link" href="{{ entry.href }}" rel="nofollow">AS{{ entry.asn }}</a>{% else %}AS{{ entry.asn }}{% endif %}</td><td colspan="3">{{ entry.name or "" }}</td></tr>
+                        {% else %}
+                        <tr><td colspan="4" class="tone-muted">{{ panel.empty }}</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    {% if panel.note %}<p class="api-note tone-muted">{{ panel.note }}</p>{% endif %}
+                    {% endif %}
+                </div>
+            </details>
+            {% endfor %}
+        </section>
+    </main>
+
+    {% include "_footer.html" %}
+</div>
+
+<script type="application/json" id="page-data" nonce="{{ nonce }}">{{ json_data | safe }}</script>
+<script src="/static/js/app.js" nonce="{{ nonce }}" defer></script>
+</body>
+</html>

@@ -43,6 +43,7 @@ TEMPLATES = [
     Path("templates/browser.html"),
     Path("templates/error.html"),
     Path("templates/privacy.html"),
+    Path("templates/as.html"),
 ]
 # What the page writes itself, as opposed to the data it shows: the templates,
 # the view model and main.py that fill them, and the scripts and stylesheet
@@ -1601,7 +1602,7 @@ class TestMobileLayout:
         # The other way to stop the zoom is `maximum-scale=1`, which also stops
         # a visitor zooming on purpose. The fix is the font size, so the
         # viewport meta stays as it is on every page that has the search box.
-        for name in ("browser.html", "error.html", "privacy.html"):
+        for name in ("browser.html", "error.html", "privacy.html", "as.html"):
             page = Path("templates", name).read_text(encoding="utf-8")
             assert 'content="width=device-width, initial-scale=1.0"' in page, name
             assert "maximum-scale" not in page, name
@@ -1619,7 +1620,7 @@ class TestMobileLayout:
         assert "hover" not in handler
         assert "matchMedia" not in handler
         # One include serves every page with the box, so one rule covers them.
-        for name in ("browser.html", "error.html", "privacy.html"):
+        for name in ("browser.html", "error.html", "privacy.html", "as.html"):
             page = Path("templates", name).read_text(encoding="utf-8")
             assert '{% include "_search.html" %}' in page, name
 
@@ -1801,6 +1802,14 @@ class TestWebManifest:
         ]
         assert usable
 
+    def test_every_page_template_links_it(self):
+        """Install from any page: each template's <head> names the manifest."""
+        for template in TEMPLATES:
+            head = template.read_text(encoding="utf-8").split("</head>")[0]
+            assert '<link rel="manifest" href="/static/site.webmanifest">' in head, (
+                template
+            )
+
     def test_served_as_a_web_app_manifest(self):
         response = client.get("/static/site.webmanifest")
         assert response.status_code == 200
@@ -1825,13 +1834,24 @@ def _head_meta(html, name):
 
 
 # One page per template: the self page (browser.html, whose <head> every lookup
-# shares), an error page (error.html, which 403, 429 and 503 also render) and
-# /privacy (privacy.html).
+# shares), an error page (error.html, which 403, 429 and 503 also render),
+# /privacy (privacy.html) and an AS page (as.html), which needs AS lookups on.
 THEMED_PAGES = {
     "self page": "/",
     "error page": "/192.168.0.1",
     "privacy page": "/privacy",
+    "AS page": "/AS64512",
 }
+
+
+def _themed_page(request, path):
+    """GET `path` as a browser; the AS page with the asinfo_enabled fixture,
+    since with AS lookups off /AS64512 answers error.html."""
+    if path.startswith("/AS"):
+        request.getfixturevalue("asinfo_enabled")
+    response = client.get(path, headers=BROWSER_UA)
+    assert response.status_code == (400 if path == THEMED_PAGES["error page"] else 200)
+    return response
 
 
 class TestThemeColor:
@@ -1841,8 +1861,8 @@ class TestThemeColor:
     @pytest.mark.parametrize(
         "path", list(THEMED_PAGES.values()), ids=list(THEMED_PAGES)
     )
-    def test_theme_color_is_the_page_background(self, path):
-        response = client.get(path, headers=BROWSER_UA)
+    def test_theme_color_is_the_page_background(self, request, path):
+        response = _themed_page(request, path)
         assert response.headers["content-type"].startswith("text/html")
         # Exactly one: a second, stale theme-color would win or lose by order.
         (colour,) = _head_meta(response.text, "theme-color")
@@ -1851,11 +1871,11 @@ class TestThemeColor:
     @pytest.mark.parametrize(
         "path", list(THEMED_PAGES.values()), ids=list(THEMED_PAGES)
     )
-    def test_color_scheme_is_dark(self, path):
+    def test_color_scheme_is_dark(self, request, path):
         """Scrollbars and other unstyled controls follow it, and so does an
         error page whose stylesheet a banned address cannot fetch. One value:
         the CSS has no light branch (test_no_light_mode_branch)."""
-        response = client.get(path, headers=BROWSER_UA)
+        response = _themed_page(request, path)
         assert _head_meta(response.text, "color-scheme") == ["dark"]
 
 

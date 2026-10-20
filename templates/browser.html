@@ -178,25 +178,7 @@
                 </summary>
                 <div class="accordion__body">
                     {% if item.id == 'raw' %}
-                    <p class="api-note">Any non-browser client gets JSON — curl, wget and friends already qualify:</p>
-                    <div class="code">
-                        <pre id="curl-example">curl {{ api_base }}{{ view.target }}</pre>
-                        <button type="button" class="copy-btn" id="copy-curl"
-                                data-value="curl {{ api_base }}{{ view.target }}">Copy</button>
-                    </div>
-                    <p class="api-note">AI agents can call it over MCP — paste this into Claude, Cursor, or any MCP client:</p>
-                    <div class="code">
-                        <pre id="mcp-endpoint">{{ api_base }}mcp</pre>
-                        <button type="button" class="copy-btn" id="copy-mcp-endpoint"
-                                data-value="{{ api_base }}mcp">Copy</button>
-                    </div>
-                    <div class="code">
-                        <pre id="mcp-install">claude mcp add --transport http whatismyip {{ api_base }}mcp</pre>
-                        <button type="button" class="copy-btn" id="copy-mcp-install"
-                                data-value="claude mcp add --transport http whatismyip {{ api_base }}mcp">Copy</button>
-                    </div>
-                    <p class="api-note tone-muted">Tools: <span id="mcp-tool-list">{{ mcp_tools | join(', ') }}</span>. whoami_caller reports whoever opened the connection — your own machine from a local client like Claude Code, a datacenter from a hosted one like claude.ai. It flags an address on a datacenter list as likely hosted, but cannot be sure otherwise, so open this page in a browser when you need certainty.</p>
-                    <div id="raw-json"></div>
+                    {% include "_raw_json.html" %}
                     {% elif item.id == 'subdomains' %}
                     <p class="api-note">
                         This is a passive lookup &mdash; source:

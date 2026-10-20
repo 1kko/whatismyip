@@ -72,6 +72,7 @@ from lookup import (
     PrivateAddressError,
     abuseipdb_client,
     address_as_info,
+    as_info_for_asn,
     asinfo_manager,
     cached_whois,
     canonical_hostname,
@@ -115,6 +116,7 @@ from security import (
 from subdomains import get_subdomains, invalid_target_reason
 from textfmt import (
     InvalidFieldError,
+    as_block,
     block_fields,
     field_values,
     legs_for,
@@ -124,7 +126,14 @@ from textfmt import (
     render_lines,
 )
 from textfmt import render_error as render_text_error
-from viewmodel import build_view, dns_failure_text, dns_names, whois_display, whois_fill
+from viewmodel import (
+    as_page_view,
+    build_view,
+    dns_failure_text,
+    dns_names,
+    whois_display,
+    whois_fill,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -627,6 +636,32 @@ def render_page(request: Request, response_data: dict, is_self: bool):
                 "</", "<\\/"
             ),
             "map_data": json.dumps(map_data, default=str).replace("</", "<\\/"),
+            "nonce": getattr(request.state, "csp_nonce", ""),
+        },
+    )
+
+
+def _script_json(data: dict) -> str:
+    """`data` as JSON for a <script type="application/json"> block. Every <, >
+    and & is a \\u escape, so no name a dataset sent can end the element or
+    open a comment inside it; JSON.parse reads the escapes back."""
+    text = json.dumps(data, indent=2, default=str)
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def render_as_page(request: Request, response_data: dict):
+    """Render as.html, the /AS<n> page, from viewmodel.as_page_view. Its
+    numbers link to their own pages through lookup_href: the page exists only
+    while AS lookups are on."""
+    return templates.TemplateResponse(
+        request,
+        "as.html",
+        {
+            "view": as_page_view(response_data, lookup_href),
+            "mcp_tools": registered_tool_names(),
+            "api_base": public_base_url(request),
+            "site_domain": site_domain(request),
+            "json_data": _script_json(response_data),
             "nonce": getattr(request.state, "csp_nonce", ""),
         },
     )
@@ -1980,6 +2015,72 @@ async def _self_whois_only(client_ip: str) -> dict:
         return await asyncio.shield(task)
 
 
+# What an AS target answers in place of a lookup: AS lookups turned off
+# (ASINFO_ENABLED=false), and the two query parameters that belong to an
+# address or a domain.
+AS_LOOKUPS_OFF = "AS lookups are turned off on this server"
+AS_FIELDS_UNSUPPORTED = (
+    "fields are not available for an AS lookup: ask for the whole answer as "
+    "JSON or with ?format=text"
+)
+AS_SUBDOMAINS_UNSUPPORTED = "subdomains apply to a domain name, not an AS number"
+
+
+def _as_lookup(
+    asn: int, request: Request, fmt: str, names: list[str] | None
+) -> Response | dict:
+    """GET /AS<n>: the AS card from the local AS database
+    (lookup.as_info_for_asn, with its full lists), as JSON, as the text block
+    (textfmt.as_block) or as the AS page, its address spelled AS<n>.
+
+    A read of a local file and nothing else, so it takes no slot at the lookup
+    gate and runs right here, as a GeoIP read does; the rate limit is the
+    middleware's, as for any lookup. A special-purpose number answers what it
+    is for and reads no dataset. With AS lookups off every number is a 400 of
+    its own (asinfo_disabled), the special-purpose ones included, its JSON
+    shaped like a refused address's. ?fields= and ?subdomains= are refused:
+    the field table is an address's and a domain's, and an AS has no
+    subdomains.
+    """
+    if names is not None:
+        return _invalid_field(InvalidFieldError(AS_FIELDS_UNSUPPORTED), fmt)
+    if "subdomains" in request.query_params:
+        if fmt == "text":
+            return _text_error(AS_SUBDOMAINS_UNSUPPORTED)
+        raise HTTPException(status_code=400, detail=AS_SUBDOMAINS_UNSUPPORTED)
+    started = time.perf_counter()
+    as_info = as_info_for_asn(asn, full=True)
+    if as_info is None:
+        if fmt == "text":
+            return _text_error(AS_LOOKUPS_OFF)
+        if fmt == "html":
+            return render_error(
+                request,
+                400,
+                "AS lookups are off",
+                "This server does not look up AS numbers. Enter a domain name "
+                "or an IP address instead.",
+            )
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": AS_LOOKUPS_OFF,
+                "error": AS_LOOKUPS_OFF,
+                "code": "asinfo_disabled",
+            },
+        )
+    response_data = {
+        "address": f"AS{asn}",
+        **as_info,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
+    }
+    if fmt == "text":
+        return PlainTextResponse(as_block(response_data))
+    if fmt == "html":
+        return render_as_page(request, response_data)
+    return response_data
+
+
 async def _target_fields(target: str, names: list[str] | None, fmt: str):
     """/{domain_ip} as text or as ?fields=: only the legs the fields need, and
     none of the map, the visitor's own location or the subdomain list, which
@@ -2179,6 +2280,9 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     # for its MCP callers; normalize_lookup_target is idempotent,
     # see test_normalize_lookup_target_is_idempotent in tests/test_lookup.py.
     domain_ip = normalize_lookup_target(domain_ip)
+    # An AS number (classify_target's "asn": as4766, as04766) is answered by
+    # _as_lookup below, and spelled AS4766 from here on, the log line included.
+    asn = parse_asn(domain_ip)
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
         dict(request.headers), ["x-forwarded-", "x-real-ip"]
@@ -2190,7 +2294,7 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         "client=%s lookup=%s",
         sanitize_log_input(client_ip),
         # A target with an "@" in it is logged as a marker: see loggable_target.
-        loggable_target(domain_ip),
+        f"AS{asn}" if asn is not None else loggable_target(domain_ip),
     )
 
     fmt = negotiate(request)
@@ -2204,6 +2308,11 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         names = parse_fields(request.query_params.getlist("fields"))
     except InvalidFieldError as exc:
         return _invalid_field(exc, fmt)
+
+    if asn is not None:
+        # Before _target_fields and gather(): both take a target that is not a
+        # domain for an IP address.
+        return _as_lookup(asn, request, fmt, names)
 
     if mode == "only":
         # Skips gather() entirely: this mode exists so the page's toggle can ask

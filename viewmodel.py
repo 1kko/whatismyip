@@ -1446,7 +1446,14 @@ _AS_DATASET_LABELS = {
     "caida_rel": "CAIDA AS relationships",
     "caida_org": "CAIDA AS organizations",
 }
-_RPKI_STATES = {"valid": "Valid", "invalid": "Invalid", "not_found": "Not found"}
+# A route's (and an announced prefix's) state is spelled "not-found"; the AS's
+# counts are keyed "not_found".
+_RPKI_STATES = {
+    "valid": "Valid",
+    "invalid": "Invalid",
+    "not-found": "Not found",
+    "not_found": "Not found",
+}
 _RPKI_TONES = {"valid": "success", "invalid": "warning"}
 # How many neighbours of an AS (and siblings of its organization) the panel
 # names; the rest are counted. The JSON carries the whole capped list.
@@ -1562,14 +1569,10 @@ def _as_route_rows(as_info: dict, link_for: LinkFor | None) -> list[dict]:
     ]
 
 
-def _as_hint(as_info: dict) -> str:
-    asn = as_info.get("asn")
-    special = as_info.get("special")
-    if asn is None:
-        return "unknown"
-    if special:
-        return f"AS{asn} · {str(special.get('label', '')).lower()}"
-    pieces = [f"AS{asn}"]
+def _as_counts(as_info: dict) -> list[str]:
+    """'3 prefixes', 'RPKI 67% valid': the AS's own counts, as its hint and its
+    page's link preview print them."""
+    pieces = []
     prefixes = as_info.get("prefixes")
     if prefixes:
         count = (prefixes.get("v4") or 0) + (prefixes.get("v6") or 0)
@@ -1581,10 +1584,22 @@ def _as_hint(as_info: dict) -> str:
             pieces.append(
                 f"RPKI {round(100 * (rpki.get('valid') or 0) / total)}% valid"
             )
-    return " · ".join(pieces)
+    return pieces
 
 
-def as_view(as_info: dict | None, link_for: LinkFor | None = None) -> dict | None:
+def _as_hint(as_info: dict) -> str:
+    asn = as_info.get("asn")
+    special = as_info.get("special")
+    if asn is None:
+        return "unknown"
+    if special:
+        return f"AS{asn} · {str(special.get('label', '')).lower()}"
+    return " · ".join([f"AS{asn}", *_as_counts(as_info)])
+
+
+def as_view(
+    as_info: dict | None, link_for: LinkFor | None = None, route: bool = True
+) -> dict | None:
     """The AS panel: the route an address is announced on, its RPKI state, and
     the AS behind it (holder, registry, organization, prefixes, neighbours,
     ASN-DROP). Pure, over `lookup.address_as_info` / `as_info_for_asn`'s dict.
@@ -1593,14 +1608,17 @@ def as_view(as_info: dict | None, link_for: LinkFor | None = None) -> dict | Non
     'Unknown: <reason>' (muted) when its dataset could not be used and
     'Not in <dataset>' when it could. A special-purpose number (`special`)
     keeps Route and RPKI, names itself and says what it is for; the sections
-    it leaves out are not gaps, so no Unknown row is drawn for them."""
+    it leaves out are not gaps, so no Unknown row is drawn for them.
+
+    `route` False leaves out the Route and RPKI rows, which describe an
+    address: the /AS<n> page lists the AS's prefixes instead."""
     if not as_info:
         return None
     asn = as_info.get("asn")
     special = as_info.get("special")
     attribution = as_info.get("attribution") or []
     as_href = _href(link_for, f"AS{asn}") if asn is not None else None
-    rows = _as_route_rows(as_info, link_for)
+    rows = _as_route_rows(as_info, link_for) if route else []
     lists: dict = {}
 
     if special:
@@ -1775,6 +1793,175 @@ def as_view(as_info: dict | None, link_for: LinkFor | None = None) -> dict | Non
         "rows": rows,
         "lists": lists,
         "attribution": attribution,
+    }
+
+
+def _as_page_list(
+    as_info: dict, key: str, one: str, many: str, link_for: LinkFor | None
+) -> dict:
+    """One neighbour list of the /AS<n> page: every entry the answer carries
+    (upstreams whole, downstreams and peers capped at ASINFO_LIST_LIMIT), the
+    total, and what to say when there is none to list."""
+    section = as_info.get(key)
+    if section is None:
+        reason = _as_absent(as_info, ("caida_rel",))
+        return {"hint": "unknown", "entries": [], "empty": reason, "note": None}
+    if isinstance(section, list):
+        entries, total = section, len(section)
+    else:
+        entries, total = section.get("list") or [], section.get("count") or 0
+    note = None
+    if total > len(entries):
+        note = f"Showing {len(entries):,} of {total:,}."
+    return {
+        "hint": f"{total:,} {one if total == 1 else many}" if total else "none",
+        "entries": [
+            {
+                "asn": entry.get("asn"),
+                "name": entry.get("name"),
+                "href": _href(link_for, f"AS{entry.get('asn')}"),
+            }
+            for entry in entries
+        ],
+        "empty": f"No {many}",
+        "note": note,
+    }
+
+
+def _as_page_prefixes(as_info: dict) -> dict:
+    """The /AS<n> page's announced prefixes, each with its RPKI state and the
+    RIS peers that see it, capped at ASINFO_LIST_LIMIT with the total."""
+    prefix_list = as_info.get("prefix_list")
+    if prefix_list is None:
+        reason = _as_absent(as_info, ("ris_v4", "ris_v6"))
+        return {"hint": "unknown", "rows": [], "empty": reason, "note": None}
+    entries = prefix_list.get("list") or []
+    total = prefix_list.get("count") or 0
+    rows = []
+    for entry in entries:
+        rpki = entry.get("rpki") or {}
+        state = rpki.get("state")
+        text = _RPKI_STATES.get(state, "Unknown")
+        if state == "invalid" and rpki.get("reason"):
+            text += f": {rpki['reason']}"
+        peers = entry.get("ris_peers")
+        rows.append(
+            {
+                "prefix": entry.get("prefix"),
+                "state": text,
+                "tone": _RPKI_TONES.get(state, "default" if state else "muted"),
+                "peers": (
+                    f"{peers:,} RIS peer{'' if peers == 1 else 's'}"
+                    if isinstance(peers, int)
+                    else None
+                ),
+            }
+        )
+    note = None
+    if total > len(entries):
+        note = f"Showing {len(entries):,} of {total:,}."
+    return {
+        "hint": f"{total:,} prefix{'' if total == 1 else 'es'}" if total else "none",
+        "rows": rows,
+        "empty": "No announced prefixes",
+        "note": note,
+    }
+
+
+def _as_special_rows(special: dict) -> list[dict]:
+    """Use, Range, Defined in and Purpose: what a special-purpose number is."""
+    first, last = special.get("first"), special.get("last")
+    span = f"AS{first}" if first == last else f"AS{first} – AS{last}"
+    return [
+        _as_row("Use", [_part(str(special.get("label")))]),
+        _as_row("Range", [_part(span)]),
+        _as_row("Defined in", [_part(str(special.get("defined_in")))]),
+        _as_row("Purpose", [_part(str(special.get("purpose")))]),
+    ]
+
+
+def as_page_view(as_info: dict, link_for: LinkFor | None = None) -> dict:
+    """The /AS<n> page (templates/as.html) over its answer: as_info_for_asn's
+    card with `address` and `elapsed_ms`. Pure, like build_view.
+
+    The hero is the number, its holder and its tags; the AS panel is as_view's
+    card without the Route and RPKI rows, which describe an address; then the
+    neighbour lists and the announced prefixes, each in full as the answer
+    carries them; then Raw JSON. A special-purpose number is its Use, Range,
+    Defined in and Purpose, and nothing else: no dataset was read for it. The
+    page's own number does not link to the page it is on."""
+    asn = as_info.get("asn")
+    target = f"AS{asn}"
+    special = as_info.get("special")
+
+    def link(value: str) -> str | None:
+        return None if link_for is None or value == target else link_for(value)
+
+    if special:
+        label = special.get("label")
+        tags = [{"text": label, "tone": "default"}]
+        title = f"{target} · {label}"
+        description = " · ".join(
+            str(part) for part in (target, label, special.get("purpose")) if part
+        )
+        card = {
+            "hint": _as_hint(as_info),
+            "rows": _as_special_rows(special),
+            "attribution": [],
+        }
+        lists: list[dict] = []
+        prefixes = None
+    else:
+        name = as_info.get("name")
+        registry = as_info.get("registry") or {}
+        tags = [{"text": "ASN", "tone": "default"}]
+        if registry.get("rir"):
+            tags.append({"text": str(registry["rir"]).upper(), "tone": "default"})
+        if as_info.get("announced") is False:
+            tags.append({"text": "NOT ANNOUNCED", "tone": "default"})
+        if as_info.get("asn_drop") is True:
+            tags.append({"text": "ASN-DROP", "tone": "danger"})
+        title = f"{target} · {name}" if name else target
+        description = " · ".join(
+            part
+            for part in (target, name, as_info.get("country"), *_as_counts(as_info))
+            if part
+        )
+        card = as_view(as_info, link, route=False)
+        lists = [
+            {"id": key, "title": label, **_as_page_list(as_info, key, one, many, link)}
+            for key, label, one, many in (
+                ("upstreams", "Upstreams", "provider", "providers"),
+                ("downstreams", "Downstreams", "customer", "customers"),
+                ("peers", "Peers", "peer", "peers"),
+            )
+        ]
+        prefixes = _as_page_prefixes(as_info)
+
+    accordions = [{"id": "as", "title": "AS", "hint": card["hint"]}]
+    accordions += [
+        {"id": item["id"], "title": item["title"], "hint": item["hint"]}
+        for item in lists
+    ]
+    if prefixes is not None:
+        accordions.append(
+            {"id": "prefixes", "title": "Announced prefixes", "hint": prefixes["hint"]}
+        )
+    accordions.append({"id": "raw", "title": "Raw JSON", "hint": "full response"})
+    return {
+        "target": target,
+        "title": f"{title} — WhatIsMyIP",
+        "description": description,
+        # The spelling every link to it uses (main.lookup_href): AS4766.
+        "canonical_path": target,
+        "tags": tags,
+        "holder": None if special else as_info.get("name"),
+        "flag": country_flag(as_info.get("country")),
+        "meta_line": format_meta(as_info.get("elapsed_ms"), None),
+        "card": card,
+        "lists": {item["id"]: item for item in lists},
+        "prefixes": prefixes,
+        "accordions": accordions,
     }
 
 

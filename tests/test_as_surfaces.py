@@ -874,3 +874,11 @@ def test_special_card_with_a_route_keeps_its_route_rows():
     }
     view = viewmodel.as_view(_special_card(route=route, announced=True))
     assert [r["label"] for r in view["rows"]][:2] == ["Route", "RPKI"]
+
+
+def test_a_route_rpki_does_not_cover_reads_not_found(asinfo_enabled):
+    # asinfo spells a route's own state "not-found"; its AS's counts are keyed
+    # not_found. Both read "Not found", never "Unknown".
+    card = asinfo_enabled.for_address("2001:2d8::1")
+    assert card["route"]["origins"][0]["rpki"]["state"] == "not-found"
+    assert _rows(viewmodel.as_view(card))["RPKI"]["value"] == "Not found"
