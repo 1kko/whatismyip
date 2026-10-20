@@ -13,6 +13,8 @@ import os
 
 CAIDA_REL_NAME = "20261001.as-rel2.txt.bz2"
 CAIDA_ORG_NAME = "20261001.as-org2info.jsonl.gz"
+# CAIDA names an organization after one of its ASes; AS4766 is in this one.
+KT_ORG_ID = "@aut-4766-APNIC"
 
 ASNAMES = """\
 174 COGENT-174 - Cogent Communications, US
@@ -73,7 +75,7 @@ CAIDA_ORG = [
         "type": "ASN",
         "asn": "4766",
         "name": "KIXS-AS-KR",
-        "organizationId": "@aut-45400-APNIC",
+        "organizationId": KT_ORG_ID,
         "source": "APNIC",
     },
     {
@@ -87,12 +89,12 @@ CAIDA_ORG = [
         "type": "ASN",
         "asn": "9760",
         "name": "KT-SIBLING",
-        "organizationId": "@aut-45400-APNIC",
+        "organizationId": KT_ORG_ID,
         "source": "APNIC",
     },
     {
         "type": "Organization",
-        "organizationId": "@aut-45400-APNIC",
+        "organizationId": KT_ORG_ID,
         "name": "Korea Telecom",
         "country": "KR",
         "source": "APNIC",
