@@ -882,3 +882,63 @@ def test_a_route_rpki_does_not_cover_reads_not_found(asinfo_enabled):
     card = asinfo_enabled.for_address("2001:2d8::1")
     assert card["route"]["origins"][0]["rpki"]["state"] == "not-found"
     assert _rows(viewmodel.as_view(card))["RPKI"]["value"] == "Not found"
+
+
+def test_page_json_survives_a_comment_opener_in_third_party_text(
+    legs, monkeypatch, tmp_path
+):
+    # An AS name and a WHOIS field are third-party text, and #page-data embeds
+    # both. With only "</" broken, "<!--<script" put the tokenizer in its
+    # double-escaped state: the block's own </script> no longer ended it, and
+    # app.js after it was swallowed. With every < > & a \u escape, nothing in
+    # either block is markup, and both parse back whole.
+    hostile = "<!--<script>x</script>-->"
+    names = ASNAMES.replace("KIXS-AS-KR-KR - Korea Telecom", f"KT {hostile} & Co")
+    manager = build_manager(tmp_path, texts={"asnames": names})
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    whois = AsyncMock(
+        return_value={"source": "rdap", "name": "EXAMPLE", "registrant": hostile}
+    )
+    with patch("lookup.lookup_whois", whois), patch("main.lookup_whois", whois):
+        html = client.get(f"/{KT_IP}", headers=BROWSER).text
+    blocks = dict(
+        re.findall(
+            r'<script type="application/json" id="([a-z-]+)" nonce="[^"]*">(.*?)'
+            r"</script>",
+            html,
+            re.S,
+        )
+    )
+    assert set(blocks) == {"page-data", "map-data"}
+    for name, raw in blocks.items():
+        assert not set(raw) & set("<>&"), name
+    page = json.loads(blocks["page-data"])
+    assert page["as_info"]["name"] == f"KT {hostile} & Co"
+    assert page["whois"]["registrant"] == hostile
+    map_data = json.loads(blocks["map-data"])
+    assert {key: map_data[key] for key in page["map"]} == page["map"]
+    # The scripts after the blocks are still elements of their own.
+    tail = html.split('id="map-data"')[1]
+    assert '<script src="/static/js/app.js"' in tail
+    assert '<script src="/static/js/map.js"' in tail
+
+
+def test_page_scripts_read_the_blocks_with_json_parse():
+    # JSON.parse decodes \u003c back to "<"; a script that read a block's text
+    # any other way would see the escapes. Writing it back (app.js sets
+    # textContent after the WHOIS fill-in) goes through no HTML parser.
+    node = (
+        r'(?:document\.getElementById\("(?:page|map)-data"\)'
+        r"|pageData|pageDataScript|mapDataNode)"
+    )
+    read = re.compile(rf"{node}\.textContent(?!\s*=(?!=))")
+    found = 0
+    for path in ("static/js/app.js", "static/js/map.js", "static/js/fingerprint.js"):
+        source = (ROOT / path).read_text(encoding="utf-8")
+        reads = list(read.finditer(source))
+        assert reads, path
+        for match in reads:
+            assert source[: match.start()].endswith("JSON.parse("), (path, match[0])
+        found += len(reads)
+    assert found == 5

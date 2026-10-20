@@ -590,6 +590,15 @@ def site_domain(request: Request) -> str:
     return host if host and not is_ip else SITE_DOMAIN_FALLBACK
 
 
+def _script_json(data: object, indent: int | None = 2) -> str:
+    """`data` as JSON for a <script type="application/json"> block. Every <, >
+    and & is a \\u escape, so no third-party text in it (a WHOIS field, an AS
+    name) can end the element, or open a "<!--<script" that would make the
+    tokenizer swallow the scripts after it; JSON.parse reads the escapes back."""
+    text = json.dumps(data, indent=indent, default=str)
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 def render_page(request: Request, response_data: dict, is_self: bool):
     """Render browser.html from the server-side view model."""
     whois_data = response_data.get("whois") or {}
@@ -632,21 +641,11 @@ def render_page(request: Request, response_data: dict, is_self: bool):
             "dns_rows": _dns_rows(response_data),
             "headers": response_data.get("headers") or {},
             "whois": whois_display(whois_data),
-            "json_data": json.dumps(response_data, indent=2, default=str).replace(
-                "</", "<\\/"
-            ),
-            "map_data": json.dumps(map_data, default=str).replace("</", "<\\/"),
+            "json_data": _script_json(response_data),
+            "map_data": _script_json(map_data, indent=None),
             "nonce": getattr(request.state, "csp_nonce", ""),
         },
     )
-
-
-def _script_json(data: dict) -> str:
-    """`data` as JSON for a <script type="application/json"> block. Every <, >
-    and & is a \\u escape, so no name a dataset sent can end the element or
-    open a comment inside it; JSON.parse reads the escapes back."""
-    text = json.dumps(data, indent=2, default=str)
-    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
 def render_as_page(request: Request, response_data: dict):
