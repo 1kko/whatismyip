@@ -1432,14 +1432,20 @@ class AsInfoManager:
             {"dataset": i, "label": self._labels[i], "reason": reason}
             for i, reason in reasons.items()
         ]
+        answer["attribution"] = self.attribution(answer["datasets"])
+        return {key: answer[key] for key in ANSWER_KEYS}
+
+    def attribution(self, datasets: dict[str, object]) -> list[str]:
+        """The credits an answer's `datasets` ({id: date}) ask for, each once,
+        in dataset order: its `attribution`. lookup.py asks again for the
+        datasets an answer still shows once it has dropped some sections."""
         attribution: list[str] = []
         for dataset in self.datasets:
-            if dataset.id in reader.used:
-                credit = dataset.credit.format(date=_day(dates[dataset.id]))
+            if dataset.id in datasets:
+                credit = dataset.credit.format(date=_day(datasets[dataset.id]))
                 if credit not in attribution:
                     attribution.append(credit)
-        answer["attribution"] = attribution
-        return {key: answer[key] for key in ANSWER_KEYS}
+        return attribution
 
     def for_address(self, ip: str, fallback_asn: int | None = None) -> dict | None:
         """The announced route covering `ip`, and the AS it describes: the

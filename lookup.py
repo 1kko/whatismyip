@@ -752,11 +752,12 @@ def address_as_info(ip: str, location: dict | None = None) -> dict | None:
     taken from `location` when the caller already has it, otherwise read here,
     as ip_reputation does. `asn_drop` says whether that AS is on Spamhaus
     ASN-DROP, and `special` what the number is for when it is special-purpose
-    (special_asn); the card then keeps the route and drops the AS sections."""
+    (special_asn); the card then keeps the route, drops the AS sections and
+    credits only the datasets the route was read from."""
     if not asinfo_manager.enabled:
         return None
     try:
-        ipaddress.ip_address(ip)
+        address = ipaddress.ip_address(ip)
     except ValueError:
         return None
     if location is None:
@@ -770,6 +771,21 @@ def address_as_info(ip: str, location: dict | None = None) -> dict | None:
         answer["asn_drop"] = reputation_manager.asn_listed(asn)
     else:
         answer.update(dict.fromkeys(_AS_CARD_SECTIONS))
+        # What is left was read from the address's family's RIS dump (an
+        # IPv4-mapped address is read as IPv4), plus the VRPs when a route
+        # was found. The dropped sections read the rest, which must not be
+        # credited for data the card no longer shows.
+        if address.version == 6 and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        kept = {f"ris_v{address.version}"}
+        if answer["route"] is not None:
+            kept.add("rpki")
+        answer["datasets"] = {
+            dataset: date
+            for dataset, date in answer["datasets"].items()
+            if dataset in kept
+        }
+        answer["attribution"] = asinfo_manager.attribution(answer["datasets"])
     answer["special"] = special
     return answer
 

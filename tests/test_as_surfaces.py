@@ -485,14 +485,49 @@ def test_an_ip_routed_from_a_special_asn_keeps_its_route_and_names_the_purpose(
     assert as_info["rpki"] is None
     assert as_info["announced"] is True
     assert as_info["source"] == "route"
+    # Only what the card still shows is credited: the route, from the IPv4
+    # dump, and RPKI's verdict on it. The read of the dropped sections took
+    # in every dataset, CAIDA's included.
+    assert list(raw["datasets"]) == [
+        "asnames",
+        "nro",
+        "ris_v4",
+        "ris_v6",
+        "rpki",
+        "caida_rel",
+        "caida_org",
+    ]
+    assert any("CAIDA" in credit for credit in raw["attribution"])
+    assert as_info["datasets"] == {
+        "ris_v4": raw["datasets"]["ris_v4"],
+        "rpki": raw["datasets"]["rpki"],
+    }
+    assert as_info["attribution"] == [
+        "Source: RIPE NCC",
+        "RPKI data validated by rpki-client.org",
+    ]
+    # The same address written IPv4-mapped is read, and credited, as IPv4.
+    mapped = lookup.address_as_info(f"::ffff:{LEAKED_IP}")
+    assert mapped["route"] == as_info["route"]
+    assert list(mapped["datasets"]) == ["ris_v4", "rpki"]
 
     # GeoLite2's number is special-purpose and no route covers the address.
     fallback = lookup.address_as_info(UNANNOUNCED_IP, {"asn_number": 4200000000})
     assert fallback["source"] == "geolite2"
     assert fallback["route"] is None
+    assert fallback["announced"] is False
     assert fallback["special"]["code"] == "private_asn"
     for section in AS_SECTIONS:
         assert fallback[section] is None, section
+    # No route, so no RPKI verdict to credit: only the dump that says so.
+    assert list(fallback["datasets"]) == ["ris_v4"]
+    assert fallback["attribution"] == ["Source: RIPE NCC"]
+    # An IPv6 address is answered from the IPv6 dump, not the IPv4 one that
+    # the dropped prefix counts also read.
+    v6 = lookup.address_as_info("2a00:1450::1", {"asn_number": 64512})
+    assert v6["announced"] is False
+    assert list(v6["datasets"]) == ["ris_v6"]
+    assert v6["attribution"] == ["Source: RIPE NCC"]
 
 
 class _Exploding:
