@@ -1219,8 +1219,9 @@ def test_as_info_tool_returns_the_compact_card(asinfo_enabled, monkeypatch):
         result = _call(mcp_client, "as_info", {"asn": "AS4766"})
         assert not result.get("isError")
         card = result["structuredContent"]
-        # "as4766" and the bare number are the same AS.
-        for spelling in ("as4766", " 4766 "):
+        # "as4766" and the bare number, as a string or a JSON integer, are the
+        # same AS.
+        for spelling in ("as4766", " 4766 ", 4766):
             again = _call(mcp_client, "as_info", {"asn": spelling})
             assert again["structuredContent"] == card
         full = _call(mcp_client, "as_info", {"asn": "4766", "full": True})
@@ -1257,7 +1258,18 @@ def test_as_info_tool_explains_a_special_asn(asinfo_enabled):
 
 
 @pytest.mark.parametrize(
-    "value", ["", "AS", "AS4294967296", "AS99999999999", "example.com", "4766x", "-1"]
+    "value",
+    [
+        "",
+        "AS",
+        "AS4294967296",
+        "AS99999999999",
+        "example.com",
+        "4766x",
+        "-1",
+        -1,
+        4294967296,
+    ],
 )
 def test_as_info_tool_refuses_malformed_asns(asinfo_enabled, value):
     with _with_as_info_tool(), TestClient(main.app) as mcp_client:

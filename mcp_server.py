@@ -990,12 +990,12 @@ whoami_caller.__doc__ = (
 mcp.tool(title="Caller address", annotations=_READ_ONLY_LOCAL)(whoami_caller)
 
 
-async def as_info(asn: str, full: bool = False) -> dict[str, Any]:
+async def as_info(asn: str | int, full: bool = False) -> dict[str, Any]:
     """An autonomous system: its name, country, registry record, organization
     and sibling ASes, how many prefixes it announces and their RPKI coverage,
     its upstreams, the number of downstreams and peers, and whether it is on
-    Spamhaus ASN-DROP. Pass "AS4766", "as4766" or "4766". With `full`, the
-    downstream, peer and announced-prefix lists come too, capped; `count`
+    Spamhaus ASN-DROP. Pass "AS4766", "as4766", "4766" or 4766. With `full`,
+    the downstream, peer and announced-prefix lists come too, capped; `count`
     always gives the true total.
 
     The data is read from public BGP and RPKI datasets (RIPE RIS, RIPE NCC,
@@ -1006,7 +1006,8 @@ async def as_info(asn: str, full: bool = False) -> dict[str, Any]:
     answers with `special`, what it is for, and no network data. A malformed
     or out-of-range number is refused.
     """
-    text = asn.strip().lower()
+    # A model may send the number as a JSON integer; it is read as its digits.
+    text = str(asn).strip().lower()
     if text.isascii() and text.isdigit():
         text = "as" + text
     number = parse_asn(text)
