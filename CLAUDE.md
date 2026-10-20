@@ -214,7 +214,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `viewmodel.dmarc_policy()`, so the field and the page's Mail row agree.
   `as_block` is the `/AS<n>` text block (the card's scalars and its
   upstreams); `route_prefix`, `route_origin` and `rpki_state` are address
-  fields, in the text block because the data is local. `-` is "no value", `?` is "the
+  fields, in the text block because the data is local, but only while AS
+  information is on (`block_fields(kind, as_info=)`, which `main` passes
+  `asinfo_manager.enabled`): off, a `-` there would read as "not announced",
+  so they read `-` only when asked for by name. `-` is "no value", `?` is "the
   lookup failed": `field_values` marks the registration fields for a broken
   RDAP/WHOIS lookup, every field read from the address (chosen by leg, so a
   new field follows; `_NAME_LEGS`, whois and the dns sweep, ask about the

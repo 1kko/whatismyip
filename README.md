@@ -666,6 +666,10 @@ record sweep of the PTR name, which the block skips.
 `dmarc_policy` is asked for by name only too: it needs the DNS record sweep,
 which the text block skips. It has no counterpart in the MCP tools, whose
 `dns_records` returns the record itself.
+`route_prefix`, `route_origin` and `rpki_state` are in the block, after `cidr`,
+only while AS information is on (`ASINFO_ENABLED`). With it off they are left
+out, where a `-` would read as "not announced", and read `-` when asked for by
+name.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
 own address; `cert_*` and the domain-only fields are `-`, and so is

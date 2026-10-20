@@ -87,9 +87,6 @@ DOMAIN_KEYS = [
     "asn_number",
     "asn_name",
     "cidr",
-    "route_prefix",
-    "route_origin",
-    "rpki_state",
     "registrar",
     "registrant",
     "domain_expires",
@@ -109,11 +106,11 @@ IP_KEYS = [
     "asn_number",
     "asn_name",
     "cidr",
-    "route_prefix",
-    "route_origin",
-    "rpki_state",
     "registrant",
 ]
+# The suite runs with ASINFO_ENABLED=false, which leaves out the route fields;
+# with AS information on they follow cidr (test_as_surfaces).
+ROUTE_KEYS = ["route_prefix", "route_origin", "rpki_state"]
 
 
 @contextlib.contextmanager
@@ -242,6 +239,15 @@ class TestTargetText:
             "cert_expires": "2099-11-09",
         }
         assert int(values["cert_days_remaining"]) > 0
+
+    def test_the_route_fields_follow_cidr_only_while_as_information_is_on(self):
+        # Off, a "-" would read as "not announced" when nothing was looked up.
+        for kind, keys in (("domain", DOMAIN_KEYS), ("ip", IP_KEYS)):
+            assert textfmt.block_fields(kind, as_info=False) == keys
+            at = keys.index("cidr") + 1
+            assert textfmt.block_fields(kind, as_info=True) == (
+                keys[:at] + ROUTE_KEYS + keys[at:]
+            )
 
     def test_an_ip_answers_the_ip_block(self):
         with _legs():
@@ -745,7 +751,7 @@ class TestResolutionField:
         with _legs():
             response = client.get("/example.com?format=text", headers=CURL)
         assert [key for key, _ in _block(response)] == DOMAIN_KEYS
-        assert textfmt.block_fields("domain") == DOMAIN_KEYS
+        assert textfmt.block_fields("domain", as_info=False) == DOMAIN_KEYS
 
     def test_an_ip_and_the_self_route_answer_a_dash_for_nothing(self):
         """An IP's "literal" is not shown: the field is a domain's, and a

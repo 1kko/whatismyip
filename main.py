@@ -2106,7 +2106,7 @@ async def _target_fields(target: str, names: list[str] | None, fmt: str):
     kind = "domain" if classify_target(target) == "domain" else "ip"
     block = names is None
     if block:
-        names = block_fields(kind)
+        names = block_fields(kind, as_info=asinfo_manager.enabled)
     try:
         data = await gather(target, legs=legs_for(names, kind))
     except InvalidTargetError as exc:

@@ -1169,9 +1169,15 @@ def test_route_fields_are_dashes_when_not_announced(asinfo_enabled, legs):
 
 def test_route_fields_are_dashes_when_the_feature_is_off(legs):
     # Like the reputation fields with REPUTATION_ENABLED=false: no leg answers,
-    # so the fields read "-" rather than being refused.
+    # so the fields read "-" rather than being refused, when asked for by name.
     body = client.get(f"/{KT_IP}", params={"fields": ROUTE_FIELDS}, headers=CURL).json()
     assert body == {"route_prefix": None, "route_origin": None, "rpki_state": None}
+    # The text block leaves them out: there, "-" would read as not announced.
+    for target in (KT_IP, DOMAIN):
+        lines = client.get(f"/{target}?format=text", headers=CURL).text.splitlines()
+        keys = [line.split(":", 1)[0] for line in lines]
+        assert "cidr" in keys
+        assert not set(keys) & set(ROUTE_FIELDS.split(","))
 
 
 def test_self_fields_answer_the_route_fields(asinfo_enabled, legs, monkeypatch):

@@ -51,7 +51,7 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "cidr": (frozenset({"geo"}), _BOTH),
     # The announced route covering the address (RIPE RIS), the origin the AS
     # card describes, and that origin's RPKI state. A local read, so they cost
-    # nothing and sit in the block.
+    # nothing and sit in the block, while AS information is on (block_fields).
     "route_prefix": (_ROUTE_LEGS, _BOTH),
     "route_origin": (_ROUTE_LEGS, _BOTH),
     "rpki_state": (_ROUTE_LEGS, _BOTH),
@@ -186,12 +186,17 @@ def parse_fields(values: list[str]) -> list[str] | None:
     return names
 
 
-def block_fields(kind: str) -> list[str]:
-    """The keys of the text block for a target of `kind` ("domain" or "ip")."""
+def block_fields(kind: str, *, as_info: bool) -> list[str]:
+    """The keys of the text block for a target of `kind` ("domain" or "ip").
+    The route fields are among them only with `as_info`, AS information on
+    (main passes asinfo_manager.enabled): off, nothing reads them, and a "-"
+    would read as "not announced". Asked for by name they still read "-", as
+    the risk fields do with the reputation lists off."""
+    left_out = _NOT_IN_BLOCK if as_info else _NOT_IN_BLOCK | set(_ROUTE_FIELDS)
     return [
         name
         for name, (_, kinds) in FIELDS.items()
-        if kind in kinds and name not in _NOT_IN_BLOCK
+        if kind in kinds and name not in left_out
     ]
 
 
