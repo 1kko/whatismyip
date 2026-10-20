@@ -259,8 +259,8 @@ REPUTATION_CHECK_INTERVAL_SECONDS = int(
 # AS information (asinfo.py): the route an address sits in and the AS that
 # originates it, from bulk public datasets the scheduler downloads into
 # ASINFO_DIR and builds into one SQLite file. A lookup reads that file and
-# sends nothing anywhere. ASINFO_ENABLED=false drops the `as` section, the page
-# panel and the downloads.
+# sends nothing anywhere. ASINFO_ENABLED=false drops the `as_info` key, the
+# page panel and the downloads.
 ASINFO_ENABLED = os.getenv("ASINFO_ENABLED", "true").lower() != "false"
 ASINFO_DIR = os.getenv("ASINFO_DIR", os.path.join(_APP_DIR, "data", "asinfo"))
 # RIS rows seen by fewer peers are mostly leaks and more-specific noise.

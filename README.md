@@ -1114,7 +1114,10 @@ at the top level, with the full lists:
 
 The card describes the route's origin AS; an address no RIS peer routes
 (`announced: false`) is described by GeoLite2-ASN's number instead, and `source`
-says which. RPKI state belongs to a (prefix, origin) pair, so a prefix announced
+says which. With no number there either, `asn` and `source` are `null` and so is
+every AS section, because there is no AS to describe: the page stops after the
+AS row, and MCP's compact card is the route, `announced`, `source` and
+`unavailable` alone. RPKI state belongs to a (prefix, origin) pair, so a prefix announced
 by two origins lists both, each with its own verdict. `location.asn_*` is
 unchanged. `asn_drop` is read on the card's AS, `reputation`'s on GeoLite2's
 number, so the two can differ for one address when the ASNs do. An address
@@ -1127,8 +1130,8 @@ replaces the AS sections.
 | Registry, assignment date | NRO extended delegated statistics | daily |
 | Routes and peers seen | RIPE RIS whois dumps (IPv4, IPv6) | daily |
 | RPKI VRPs | rpki-client's `rpki.csv` | daily |
-| Upstreams, downstreams, peers | CAIDA AS relationships | checked daily, downloaded when CAIDA lists a newer file (monthly) |
-| Organization, siblings | CAIDA AS organizations | checked daily, downloaded when CAIDA lists a newer file (quarterly) |
+| Upstreams, downstreams, peers | CAIDA AS relationships | checked daily, downloaded when CAIDA's listing names a different newest file (monthly) |
+| Organization, siblings | CAIDA AS organizations | checked daily, downloaded when CAIDA's listing names a different newest file (quarterly) |
 
 They are downloaded into `data/asinfo/` by the scheduler, never by a lookup, and
 built into one SQLite file that is swapped in whole: a lookup is a read of that
@@ -1147,7 +1150,7 @@ not live routing: they are one or more days old, and say nothing about
 reputation. Credits are on the page and on `/privacy`: "Source: RIPE NCC",
 "RPKI data validated by rpki-client.org", and CAIDA's citations, "The CAIDA UCSD
 AS Relationships Dataset" and "The CAIDA UCSD AS Organizations Dataset", each
-with the file's date.
+with the file's date and, on the page, a link to its dataset page.
 
 ### Response codes
 

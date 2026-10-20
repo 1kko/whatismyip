@@ -253,7 +253,7 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `AsInfoManager` owns the seven datasets (`default_datasets()`), their
   downloads (`refresh()`: due check, `.requested` stamp, streamed copy,
   `min_rows`, build, `os.replace()`), the SQLite file they are built into, and
-  the reads: `for_address(ip, geolite_asn)` (longest-prefix route, RPKI state
+  the reads: `for_address(ip, fallback_asn)` (longest-prefix route, RPKI state
   per origin, then the card of the route's origin AS, else GeoLite2's) and
   `for_asn(asn, full=)`. Also `status()`, `stale_datasets()`, `hosts()` (for
   `/privacy`; it lists the hosts whether or not the manager is enabled, so
@@ -283,7 +283,11 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `mcp_server.py` reuses its certificate helpers without a cycle. The one
   decision that needs `lookup` — which values link to their own lookup —
   comes in as the `link_for` argument (`main.lookup_href`); the default
-  `None` links nothing. `dmarc_policy()` is the one reading of a name's
+  `None` links nothing. Likewise the dataset page each of CAIDA's credit
+  lines links to comes in as `credit_links`
+  (`AsInfoManager.credit_links`), so the view draws the JSON's plain
+  `attribution` as `[{text, href?}]` without importing `asinfo`.
+  `dmarc_policy()` is the one reading of a name's
   DMARC record (the Mail row in the DNS column): exactly one record, and an
   inherited one's `sp=` for a subdomain.
 - `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
@@ -689,7 +693,7 @@ below by text:
 - `@media (hover: none)` hides the `/` badge (`kbd.search__hint`) on
   touch-first devices. The keydown handler in `app.js` stays, so an attached
   keyboard still has the shortcut. `_search.html` is one include, so
-  `browser.html`, `error.html` and `privacy.html` all get the rule.
+  `browser.html`, `as.html`, `error.html` and `privacy.html` all get the rule.
 - Accordion titles never wrap (`.accordion__title`), and a hint that does not
   fit truncates with an ellipsis (`.hint`). The cut is visual: the DOM text
   stays whole for a screen reader, and the span's `title` repeats it, so
@@ -783,7 +787,7 @@ below by text:
 
 #### Web manifest and theme colour
 
-`static/site.webmanifest`, linked from all three templates' `<head>`:
+`static/site.webmanifest`, linked from all four templates' `<head>`:
 - It is what "Install app" and "Add to Home Screen" read: `name` WhatIsMyIP,
   `short_name` My IP, `description` = `viewmodel.SITE_DESCRIPTION`,
   `id`/`start_url`/`scope` `/`, `display: standalone`, `theme_color` and
@@ -803,14 +807,14 @@ below by text:
   or its My IP shortcut, is one self lookup, the same as a visit; `/privacy` is
   a fixed answer outside the lookup budget. `start_url` carries no
   `?utm_source=`.
-- All three templates carry `<meta name="theme-color" content="#0B0D12">` and
+- All four templates carry `<meta name="theme-color" content="#0B0D12">` and
   `<meta name="color-scheme" content="dark">` under the viewport meta. Android
   Chrome's address bar and Safari's tab bar take the first; the second draws
   scrollbars and other unstyled controls dark, also on an error page whose
   stylesheet a banned address cannot fetch. One value each, because the CSS
   has no light branch (`TestDesignTokens.test_no_light_mode_branch`); a light
   theme would add `media="(prefers-color-scheme: ...)"` variants.
-  `TestThemeColor` pins both on all three templates.
+  `TestThemeColor` pins both on all four templates.
 
 #### MCP endpoint
 
@@ -900,10 +904,11 @@ below by text:
   a catch-all: `startswith("/mcp")` also matches the reachable page
   `/mcpfoo.com`. Always match the exact surface (`path == "/mcp" or
   path.startswith("/mcp/")`).
-- Never type tool names into `templates/browser.html`. The `mcp-tools` meta
-  tag and the Raw JSON panel's tool list render `registered_tool_names()`, so
-  they follow `tools/list`, including `subdomains` dropping out under
-  `SUBDOMAIN_ENABLED=false`.
+- Never type tool names into a template. The `mcp-tools` meta tag (in
+  `templates/_agent_discovery.html`, the agent-discovery block `browser.html`
+  and `as.html` both include) and the Raw JSON panel's tool list render
+  `registered_tool_names()`, so they follow `tools/list`, including
+  `subdomains` dropping out under `SUBDOMAIN_ENABLED=false`.
 - `server.json` is the official MCP Registry entry, published by hand through
   `.github/workflows/mcp-publish.yml` with GitHub OIDC. Never switch it to
   `mcp-publisher login http`: the registry would fetch
@@ -944,8 +949,9 @@ whatismyip/
 │   ├── as.html          # /AS<n>: the AS card, its lists and prefixes
 │   ├── _raw_json.html   # the Raw JSON panel, shared by browser.html and as.html
 │   ├── privacy.html     # /privacy, filled from the constants the code runs on
-│   ├── _search.html     # search box included by browser.html and error.html (app.js finds it by id)
-│   └── _footer.html     # footer included by all three pages
+│   ├── _agent_discovery.html # the <head>'s service-doc and mcp-*/api-* tags, shared by browser.html and as.html
+│   ├── _search.html     # search box included by every page (app.js finds it by id)
+│   └── _footer.html     # footer included by all four pages
 ├── static/
 │   ├── css/whatismyip.css  # design tokens + layout (dark only); jsoneditor.css is vendored
 │   ├── js/app.js           # search, copy, accordions, WHOIS fill-in, subdomain panel, lazy JSONEditor
@@ -1157,7 +1163,8 @@ card line carries (`asinfo.Dataset.credit`):
   gzip`: daily. "RPKI data validated by rpki-client.org".
 - CAIDA AS relationships (`YYYYMM01.as-rel2.txt.bz2`) and organizations
   (`YYYYMMDD.as-org2info.jsonl.gz`): the directory listing is read daily and a
-  file is downloaded only when the listing names a newer one than the copy.
+  file is downloaded only when the newest name the listing gives differs from
+  the copy's.
   "The CAIDA UCSD AS Relationships Dataset, <file date>" and "... AS
   Organizations Dataset, <file date>", the date being the file's own.
 - Spamhaus ASN-DROP is not downloaded here: `ReputationManager.asn_listed`
@@ -1165,7 +1172,10 @@ card line carries (`asinfo.Dataset.credit`):
 
 **Download rules.** Each request's time is written to `<file>.requested`
 before the request is sent, so a failed request and a restart both count, and a
-dataset is not asked again within `ASINFO_RETRY_SECONDS`. A download is
+dataset is not asked again within `ASINFO_RETRY_SECONDS`. A dataset is due half
+of `ASINFO_CHECK_INTERVAL_SECONDS` before its daily interval is up: the job runs
+on that interval, and without the slack the daily datasets drift into separate
+runs, each one a rebuild. A download is
 streamed to `<file>.tmp` under a byte cap per dataset (NRO is 57 MB, so
 `reputation.MAX_LIST_BYTES` would be too small), refused when it ends short of
 its `Content-Length` (`http.client` answers a dropped connection with an early
@@ -1193,7 +1203,11 @@ is in the card's `unavailable` with its reason, and its section is `None`. A
 `None` section whose dataset is in `unavailable` reads **Unknown**; with the
 dataset available it reads "Not in <dataset>" (`viewmodel`). Neither is ever
 "0 upstreams" or an empty list. An address no RIS peer routes is `route: null`
-and `announced: false`, which is a finding, not a gap. A fresh volume (enabled,
+and `announced: false`, which is a finding, not a gap. An address with no AS
+(`asn` None: no route, and GeoLite2 has no number) has every AS section `None`
+because there is no AS: the panel stops after its AS row (hint `not announced`,
+or `unknown` when the route data could not be read), and MCP's compact card is
+`{asn, route, announced, source, unavailable}`. A fresh volume (enabled,
 no database yet) answers with every section `None` and every dataset
 unavailable, and `/healthz` says `asinfo_unavailable` only after the first
 build attempt (`AsInfoManager.build_attempted`) or when a database file exists
@@ -1216,7 +1230,9 @@ RPKI state; its `as_info` carries `special` and the AS sections are `None`,
 and only the datasets the route came from are credited.
 
 **Performance and size.** Reads run inline on the event-loop thread, like
-GeoIP; nothing in them is slow enough to need a pool. The build runs in the
+GeoIP; each is an indexed lookup, so none needs a pool. The prefix lengths a
+longest-prefix match walks are in `route_plen`, written at build, so the first
+read of a new file scans no routes for them. The build runs in the
 scheduler's thread. Measured on real data (2026-10-20, macOS, not yet on the
 Debian image): a refresh of all seven datasets takes about 72 s, raises the
 process's peak RSS by about 55 MB, leaves about 241 MB in `data/asinfo/`
@@ -1225,7 +1241,9 @@ beside the old one. SQLite's build temp files (about 140 to 210 MB, `PRAGMA
 temp_store = FILE`) go to the system temp directory, not the volume; nothing
 sets `SQLITE_TMPDIR`.
 
-**Credits and terms.** The card carries the credit lines above, and
+**Credits and terms.** The card carries the credit lines above, CAIDA's two
+linked to their dataset pages on the panel and the `/AS<n>` page
+(`Dataset.credit_url`; the JSON's `attribution` stays plain text), and
 `/privacy` the hosts (`asinfo_manager.hosts()`, shown only when the manager is
 enabled), that nothing is downloaded for a particular lookup, and, when CAIDA's
 datasets are in use, their citations with links to their dataset pages. CAIDA's terms ask that a
@@ -1276,7 +1294,7 @@ A single stage on `python:3.12-slim`, pinned by digest:
    drop to the non-root `appuser`. A new top-level module ships on its own; a
    new top-level directory needs its own `COPY`
 4. `SOURCE_COMMIT` (build arg or Coolify's runtime env) becomes `/healthz`
-   `version` and OTel `service.version`, and the three templates' stylesheet
+   `version` and OTel `service.version`, and the four templates' stylesheet
    URL carries it as `?v=` (`APP_VERSION`, a Jinja global set in `main.py`)
 5. `HEALTHCHECK` runs `healthcheck.py`; the entrypoint is
    `opentelemetry-instrument uvicorn main:app --host 0.0.0.0 --port 8000
