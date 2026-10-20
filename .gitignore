@@ -185,6 +185,8 @@ data/tld/
 # IP reputation lists (reputation.py): downloaded at runtime, and Spamhaus's
 # terms do not cover republishing them.
 data/reputation/
+# AS information datasets (asinfo.py) and the SQLite file built from them.
+data/asinfo/
 # Subdomain cache (SQLite + WAL sidecars). A local cache of crt.sh data,
 # rebuilt on demand; never part of the source tree.
 data/subdomains.sqlite3*

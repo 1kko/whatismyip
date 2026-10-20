@@ -256,6 +256,54 @@ REPUTATION_RETRY_SECONDS = int(os.getenv("REPUTATION_RETRY_SECONDS", "3600"))
 REPUTATION_CHECK_INTERVAL_SECONDS = int(
     os.getenv("REPUTATION_CHECK_INTERVAL_SECONDS", "600")
 )
+# AS information (asinfo.py): the route an address sits in and the AS that
+# originates it, from bulk public datasets the scheduler downloads into
+# ASINFO_DIR and builds into one SQLite file. A lookup reads that file and
+# sends nothing anywhere. ASINFO_ENABLED=false drops the `as` section, the page
+# panel and the downloads.
+ASINFO_ENABLED = os.getenv("ASINFO_ENABLED", "true").lower() != "false"
+ASINFO_DIR = os.getenv("ASINFO_DIR", os.path.join(_APP_DIR, "data", "asinfo"))
+# RIS rows seen by fewer peers are mostly leaks and more-specific noise.
+ASINFO_MIN_RIS_PEERS = int(os.getenv("ASINFO_MIN_RIS_PEERS", "10"))
+# Past this age a daily dataset no longer answers (three missed refreshes).
+ASINFO_MAX_AGE_HOURS = float(os.getenv("ASINFO_MAX_AGE_HOURS", "72"))
+# CAIDA publishes monthly (relationships) and about quarterly (organizations);
+# the age is counted from the file's own date.
+ASINFO_CAIDA_REL_MAX_AGE_DAYS = float(os.getenv("ASINFO_CAIDA_REL_MAX_AGE_DAYS", "75"))
+ASINFO_CAIDA_ORG_MAX_AGE_DAYS = float(os.getenv("ASINFO_CAIDA_ORG_MAX_AGE_DAYS", "200"))
+# CAIDA's terms are for non-commercial use: off drops the two CAIDA datasets.
+ASINFO_CAIDA_ENABLED = os.getenv("ASINFO_CAIDA_ENABLED", "true").lower() != "false"
+# Cap for the downstream, peer and prefix lists in an answer.
+ASINFO_LIST_LIMIT = int(os.getenv("ASINFO_LIST_LIMIT", "100"))
+# How soon a failed download is tried again, and how often the scheduler
+# checks which datasets are due (a check makes no request unless one is).
+ASINFO_RETRY_SECONDS = int(os.getenv("ASINFO_RETRY_SECONDS", "3600"))
+ASINFO_CHECK_INTERVAL_SECONDS = int(os.getenv("ASINFO_CHECK_INTERVAL_SECONDS", "3600"))
+ASINFO_ASNAMES_URL = os.getenv(
+    "ASINFO_ASNAMES_URL", "https://ftp.ripe.net/ripe/asnames/asn.txt"
+)
+ASINFO_NRO_URL = os.getenv(
+    "ASINFO_NRO_URL",
+    "https://ftp.ripe.net/pub/stats/ripencc/nro-stats/latest/nro-delegated-stats",
+)
+ASINFO_RIS_V4_URL = os.getenv(
+    "ASINFO_RIS_V4_URL", "https://www.ris.ripe.net/dumps/riswhoisdump.IPv4.gz"
+)
+ASINFO_RIS_V6_URL = os.getenv(
+    "ASINFO_RIS_V6_URL", "https://www.ris.ripe.net/dumps/riswhoisdump.IPv6.gz"
+)
+# Fetched with Accept-Encoding: gzip (5 MB on the wire).
+ASINFO_RPKI_URL = os.getenv(
+    "ASINFO_RPKI_URL", "https://console.rpki-client.org/rpki.csv"
+)
+# Directory listings: the newest dated file in each is the dataset.
+ASINFO_CAIDA_REL_URL = os.getenv(
+    "ASINFO_CAIDA_REL_URL",
+    "https://publicdata.caida.org/datasets/as-relationships/serial-2/",
+)
+ASINFO_CAIDA_ORG_URL = os.getenv(
+    "ASINFO_CAIDA_ORG_URL", "https://publicdata.caida.org/datasets/as-organizations/"
+)
 # The grade (none/low/medium/high) is the band the summed weights of the
 # signals found fall in. The defaults give the rule: on Spamhaus DROP or
 # ASN-DROP is high; a Tor exit is medium (anonymity, not malice); a VPN low; a
