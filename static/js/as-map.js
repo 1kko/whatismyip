@@ -199,7 +199,7 @@ function initMap() {
     });
   });
 
-  if (!data.approx) wireBubbles(map, live, data, markers);
+  if (!data.approx) wireBubbles(map, figure, live, data, markers);
   wireWheel(map, live);
 
   // The static picture's own description, for the map that replaces it.
@@ -220,7 +220,7 @@ function initMap() {
   tiles.addTo(map);
 }
 
-function wireBubbles(map, live, data, markers) {
+function wireBubbles(map, figure, live, data, markers) {
   function pick(point) {
     var points = markers.map(function (marker, index) {
       var at = map.latLngToContainerPoint(marker.getLatLng());
@@ -259,6 +259,14 @@ function wireBubbles(map, live, data, markers) {
     var index = pick(event.containerPoint);
     if (index !== -1) open(index, false);
   });
+  // Above 900px the node sits on the map, over Leaflet's whole map pane and
+  // so over any bubble: it steps aside while one is open.
+  map.on("popupopen", function () {
+    figure.classList.add("as-map--bubble");
+  });
+  map.on("popupclose", function () {
+    figure.classList.remove("as-map--bubble");
+  });
   map.on("mousemove", function (event) {
     live.classList.toggle("as-map__live--hit", pick(event.containerPoint) !== -1);
   });
@@ -280,18 +288,16 @@ function wireBubbles(map, live, data, markers) {
   });
 }
 
-/* The wheel zooms only once the visitor has clicked or tabbed into the map,
- * and stops when the pointer or the focus leaves it: scrolling the page past
- * the map never zooms it. */
+/* The wheel zooms only once the visitor has pressed the mouse in the map, and
+ * stops when the pointer or the focus leaves it: scrolling the page past the
+ * map never zooms it, nor does tabbing into it with the pointer resting on
+ * it. */
 function wireWheel(map, live) {
   function wheel(on) {
     if (on) map.scrollWheelZoom.enable();
     else map.scrollWheelZoom.disable();
   }
-  map.on("click", function () {
-    wheel(true);
-  });
-  live.addEventListener("focusin", function () {
+  map.on("mousedown", function () {
     wheel(true);
   });
   live.addEventListener("mouseleave", function () {

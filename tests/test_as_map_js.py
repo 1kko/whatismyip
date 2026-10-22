@@ -5,10 +5,12 @@ Leaflet does not run in node, so the file keeps what it decides in pure
 functions (the widest zoom, which dot a click picks, the world copy a dot is
 drawn on, what a key does, the bubble) and node runs those against a fake
 document the way tests/test_as_page_js.py runs as.js. Leaflet is not loaded
-here, so the map itself never starts; a browser checks the wiring.
+here, so the map itself never starts; a browser checks the wiring, and the
+few wiring rules that decide behaviour are pinned by text.
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +18,7 @@ from pathlib import Path
 import pytest
 
 AS_MAP_JS = Path("static/js/as-map.js").resolve()
+CSS = Path("static/css/whatismyip.css").resolve()
 NODE = shutil.which("node")
 needs_node = pytest.mark.skipif(NODE is None, reason="needs node")
 
@@ -248,3 +251,43 @@ def test_nothing_starts_without_leaflet():
     """L is undefined here: the file defines its helpers and reads nothing
     from the page, so a failed Leaflet load leaves the static map alone."""
     assert run_js("[typeof L, lookups]") == ["undefined", []]
+
+
+def test_the_node_steps_aside_for_an_open_bubble_on_desktop():
+    """Leaflet keeps its bubbles inside its map pane, one stacking context, so
+    no z-index puts the node over the dots and under a bubble. Above 900px,
+    where the node sits on the map, it hides while a bubble is open; at 900px
+    and below it hangs above the canvas, clear of every bubble, and stays."""
+    css = CSS.read_text(encoding="utf-8")
+    desktop = re.search(r"@media \(min-width: 901px\) \{(.*?)\n\}", css, re.S)
+    assert desktop
+    assert re.search(
+        r"\.as-map--bubble \.as-map__node\s*\{\s*visibility:\s*hidden;",
+        desktop.group(1),
+    )
+    source = AS_MAP_JS.read_text(encoding="utf-8")
+    assert re.search(
+        r'map\.on\("popupopen", function \(\) \{\s*figure\.classList\.add\("as-map--bubble"\)',
+        source,
+    )
+    assert re.search(
+        r'map\.on\("popupclose", function \(\) \{\s*figure\.classList\.remove\("as-map--bubble"\)',
+        source,
+    )
+
+
+def test_only_a_press_in_the_map_turns_the_wheel_on():
+    """The design: off until the visitor clicks into the map. Focus alone (a
+    tab into the map with the pointer resting on it) must not turn it on;
+    leaving it, by pointer or by focus, turns it off."""
+    source = AS_MAP_JS.read_text(encoding="utf-8")
+    wheel = source.split("function wireWheel")[1].split("\n}\n")[0]
+    calls = re.findall(
+        r'(?:map\.on|live\.addEventListener)\("([a-z]+)", function \(\w*\) \{\s*(.*?)\n  \}\);',
+        wheel,
+        re.S,
+    )
+    turns_on = [event for event, body in calls if "wheel(true)" in body]
+    turns_off = [event for event, body in calls if "wheel(false)" in body]
+    assert turns_on == ["mousedown"]
+    assert sorted(turns_off) == ["focusout", "mouseleave"]

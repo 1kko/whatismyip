@@ -1234,8 +1234,8 @@ table.records--dns td:nth-child(4) {
   transform-box: fill-box;
   transform-origin: center;
 }
-/* Over the live map's panes and controls too, where the upstream fan ends,
-   and never in the way of a drag or a click on a dot under it. */
+/* Over the live map's tiles, dots and controls too, where the upstream fan
+   ends, and never in the way of a drag or a click on a dot under it. */
 .as-map__node {
   position: absolute;
   top: 50%;
@@ -1243,6 +1243,13 @@ table.records--dns td:nth-child(4) {
   z-index: 1001;
   transform: translateY(-50%);
   pointer-events: none;
+}
+/* Leaflet keeps its bubbles inside its map pane, one stacking context with
+   the dots, so no z-index puts the node between them. Where the node sits on
+   the map, it steps aside while a bubble is open (as-map.js); at 900px and
+   below it hangs above the canvas, clear of every bubble. */
+@media (min-width: 901px) {
+  .as-map--bubble .as-map__node { visibility: hidden; }
 }
 .as-map__caption {
   align-self: start;
