@@ -37,7 +37,11 @@ def test_the_budget_caps_the_reads():
     prefixes = [f"30.{(2 * i) // 256}.{(2 * i) % 256}.0/24" for i in range(5000)]
     calls = []
     asmap.footprint(prefixes, lambda ip: calls.append(ip) or None, budget=2000)
-    assert len(calls) == 2000
+    sampled = [a for a, _ in asmap.sample_addresses(prefixes, budget=2000)]
+    assert len(sampled) == 2000
+    # the sample reads come first; every unsampled prefix then costs one more
+    assert calls[:2000] == sampled
+    assert len(calls) == 2000 + 3000
 
 
 def test_samples_follow_size_one_per_slash_24_at_most():
@@ -66,7 +70,17 @@ def test_footprint_splits_city_country_and_unplaced_space():
     assert fp["country_level_share"] == 0.25 and fp["unplaced_share"] == 0.25
     # 20.x and 21.x are the same city within 0.1 degree: one dot, weighted mean.
     assert fp["cities"] == [
-        {"name": "Seoul", "country": "KR", "lat": 37.585, "lon": 126.985, "share": 0.5}
+        {
+            "name": "Seoul",
+            "country": "KR",
+            "lat": 37.585,
+            "lon": 126.985,
+            "share": 0.5,
+            "prefixes": [
+                {"prefix": "20.0.0.0/24", "here": 1.0, "address": "20.0.0.1"},
+                {"prefix": "21.0.0.0/24", "here": 1.0, "address": "21.0.0.1"},
+            ],
+        }
     ]
 
 
@@ -105,3 +119,92 @@ def test_an_unnamed_place_is_country_level_whatever_its_radius():
 
     fp = asmap.footprint(["20.0.0.0/24"], default_record, budget=4)
     assert fp["cities"] == [] and fp["country_level_share"] == 1.0
+
+
+SEOUL = {
+    "lat": 37.57,
+    "lon": 126.98,
+    "accuracy_km": 10,
+    "city": "Seoul",
+    "country": "KR",
+}
+BUSAN = {
+    "lat": 35.18,
+    "lon": 129.08,
+    "accuracy_km": 10,
+    "city": "Busan",
+    "country": "KR",
+}
+KR_ONLY = {"lat": 36.5, "lon": 127.8, "accuracy_km": 500, "city": None, "country": "KR"}
+
+
+def split_place(ip):
+    """20.0-63 Seoul, 20.64-127 Busan, 20.128-191 country level, 20.192-255 unplaced."""
+    a, b = (int(x) for x in ip.split(".")[:2])
+    if a != 20:
+        return None
+    return [SEOUL, BUSAN, KR_ONLY, None][b // 64]
+
+
+def _pairs(fp, name):
+    return next(c["prefixes"] for c in fp["cities"] if c["name"] == name)
+
+
+# budget 4 over 20.0.0.0/8 samples 20.0.0.0, 20.64.0.0, 20.128.0.0, 20.192.0.0
+
+
+def test_a_prefix_spanning_cities_appears_under_each_with_its_share():
+    fp = asmap.footprint(["20.0.0.0/8"], split_place, budget=4)
+    assert _pairs(fp, "Seoul") == [
+        {"prefix": "20.0.0.0/8", "here": 0.25, "address": "20.0.0.1"}
+    ]
+    assert _pairs(fp, "Busan") == [
+        {"prefix": "20.0.0.0/8", "here": 0.25, "address": "20.64.0.0"}
+    ]
+    # 0.25, not 0.5: the country-level and unplaced samples are in the denominator
+
+
+def test_a_more_specific_is_judged_on_the_samples_inside_it():
+    fp = asmap.footprint(["20.0.0.0/8", "20.64.0.0/24"], split_place, budget=4)
+    assert _pairs(fp, "Busan") == [
+        {
+            "prefix": "20.64.0.0/24",
+            "here": 1.0,
+            "address": "20.64.0.1",
+        },  # here desc first
+        {"prefix": "20.0.0.0/8", "here": 0.25, "address": "20.64.0.0"},
+    ]
+    assert [p["prefix"] for p in _pairs(fp, "Seoul")] == ["20.0.0.0/8"]
+
+
+def test_an_unsampled_prefix_gets_one_extra_read_and_joins_a_drawn_city():
+    calls = []
+    fp = asmap.footprint(
+        ["20.0.0.0/8", "20.1.0.0/24"],
+        lambda ip: calls.append(ip) or split_place(ip),
+        budget=1,
+    )
+    assert calls == ["20.0.0.0", "20.1.0.1"]
+    assert {"prefix": "20.1.0.0/24", "here": 1.0, "address": "20.1.0.1"} in _pairs(
+        fp, "Seoul"
+    )
+
+
+def test_an_extra_read_outside_the_drawn_cities_attaches_nowhere():
+    fp = asmap.footprint(["20.0.0.0/8", "20.65.0.0/24"], split_place, budget=1)
+    assert [c["name"] for c in fp["cities"]] == ["Seoul"]  # no Busan dot is made
+    assert [p["prefix"] for p in _pairs(fp, "Seoul")] == ["20.0.0.0/8"]
+
+
+def test_listed_duplicates_ipv6_and_junk_are_ignored():
+    fp = asmap.footprint(
+        ["20.0.0.0/8", "20.0.0.0/8", "2001:db8::/32", "nonsense"], split_place, budget=4
+    )
+    assert [p["prefix"] for p in _pairs(fp, "Seoul")] == ["20.0.0.0/8"]
+
+
+def test_reads_stay_within_budget_plus_one_per_listed_prefix():
+    calls = []
+    prefixes = [f"20.{i}.0.0/16" for i in range(50)]
+    asmap.footprint(prefixes, lambda ip: calls.append(ip) or split_place(ip), budget=10)
+    assert len(calls) <= 10 + 50
