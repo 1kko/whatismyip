@@ -993,3 +993,400 @@ table.records--dns td:nth-child(4) {
   .footer .mono,
   .footer__links { grid-column: 1; justify-self: center; }
 }
+
+/* The /AS<n> page (as.html): summary first, then the two lists. No map band
+   sits behind its hero, so the band is only as tall as what it holds, which
+   keeps the sentence, the tiles and the upstream graph on the first screen. */
+.band--plain { height: auto; padding-bottom: 24px; }
+.as-summary {
+  max-width: 82ch;
+  margin: 0 0 18px;
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1.6;
+}
+.as-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.as-tile,
+.as-panel {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.as-tile { padding: 14px 16px 16px; }
+.as-tile__label,
+.as-panel__title {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+}
+.as-tile__value {
+  margin-top: 6px;
+  font: 600 24px/1.2 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+.as-tile__sub { margin-top: 4px; color: var(--text-secondary); font-size: 12px; }
+.as-tile .stack-bar { margin-top: 12px; }
+.as-panel { margin-bottom: 10px; padding: 16px 18px 18px; }
+.as-panel__title { margin-bottom: 14px; }
+.as-panel > .api-note { margin: 10px 0 0; font-size: 12px; }
+.as-empty { margin: 0; font-size: 13px; }
+
+/* Composition bars: one segment per part, its tone's colour. Sizes and
+   Family are all tone default, so their parts are told apart by position, in
+   shades of the accent; the legend's swatches follow the same rule. */
+.stack-bar {
+  display: flex;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+.stack-bar > i { display: block; height: 100%; background: currentColor; }
+.stack-bar--sizes > i:nth-child(1),
+.stack-legend--sizes li:nth-child(1) > i,
+.stack-bar--family > i:nth-child(1),
+.stack-legend--family li:nth-child(1) > i { color: var(--accent); }
+.stack-bar--sizes > i:nth-child(2),
+.stack-legend--sizes li:nth-child(2) > i { color: #5B8CFFC2; }
+.stack-bar--sizes > i:nth-child(3),
+.stack-legend--sizes li:nth-child(3) > i { color: #5B8CFF8F; }
+.stack-bar--sizes > i:nth-child(4),
+.stack-legend--sizes li:nth-child(4) > i { color: #5B8CFF61; }
+.stack-bar--sizes > i:nth-child(5),
+.stack-legend--sizes li:nth-child(5) > i { color: #5B8CFF3D; }
+.stack-bar--family > i:nth-child(2),
+.stack-legend--family li:nth-child(2) > i { color: #AFC6FF; }
+.stack-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.stack-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.stack-legend li > i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.as-glance__bars {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 36px;
+}
+.glance-bar__label { margin-bottom: 7px; font-size: 13px; }
+
+/* A neighbour's or a prefix's own size, beside its number. */
+.size-bar {
+  display: block;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--surface-2);
+}
+.size-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  opacity: 0.85;
+}
+.size-cell { display: flex; align-items: center; gap: 8px; }
+.size-cell .size-bar { flex: 0 0 96px; }
+
+/* The upstream graph: rows, fan and map on one line, centred, so the fan's
+   paths (drawn from each 30px row's middle to the middle of the rows) meet
+   the AS node at the map's left edge. The map spans two rows of the grid,
+   its canvas in the first and its caption in the second (subgrid), so the
+   caption does not push the canvas off that line. */
+.as-graph__body {
+  display: grid;
+  grid-template-columns: minmax(0, 340px) 72px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: center;
+}
+.as-graph__rows { grid-column: 1; grid-row: 1; min-width: 0; }
+.as-graph__fan { grid-column: 2; grid-row: 1; display: block; overflow: visible; }
+.as-graph__fan path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-opacity: 0.5;
+  stroke-width: 1.2;
+}
+.as-graph__row {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) 64px 44px;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding-right: 8px;
+  font-size: 12.5px;
+}
+.as-graph__asn { font-weight: 600; }
+.as-graph__name {
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.as-graph__count {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: right;
+}
+.as-graph__more {
+  grid-column: 1 / -1;
+  color: var(--accent);
+  text-decoration: none;
+}
+.as-graph__more:hover,
+.as-graph__more:focus-visible { text-decoration: underline; }
+.as-graph__node { grid-column: 3; grid-row: 1; justify-self: start; }
+.as-node {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 180px;
+  padding: 6px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  background: var(--surface-2);
+  line-height: 1.3;
+}
+.as-node strong { color: var(--text-primary); font-size: 13px; font-weight: 700; }
+.as-node span {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The address map: one canvas, tiles and dots positioned in percent inside a
+   box of the canvas's aspect ratio, so it scales to any column. The tiles
+   take the lookup map's dark filter and a lighter scrim (no text sits on
+   them but the node). */
+.as-map {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-rows: subgrid;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+}
+/* The tiles clip, not the canvas, so a phone can hang the node above it. */
+.as-map__canvas {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.as-map__tiles { position: absolute; inset: 0; overflow: hidden; border-radius: 9px; }
+.as-map__tiles::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #0B0D1259;
+}
+.as-map__tile {
+  position: absolute;
+  max-width: none;
+  filter: grayscale(1) invert(1) brightness(1) contrast(1.12);
+}
+.as-map__dots { position: absolute; inset: 0; width: 100%; height: 100%; }
+.as-map__dots circle {
+  fill: #34D39966;
+  stroke: #34D399D9;
+  stroke-width: 0.8;
+}
+/* The country pin: "somewhere in this country", a wide dashed halo like the
+   lookup map's approximate pin, never drawn like a city. Scaled about its own
+   centre, so it stays where the view put it. */
+.as-map--approx .as-map__dots circle {
+  fill: #5B8CFF29;
+  stroke: #5B8CFFCC;
+  stroke-width: 0.6;
+  stroke-dasharray: 1.6 1.2;
+  transform: scale(2.5);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.as-map__node {
+  position: absolute;
+  top: 50%;
+  left: 6px;
+  transform: translateY(-50%);
+}
+.as-map__caption {
+  align-self: start;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.as-map__credit { white-space: nowrap; }
+
+/* Controls: each carries `hidden` in the HTML and static/js/as.js reveals it,
+   so a page without JavaScript shows the first rows alone. Their own display
+   rules would otherwise outrank the attribute. */
+.as-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.as-toolbar:has(> :not([hidden])) { margin-bottom: 12px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-secondary);
+  font: 500 12px/1.4 var(--font-sans);
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--text-primary); }
+.chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+.chip:disabled { opacity: 0.45; cursor: default; }
+.chip:focus-visible,
+.as-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chip__count { color: var(--text-muted); font: 500 11px/1 var(--font-mono); }
+.as-filter {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font: 500 12.5px/1.4 var(--font-mono);
+}
+.as-filter::placeholder { color: var(--text-muted); font-family: var(--font-sans); }
+.as-filter:focus { outline: none; border-color: var(--accent); }
+.as-more {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: none;
+  color: var(--accent);
+  font: 500 13px/1.4 var(--font-sans);
+  cursor: pointer;
+}
+.as-more:hover { border-color: var(--accent); }
+.chip[hidden],
+.as-filter[hidden],
+.as-more[hidden] { display: none; }
+
+/* The neighbours and prefixes tables. A table wider than a phone scrolls in
+   its own box, never the page. */
+.as-table-wrap { overflow-x: auto; }
+table.as-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.as-table th {
+  padding: 8px 14px 8px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.as-table td {
+  padding: 8px 14px 8px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.as-table th:last-child,
+.as-table td:last-child { padding-right: 0; }
+.as-table tr:last-child td { border-bottom: 0; }
+.as-table td:first-child { white-space: nowrap; }
+/* An AS number links to its page; a prefix is text. */
+.as-table--neighbours td:first-child { color: var(--accent); }
+.as-table__holder { min-width: 80px; overflow-wrap: anywhere; }
+.as-table__country { white-space: nowrap; }
+.relation {
+  display: inline-block;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 18px;
+}
+.relation--upstream { border-color: #5B8CFF80; color: var(--accent); }
+.as-details table.records { margin-bottom: 8px; }
+/* "Organization" is the longest label, wider than the 90px a phone gives the
+   records table's first column: it widens the column instead of breaking. */
+.as-details table.records td:first-child { white-space: nowrap; }
+
+/* The same 16px floor as the search box and the subdomain filter, after the
+   base rule above for the same reason as theirs. */
+@media (max-width: 900px) {
+  .as-filter { font-size: 16px; }
+  .as-summary { font-size: 14px; }
+  .as-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .as-tile { padding: 12px 14px 14px; }
+  .as-tile__value { font-size: 20px; }
+  .as-panel { padding: 14px 14px 16px; }
+  /* One column: the rows, then the map with the node at its top-left. The
+     fan has nowhere to run, so it goes. */
+  .as-graph__body { grid-template-columns: minmax(0, 1fr); row-gap: 14px; }
+  .as-graph__fan { display: none; }
+  .as-graph__rows,
+  .as-graph__node,
+  .as-map { grid-column: 1; grid-row: auto; }
+  .as-map { display: block; }
+  .as-graph__row { padding-right: 0; }
+  /* The node on one line just above the map's top-left corner: over the
+     canvas it would hide whatever city sits there. */
+  .as-map__canvas { margin-top: 40px; }
+  .as-map__node { top: auto; bottom: calc(100% + 8px); left: 0; transform: none; }
+  .as-node { flex-direction: row; align-items: baseline; gap: 8px; max-width: 100%; padding: 4px 12px; }
+  .as-glance__bars { grid-template-columns: minmax(0, 1fr); }
+  .as-col-space { display: none; }
+  .as-table th,
+  .as-table td { padding-right: 10px; }
+  .size-cell .size-bar { flex-basis: 48px; }
+}
+/* A phone: each table's own size bars go and their numbers stay, so the
+   holder keeps room to wrap at its spaces and every column fits the box. */
+@media (max-width: 520px) {
+  .as-table { font-size: 12px; }
+  .as-table th { font-size: 9px; letter-spacing: 0.3px; white-space: normal; }
+  .as-table th,
+  .as-table td { padding-right: 6px; }
+  .as-panel { padding: 12px 12px 14px; }
+  .as-table__holder { min-width: 64px; }
+  /* The flag alone: its code is the span's title, and the filter matches it. */
+  .as-table__country .as-flag + .as-cc { display: none; }
+  .size-cell .size-bar { display: none; }
+  /* The relation as a coloured word, without its pill. */
+  .relation { padding: 0; border: 0; font-size: 10.5px; }
+}

@@ -344,12 +344,15 @@ def test_a_dataset_that_cannot_be_read_is_unknown_not_none(monkeypatch, tmp_path
         e for e in manager.for_asn(4766)["unavailable"] if e["dataset"] == "caida_rel"
     ]
     page = client.get("/AS4766", headers=BROWSER).text
-    rows = _rows(page)
-    assert rows["Upstreams"] == f"Unknown: {entry['reason']}"
-    for list_id in ("upstreams", "downstreams", "peers"):
-        panel = page.split(f'id="acc-{list_id}"')[1].split("</details>")[0]
-        assert f"Unknown: {entry['reason']}" in panel
-        assert 'title="unknown">unknown</span>' in panel
+    unknown = f"Unknown: {entry['reason']}"
+    # The graph's upstreams, the Neighbours tile and the table: each says why.
+    assert unknown in _section(page, "as-graph")
+    assert unknown in _section(page, "as-neighbours")
+    tiles = _section(page, "as-tiles").split('<div class="as-tile">')[1:]
+    (neighbours_tile,) = [tile for tile in tiles if ">Neighbours<" in tile]
+    assert ">Unknown<" in neighbours_tile and unknown in neighbours_tile
+    # No zero stands in for the unknown counts, and no chip offers them.
+    assert 'data-relation="' not in _section(page, "as-neighbours")
 
 
 def test_a_fresh_volume_answers_unknown_never_an_error(monkeypatch, tmp_path):
@@ -366,13 +369,46 @@ def test_a_fresh_volume_answers_unknown_never_an_error(monkeypatch, tmp_path):
     assert text.count(": ?\n") == len(text.splitlines()) - 1
     page = client.get("/AS4766", headers=BROWSER)
     assert page.status_code == 200
-    rows = _rows(page.text)
-    assert rows["Holder"] == rows["Upstreams"] == "Unknown: not downloaded yet"
-    prefixes = page.text.split('id="acc-prefixes"')[1].split("</details>")[0]
-    assert "Unknown: not downloaded yet" in prefixes
+    rows = _rows(_section(page.text, "as-details"))
+    assert rows["Registry"] == "Unknown: not downloaded yet"
+    for section in ("as-graph", "as-neighbours", "as-prefixes"):
+        assert "Unknown: not downloaded yet" in _section(page.text, section), section
+    labels = re.findall(
+        r'<div class="as-tile__value tone-muted">([^<]*)</div>', page.text
+    )
+    assert labels == ["Unknown"] * 4
+    # Nothing places the AS: no prefixes to sample, no country to pin.
+    assert 'id="as-map"' not in page.text
 
 
-def test_as_html_page_names_the_as_and_links_neighbours(asinfo_enabled):
+# Where AS4766's IPv4 space geolocates, in place of a GeoLite2-City read: the
+# suite's GeoIP database is whatever data/ holds, so a page test that draws the
+# map says what the map is of.
+SEOUL_FOOTPRINT = {
+    "cities": [
+        {"name": "Seoul", "country": "KR", "lat": 37.57, "lon": 126.98, "share": 1.0}
+    ],
+    "country_level_share": 0.0,
+    "unplaced_share": 0.0,
+    "sampled_share": 1.0,
+    "samples": 1,
+}
+COUNTRY_LEVEL_ONLY = {
+    "cities": [],
+    "country_level_share": 1.0,
+    "unplaced_share": 0.0,
+    "sampled_share": 1.0,
+    "samples": 2,
+}
+
+
+def _section(html, section_id):
+    """One <section> of the AS page, from its id to its end."""
+    return html.split(f'id="{section_id}"')[1].split("</section>")[0]
+
+
+def test_as_html_page_names_the_as_and_links_neighbours(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
     response = client.get("/AS4766", headers=BROWSER)
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
@@ -410,37 +446,41 @@ def test_as_html_page_names_the_as_and_links_neighbours(asinfo_enabled):
         )
     assert 'href="/AS4766"' not in html
 
-    rows = _rows(html)
-    # The card's AS rows (viewmodel.as_view), without Route and RPKI: those
-    # describe an address.
-    assert "Route" not in rows and "RPKI" not in rows
-    assert rows["AS"] == "AS4766"
-    assert rows["Holder"] == "KIXS-AS-KR-KR - Korea Telecom · KR"
+    # Summary first: the sentence and the four tiles.
+    assert 'id="as-summary"' in html
+    assert "A network in South Korea, registered with APNIC in 1996." in html
+    assert re.findall(r'<div class="as-tile__label">([^<]*)</div>', html) == [
+        "IPv4 space",
+        "Prefixes",
+        "RPKI signed",
+        "Neighbours",
+    ]
+    # The upstream graph and the map (footprint monkeypatched above).
+    graph = _section(html, "as-graph")
+    assert '<a class="lookup-link" href="/AS174" rel="nofollow">AS174</a>' in graph
+    assert 'referrerpolicy="strict-origin" loading="lazy"' in graph
+    assert "© OpenStreetMap contributors · GeoLite2 by MaxMind" in graph
+    # One neighbours table, 10 rows at most, every relation.
+    neighbours = _section(html, "as-neighbours")
+    assert neighbours.count('class="lookup-link"') == 6
+    assert re.findall(r'data-relation="([a-z]+)"', neighbours) == [
+        "all",
+        "upstream",
+        "downstream",
+        "peer",
+    ]
+    # Details keep the card rows and the credits, CAIDA's linked.
+    details = _section(html, "as-details")
+    rows = _rows(details)
     assert rows["Registry"] == "APNIC · KR · assigned 1996-04-22"
     assert rows["Organization"] == "Korea Telecom · 1 sibling AS: AS9760"
-    assert rows["Prefixes"] == "IPv4 2 · IPv6 1"
-    assert rows["RPKI coverage"].startswith("67% valid")
     assert rows["ASN-DROP"] == "Unknown"
-    # The announced prefixes, each with its own RPKI state.
-    assert rows["211.252.0.0/15"] == "Valid · 330 RIS peers"
-    assert rows["211.252.112.0/24"] == "Valid · 326 RIS peers"
-    assert rows["2001:2d8::/32"] == "Not found · 120 RIS peers"
-    assert '<span class="tone-success">Valid</span>' in html
 
-    # The full lists, one panel each, every entry with its name.
-    upstreams = html.split('id="acc-upstreams"')[1].split("</details>")[0]
-    assert (
-        '<tr><td><a class="lookup-link" href="/AS174" rel="nofollow">AS174</a></td>'
-        '<td colspan="3">COGENT-174 - Cogent Communications</td></tr>'
-    ) in upstreams
-    assert "Showing" not in upstreams
-
-    # The datasets' credits, after the card; CAIDA's citations link to their
-    # dataset pages, and the JSON keeps the plain lines.
+    # The datasets' credits, after the details rows; CAIDA's citations link to
+    # their dataset pages, and the JSON keeps the plain lines.
     data = client.get("/AS4766", headers=CURL).json()
-    card = html.split('id="acc-as"')[1].split("</details>")[0]
     credits = re.findall(
-        r'<p class="api-note tone-muted">(.*?)</p>', card.split("</table>")[1]
+        r'<p class="api-note tone-muted">(.*?)</p>', details.split("</table>")[1]
     )
     caida = "https://www.caida.org/catalog/datasets/"
     assert data["attribution"] == [
@@ -458,7 +498,8 @@ def test_as_html_page_names_the_as_and_links_neighbours(asinfo_enabled):
         "The CAIDA UCSD AS Organizations Dataset, 2026-10-01</a>",
     ]
 
-    # No map, and none of an address's or a domain's panels.
+    # The page's own map, server-drawn, and none of an address's or a domain's
+    # panels: the lookup page's map band and map.js are not on it.
     for absent in (
         'id="page-map"',
         'id="mobile-map"',
@@ -474,7 +515,7 @@ def test_as_html_page_names_the_as_and_links_neighbours(asinfo_enabled):
     ):
         assert absent not in html, absent
     panels = re.findall(r'<details class="accordion" id="acc-([a-z]+)"', html)
-    assert panels == ["as", "upstreams", "downstreams", "peers", "prefixes", "raw"]
+    assert panels == ["raw"]
 
     # Raw JSON as on a lookup page: the curl line and the JSON answer.
     raw = html.split('id="acc-raw"')[1]
@@ -482,33 +523,92 @@ def test_as_html_page_names_the_as_and_links_neighbours(asinfo_enabled):
     assert 'id="raw-json"' in raw
     assert _without_timing(_page_data(html)) == _without_timing(data)
 
-    # A hint truncates on a phone; its title keeps the whole text.
-    hints = re.findall(
-        r'<span class="hint" id="(hint-[a-z]+)" title="([^"]*)">([^<]*)</span>', html
+    # Every loaded row travels in the page for as.js, beside the JSON answer
+    # rather than in it.
+    payload = json.loads(
+        re.search(r'id="as-lists" nonce="[^"]*">(.*?)</script>', html, re.S).group(1)
     )
-    assert dict((name, text) for name, _, text in hints) == {
-        "hint-as": "AS4766 · 3 prefixes · RPKI 67% valid",
-        "hint-upstreams": "2 providers",
-        "hint-downstreams": "3 customers",
-        "hint-peers": "1 peer",
-        "hint-prefixes": "3 prefixes",
-        "hint-raw": "full response",
-    }
-    for name, title, text in hints:
-        assert title == text, name
+    assert payload["own"] == 4766 and len(payload["neighbours"]["rows"]) == 6
 
 
-def test_long_lists_say_how_many_are_shown(asinfo_enabled, monkeypatch):
-    # The JSON's lists stop at ASINFO_LIST_LIMIT, with the total beside them.
-    monkeypatch.setattr(asinfo, "ASINFO_LIST_LIMIT", 1)
+def test_long_lists_say_how_many_are_loaded(asinfo_enabled, monkeypatch):
+    # The page's lists stop at ASINFO_PAGE_LIMIT per relation and per family,
+    # and say so with the true count beside them.
+    monkeypatch.setattr(asinfo, "ASINFO_PAGE_LIMIT", 1)
     html = client.get("/AS4766", headers=BROWSER).text
-    downstreams = html.split('id="acc-downstreams"')[1].split("</details>")[0]
-    assert downstreams.count('class="lookup-link"') == 1
-    assert "Showing 1 of 3." in downstreams
-    prefixes = html.split('id="acc-prefixes"')[1].split("</details>")[0]
-    assert prefixes.count("RIS peers") == 1
-    assert "Showing 1 of 3." in prefixes
-    assert 'title="3 prefixes">3 prefixes</span>' in prefixes
+    neighbours = _section(html, "as-neighbours")
+    assert "Largest 1 of 3 downstreams loaded." in neighbours
+    assert "Largest 1 of 2 upstreams loaded." in neighbours
+    assert "peers loaded" not in neighbours
+    # The chips and the button count every neighbour, not just the loaded ones.
+    assert "Show all 6 neighbours" in neighbours
+    prefixes = _section(html, "as-prefixes")
+    assert "Largest 1 of 2 IPv4 prefixes loaded." in prefixes
+    assert "Show all 2 prefixes" in prefixes
+    # The graph draws the one loaded upstream and counts the other.
+    graph = _section(html, "as-graph")
+    assert graph.count('class="lookup-link"') == 1
+    assert re.search(
+        r'<a class="as-graph__more" href="#as-neighbours" data-relation="upstream">'
+        r"\+1 more</a>",
+        graph,
+    )
+
+
+def test_no_city_placement_falls_back_to_the_country_pin(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: COUNTRY_LEVEL_ONLY)
+    html = client.get("/AS4766", headers=BROWSER).text
+    assert "the pin marks South Korea, at country level." in html
+    # One dot, at the centroid of the AS's registered country.
+    figure = html.split('id="as-map"')[1].split("</figure>")[0]
+    assert figure.count("<circle") == 1
+
+
+def test_no_country_and_no_placement_draws_no_map(monkeypatch, tmp_path):
+    # AS4766's name line without ", KR": no country to fall back to.
+    manager = build_manager(
+        tmp_path, texts={"asnames": "4766 KIXS-AS-KR-KR - Korea Telecom\n"}
+    )
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: COUNTRY_LEVEL_ONLY)
+    html = client.get("/AS4766", headers=BROWSER).text
+    assert 'id="as-map"' not in html and 'id="as-graph"' in html
+    # The graph ends on the plain node instead.
+    assert '<div class="as-graph__node' in _section(html, "as-graph")
+
+
+def test_the_map_samples_only_the_ipv4_prefixes(asinfo_enabled, monkeypatch):
+    asked = []
+
+    def footprint(prefixes):
+        asked.append(list(prefixes))
+        return SEOUL_FOOTPRINT
+
+    monkeypatch.setattr(main, "as_footprint", footprint)
+    client.get("/AS4766", headers=BROWSER)
+    assert asked == [["211.252.0.0/15", "211.252.112.0/24"]]
+    # JSON and text draw no map, so they sample nothing.
+    client.get("/AS4766", headers=CURL)
+    client.get("/AS4766?format=text")
+    assert len(asked) == 1
+
+
+def test_markup_in_a_name_stays_text_everywhere_on_the_as_page(monkeypatch, tmp_path):
+    # A neighbour (AS174, an upstream: graph row, table row, payload) named
+    # with markup.
+    names = (
+        "174 <img src=x onerror=alert(1)> - Evil, US\n"
+        "4766 KIXS-AS-KR-KR - Korea Telecom, KR\n"
+    )
+    manager = build_manager(tmp_path, texts={"asnames": names})
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    html = client.get("/AS4766", headers=BROWSER).text
+    assert "<img src=x" not in html.split('id="page-data"')[0]
+    assert "&lt;img src=x onerror=alert(1)&gt;" in _section(html, "as-graph")
+    lists = html.split('id="as-lists"')[1].split("</script>")[0]
+    assert "<" not in lists.split(">", 1)[1]
 
 
 def test_an_as_on_asn_drop_says_so(asinfo_enabled, monkeypatch, tmp_path):
@@ -584,9 +684,12 @@ def test_a_special_asn_page_shows_use_range_and_purpose(asinfo_enabled, monkeypa
         "Defined in": "RFC 6996",
         "Purpose": PRIVATE_USE["purpose"],
     }
-    # No data: no lists, no prefixes and no credits.
+    # No data: no lists, no prefixes and no credits, and none of the summary
+    # page drawn for an assignable number.
     panels = re.findall(r'<details class="accordion" id="acc-([a-z]+)"', html)
     assert panels == ["as", "raw"]
+    for absent in ('id="as-summary"', 'id="as-tiles"', 'id="as-lists"', "as.js"):
+        assert absent not in html, absent
     assert 'class="api-note tone-muted">Source' not in html
     assert 'title="AS64512 · private use">AS64512 · private use</span>' in html
     assert 'href="/AS64512"' not in html
@@ -676,12 +779,14 @@ def test_an_unknown_asn_is_a_200_saying_so(asinfo_enabled):
     assert "<title>AS9999 — WhatIsMyIP</title>" in html
     hero = _hero(html)
     assert '<span class="tag tone-default">NOT ANNOUNCED</span>' in hero
-    rows = _rows(html)
-    assert rows["Holder"] == "Not in RIPE NCC AS names"
+    rows = _rows(_section(html, "as-details"))
     assert rows["Registry"] == "Not in NRO delegated statistics"
     assert rows["Organization"] == "Not in CAIDA AS organizations"
-    assert "No announced prefixes" in html.split('id="acc-prefixes"')[1]
-    assert "No providers" in html.split('id="acc-upstreams"')[1]
+    # Known to have none: a finding, said as one, never "Unknown".
+    assert "No announced prefixes" in _section(html, "as-prefixes")
+    assert "No upstreams in CAIDA&#39;s data" in _section(html, "as-graph")
+    assert "No neighbours in CAIDA&#39;s data" in _section(html, "as-neighbours")
+    assert "Unknown" not in _section(html, "as-prefixes")
 
 
 def test_as_lookup_takes_no_gate_slot(asinfo_enabled, monkeypatch):

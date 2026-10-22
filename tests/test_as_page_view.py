@@ -280,6 +280,7 @@ def test_map_view_draws_city_dots_and_says_what_is_left_out():
     )
     assert view["credit"] == "© OpenStreetMap contributors · GeoLite2 by MaxMind"
     assert view["alt"] == "Where its IPv4 addresses geolocate: Seoul 71%"
+    assert view["approx"] is False
     assert all(
         t["url"].startswith("https://tile.openstreetmap.org/") for t in view["tiles"]
     )
@@ -295,6 +296,8 @@ def test_map_view_country_fallback_caption():
         "No city-level placement for its IPv4 addresses; "
         "the pin marks South Korea, at country level."
     )
+    # A country's centroid is drawn as "around here", never as a city.
+    assert view["approx"] is True
     assert viewmodel.as_map_view(BASE, None) is None
 
 
@@ -381,9 +384,20 @@ def test_page_view_keeps_details_and_credits(as_info, page):
     assert [t["text"] for t in view["tags"]] == ["ASN", "APNIC", "since 1996"]
     assert view["lists_payload"]["own"] == 4766 and view["map"] is None
     assert view["special"] is False and view["prefix_table"]["counts"]["v4"] == 2
+    assert view["node"] == {"label": "AS4766", "sub": "KIXS-AS-KR-KR"}
+    # The card, the four lists and their accordions gave way to the sections
+    # above; only a special-purpose number's page still draws them.
+    for old in ("card", "lists", "prefixes", "accordions"):
+        assert old not in view, old
 
 
 def test_special_page_view_is_unchanged(asinfo_enabled):
     view = viewmodel.as_page_view(lookup.as_info_for_asn(64512))
     assert view["special"] is True
     assert [a["id"] for a in view["accordions"]] == ["as", "raw"]
+    assert [row["label"] for row in view["card"]["rows"]] == [
+        "Use",
+        "Range",
+        "Defined in",
+        "Purpose",
+    ]

@@ -1600,6 +1600,18 @@ class TestMobileLayout:
         assert search_rule.start() > search_base
         assert filter_rule.start() > filter_base
 
+    def test_the_as_page_filters_are_16px_under_900px(self):
+        # The /AS<n> page's neighbour and prefix filters are text inputs too,
+        # so they get the same floor as the subdomain filter, and the same
+        # placement: after their base rule, which shares the specificity.
+        css = CSS.read_text(encoding="utf-8")
+        mobile = _media_blocks(css, "max-width: 900px")
+        assert re.search(r"\.as-filter[^{]*\{[^}]*font-size:\s*16px", mobile)
+        base = re.search(r"^\.as-filter\s*\{([^}]*)\}", css, re.M)
+        assert base and "16px" not in base.group(1)
+        rule = re.search(r"\.as-filter[^{]*\{\s*font-size:\s*16px", css)
+        assert rule.start() > base.start()
+
     def test_the_desktop_box_is_unchanged(self):
         css = CSS.read_text(encoding="utf-8")
         assert re.search(r"\.search-wrap\s*\{[^}]*width:\s*440px", css)

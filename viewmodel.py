@@ -1823,78 +1823,6 @@ def as_view(
     }
 
 
-def _as_page_list(
-    as_info: dict, key: str, one: str, many: str, link_for: LinkFor | None
-) -> dict:
-    """One neighbour list of the /AS<n> page: every entry the answer carries
-    (upstreams whole, downstreams and peers capped at ASINFO_LIST_LIMIT), the
-    total, and what to say when there is none to list."""
-    section = as_info.get(key)
-    if section is None:
-        reason = _as_absent(as_info, ("caida_rel",))
-        return {"hint": "unknown", "entries": [], "empty": reason, "note": None}
-    if isinstance(section, list):
-        entries, total = section, len(section)
-    else:
-        entries, total = section.get("list") or [], section.get("count") or 0
-    note = None
-    if total > len(entries):
-        note = f"Showing {len(entries):,} of {total:,}."
-    return {
-        "hint": f"{total:,} {one if total == 1 else many}" if total else "none",
-        "entries": [
-            {
-                "asn": entry.get("asn"),
-                "name": entry.get("name"),
-                "href": _href(link_for, f"AS{entry.get('asn')}"),
-            }
-            for entry in entries
-        ],
-        "empty": f"No {many}",
-        "note": note,
-    }
-
-
-def _as_page_prefixes(as_info: dict) -> dict:
-    """The /AS<n> page's announced prefixes, each with its RPKI state and the
-    RIS peers that see it, capped at ASINFO_LIST_LIMIT with the total."""
-    prefix_list = as_info.get("prefix_list")
-    if prefix_list is None:
-        reason = _as_absent(as_info, ("ris_v4", "ris_v6"))
-        return {"hint": "unknown", "rows": [], "empty": reason, "note": None}
-    entries = prefix_list.get("list") or []
-    total = prefix_list.get("count") or 0
-    rows = []
-    for entry in entries:
-        rpki = entry.get("rpki") or {}
-        state = rpki.get("state")
-        text = _RPKI_STATES.get(state, "Unknown")
-        if state == "invalid" and rpki.get("reason"):
-            text += f": {rpki['reason']}"
-        peers = entry.get("ris_peers")
-        rows.append(
-            {
-                "prefix": entry.get("prefix"),
-                "state": text,
-                "tone": _RPKI_TONES.get(state, "default" if state else "muted"),
-                "peers": (
-                    f"{peers:,} RIS peer{'' if peers == 1 else 's'}"
-                    if isinstance(peers, int)
-                    else None
-                ),
-            }
-        )
-    note = None
-    if total > len(entries):
-        note = f"Showing {len(entries):,} of {total:,}."
-    return {
-        "hint": f"{total:,} prefix{'' if total == 1 else 'es'}" if total else "none",
-        "rows": rows,
-        "empty": "No announced prefixes",
-        "note": note,
-    }
-
-
 def _as_special_rows(special: dict) -> list[dict]:
     """Use, Range, Defined in and Purpose: what a special-purpose number is."""
     first, last = special.get("first"), special.get("last")
@@ -1918,18 +1846,18 @@ def as_page_view(
     card with `address` and `elapsed_ms`. Pure, like build_view;
     `credit_links` as for as_view.
 
-    The hero is the number, its holder and its tags; the AS panel is as_view's
-    card without the Route and RPKI rows, which describe an address; then the
-    neighbour lists and the announced prefixes, each in full as the answer
-    carries them; then Raw JSON. A special-purpose number is its Use, Range,
-    Defined in and Purpose, and nothing else: no dataset was read for it. The
-    page's own number does not link to the page it is on.
+    The hero is the number, its holder and its tags. Then, for an assignable
+    number: the sentence, the four tiles, the upstream graph ending on the
+    address map, the composition bars, one neighbours table and one prefixes
+    table (their first rows; every loaded row in `lists_payload` for the
+    page's script), the details rows and credits out of as_view's card, and
+    Raw JSON. A special-purpose number is its Use, Range, Defined in and
+    Purpose in one card (`card`, `accordions`), and nothing else: no dataset
+    was read for it. The page's own number does not link to the page it is
+    on.
 
     `page` is AsInfoManager.page_data's dict and `as_map` the map's inputs
-    (see as_map_view); both may be None. A number that is not special also
-    carries the new page's pieces (summary, tiles, graph, map, glance,
-    neighbours, prefix_table, details, lists_payload) beside the card, lists
-    and prefixes the current template draws."""
+    (see as_map_view); both may be None."""
     asn = as_info.get("asn")
     target = f"AS{asn}"
     special = as_info.get("special")
@@ -1949,9 +1877,13 @@ def as_page_view(
             "rows": _as_special_rows(special),
             "attribution": [],
         }
-        lists: list[dict] = []
-        prefixes = None
         extra: dict = {
+            "node": None,
+            "card": card,
+            "accordions": [
+                {"id": "as", "title": "AS", "hint": card["hint"]},
+                {"id": "raw", "title": "Raw JSON", "hint": "full response"},
+            ],
             "summary": None,
             "tiles": [],
             "graph": None,
@@ -1982,18 +1914,12 @@ def as_page_view(
             if part
         )
         card = as_view(as_info, link, route=False, credit_links=credit_links)
-        lists = [
-            {"id": key, "title": label, **_as_page_list(as_info, key, one, many, link)}
-            for key, label, one, many in (
-                ("upstreams", "Upstreams", "provider", "providers"),
-                ("downstreams", "Downstreams", "customer", "customers"),
-                ("peers", "Peers", "peer", "peers"),
-            )
-        ]
-        prefixes = _as_page_prefixes(as_info)
         neighbours = as_neighbour_table(as_info, page, link)
         prefix_table = as_prefix_table(as_info, page)
         extra = {
+            # The graph's end when there is no map to carry it (as_map_view's
+            # node otherwise): the number and its handle.
+            "node": {"label": target, "sub": as_handle(name)},
             "summary": as_summary(as_info, page),
             "tiles": as_tiles(as_info, page),
             "graph": as_upstream_graph(as_info, page, link),
@@ -2012,16 +1938,6 @@ def as_page_view(
             },
         }
 
-    accordions = [{"id": "as", "title": "AS", "hint": card["hint"]}]
-    accordions += [
-        {"id": item["id"], "title": item["title"], "hint": item["hint"]}
-        for item in lists
-    ]
-    if prefixes is not None:
-        accordions.append(
-            {"id": "prefixes", "title": "Announced prefixes", "hint": prefixes["hint"]}
-        )
-    accordions.append({"id": "raw", "title": "Raw JSON", "hint": "full response"})
     return {
         "target": target,
         "title": f"{title} — WhatIsMyIP",
@@ -2032,10 +1948,6 @@ def as_page_view(
         "holder": None if special else as_info.get("name"),
         "flag": country_flag(as_info.get("country")),
         "meta_line": format_meta(as_info.get("elapsed_ms"), None),
-        "card": card,
-        "lists": {item["id"]: item for item in lists},
-        "prefixes": prefixes,
-        "accordions": accordions,
         "special": bool(special),
         **extra,
     }
@@ -2770,7 +2682,8 @@ def as_upstream_graph(
 def as_map_view(as_info: dict, as_map: dict | None) -> dict | None:
     """Where the AS's IPv4 addresses geolocate, as tiles and dots in percent
     and pixels of the canvas `as_map` carries. None without a map, or when
-    there is neither a footprint with cities nor a country to pin."""
+    there is neither a footprint with cities nor a country to pin. `approx`
+    is the country pin: drawn as "around here", never as a city."""
     if not as_map:
         return None
     canvas = as_map.get("canvas") or {}
@@ -2839,6 +2752,7 @@ def as_map_view(as_info: dict, as_map: dict | None) -> dict | None:
         "caption": caption,
         "credit": MAP_CREDIT,
         "alt": alt,
+        "approx": not cities,
     }
 
 

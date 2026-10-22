@@ -31,6 +31,8 @@ from concurrency import LookupBusy, lookup_gate
 from config import (
     ABUSEIPDB_CACHE_TTL,
     APP_VERSION,
+    AS_MAP_CANVAS,
+    AS_MAP_MAX_ZOOM,
     ASINFO_CAIDA_ORG_MAX_AGE_DAYS,
     ASINFO_CAIDA_REL_MAX_AGE_DAYS,
     ASINFO_CHECK_INTERVAL_SECONDS,
@@ -75,6 +77,7 @@ from lookup import (
     PrivateAddressError,
     abuseipdb_client,
     address_as_info,
+    as_footprint,
     as_info_for_asn,
     asinfo_manager,
     cached_whois,
@@ -95,7 +98,7 @@ from lookup import (
     tld_names_manager,
 )
 from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
-from mapgeom import build_canvas
+from mapgeom import build_canvas, build_points_canvas
 from mcp_server import (
     McpBarePathRoute,
     McpDisabled,
@@ -653,20 +656,68 @@ def render_page(request: Request, response_data: dict, is_self: bool):
     )
 
 
+# A registered country's centroid is a country, not a place: framed this far
+# out at most, so the pin reads as "somewhere in South Korea".
+AS_MAP_COUNTRY_ZOOM = 4
+
+
+def _as_map(as_info: dict, page: dict | None) -> dict | None:
+    """The /AS<n> map's inputs for viewmodel.as_map_view: where the AS's IPv4
+    space geolocates by city (lookup.as_footprint, a bounded number of local
+    GeoLite2 reads over page_data's IPv4 prefixes) framed on one canvas; else,
+    with no city-level placement, a pin at the centroid of the AS's registered
+    country (its RIPE AS-names country), `fallback` "country"; else None, and
+    the graph ends on a plain node. IPv4 only, as asmap.footprint samples:
+    an IPv6-only AS gets the country pin."""
+    v4 = (((page or {}).get("prefixes") or {}).get("v4") or {}).get("list") or []
+    prefixes = [entry["prefix"] for entry in v4 if entry.get("prefix")]
+    footprint = as_footprint(prefixes) if prefixes else None
+    points = [
+        (city["lat"], city["lon"], city["share"])
+        for city in (footprint or {}).get("cities") or []
+    ]
+    if points:
+        canvas = build_points_canvas(points, **AS_MAP_CANVAS, max_zoom=AS_MAP_MAX_ZOOM)
+        return {"footprint": footprint, "canvas": canvas, "fallback": None}
+    centroid = gazetteer.countries.get((as_info.get("country") or "").upper())
+    if centroid:
+        canvas = build_points_canvas(
+            [(centroid[0], centroid[1], 1.0)],
+            **AS_MAP_CANVAS,
+            max_zoom=AS_MAP_COUNTRY_ZOOM,
+        )
+        return {"footprint": footprint, "canvas": canvas, "fallback": "country"}
+    return None
+
+
 def render_as_page(request: Request, response_data: dict):
     """Render as.html, the /AS<n> page, from viewmodel.as_page_view. Its
     numbers link to their own pages through lookup_href: the page exists only
-    while AS lookups are on."""
+    while AS lookups are on.
+
+    An assignable number also reads the page's longer lists (page_data, up to
+    ASINFO_PAGE_LIMIT per relation and family) and draws its map (_as_map);
+    both are local reads, made for the page alone, so the JSON answer and the
+    Raw JSON panel stay what ?format=json returns. The loaded rows travel in
+    #as-lists for static/js/as.js. A special-purpose number reads neither."""
     credit_links = asinfo_manager.credit_links(response_data.get("datasets") or {})
+    page = as_map = None
+    if not response_data.get("special"):
+        page = asinfo_manager.page_data(response_data["asn"])
+        as_map = _as_map(response_data, page)
+    view = as_page_view(
+        response_data, lookup_href, credit_links, page=page, as_map=as_map
+    )
     return templates.TemplateResponse(
         request,
         "as.html",
         {
-            "view": as_page_view(response_data, lookup_href, credit_links),
+            "view": view,
             "mcp_tools": registered_tool_names(),
             "api_base": public_base_url(request),
             "site_domain": site_domain(request),
             "json_data": _script_json(response_data),
+            "as_lists": _script_json(view["lists_payload"], indent=None),
             "nonce": getattr(request.state, "csp_nonce", ""),
         },
     )

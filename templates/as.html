@@ -33,12 +33,40 @@
 </head>
 <body>
 {# The /AS<n> page (viewmodel.as_page_view): an AS number, read from the local
-   AS database. It has no address, so no map, and none of an address's or a
-   domain's panels. Every name and number below is a dataset's third-party
-   text, autoescaped like the rest. #}
+   AS database. It has no address, so none of an address's or a domain's
+   panels and not the lookup page's map band; an assignable number's map is
+   its own, drawn by the server below. Every name and number below is a
+   dataset's third-party text, autoescaped like the rest. #}
+{#- A card's rows: label, then the value with each AS number that links
+   wrapped alone in its anchor (viewmodel._as_row's parts). #}
+{%- macro card_rows(rows) %}
+{%- for row in rows %}
+<tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{% for part in row.parts %}{% if part.href %}<a class="lookup-link" href="{{ part.href }}" rel="nofollow">{{ part.text }}</a>{% else %}{{ part.text }}{% endif %}{% endfor %}</td></tr>
+{%- endfor %}
+{%- endmacro %}
+{#- The datasets' own credit lines, CAIDA's linked to their dataset pages as
+   its terms ask. #}
+{%- macro credits(lines) %}
+{%- for credit in lines %}
+<p class="api-note tone-muted">{% if credit.href %}<a href="{{ credit.href }}" rel="noopener noreferrer">{{ credit.text }}</a>{% else %}{{ credit.text }}{% endif %}</p>
+{%- endfor %}
+{%- endmacro %}
+{#- One composition bar: a segment per part, as wide as its share. The text
+   that carries the counts is the legend beside it, so the bar is hidden from
+   a screen reader. A segment's colour is its tone's (currentColor); Sizes and
+   Family are all tone default and tell their parts apart by position
+   (.stack-bar--sizes, .stack-bar--family). #}
+{%- macro stack_bar(segments, key) %}
+<div class="stack-bar stack-bar--{{ key }}" aria-hidden="true">{% for segment in segments %}<i class="tone-{{ segment.tone }}" style="width:{{ segment.pct }}%"></i>{% endfor %}</div>
+{%- endmacro %}
+{#- An AS number in a list: a lookup link unless it is the page's own. #}
+{%- macro as_number(asn, href) %}{% if href %}<a class="lookup-link" href="{{ href }}" rel="nofollow">AS{{ asn }}</a>{% else %}AS{{ asn }}{% endif %}{% endmacro %}
 <div class="progress" id="progress" aria-hidden="true"></div>
 <div class="shell">
-    <section class="band">
+    {#- No map behind the hero, so the band is only as tall as what it holds
+       (band--plain), which keeps the summary and the graph on the first
+       screen. #}
+    <section class="band{% if not view.special %} band--plain{% endif %}">
         {% include "_search.html" %}
 
         <div class="hero inset">
@@ -60,6 +88,10 @@
     </section>
 
     <main class="inset">
+        {% if view.special %}
+        {# A special-purpose number: its Use, Range, Defined in and Purpose, and
+           Raw JSON. No dataset was read for it, so none of the sections an
+           assignable number gets. #}
         <section class="accordions">
             {% for item in view.accordions %}
             <details class="accordion" id="acc-{{ item.id }}"{% if item.id == 'as' %} open{% endif %}>
@@ -70,59 +102,263 @@
                 <div class="accordion__body">
                     {% if item.id == 'raw' %}
                     {% include "_raw_json.html" %}
-                    {% elif item.id == 'as' %}
-                    {# The AS panel's card (viewmodel.as_view) without Route and RPKI,
-                       which describe an address. Every AS number links to its own
-                       page; the anchor wraps the number alone. The credits are the
-                       datasets' own terms, CAIDA's linked to their dataset pages as
-                       its terms ask. #}
-                    <table class="records">
-                        <tbody>
-                        {% for row in view.card.rows %}
-                        <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{% for part in row.parts %}{% if part.href %}<a class="lookup-link" href="{{ part.href }}" rel="nofollow">{{ part.text }}</a>{% else %}{{ part.text }}{% endif %}{% endfor %}</td></tr>
-                        {% endfor %}
-                        </tbody>
-                    </table>
-                    {% for credit in view.card.attribution %}
-                    <p class="api-note tone-muted">{% if credit.href %}<a href="{{ credit.href }}" rel="noopener noreferrer">{{ credit.text }}</a>{% else %}{{ credit.text }}{% endif %}</p>
-                    {% endfor %}
-                    {% elif item.id == 'prefixes' %}
-                    {% set panel = view.prefixes %}
-                    <table class="records">
-                        <tbody>
-                        {% for row in panel.rows %}
-                        <tr><td>{{ row.prefix }}</td><td colspan="3"><span class="tone-{{ row.tone }}">{{ row.state }}</span>{% if row.peers %} · {{ row.peers }}{% endif %}</td></tr>
-                        {% else %}
-                        <tr><td colspan="4" class="tone-muted">{{ panel.empty }}</td></tr>
-                        {% endfor %}
-                        </tbody>
-                    </table>
-                    {% if panel.note %}<p class="api-note tone-muted">{{ panel.note }}</p>{% endif %}
                     {% else %}
-                    {# Upstreams, downstreams or peers: each neighbour links to its
-                       own page, with its name beside it. #}
-                    {% set panel = view.lists[item.id] %}
                     <table class="records">
                         <tbody>
-                        {% for entry in panel.entries %}
-                        <tr><td>{% if entry.href %}<a class="lookup-link" href="{{ entry.href }}" rel="nofollow">AS{{ entry.asn }}</a>{% else %}AS{{ entry.asn }}{% endif %}</td><td colspan="3">{{ entry.name or "" }}</td></tr>
-                        {% else %}
-                        <tr><td colspan="4" class="tone-muted">{{ panel.empty }}</td></tr>
-                        {% endfor %}
+                        {{- card_rows(view.card.rows) }}
                         </tbody>
                     </table>
-                    {% if panel.note %}<p class="api-note tone-muted">{{ panel.note }}</p>{% endif %}
+                    {{- credits(view.card.attribution) }}
                     {% endif %}
                 </div>
             </details>
             {% endfor %}
         </section>
+        {% else %}
+        {# Summary first (the sentence, the tiles, the upstreams and the map, the
+           bars), then the two lists, each its first rows only, then the card's
+           remaining rows and the credits. Without JavaScript that is the whole
+           page; static/js/as.js reveals the controls (each carries `hidden`)
+           and draws more rows from #as-lists. #}
+        {% if view.summary %}
+        <p class="as-summary" id="as-summary">{{ view.summary }}</p>
+        {% endif %}
+
+        <section class="as-tiles" id="as-tiles" aria-label="Counts">
+            {% for tile in view.tiles %}
+            <div class="as-tile">
+                <div class="as-tile__label">{{ tile.label }}</div>
+                {#- The space before each "·" is U+00A0, so a value too wide for a
+                   phone's tile ("855 v4 · 57 v6") wraps after a dot, never
+                   before one. #}
+                <div class="as-tile__value tone-{{ tile.tone }}">{{ tile.value | replace(" · ", " · ") }}</div>
+                {% if tile.sub %}<div class="as-tile__sub">{{ tile.sub }}</div>{% endif %}
+                {% if tile.segments and tile.segments | sum(attribute="count") %}{{ stack_bar(tile.segments, tile.key) }}{% endif %}
+            </div>
+            {% endfor %}
+        </section>
+
+        {# The upstreams, left, run into the AS at the map's left edge: one
+           30px row each (viewmodel.AS_GRAPH_ROW_HEIGHT, which the fan's paths
+           are drawn to), the rows, the fan and the map centred on one line so
+           the paths meet the node. The rows are real text and links; the fan
+           is decoration. A bar is the upstream's own direct customers, never
+           traffic through this AS. #}
+        {% set graph = view.graph %}
+        <section class="as-panel as-graph" id="as-graph" aria-labelledby="as-graph-title">
+            <h2 class="as-panel__title" id="as-graph-title">Upstreams · bar = each one&#39;s own customers</h2>
+            <div class="as-graph__body">
+                <div class="as-graph__rows">
+                    {% if graph.empty %}
+                    <p class="as-empty tone-muted">{{ graph.empty }}</p>
+                    {% else %}
+                    {% for row in graph.rows %}
+                    <div class="as-graph__row">
+                        <span class="as-graph__asn mono">{{ as_number(row.asn, row.href) }}</span>
+                        <span class="as-graph__name"{% if row.handle %} title="{{ row.handle }}"{% endif %}>{% if row.flag %}<span class="as-flag">{{ row.flag }}</span> {% endif %}{{ row.handle or "" }}</span>
+                        <span class="size-bar" aria-hidden="true"><i style="width:{{ row.bar_pct }}%"></i></span>
+                        <span class="as-graph__count mono">{{ row.customers_text }}</span>
+                    </div>
+                    {% endfor %}
+                    {% if graph.more %}
+                    {# The rest are in the table; as.js selects its Upstreams chip. #}
+                    <div class="as-graph__row"><a class="as-graph__more" href="#as-neighbours" data-relation="upstream">+{{ "{:,}".format(graph.more) }} more</a></div>
+                    {% endif %}
+                    {% endif %}
+                </div>
+                {% if graph.fan %}
+                <svg class="as-graph__fan" width="72" height="{{ graph.height }}" viewBox="0 0 72 {{ graph.height }}" aria-hidden="true" focusable="false">
+                    {% for d in graph.fan %}<path d="{{ d }}"/>{% endfor %}
+                </svg>
+                {% endif %}
+                {% if view.map %}
+                {# One canvas, positioned in percent inside a box of its own
+                   aspect ratio, so the same tiles and dots fit the desktop column
+                   and a phone. The tiles come from tile.openstreetmap.org, the
+                   one image host the CSP allows, and need a Referer (OSM refuses
+                   referer-less tiles), hence strict-origin over the page's
+                   no-referrer: the origin, never the path. #}
+                {% set as_map = view.map %}
+                <figure class="as-map{% if as_map.approx %} as-map--approx{% endif %}" id="as-map">
+                    <div class="as-map__canvas" style="aspect-ratio: {{ as_map.width }} / {{ as_map.height }}">
+                        <div class="as-map__tiles">
+                            {% for tile in as_map.tiles %}
+                            <img class="as-map__tile" src="{{ tile.url }}" referrerpolicy="strict-origin" loading="lazy" alt="" style="left:{{ tile.left }}%;top:{{ tile.top }}%;width:{{ tile.w }}%;height:{{ tile.h }}%">
+                            {% endfor %}
+                        </div>
+                        <svg class="as-map__dots" viewBox="0 0 {{ as_map.width }} {{ as_map.height }}" role="img" aria-label="{{ as_map.alt }}">
+                            {% for dot in as_map.dots %}<circle cx="{{ dot.x }}" cy="{{ dot.y }}" r="{{ dot.r }}"/>{% endfor %}
+                        </svg>
+                        {# HTML, not SVG text, so the label keeps its size when
+                           the canvas is scaled down to a phone. #}
+                        <div class="as-map__node as-node"><strong class="mono">{{ as_map.node.label }}</strong>{% if as_map.node.sub %}<span>{{ as_map.node.sub }}</span>{% endif %}</div>
+                    </div>
+                    <figcaption class="as-map__caption">{{ as_map.caption }} <span class="as-map__credit">{{ as_map.credit }}</span></figcaption>
+                </figure>
+                {% else %}
+                {# Nothing places the AS, not even its country: the graph ends
+                   on the plain node. #}
+                <div class="as-graph__node as-node"><strong class="mono">{{ view.node.label }}</strong>{% if view.node.sub %}<span>{{ view.node.sub }}</span>{% endif %}</div>
+                {% endif %}
+            </div>
+        </section>
+
+        <section class="as-panel as-glance" id="as-glance" aria-labelledby="as-glance-title">
+            <h2 class="as-panel__title" id="as-glance-title">Prefixes at a glance</h2>
+            <div class="as-glance__bars">
+                {% for bar in view.glance.bars %}
+                <div class="glance-bar">
+                    <div class="glance-bar__label">{{ bar.label }}</div>
+                    {% if bar.empty %}
+                    <p class="as-empty tone-muted">{{ bar.empty }}</p>
+                    {% else %}
+                    {{ stack_bar(bar.segments, bar.key) }}
+                    <ul class="stack-legend stack-legend--{{ bar.key }}">
+                        {% for segment in bar.segments %}
+                        <li><i class="tone-{{ segment.tone }}" aria-hidden="true"></i>{{ segment.label }} <span class="mono">{{ "{:,}".format(segment.count) }}</span></li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            <p class="api-note tone-muted">{{ view.glance.note }}</p>
+        </section>
+
+        {# Every relation in one table, ordered by each neighbour's own direct
+           customers: the first rows of All are served, every loaded row is in
+           #as-lists. A relation cut at the page limit says so under it. #}
+        {% set table = view.neighbours %}
+        <section class="as-panel as-neighbours" id="as-neighbours" aria-labelledby="as-neighbours-title">
+            <h2 class="as-panel__title" id="as-neighbours-title">Neighbours</h2>
+            {% if table.empty %}
+            <p class="as-empty tone-muted">{{ table.empty }}</p>
+            {% else %}
+            <div class="as-toolbar">
+                {% for chip in table.chips %}
+                <button type="button" class="chip" data-relation="{{ chip.key }}" aria-pressed="{{ 'true' if chip.key == 'all' else 'false' }}" hidden>{{ chip.label }} <span class="chip__count">{{ "{:,}".format(chip.count) }}</span></button>
+                {% endfor %}
+                <input type="search" class="as-filter" id="neighbour-filter" placeholder="Filter by AS, name or country" aria-label="Filter neighbours by AS number, name or country" autocomplete="off" spellcheck="false" hidden>
+            </div>
+            <div class="as-table-wrap">
+                <table class="as-table as-table--neighbours">
+                    <thead>
+                        <tr>
+                            <th scope="col">AS</th>
+                            <th scope="col">Holder</th>
+                            <th scope="col">Country</th>
+                            <th scope="col">Relation</th>
+                            <th scope="col" aria-sort="descending">Its customers ↓</th>
+                            <th scope="col" class="as-col-space">IPv4 space</th>
+                        </tr>
+                    </thead>
+                    <tbody id="neighbour-rows">
+                        {% for row in table.rows %}
+                        <tr>
+                            <td class="mono">{{ as_number(row.asn, row.href) }}</td>
+                            <td class="as-table__holder">{{ row.holder or "" }}</td>
+                            <td class="as-table__country">{% if row.flag %}<span class="as-flag" title="{{ row.country }}">{{ row.flag }}</span> {% endif %}<span class="as-cc">{{ row.country or "—" }}</span></td>
+                            <td><span class="relation relation--{{ row.relation }}">{{ row.relation }}</span></td>
+                            <td><span class="size-cell"><span class="size-bar" aria-hidden="true"><i style="width:{{ row.bar_pct }}%"></i></span><span class="mono">{{ row.customers_text }}</span></span></td>
+                            <td class="as-col-space mono">{{ row.space_text }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <button type="button" class="as-more" id="neighbours-more" hidden>Show all {{ "{:,}".format(table.chips[0].count) }} neighbours</button>
+            {% for line in table.truncated %}
+            <p class="api-note tone-muted">{{ line }}</p>
+            {% endfor %}
+            <p class="api-note tone-muted">{{ table.note }}</p>
+            {% endif %}
+        </section>
+
+        {# The announced prefixes, largest first, one family at a time: IPv4,
+           or IPv6 when it announces no IPv4 (viewmodel.as_prefix_table). #}
+        {% set prefixes = view.prefix_table %}
+        {% set family = "v4" if prefixes.payload.v4 else "v6" %}
+        <section class="as-panel as-prefixes" id="as-prefixes" aria-labelledby="as-prefixes-title">
+            <h2 class="as-panel__title" id="as-prefixes-title">Announced prefixes · largest first</h2>
+            {% if prefixes.empty %}
+            <p class="as-empty tone-muted">{{ prefixes.empty }}</p>
+            {% else %}
+            <div class="as-toolbar">
+                <input type="search" class="as-filter" id="prefix-filter" placeholder="Filter by prefix or address" aria-label="Filter prefixes by prefix or an address inside one" autocomplete="off" spellcheck="false" hidden>
+                {% for key, word in (("v4", "IPv4"), ("v6", "IPv6")) %}
+                <button type="button" class="chip" data-family="{{ key }}" aria-pressed="{{ 'true' if key == family else 'false' }}"{% if not prefixes.counts[key] %} disabled{% endif %} hidden>{{ word }} <span class="chip__count">{{ "{:,}".format(prefixes.counts[key]) }}</span></button>
+                {% endfor %}
+                <button type="button" class="chip" id="prefix-group" aria-pressed="false" hidden>Group by /8</button>
+            </div>
+            <div class="as-table-wrap">
+                <table class="as-table as-table--prefixes">
+                    <thead>
+                        <tr>
+                            <th scope="col">Prefix</th>
+                            <th scope="col">Size</th>
+                            <th scope="col">RIS peers</th>
+                            <th scope="col">RPKI</th>
+                        </tr>
+                    </thead>
+                    <tbody id="prefix-rows">
+                        {% for row in prefixes.rows %}
+                        <tr>
+                            <td class="mono">{{ row.prefix }}</td>
+                            <td><span class="size-cell"><span class="size-bar" aria-hidden="true"><i style="width:{{ row.bar_pct }}%"></i></span><span class="mono">{{ row.size_text }}</span></span></td>
+                            <td class="mono">{{ row.peers_text }}</td>
+                            <td class="tone-{{ row.rpki_tone }}">{{ row.rpki_text }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <button type="button" class="as-more" id="prefixes-more" hidden>Show all {{ "{:,}".format(prefixes.counts[family]) }} prefixes</button>
+            {% for line in prefixes.truncated %}
+            <p class="api-note tone-muted">{{ line }}</p>
+            {% endfor %}
+            {% endif %}
+        </section>
+
+        {# What the AS card says that the sections above do not: Registry,
+           Organization (its sibling ASNs linked) and ASN-DROP, then every
+           dataset's credit. The map's credit stays in its caption. #}
+        <section class="as-panel as-details" id="as-details" aria-labelledby="as-details-title">
+            <h2 class="as-panel__title" id="as-details-title">Details</h2>
+            <table class="records">
+                <tbody>
+                {{- card_rows(view.details.rows) }}
+                </tbody>
+            </table>
+            {{- credits(view.details.attribution) }}
+        </section>
+
+        <section class="accordions">
+            <details class="accordion" id="acc-raw">
+                <summary class="accordion__header">
+                    <span class="accordion__title">Raw JSON</span>
+                    <span class="hint" id="hint-raw" title="full response">full response</span>
+                </summary>
+                <div class="accordion__body">
+                    {% include "_raw_json.html" %}
+                </div>
+            </details>
+        </section>
+        {% endif %}
     </main>
 
     {% include "_footer.html" %}
 </div>
 
 <script type="application/json" id="page-data" nonce="{{ nonce }}">{{ json_data | safe }}</script>
+{% if not view.special %}
+{#- Every loaded neighbour and prefix, compact, for as.js: beside the JSON
+   answer rather than in it, so Raw JSON stays what ?format=json returns.
+   main._script_json escapes <, > and &, as an AS name is third-party text. #}
+<script type="application/json" id="as-lists" nonce="{{ nonce }}">{{ as_lists | safe }}</script>
+{% endif %}
 <script src="/static/js/app.js" nonce="{{ nonce }}" defer></script>
+{% if not view.special %}
+<script src="/static/js/as.js" nonce="{{ nonce }}" defer></script>
+{% endif %}
 </body>
 </html>
