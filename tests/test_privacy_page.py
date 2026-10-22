@@ -236,6 +236,17 @@ class TestContent:
         assert _mentions(text, "tile.openstreetmap.org")
         assert _mentions(text, config.WEBRTC_STUN_HOST)
 
+    def test_the_map_tile_note_mentions_zooming(self):
+        """The AS page's map zooms and pans (static/js/as-map.js), and each
+        move fetches tiles the first view's counts do not cover."""
+        text = _privacy_text()
+        assert _mentions(text, "tile.openstreetmap.org")
+        assert "about 15 requests on a desktop, 6 on a phone" in text
+        assert (
+            "Zooming or moving the map on an AS page fetches more tiles from "
+            "the same host." in text
+        )
+
     def test_no_stun_server_when_the_test_is_off(self):
         text = _privacy_text(WEBRTC_STUN_URL="", WEBRTC_STUN_HOST="")
         assert "STUN" not in text

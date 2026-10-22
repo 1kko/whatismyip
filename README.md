@@ -121,10 +121,12 @@ RDAP registration data and the full TLS certificate, expanded.
 - **Map** — all projection math is server-side and unit-tested. The server emits
   tile URLs with pixel offsets and a projected great-circle polyline for two
   fixed canvases (desktop band and mobile card); the browser only paints them.
-  Coordinates come from GeoLite2-City, with a committed GeoNames gazetteer
-  (city name, then country centroid) for addresses it gives none. A fix
-  GeoLite2 could only place in a country (its 1,000 km centroid for 8.8.8.8, or
-  a block it has no coordinates for) is drawn as a dashed, wider pin, and the
+  The `/AS<n>` map is the exception: a vendored Leaflet zooms and pans it in
+  the browser, over the same server-drawn picture that a browser without
+  JavaScript keeps. Coordinates come from GeoLite2-City, with a committed
+  GeoNames gazetteer (city name, then country centroid) for addresses it gives
+  none. A fix GeoLite2 could only place in a country (its 1,000 km centroid for
+  8.8.8.8, or a block it has no coordinates for) is drawn as a dashed, wider pin, and the
   hero says `approximate · country-level` in place of a city — or
   `registered in … · location unknown` when GeoLite2 had only the country the
   block is registered in (1.1.1.1).
@@ -305,10 +307,16 @@ fails when the page starts writing a character outside the Latin range, which
 then goes into `LATIN` in the script and into the CSS before the script is run
 again, and when a cut outgrows its measured size.
 
+Leaflet 1.9.4, which draws the `/AS<n>` map, is vendored too:
+`static/js/leaflet.js` and `static/css/leaflet.css` are the npm package's
+`dist/leaflet.js` and `dist/leaflet.css`, unchanged, copied after checking the
+tarball against the registry's `dist.integrity`. `tests/test_as_target.py` pins
+their SHA-256, so an upgrade replaces both files and both digests together.
+
 Map tiles come from the single allowlisted host `tile.openstreetmap.org`: the
 browser fetches them directly (no API key, no proxy), which means visitor IPs
 reach OSM — `/privacy` says so, and `© OpenStreetMap contributors` attribution
-is required.
+is required. Zooming or moving the `/AS<n>` map fetches more of them.
 
 Coordinates for the map come from GeoLite2-City. The GeoNames gazetteer above
 covers addresses it gives no coordinates for, and the window before the first
@@ -407,7 +415,8 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # ASINFO_PAGE_LIMIT=1000             # the /AS<n> page's own cap, per relation and prefix family
 # AS_MAP_SAMPLE_BUDGET=2000          # GeoLite2-City reads for one /AS<n> map
 # AS_MAP_MAX_DOTS=200                # city dots drawn on it
-# AS_MAP_MAX_ZOOM=8                  # the map never zooms in past this
+# AS_MAP_MAX_ZOOM=8                  # the map opens no closer than this
+# AS_MAP_ZOOM_LIMIT=10               # the closest a visitor can zoom it
 
 # AbuseIPDB (see "IP reputation" below); off without a key
 # ABUSEIPDB_API_KEY=your_api_key
@@ -536,9 +545,13 @@ one's RPKI state, as a page, as JSON, or as `?format=text`. The page leads with 
 one-sentence summary, four headline tiles, the upstreams beside a map of where
 the AS's IPv4 space geolocates (GeoLite2-City, sampled; tiles come from
 OpenStreetMap through your browser), and then neighbour and prefix tables you can
-filter. The JSON adds each neighbour's `country`, `customers`, `v4_addresses`,
-`v4_prefixes` and `v6_prefixes`. `?fields=` and
-`?subdomains=` are `400`s on it. An AS no dataset knows is a `200` saying so.
+filter. The map zooms and pans, and each city dot opens a bubble with its share
+of the AS's IPv4 space, the prefixes with addresses there and how much of each,
+a button that narrows the prefix table to them, and an address there to look up.
+Without JavaScript the map is a still picture. The JSON adds each neighbour's
+`country`, `customers`, `v4_addresses`, `v4_prefixes` and `v6_prefixes`, and
+carries none of the map's data. `?fields=` and `?subdomains=` are `400`s on it.
+An AS no dataset knows is a `200` saying so.
 
 A special-purpose number (0, `AS_TRANS` 23456, the documentation, private-use and
 reserved ranges) is a `200` too, with `special` saying what it is for and which
@@ -1679,7 +1692,7 @@ whatismyip/
 ├── server.json          # MCP Registry entry
 ├── scripts/             # gazetteer rebuild, font vendoring
 ├── templates/           # browser.html, error.html, privacy.html and shared partials
-├── static/              # css, js, self-hosted fonts, generated geo JSON
+├── static/              # css, js (vendored Leaflet among them), self-hosted fonts, generated geo JSON
 ├── tests/               # pytest suite (TestClient, no running server)
 ├── docs/                # README screenshots; ops/ runbooks (alerts, MCP directories)
 ├── data/                # persistent volume: GeoIP DBs, lists, caches, bans, rules
