@@ -144,6 +144,12 @@ def _attach(
 
 
 def _city_key(found: dict) -> tuple:
+    """The dot a city-level answer joins: GeoLite2's city geoname_id, so the
+    pieces of one city it puts at different points make one dot and two
+    places that share a name stay two; an answer without one falls back to
+    the name on a tenth-of-a-degree grid."""
+    if found.get("geoname_id") is not None:
+        return (found.get("country"), found["geoname_id"])
     return (
         found.get("country"),
         found.get("city"),
@@ -164,10 +170,10 @@ def footprint(
     A sample is city-level by `geo.coordinate_precision`, the site's one
     precision rule, and only when it names a city: GeoLite2's country-default
     record (a centroid with a 200 km radius and no city) is country level.
-    Samples in the same named city (within a tenth of a degree) merge into one
-    dot at their weighted mean. `sampled_share` is the sampled space over all
-    the IPv4 space of `prefixes`, so a page can say how much of the AS the map
-    looked at."""
+    Samples in the same city (`_city_key`) merge into one dot at their
+    weighted mean, named by the record. `sampled_share` is the sampled space
+    over all the IPv4 space of `prefixes`, so a page can say how much of the
+    AS the map looked at."""
     samples = sample_addresses(prefixes, budget)
     total_space = sum(n.num_addresses for n in _collapsed(prefixes))
     sampled = sum(weight for _, weight in samples)
@@ -183,7 +189,8 @@ def footprint(
             country_level += weight
         else:
             key = _city_key(found)
-            entry = cities.setdefault(key, [0.0, 0.0, 0.0])
+            # [weight, weighted lat, weighted lon, name]
+            entry = cities.setdefault(key, [0.0, 0.0, 0.0, found["city"]])
             entry[0] += weight
             entry[1] += found["lat"] * weight
             entry[2] += found["lon"] * weight
@@ -196,14 +203,14 @@ def footprint(
         (
             key,
             {
-                "name": key[1],
+                "name": name,
                 "country": key[0],
                 "lat": round(lat / weight, 4),
                 "lon": round(lon / weight, 4),
                 "share": share(weight),
             },
         )
-        for key, (weight, lat, lon) in cities.items()
+        for key, (weight, lat, lon, name) in cities.items()
     ]
     ranked.sort(
         key=lambda r: (-r[1]["share"], r[1]["name"] or "", r[1]["country"] or "")

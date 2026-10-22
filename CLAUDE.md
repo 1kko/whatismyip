@@ -271,7 +271,14 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   at most `AS_MAP_SAMPLE_BUDGET` addresses over the prefixes by size, and
   `footprint` locates them with a `place` callable (`lookup.as_footprint`
   passes `geo_ip_manager.place`: GeoLite2-City only) and groups them by city, at most `AS_MAP_MAX_DOTS`, each with a
-  share. Nested prefixes are collapsed first (`ipaddress.collapse_addresses`),
+  share. A city is GeoLite2's city `geoname_id` (`_city_key`; `place` carries
+  it): GeoLite2 puts one city's blocks at several points, so a key on the name
+  and a 0.1° grid drew Mapo-gu as three dots of one name, each bubble and
+  filter chip holding a piece of it, while two places that share a name (the
+  Jung-gu of Seoul and of Busan) are two ids. A dot sits at its samples'
+  weighted mean; the shares, the prefixes and the extra reads all join a dot
+  by that key, and an answer without an id keeps the name-and-grid key.
+  Nested prefixes are collapsed first (`ipaddress.collapse_addresses`),
   so no address is sampled or weighed twice. A dot is a named city at city
   precision only: GeoLite2's country-default record (a centroid, radius 200,
   no city name) is country level, so the map never draws a country as a city. Imports the standard library, `config` and `geo` only. IPv4 only; an

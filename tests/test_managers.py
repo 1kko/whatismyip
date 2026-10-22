@@ -88,10 +88,21 @@ class TestPlace:
             "lon": -0.0931,
             "accuracy_km": 10,
             "city": "London",
+            "geoname_id": 2643743,
             "country": "GB",
         }
         assert manager.place("67.43.156.1")["city"] is None  # radius 534
         assert manager.place("10.0.0.1") is None
+
+    def test_place_carries_the_citys_geoname_id(self, tmp_path, monkeypatch):
+        """The /AS<n> map keys a city dot by it (asmap._city_key), so the
+        pieces of one city that GeoLite2 puts at different points are one
+        dot, and two places that share a name stay two."""
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB)
+        assert manager.place("81.2.69.160")["geoname_id"] == 2643743  # London
+        assert manager.place("89.160.20.112")["geoname_id"] == 2694762  # Linköping
+        assert manager.place("216.160.83.56")["geoname_id"] == 5803556  # Milton
+        assert manager.place("67.43.156.1")["geoname_id"] is None  # no city
 
     def test_no_city_database_places_nothing(self, tmp_path, monkeypatch):
         manager = _manager(tmp_path, monkeypatch)

@@ -1,6 +1,8 @@
 """asmap: sampling an AS's IPv4 space and folding the answers into city dots.
 `place` is a fake, so no mmdb is read."""
 
+import pytest
+
 import asmap
 
 
@@ -68,7 +70,8 @@ def test_footprint_splits_city_country_and_unplaced_space():
     )
     assert fp["samples"] == 4 and fp["sampled_share"] == 1.0
     assert fp["country_level_share"] == 0.25 and fp["unplaced_share"] == 0.25
-    # 20.x and 21.x are the same city within 0.1 degree: one dot, weighted mean.
+    # 20.x and 21.x: one name in one 0.1 degree cell, no geoname_id: one dot,
+    # at the weighted mean.
     assert fp["cities"] == [
         {
             "name": "Seoul",
@@ -208,3 +211,79 @@ def test_reads_stay_within_budget_plus_one_per_listed_prefix():
     prefixes = [f"20.{i}.0.0/16" for i in range(50)]
     asmap.footprint(prefixes, lambda ip: calls.append(ip) or split_place(ip), budget=10)
     assert len(calls) <= 10 + 50
+
+
+# A city's geoname_id keys its dot (GeoIpManager.place carries it): GeoLite2
+# puts one city's blocks at several points, and two places can share a name.
+MAPO = {"accuracy_km": 5, "city": "Mapo-gu", "country": "KR", "geoname_id": 1}
+MAPO_WEST = {**MAPO, "lat": 37.54, "lon": 126.84}
+MAPO_EAST = {**MAPO, "lat": 37.56, "lon": 126.96}  # across the 0.1 degree grid
+
+
+def test_one_geoname_at_two_points_is_one_dot_at_their_weighted_mean():
+    def place(ip):
+        # 20.0-191 west, 20.192-255 east
+        return MAPO_EAST if int(ip.split(".")[1]) >= 192 else MAPO_WEST
+
+    fp = asmap.footprint(["20.0.0.0/8"], place, budget=4)
+    assert len(fp["cities"]) == 1
+    (dot,) = fp["cities"]
+    assert (dot["name"], dot["country"], dot["share"]) == ("Mapo-gu", "KR", 1.0)
+    assert dot["lat"] == pytest.approx((3 * 37.54 + 37.56) / 4, abs=1e-4)
+    assert dot["lon"] == pytest.approx((3 * 126.84 + 126.96) / 4, abs=1e-4)
+    assert dot["prefixes"] == [
+        {"prefix": "20.0.0.0/8", "here": 1.0, "address": "20.0.0.1"}
+    ]
+
+
+def test_two_geonames_with_one_name_stay_two_dots():
+    jung_seoul = {
+        **MAPO,
+        "city": "Jung-gu",
+        "geoname_id": 2,
+        "lat": 37.56,
+        "lon": 126.99,
+    }
+    jung_incheon = {**jung_seoul, "geoname_id": 3}  # the same point, rounded
+
+    def place(ip):
+        return jung_incheon if int(ip.split(".")[1]) >= 128 else jung_seoul
+
+    fp = asmap.footprint(["20.0.0.0/8"], place, budget=4)
+    assert [(c["name"], c["share"]) for c in fp["cities"]] == [
+        ("Jung-gu", 0.5),
+        ("Jung-gu", 0.5),
+    ]
+    assert [c["prefixes"][0]["address"] for c in fp["cities"]] == [
+        "20.0.0.1",
+        "20.128.0.0",
+    ]
+
+
+def test_without_a_geoname_id_the_name_on_a_grid_keys_the_dot():
+    west = {k: v for k, v in MAPO_WEST.items() if k != "geoname_id"}
+    east = {**MAPO_EAST, "geoname_id": None}
+
+    def place(ip):
+        return east if int(ip.split(".")[1]) >= 192 else west
+
+    fp = asmap.footprint(["20.0.0.0/8"], place, budget=4)
+    assert [(c["name"], c["share"], c["lat"]) for c in fp["cities"]] == [
+        ("Mapo-gu", 0.75, 37.54),
+        ("Mapo-gu", 0.25, 37.56),
+    ]
+
+
+def test_an_extra_read_joins_its_geonames_dot_wherever_it_is_placed():
+    calls = []
+
+    def place(ip):
+        calls.append(ip)
+        return MAPO_EAST if ip.startswith("20.1.") else MAPO_WEST
+
+    fp = asmap.footprint(["20.0.0.0/8", "20.1.0.0/24"], place, budget=1)
+    assert calls == ["20.0.0.0", "20.1.0.1"]
+    assert [p["prefix"] for p in _pairs(fp, "Mapo-gu")] == [
+        "20.0.0.0/8",
+        "20.1.0.0/24",
+    ]

@@ -448,7 +448,8 @@ class GeoIpManager:
 
     def place(self, ip: str) -> Dict[str, Any] | None:
         """Where GeoLite2-City puts `ip`: coordinates, accuracy radius, English
-        city name and country code, from the City record alone. The /AS<n>
+        city name, the city's geoname_id (the /AS<n> map's dots are keyed by
+        it) and country code, from the City record alone. The /AS<n>
         map reads up to a couple of thousand addresses per page, so this skips
         the ASN read, the geoip2fast fallback and the block arithmetic that
         fetch_location does. None with no City database, no record or no
@@ -476,6 +477,7 @@ class GeoIpManager:
             "lon": loc["longitude"],
             "accuracy_km": loc.get("accuracy_radius"),
             "city": _english_name(record.get("city")),
+            "geoname_id": (record.get("city") or {}).get("geoname_id"),
             "country": country,
         }
 
