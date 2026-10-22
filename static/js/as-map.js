@@ -224,6 +224,8 @@ function initMap() {
       keyboard: !data.approx,
       interactive: !data.approx,
       zIndexOffset: stackOffset(dot.r),
+      // wireRoving pans a focused dot in itself.
+      autoPanOnFocus: false,
     }).addTo(map);
     var element = marker.getElement();
     // The country pin is a picture, not a control: it has no bubble.
@@ -340,9 +342,9 @@ function wireBubbles(map, figure, live, data, markers) {
 }
 
 /* One dot is a Tab stop, the first (the largest) until the focus moves:
- * Leaflet makes every keyboard marker one, and getting past a map of 183 dots
- * would take as many presses. The arrow keys, Home and End move the focus
- * between the dots (stepDot), and the Tab stop goes with it. */
+ * Leaflet makes every keyboard marker one, and getting past a map of a
+ * hundred dots would take a hundred presses. The arrow keys, Home and End
+ * move the focus between the dots (stepDot), and the Tab stop goes with it. */
 function wireRoving(map, data, markers) {
   var current = 0;
   function rove(index) {
@@ -351,10 +353,17 @@ function wireRoving(map, data, markers) {
       marker.getElement().setAttribute("tabindex", i === current ? "0" : "-1");
     });
   }
+  // A dot off the view is brought in whole, with its focus ring. Leaflet's
+  // own pan on focus (off) stops with the dot's centre on the edge.
+  function reveal(index) {
+    var pad = data.dots[index].r + 4;
+    map.panInside(markers[index].getLatLng(), { padding: [pad, pad], animate: false });
+  }
   rove(0);
   markers.forEach(function (marker, index) {
     var element = marker.getElement();
     element.addEventListener("focus", function () {
+      reveal(index);
       if (index !== current) rove(index);
     });
     element.addEventListener("keydown", function (event) {
@@ -364,14 +373,10 @@ function wireRoving(map, data, markers) {
       event.preventDefault();
       var next = stepDot(markers.length, index, event.key);
       if (next === index) return;
-      var target = markers[next];
-      var pad = 2 * data.dots[next].r + 4;
-      // Off the view the dot is brought in first: focusing it there would
-      // scroll Leaflet's overflow-hidden box. The margin holds the dot, its
-      // focus ring and Leaflet's own pan on focus, which reckons the icon
-      // below and right of its point.
-      map.panInside(target.getLatLng(), { padding: [pad, pad], animate: false });
-      target.getElement().focus({ preventScroll: true });
+      // Panned in first: focusing a dot off the view would scroll Leaflet's
+      // overflow-hidden box.
+      reveal(next);
+      markers[next].getElement().focus({ preventScroll: true });
     });
   });
 }

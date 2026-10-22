@@ -1127,19 +1127,22 @@ least 12px, a 24px target). The biggest dot does not win outright: a small dot
 drawn on it would be visible but could not be clicked. Overlapping dots each
 stay reachable once zoomed apart, and each dot is a focusable button that
 Enter or Space opens. Only one dot is a Tab stop (a roving tabindex,
-`wireRoving`): Leaflet makes every keyboard marker one, and a map of 183 dots
-took as many presses to get past. The arrow keys move the focus along the
+`wireRoving`): Leaflet makes every keyboard marker one, and a map of a hundred
+dots took a hundred presses to get past. The arrow keys move the focus along the
 payload's order (largest first) and Home and End to its ends, without
 wrapping (`stepDot`), and the Tab stop goes with the focus. A dot off the view
 is panned in before it takes focus with `preventScroll`: focusing it there
-would scroll Leaflet's overflow-hidden box. A bubble is built from DOM nodes
-and `textContent` (a city name is third-party text), never Leaflet's
-HTML-string popup content. Above 900px the AS node label sits on the map and
-steps aside while a bubble is open; under 520px a page that runs scripts
-gets a square box, so a bubble fits above its dot. Its tiles come through
-Leaflet with `referrerPolicy: "strict-origin"` and the same inverting
-filter, and Leaflet's attribution control is off because the figcaption
-carries `MAP_CREDIT`. Zooming or moving it fetches more tiles, which
+would scroll Leaflet's overflow-hidden box. A dot that takes focus any other
+way (a Tab into the map) is panned in whole by its own focus listener; the
+markers' `autoPanOnFocus` is off, because Leaflet's stops with the dot's
+centre on the edge of the view, half of it and its focus ring cut off. A
+bubble is built from DOM nodes and `textContent` (a city name is third-party
+text), never Leaflet's HTML-string popup content. Above 900px the AS node
+label sits on the map and steps aside while a bubble is open; under 520px a
+page that runs scripts gets a square box, so a bubble fits above its dot. Its
+tiles come through Leaflet with `referrerPolicy: "strict-origin"` and the same
+inverting filter, and Leaflet's attribution control is off because the
+figcaption carries `MAP_CREDIT`. Zooming or moving it fetches more tiles, which
 `/privacy` says while AS information is on (`asinfo_hosts`), as there is no
 AS page otherwise. `tests/test_as_map_js.py` runs the pure parts in node;
 Leaflet does not run there, so the wiring is checked in a browser.

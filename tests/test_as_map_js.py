@@ -185,15 +185,25 @@ def test_one_dot_is_a_tab_stop_and_the_arrows_move_focus_without_scrolling():
     """Leaflet makes every keyboard marker a Tab stop; the map keeps one
     (a roving tabindex) and moves it with the focus. A dot off the view is
     panned in before it takes focus, which must not scroll Leaflet's
-    overflow-hidden box."""
+    overflow-hidden box. Leaflet's own pan on focus is off: it stops with a
+    dot's centre on the edge, half of it and its ring cut off, so a Tab into
+    the map brings the dot in whole through the same pan."""
     source = AS_MAP_JS.read_text(encoding="utf-8")
     assert re.search(
         r'setAttribute\("tabindex", (?:index|i) === (?:current|roving)\s*\?\s*"0"\s*:\s*"-1"\)',
         source,
     )
+    assert "autoPanOnFocus: false" in source
     assert re.search(r"panInside\([^;]*animate: false", source)
-    assert re.search(r"panInside\([\s\S]*?\.focus\(\{ preventScroll: true \}\)", source)
-    assert "stepDot(markers.length" in source
+    roving = source.split("function wireRoving")[1].split("\n}\n")[0]
+    assert re.search(
+        r'addEventListener\("focus", function \(\) \{\s*reveal\(index\);', roving
+    )
+    assert re.search(
+        r"reveal\(next\);\s*markers\[next\]\.getElement\(\)\.focus\(\{ preventScroll: true \}\);",
+        roving,
+    )
+    assert "stepDot(markers.length" in roving
 
 
 DOT = {
