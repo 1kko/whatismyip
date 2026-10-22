@@ -527,7 +527,12 @@ An autonomous system on its own: `/AS4766`, or `/as4766` (a bare `/4766` is not
 an AS lookup). The answer is the AS card of the
 [AS information](#as-information) section, with the full upstream, downstream and
 peer lists (capped at `ASINFO_LIST_LIMIT`) and the announced prefixes with each
-one's RPKI state, as a page, as JSON, or as `?format=text`. `?fields=` and
+one's RPKI state, as a page, as JSON, or as `?format=text`. The page leads with a
+one-sentence summary, four headline tiles, the upstreams beside a map of where
+the AS's IPv4 space geolocates (GeoLite2-City, sampled; tiles come from
+OpenStreetMap through your browser), and then neighbour and prefix tables you can
+filter. The JSON adds each neighbour's `country`, `customers`, `v4_addresses`,
+`v4_prefixes` and `v6_prefixes`. `?fields=` and
 `?subdomains=` are `400`s on it. An AS no dataset knows is a `200` saying so.
 
 A special-purpose number (0, `AS_TRANS` 23456, the documentation, private-use and

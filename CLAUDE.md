@@ -259,7 +259,22 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `/privacy`; it lists the hosts whether or not the manager is enabled, so
   the caller checks `enabled`), the dataset parsers (`parse_asnames` and the like) and the answer shape
   (`ANSWER_KEYS`). Imports `config` and the standard library only; must not
-  import `lookup` or `main`, for `subdomains.py`'s reason.
+  import `lookup` or `main`, for `subdomains.py`'s reason. For the `/AS<n>`
+  page, `page_data(asn, limit=)` reads every relation and both prefix families
+  (each up to `ASINFO_PAGE_LIMIT`, with the full counts), each neighbour with
+  its own size (country, customers, IPv4 addresses and prefixes) and each
+  family's median RIS peer count (`route_median`, written at build: schema 3,
+  so a version-2 file is rebuilt on the next refresh rather than read).
+  `describe(asn, detail=True)` adds the neighbour keys to the `/AS<n>` JSON
+  only; an IP, domain or self lookup's `as_info`, MCP and text never carry them.
+- `asmap.py`: where an AS's IPv4 space geolocates. `sample_addresses` spreads
+  at most `AS_MAP_SAMPLE_BUDGET` addresses over the prefixes by size, and
+  `footprint` locates them with a `place` callable (`lookup.as_footprint`
+  passes `geo_ip_manager.place`: GeoLite2-City only) and groups them by city, at most `AS_MAP_MAX_DOTS`, each with a
+  share. Imports the standard library, `config` and `geo` only. IPv4 only; an
+  IPv6-only AS gets the country pin.
+- `countrynames.py`: pure data, ISO 3166 code to name and flag, for the
+  neighbour tables. `viewmodel.py` may import it and stay pure.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
   Streamable HTTP, stateless). Five tools, six with `ASINFO_ENABLED`: `lookup` over `lookup.gather()`,
   `dns_records` and `ssl_certificate` over `gather(legs=)` narrowed to their
@@ -293,7 +308,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
   and `coordinate_precision`, the one `city`/`country` rule for a fix.
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
-  great-circle math behind it.
+  great-circle math behind it. `build_points_canvas()` frames weighted points
+  (the `/AS<n>` map) on one fixed canvas, going the short way across the
+  antimeridian and never zooming past `AS_MAP_MAX_ZOOM`.
 - `healthcheck.py`: the Docker `HEALTHCHECK`: exit 0 when `/healthz` answers
   200, whatever its `status`.
 - `main.py`: the FastAPI app, middleware, routes and page rendering; wires the
@@ -332,7 +349,16 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `lookup_gate` slot. A special-purpose number is a `200` that says what it is
   for. `?fields=` and `?subdomains=` are `400`s on it. `HEAD` answers as for any
   target. With `ASINFO_ENABLED=false` every number is a `400` with the code
-  `asinfo_disabled`
+  `asinfo_disabled`. The page is summary-first: a sentence, four tiles, the
+  upstream graph beside a map of where the AS's IPv4 space geolocates
+  (`main._as_map`, a bounded number of local GeoLite2 reads), composition bars,
+  then filterable neighbour and prefix tables. `main.render_as_page` reads
+  `asinfo_manager.page_data` for an assignable number only and embeds the rows
+  in `#as-lists` (through `_script_json`) for `static/js/as.js`, which filters,
+  chips and "Show all" with `textContent` only. A special-purpose number reads
+  neither. The JSON answer is the card, plus the additive neighbour keys
+  (`country`, `customers`, `v4_addresses`, `v4_prefixes`, `v6_prefixes`) on
+  `/AS<n>`'s neighbour lists.
 - `?format=html|json|text` and `?fields=` on both lookup routes
 - `HEAD /`, `HEAD /{domain_ip}` - `main.head_lookup`: `200` with the
   Content-Type GET would answer with (JSON for the `?whois=only` and
@@ -936,7 +962,9 @@ whatismyip/
 ├── asinfo.py            # AS information: seven datasets -> one SQLite file (data/asinfo/), route and AS reads
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
-├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs
+├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs, weighted-point canvas
+├── asmap.py             # where an AS's IPv4 space geolocates (sampled, by city)
+├── countrynames.py      # ISO 3166 code -> name and flag (pure data)
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
 ├── healthcheck.py       # Docker HEALTHCHECK: /healthz answers 200 or not
 ├── server.json          # official MCP Registry entry (see mcp-publish.yml)
@@ -946,7 +974,7 @@ whatismyip/
 ├── templates/
 │   ├── browser.html     # server-rendered lookup page (no client-side templating)
 │   ├── error.html       # 400/403/429/503 page for browsers, same status as the JSON
-│   ├── as.html          # /AS<n>: the AS card, its lists and prefixes
+│   ├── as.html          # /AS<n>: the summary-first AS page (sentence, tiles, graph + map, tables)
 │   ├── _raw_json.html   # the Raw JSON panel, shared by browser.html and as.html
 │   ├── privacy.html     # /privacy, filled from the constants the code runs on
 │   ├── _agent_discovery.html # the <head>'s service-doc and mcp-*/api-* tags, shared by browser.html and as.html
@@ -1241,6 +1269,18 @@ beside the old one. SQLite's build temp files (about 140 to 210 MB, `PRAGMA
 temp_store = FILE`) go to the system temp directory, not the volume; nothing
 sets `SQLITE_TMPDIR`.
 
+**The `/AS<n>` page's cost.** The page reads `page_data` (up to
+`ASINFO_PAGE_LIMIT` rows per relation and family, indexed reads) and the map's
+footprint: at most `AS_MAP_SAMPLE_BUDGET` (2000) GeoLite2-City reads spread over
+the IPv4 prefixes by size, so a huge AS costs what a small one does, and at
+most `AS_MAP_MAX_DOTS` (200) dots. Both run inline like the other local reads,
+for the page only; JSON, text and MCP skip them. Measured on real data
+(2026-10-22, macOS, schema-3 build from the live copies, RPKI absent in the
+measured build, `TestClient` without a lifespan): `page_data` 2 to 13 ms,
+`_as_map` 13 to 19 ms, the whole page 31 to 40 ms (AS3786, AS16509) on a
+quiet run; HTML 190, 219 and 264 KB (AS3786, AS16509, AS6939) of which
+`#as-lists` is 85, 116 and 164 KB; 56 to 185 map dots on 6 to 8 tiles.
+
 **Credits and terms.** The card carries the credit lines above, CAIDA's two
 linked to their dataset pages on the panel and the `/AS<n>` page
 (`Dataset.credit_url`; the JSON's `attribution` stays plain text), and
@@ -1434,6 +1474,10 @@ Test files:
   the special-purpose numbers, never a ban), `test_as_surfaces.py` (every
   other surface: `as_info` on IP, domain and self lookups, the page's AS panel
   and links, `?fields=`, MCP, `/healthz` and `/privacy`, the credits),
+  `test_asmap.py` (the footprint sampler and grouping),
+  `test_as_page_view.py` (`as_page_view`: sentence, tiles, bars, graph, tables),
+  `test_as_page_js.py` (`static/js/as.js`'s filter, chips and show-all, run in
+  node against a fake document; skips without node),
   `asinfo_fixtures.py` (not a test module: the synthetic files and
   `build_manager()`, with conftest's `asinfo_enabled` fixture on top)
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding
