@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+import math
 from typing import Any, Callable
 from urllib.parse import quote
 
-from config import SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
+from config import ASINFO_MIN_RIS_PEERS, SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
+from countrynames import country_name
 from eppstatus import explain_status
 from reputation import grade
 
@@ -2218,3 +2220,418 @@ def build_view(
         "subdomains": response.get("subdomains"),
         "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],
     }
+
+
+# ---------------------------------------------------------------------------
+# The /AS<n> page's words and numbers: a sentence, four tiles, four bars.
+# ---------------------------------------------------------------------------
+
+
+def human_count(n: int) -> str:
+    """999, 1.0k, 131k, 8.7M, 29M. static/js/as.js repeats this digit for
+    digit, so the server-drawn and the client-drawn number cannot disagree."""
+    if n < 1000:
+        return str(n)
+    if n < 999_500:
+        t = (n + 50) // 100
+        return f"{t // 10}.{t % 10}k" if t < 100 else f"{(n + 500) // 1000}k"
+    t = (n + 50_000) // 100_000
+    return f"{t // 10}.{t % 10}M" if t < 100 else f"{(n + 500_000) // 1_000_000}M"
+
+
+def _split_as_name(name: str | None) -> tuple[str, str] | None:
+    """RIPE's 'HANDLE - Holder' or 'HANDLE Holder' as (handle, holder); a
+    single word is both. None for no name."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    if " - " in name:
+        handle, holder = name.split(" - ", 1)
+    elif " " in name:
+        handle, holder = name.split(" ", 1)
+    else:
+        return name, name
+    return handle.strip(), holder.strip() or handle.strip()
+
+
+def as_handle(name: str | None) -> str | None:
+    """The registry handle of a RIPE AS name (LGDACOM-KR)."""
+    parts = _split_as_name(name)
+    return parts[0] if parts else None
+
+
+def as_holder(name: str | None) -> str | None:
+    """The holder of a RIPE AS name (LG DACOM Corporation)."""
+    parts = _split_as_name(name)
+    return parts[1] if parts else None
+
+
+_RIR_NAMES = {"ripencc": "RIPE NCC", "ripe": "RIPE NCC"}
+
+
+def _plural(n: int, one: str, many: str | None = None) -> str:
+    return f"{n:,} {one if n == 1 else many or one + 's'}"
+
+
+def _join_clauses(clauses: list[str]) -> str:
+    if len(clauses) <= 1:
+        return "".join(clauses)
+    return ", ".join(clauses[:-1]) + " and " + clauses[-1]
+
+
+def _rpki_share(rpki: dict | None) -> tuple[int, float] | None:
+    """(signed prefixes, their share of all, 0 to 100): signed is valid plus
+    invalid. None without a section, or when it counts nothing."""
+    if not rpki:
+        return None
+    valid, invalid = rpki.get("valid") or 0, rpki.get("invalid") or 0
+    total = valid + invalid + (rpki.get("not_found") or 0)
+    if not total:
+        return None
+    return valid + invalid, (valid + invalid) * 100 / total
+
+
+def _share_text(share: float) -> str:
+    """'under 1%' for a share that exists but would round to 0."""
+    return "under 1%" if 0 < share < 0.5 else f"{round(share)}%"
+
+
+def _is_complete(relation: dict | None) -> bool:
+    return bool(relation) and len(relation.get("list") or []) == relation.get("count")
+
+
+def _relation(as_info: dict, page: dict | None, key: str) -> dict | None:
+    """{count, list} of upstreams, downstreams or peers: the page's when there
+    is one, else the card's (whose upstreams are a bare list)."""
+    if page and page.get(key):
+        return page[key]
+    value = as_info.get(key)
+    if isinstance(value, list):
+        return {"count": len(value), "list": value}
+    return value or None
+
+
+def _downstream_scope(as_info: dict, downstreams: dict) -> str:
+    """' (all in X)' or ' (k in X)' for the AS's own country, from a complete
+    list; '' when it is not the largest group or nothing is known."""
+    own = as_info.get("country")
+    if not own or not _is_complete(downstreams) or not downstreams["list"]:
+        return ""
+    tally: dict[str, int] = {}
+    for entry in downstreams["list"]:
+        if entry.get("country"):
+            tally[entry["country"]] = tally.get(entry["country"], 0) + 1
+    k = tally.get(own, 0)
+    if not k or k < max(tally.values()):
+        return ""
+    name = country_name(own)
+    if k == len(downstreams["list"]):
+        return f" (all in {name})"
+    return f" ({k} in {name})"
+
+
+def _first_sentence(as_info: dict) -> str | None:
+    registry = as_info.get("registry") or {}
+    country = country_name(as_info.get("country"))
+    rir = registry.get("rir")
+    registered = ""
+    if rir:
+        rir = _RIR_NAMES.get(rir.lower(), rir.upper())
+        year = str(registry.get("assigned") or "")[:4]
+        registered = f"registered with {rir}" + (f" in {year}" if year else "")
+    if country and registered:
+        return f"A network in {country}, {registered}."
+    if country:
+        return f"A network in {country}."
+    if registered:
+        return f"A network {registered}."
+    return None
+
+
+def _second_sentence(as_info: dict, page: dict | None, subject: str) -> str | None:
+    clauses = []
+    ups = _relation(as_info, page, "upstreams")
+    if ups is not None:
+        n = ups["count"]
+        clauses.append(
+            f"buys transit from {_plural(n, 'upstream')}"
+            if n
+            else "has no upstreams in CAIDA's data"
+        )
+    downs = _relation(as_info, page, "downstreams")
+    if downs is not None:
+        n = downs["count"]
+        clauses.append(
+            f"serves {_plural(n, 'downstream network')}"
+            + _downstream_scope(as_info, downs)
+            if n
+            else "serves no downstream networks"
+        )
+    peers = _relation(as_info, page, "peers")
+    if peers is not None:
+        n = peers["count"]
+        if not n:
+            clauses.append("has no peers in CAIDA's data")
+        else:
+            text = f"peers with {_plural(n, 'network')}"
+            if _is_complete(peers):
+                known = {e["country"] for e in peers["list"] if e.get("country")}
+                text += f" in {_plural(len(known), 'country', 'countries')}"
+            clauses.append(text)
+    if not clauses:
+        return None
+    return f"{subject} {_join_clauses(clauses)}."
+
+
+def _blocks(prefixes: list[str]) -> int:
+    """Contiguous IPv4 blocks once overlapping and adjacent prefixes merge."""
+    networks = [ipaddress.ip_network(p, strict=False) for p in prefixes]
+    return sum(1 for _ in ipaddress.collapse_addresses(networks))
+
+
+def _about_slash(addresses: int) -> int:
+    return round(32 - math.log2(addresses))
+
+
+def _third_sentence(as_info: dict, subject: str) -> str | None:
+    prefixes = as_info.get("prefixes")
+    if prefixes is None:
+        return None
+    v4, v6 = prefixes.get("v4") or 0, prefixes.get("v6") or 0
+    if not v4 and not v6:
+        return f"{subject} announces no prefixes."
+    parts = []
+    if v4:
+        parts.append(f"{v4:,} IPv4")
+    if v6:
+        parts.append(f"{v6:,} IPv6")
+    text = f"{subject} announces {' and '.join(parts)} " + (
+        "prefix" if v4 + v6 == 1 else "prefixes"
+    )
+    addresses = prefixes.get("v4_addresses") or 0
+    if v4 and addresses:
+        text += (
+            f" covering {human_count(addresses)} IPv4 addresses"
+            f" (about one /{_about_slash(addresses)})"
+        )
+    share = _rpki_share(as_info.get("rpki"))
+    if share:
+        text += f"; {_share_text(share[1])} of its prefixes are RPKI-signed"
+        invalid = as_info["rpki"].get("invalid") or 0
+        if invalid:
+            text += f" ({invalid} invalid)"
+    return text + "."
+
+
+def as_summary(as_info: dict, page: dict | None) -> str | None:
+    """The page's plain-English paragraph: who and where, how it connects
+    (only with CAIDA's relationships), what it announces (only with RIS). A
+    part whose data is unavailable is left out, never filled with zeros."""
+    first = _first_sentence(as_info)
+    name = f"AS{as_info['asn']}"
+    second = _second_sentence(as_info, page, "It" if first else name)
+    third = _third_sentence(as_info, "It" if first or second else name)
+    text = " ".join(part for part in (first, second, third) if part)
+    return text or None
+
+
+def _tile(key, label, value, sub, tone="neutral", segments=None) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "value": value,
+        "sub": sub,
+        "tone": tone,
+        "segments": segments,
+    }
+
+
+def _unknown_tile(key, label, as_info, dataset_ids) -> dict:
+    return _tile(key, label, "Unknown", _as_absent(as_info, dataset_ids), "muted")
+
+
+def _segments(parts: list[tuple[str, int, str]]) -> list[dict]:
+    """[(label, count, tone)] as bar segments with their share of the total."""
+    total = sum(count for _, count, _ in parts)
+    return [
+        {
+            "label": label,
+            "count": count,
+            "tone": tone,
+            "pct": round(count * 100 / total, 2) if total else 0.0,
+        }
+        for label, count, tone in parts
+    ]
+
+
+def _rpki_parts(rpki: dict) -> list[tuple[str, int, str]]:
+    return [
+        ("valid", rpki.get("valid") or 0, "success"),
+        ("invalid", rpki.get("invalid") or 0, "danger"),
+        ("not found", rpki.get("not_found") or 0, "muted"),
+    ]
+
+
+def as_tiles(as_info: dict, page: dict | None) -> list[dict]:
+    """The four count tiles: IPv4 space, prefixes, RPKI signed, neighbours."""
+    ris = ("ris_v4", "ris_v6")
+    prefixes = as_info.get("prefixes")
+    v4_list = ((page or {}).get("prefixes") or {}).get("v4")
+    if prefixes is None:
+        space = _unknown_tile("space", "IPv4 space", as_info, ris)
+        counts = _unknown_tile("prefixes", "Prefixes", as_info, ris)
+    else:
+        addresses = prefixes.get("v4_addresses") or 0
+        sub = None
+        if addresses:
+            sub = f"addresses ≈ one /{_about_slash(addresses)}"
+            if _is_complete(v4_list):
+                blocks = _blocks([p["prefix"] for p in v4_list["list"]])
+                sub += f" · {_plural(blocks, 'block')}"
+        space = _tile("space", "IPv4 space", human_count(addresses), sub)
+        sub = None
+        if _is_complete(v4_list) and v4_list["list"]:
+            k = sum(1 for p in v4_list["list"] if p.get("plen") == 24)
+            sub = f"{k} of the v4 are /24s"
+        counts = _tile(
+            "prefixes",
+            "Prefixes",
+            f"{prefixes.get('v4') or 0} v4 · {prefixes.get('v6') or 0} v6",
+            sub,
+        )
+    rpki = as_info.get("rpki")
+    if rpki is None:
+        signed = _unknown_tile("rpki", "RPKI signed", as_info, ("rpki",) + ris)
+    else:
+        share = _rpki_share(rpki)
+        signed = _tile(
+            "rpki",
+            "RPKI signed",
+            _share_text(share[1]) if share else "–",
+            f"{rpki.get('valid') or 0} valid · {rpki.get('invalid') or 0} invalid"
+            f" · {rpki.get('not_found') or 0} not found",
+            segments=_segments(_rpki_parts(rpki)),
+        )
+    relations = [
+        _relation(as_info, page, k) for k in ("upstreams", "downstreams", "peers")
+    ]
+    if any(r is None for r in relations):
+        neighbours = _unknown_tile("neighbours", "Neighbours", as_info, ("caida_rel",))
+    else:
+        neighbours = _tile(
+            "neighbours",
+            "Neighbours",
+            " · ".join(str(r["count"]) for r in relations),
+            "upstreams · downstreams · peers",
+        )
+    return [space, counts, signed, neighbours]
+
+
+def _size_bucket(plen: int) -> int:
+    if plen >= 24:
+        return 0
+    if plen == 23:
+        return 1
+    if plen == 22:
+        return 2
+    return 3 if plen >= 17 else 4
+
+
+def _visibility_bucket(peers: int, median: int | None) -> int:
+    if not median:
+        return 0
+    if peers >= 0.75 * median:
+        return 0
+    return 1 if peers >= 0.25 * median else 2
+
+
+def _bar(key, label, parts=None, empty=None) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "segments": _segments(parts) if parts else [],
+        "empty": empty,
+    }
+
+
+def as_glance(as_info: dict, page: dict | None) -> dict:
+    """The four composition bars (RPKI, visibility, IPv4 sizes, family) and the
+    note about what the counts leave out. A bar drawn from a truncated list
+    says how many of the largest it drew."""
+    ris = ("ris_v4", "ris_v6")
+    lists = (page or {}).get("prefixes")
+    medians = (page or {}).get("medians") or {}
+    bars = []
+
+    rpki = as_info.get("rpki")
+    if rpki is None:
+        bars.append(_bar("rpki", "RPKI", empty=_as_absent(as_info, ("rpki",) + ris)))
+    elif not any(_rpki_parts(rpki)[i][1] for i in range(3)):
+        bars.append(_bar("rpki", "RPKI", empty="No announced prefixes"))
+    else:
+        bars.append(_bar("rpki", "RPKI", _rpki_parts(rpki)))
+
+    def from_lists(key, label, build):
+        if lists is None:
+            return _bar(key, label, empty=_as_absent(as_info, ris))
+        return build(lists)
+
+    def visibility(lists):
+        counts, drawn, total = [0, 0, 0], 0, 0
+        for family in ("v4", "v6"):
+            part = lists.get(family) or {}
+            total += part.get("count") or 0
+            for entry in part.get("list") or []:
+                counts[_visibility_bucket(entry["ris_peers"], medians.get(family))] += 1
+                drawn += 1
+        label = "Visibility" + _truncated(drawn, total)
+        if not drawn:
+            return _bar("visibility", label, empty="No announced prefixes")
+        return _bar(
+            "visibility",
+            label,
+            [
+                ("widely seen", counts[0], "success"),
+                ("partly", counts[1], "warning"),
+                ("narrowly", counts[2], "muted"),
+            ],
+        )
+
+    def sizes(lists):
+        part = lists.get("v4") or {}
+        entries = part.get("list") or []
+        label = "Sizes (IPv4)" + _truncated(len(entries), part.get("count") or 0)
+        if not entries:
+            return _bar("sizes", label, empty="No announced prefixes")
+        counts = [0] * 5
+        for entry in entries:
+            counts[_size_bucket(entry["plen"])] += 1
+        names = ("/24", "/23", "/22", "/17–/21", "/16 and shorter")
+        return _bar("sizes", label, [(n, c, "accent") for n, c in zip(names, counts)])
+
+    bars.append(from_lists("visibility", "Visibility", visibility))
+    bars.append(from_lists("sizes", "Sizes (IPv4)", sizes))
+
+    prefixes = as_info.get("prefixes")
+    if prefixes is None:
+        bars.append(_bar("family", "Family", empty=_as_absent(as_info, ris)))
+    else:
+        v4, v6 = prefixes.get("v4") or 0, prefixes.get("v6") or 0
+        if v4 + v6:
+            bars.append(
+                _bar("family", "Family", [("IPv4", v4, "accent"), ("IPv6", v6, "info")])
+            )
+        else:
+            bars.append(_bar("family", "Family", empty="No announced prefixes"))
+    return {
+        "bars": bars,
+        "note": (
+            f"Routes seen by fewer than {ASINFO_MIN_RIS_PEERS} RIS peers are left out, "
+            "so counts can differ from other sites."
+        ),
+    }
+
+
+def _truncated(drawn: int, total: int) -> str:
+    """' (largest 1,000)' when a bar is drawn from fewer prefixes than exist."""
+    return f" (largest {drawn:,})" if drawn < total else ""
