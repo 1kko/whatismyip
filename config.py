@@ -275,6 +275,20 @@ ASINFO_CAIDA_ORG_MAX_AGE_DAYS = float(os.getenv("ASINFO_CAIDA_ORG_MAX_AGE_DAYS",
 ASINFO_CAIDA_ENABLED = os.getenv("ASINFO_CAIDA_ENABLED", "true").lower() != "false"
 # Cap for the downstream, peer and prefix lists in an answer.
 ASINFO_LIST_LIMIT = int(os.getenv("ASINFO_LIST_LIMIT", "100"))
+# The /AS<n> page lists up to this many of each relation and prefix family.
+ASINFO_PAGE_LIMIT = int(os.getenv("ASINFO_PAGE_LIMIT", "1000"))
+# The /AS<n> map reads at most this many addresses from GeoLite2-City per
+# page, spread over the AS's IPv4 prefixes by size, and draws at most
+# AS_MAP_MAX_DOTS cities.
+AS_MAP_SAMPLE_BUDGET = int(os.getenv("AS_MAP_SAMPLE_BUDGET", "2000"))
+AS_MAP_MAX_DOTS = int(os.getenv("AS_MAP_MAX_DOTS", "200"))
+# The /AS<n> map never zooms in past this (a city-sized frame) and is drawn on
+# one fixed canvas.
+AS_MAP_MAX_ZOOM = int(os.getenv("AS_MAP_MAX_ZOOM", "8"))
+AS_MAP_CANVAS = {
+    "width": int(os.getenv("AS_MAP_CANVAS_WIDTH", "560")),
+    "height": int(os.getenv("AS_MAP_CANVAS_HEIGHT", "360")),
+}
 # How soon a failed download is tried again, and how often the scheduler
 # checks which datasets are due (a check makes no request unless one is).
 ASINFO_RETRY_SECONDS = int(os.getenv("ASINFO_RETRY_SECONDS", "3600"))

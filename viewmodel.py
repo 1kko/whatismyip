@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+import math
 from typing import Any, Callable
 from urllib.parse import quote
 
-from config import SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
+from config import ASINFO_MIN_RIS_PEERS, SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
+from countrynames import country_name_in_text
 from eppstatus import explain_status
 from reputation import grade
 
@@ -1459,6 +1461,8 @@ _RPKI_TONES = {"valid": "success", "invalid": "warning"}
 # How many neighbours of an AS (and siblings of its organization) the panel
 # names; the rest are counted. The JSON carries the whole capped list.
 AS_LIST_SHOWN = 10
+# The rows of the AS page's details panel, out of the AS card.
+_AS_DETAILS = ("Registry", "Organization", "ASN-DROP")
 
 
 def _part(text: str, href: str | None = None) -> dict:
@@ -1819,78 +1823,6 @@ def as_view(
     }
 
 
-def _as_page_list(
-    as_info: dict, key: str, one: str, many: str, link_for: LinkFor | None
-) -> dict:
-    """One neighbour list of the /AS<n> page: every entry the answer carries
-    (upstreams whole, downstreams and peers capped at ASINFO_LIST_LIMIT), the
-    total, and what to say when there is none to list."""
-    section = as_info.get(key)
-    if section is None:
-        reason = _as_absent(as_info, ("caida_rel",))
-        return {"hint": "unknown", "entries": [], "empty": reason, "note": None}
-    if isinstance(section, list):
-        entries, total = section, len(section)
-    else:
-        entries, total = section.get("list") or [], section.get("count") or 0
-    note = None
-    if total > len(entries):
-        note = f"Showing {len(entries):,} of {total:,}."
-    return {
-        "hint": f"{total:,} {one if total == 1 else many}" if total else "none",
-        "entries": [
-            {
-                "asn": entry.get("asn"),
-                "name": entry.get("name"),
-                "href": _href(link_for, f"AS{entry.get('asn')}"),
-            }
-            for entry in entries
-        ],
-        "empty": f"No {many}",
-        "note": note,
-    }
-
-
-def _as_page_prefixes(as_info: dict) -> dict:
-    """The /AS<n> page's announced prefixes, each with its RPKI state and the
-    RIS peers that see it, capped at ASINFO_LIST_LIMIT with the total."""
-    prefix_list = as_info.get("prefix_list")
-    if prefix_list is None:
-        reason = _as_absent(as_info, ("ris_v4", "ris_v6"))
-        return {"hint": "unknown", "rows": [], "empty": reason, "note": None}
-    entries = prefix_list.get("list") or []
-    total = prefix_list.get("count") or 0
-    rows = []
-    for entry in entries:
-        rpki = entry.get("rpki") or {}
-        state = rpki.get("state")
-        text = _RPKI_STATES.get(state, "Unknown")
-        if state == "invalid" and rpki.get("reason"):
-            text += f": {rpki['reason']}"
-        peers = entry.get("ris_peers")
-        rows.append(
-            {
-                "prefix": entry.get("prefix"),
-                "state": text,
-                "tone": _RPKI_TONES.get(state, "default" if state else "muted"),
-                "peers": (
-                    f"{peers:,} RIS peer{'' if peers == 1 else 's'}"
-                    if isinstance(peers, int)
-                    else None
-                ),
-            }
-        )
-    note = None
-    if total > len(entries):
-        note = f"Showing {len(entries):,} of {total:,}."
-    return {
-        "hint": f"{total:,} prefix{'' if total == 1 else 'es'}" if total else "none",
-        "rows": rows,
-        "empty": "No announced prefixes",
-        "note": note,
-    }
-
-
 def _as_special_rows(special: dict) -> list[dict]:
     """Use, Range, Defined in and Purpose: what a special-purpose number is."""
     first, last = special.get("first"), special.get("last")
@@ -1907,17 +1839,25 @@ def as_page_view(
     as_info: dict,
     link_for: LinkFor | None = None,
     credit_links: dict[str, str] | None = None,
+    page: dict | None = None,
+    as_map: dict | None = None,
 ) -> dict:
     """The /AS<n> page (templates/as.html) over its answer: as_info_for_asn's
     card with `address` and `elapsed_ms`. Pure, like build_view;
     `credit_links` as for as_view.
 
-    The hero is the number, its holder and its tags; the AS panel is as_view's
-    card without the Route and RPKI rows, which describe an address; then the
-    neighbour lists and the announced prefixes, each in full as the answer
-    carries them; then Raw JSON. A special-purpose number is its Use, Range,
-    Defined in and Purpose, and nothing else: no dataset was read for it. The
-    page's own number does not link to the page it is on."""
+    The hero is the number, its holder and its tags. Then, for an assignable
+    number: the sentence, the four tiles, the upstream graph ending on the
+    address map, the composition bars, one neighbours table and one prefixes
+    table (their first rows; every loaded row in `lists_payload` for the
+    page's script), the details rows and credits out of as_view's card, and
+    Raw JSON. A special-purpose number is its Use, Range, Defined in and
+    Purpose in one card (`card`, `accordions`), and nothing else: no dataset
+    was read for it. The page's own number does not link to the page it is
+    on.
+
+    `page` is AsInfoManager.page_data's dict and `as_map` the map's inputs
+    (see as_map_view); both may be None."""
     asn = as_info.get("asn")
     target = f"AS{asn}"
     special = as_info.get("special")
@@ -1937,14 +1877,32 @@ def as_page_view(
             "rows": _as_special_rows(special),
             "attribution": [],
         }
-        lists: list[dict] = []
-        prefixes = None
+        extra: dict = {
+            "node": None,
+            "card": card,
+            "accordions": [
+                {"id": "as", "title": "AS", "hint": card["hint"]},
+                {"id": "raw", "title": "Raw JSON", "hint": "full response"},
+            ],
+            "summary": None,
+            "tiles": [],
+            "graph": None,
+            "map": None,
+            "glance": None,
+            "neighbours": None,
+            "prefix_table": None,
+            "details": None,
+            "lists_payload": None,
+        }
     else:
         name = as_info.get("name")
         registry = as_info.get("registry") or {}
         tags = [{"text": "ASN", "tone": "default"}]
         if registry.get("rir"):
             tags.append({"text": str(registry["rir"]).upper(), "tone": "default"})
+        year = str(registry.get("assigned") or "")[:4]
+        if year.isdigit():
+            tags.append({"text": f"since {year}", "tone": "default"})
         if as_info.get("announced") is False:
             tags.append({"text": "NOT ANNOUNCED", "tone": "default"})
         if as_info.get("asn_drop") is True:
@@ -1956,26 +1914,30 @@ def as_page_view(
             if part
         )
         card = as_view(as_info, link, route=False, credit_links=credit_links)
-        lists = [
-            {"id": key, "title": label, **_as_page_list(as_info, key, one, many, link)}
-            for key, label, one, many in (
-                ("upstreams", "Upstreams", "provider", "providers"),
-                ("downstreams", "Downstreams", "customer", "customers"),
-                ("peers", "Peers", "peer", "peers"),
-            )
-        ]
-        prefixes = _as_page_prefixes(as_info)
+        neighbours = as_neighbour_table(as_info, page, link)
+        prefix_table = as_prefix_table(as_info, page)
+        extra = {
+            # The graph's end when there is no map to carry it (as_map_view's
+            # node otherwise): the number and its handle.
+            "node": {"label": target, "sub": as_handle(name)},
+            "summary": as_summary(as_info, page),
+            "tiles": as_tiles(as_info, page),
+            "graph": as_upstream_graph(as_info, page, link),
+            "map": as_map_view(as_info, as_map),
+            "glance": as_glance(as_info, page),
+            "neighbours": neighbours,
+            "prefix_table": prefix_table,
+            "details": {
+                "rows": [row for row in card["rows"] if row["label"] in _AS_DETAILS],
+                "attribution": card["attribution"],
+            },
+            "lists_payload": {
+                "own": asn,
+                "neighbours": neighbours["payload"],
+                "prefixes": prefix_table["payload"],
+            },
+        }
 
-    accordions = [{"id": "as", "title": "AS", "hint": card["hint"]}]
-    accordions += [
-        {"id": item["id"], "title": item["title"], "hint": item["hint"]}
-        for item in lists
-    ]
-    if prefixes is not None:
-        accordions.append(
-            {"id": "prefixes", "title": "Announced prefixes", "hint": prefixes["hint"]}
-        )
-    accordions.append({"id": "raw", "title": "Raw JSON", "hint": "full response"})
     return {
         "target": target,
         "title": f"{title} — WhatIsMyIP",
@@ -1986,10 +1948,8 @@ def as_page_view(
         "holder": None if special else as_info.get("name"),
         "flag": country_flag(as_info.get("country")),
         "meta_line": format_meta(as_info.get("elapsed_ms"), None),
-        "card": card,
-        "lists": {item["id"]: item for item in lists},
-        "prefixes": prefixes,
-        "accordions": accordions,
+        "special": bool(special),
+        **extra,
     }
 
 
@@ -2218,3 +2178,774 @@ def build_view(
         "subdomains": response.get("subdomains"),
         "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],
     }
+
+
+# ---------------------------------------------------------------------------
+# The /AS<n> page's words and numbers: a sentence, four tiles, four bars.
+# ---------------------------------------------------------------------------
+
+
+def human_count(n: int) -> str:
+    """999, 1.0k, 131k, 8.7M, 29M. static/js/as.js repeats this digit for
+    digit, so the server-drawn and the client-drawn number cannot disagree."""
+    if n < 1000:
+        return str(n)
+    if n < 999_500:
+        t = (n + 50) // 100
+        return f"{t // 10}.{t % 10}k" if t < 100 else f"{(n + 500) // 1000}k"
+    t = (n + 50_000) // 100_000
+    return f"{t // 10}.{t % 10}M" if t < 100 else f"{(n + 500_000) // 1_000_000}M"
+
+
+def _split_as_name(name: str | None) -> tuple[str, str] | None:
+    """RIPE's 'HANDLE - Holder' or 'HANDLE Holder' as (handle, holder); a
+    single word is both. None for no name."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    if " - " in name:
+        handle, holder = name.split(" - ", 1)
+    elif " " in name:
+        handle, holder = name.split(" ", 1)
+    else:
+        return name, name
+    return handle.strip(), holder.strip() or handle.strip()
+
+
+def as_handle(name: str | None) -> str | None:
+    """The registry handle of a RIPE AS name (LGDACOM-KR)."""
+    parts = _split_as_name(name)
+    return parts[0] if parts else None
+
+
+def as_holder(name: str | None) -> str | None:
+    """The holder of a RIPE AS name (LG DACOM Corporation)."""
+    parts = _split_as_name(name)
+    return parts[1] if parts else None
+
+
+_RIR_NAMES = {"ripencc": "RIPE NCC", "ripe": "RIPE NCC"}
+
+
+def _plural(n: int, one: str, many: str | None = None) -> str:
+    return f"{n:,} {one if n == 1 else many or one + 's'}"
+
+
+def _join_clauses(clauses: list[str]) -> str:
+    if len(clauses) <= 1:
+        return "".join(clauses)
+    return ", ".join(clauses[:-1]) + " and " + clauses[-1]
+
+
+def _rpki_share(rpki: dict | None) -> tuple[int, float] | None:
+    """(signed prefixes, their share of all, 0 to 100): signed is valid plus
+    invalid. None without a section, or when it counts nothing."""
+    if not rpki:
+        return None
+    valid, invalid = rpki.get("valid") or 0, rpki.get("invalid") or 0
+    total = valid + invalid + (rpki.get("not_found") or 0)
+    if not total:
+        return None
+    return valid + invalid, (valid + invalid) * 100 / total
+
+
+def _share_text(share: float) -> str:
+    """'under 1%' for a share that exists but would round to 0."""
+    return "under 1%" if share and round(share) == 0 else f"{round(share)}%"
+
+
+def _is_complete(relation: dict | None) -> bool:
+    return bool(relation) and len(relation.get("list") or []) == relation.get("count")
+
+
+def _relation(as_info: dict, page: dict | None, key: str) -> dict | None:
+    """{count, list} of upstreams, downstreams or peers: the page's when there
+    is one, else the card's (whose upstreams are a bare list)."""
+    if page and page.get(key):
+        return page[key]
+    value = as_info.get(key)
+    if isinstance(value, list):
+        return {"count": len(value), "list": value}
+    return value or None
+
+
+def _downstream_scope(as_info: dict, downstreams: dict) -> str:
+    """' (all in X)' or ' (k in X)' for the AS's own country, from a complete
+    list; '' when it is not the largest group or nothing is known."""
+    own = as_info.get("country")
+    if not own or not _is_complete(downstreams) or not downstreams["list"]:
+        return ""
+    tally: dict[str, int] = {}
+    for entry in downstreams["list"]:
+        if entry.get("country"):
+            tally[entry["country"]] = tally.get(entry["country"], 0) + 1
+    k = tally.get(own, 0)
+    if not k or k < max(tally.values()):
+        return ""
+    name = country_name_in_text(own)
+    if k == len(downstreams["list"]):
+        return f" (all in {name})"
+    return f" ({k} in {name})"
+
+
+def _first_sentence(as_info: dict) -> str | None:
+    registry = as_info.get("registry") or {}
+    country = country_name_in_text(as_info.get("country"))
+    rir = registry.get("rir")
+    registered = ""
+    if rir:
+        rir = _RIR_NAMES.get(rir.lower(), rir.upper())
+        year = str(registry.get("assigned") or "")[:4]
+        registered = f"registered with {rir}" + (f" in {year}" if year else "")
+    if country and registered:
+        return f"A network in {country}, {registered}."
+    if country:
+        return f"A network in {country}."
+    if registered:
+        return f"A network {registered}."
+    return None
+
+
+def _second_sentence(as_info: dict, page: dict | None, subject: str) -> str | None:
+    clauses = []
+    ups = _relation(as_info, page, "upstreams")
+    if ups is not None:
+        n = ups["count"]
+        clauses.append(
+            f"buys transit from {_plural(n, 'upstream')}"
+            if n
+            else "has no upstreams in CAIDA's data"
+        )
+    downs = _relation(as_info, page, "downstreams")
+    if downs is not None:
+        n = downs["count"]
+        clauses.append(
+            f"serves {_plural(n, 'downstream network')}"
+            + _downstream_scope(as_info, downs)
+            if n
+            else "serves no downstream networks"
+        )
+    peers = _relation(as_info, page, "peers")
+    if peers is not None:
+        n = peers["count"]
+        if not n:
+            clauses.append("has no peers in CAIDA's data")
+        else:
+            text = f"peers with {_plural(n, 'network')}"
+            if _is_complete(peers):
+                known = {e["country"] for e in peers["list"] if e.get("country")}
+                if known:
+                    text += f" in {_plural(len(known), 'country', 'countries')}"
+            clauses.append(text)
+    if not clauses:
+        return None
+    return f"{subject} {_join_clauses(clauses)}."
+
+
+def _blocks(prefixes: list[str]) -> int:
+    """Contiguous IPv4 blocks once overlapping and adjacent prefixes merge."""
+    networks = [ipaddress.ip_network(p, strict=False) for p in prefixes]
+    return sum(1 for _ in ipaddress.collapse_addresses(networks))
+
+
+def _about_slash(addresses: int) -> int:
+    return round(32 - math.log2(addresses))
+
+
+def _third_sentence(as_info: dict, subject: str) -> str | None:
+    prefixes = as_info.get("prefixes")
+    if prefixes is None:
+        return None
+    v4, v6 = prefixes.get("v4") or 0, prefixes.get("v6") or 0
+    if not v4 and not v6:
+        return f"{subject} announces no prefixes."
+    parts = []
+    if v4:
+        parts.append(f"{v4:,} IPv4")
+    if v6:
+        parts.append(f"{v6:,} IPv6")
+    text = f"{subject} announces {' and '.join(parts)} " + (
+        "prefix" if v4 + v6 == 1 else "prefixes"
+    )
+    addresses = prefixes.get("v4_addresses") or 0
+    if v4 and addresses:
+        text += (
+            f" covering {human_count(addresses)} IPv4 addresses"
+            f" (about one /{_about_slash(addresses)})"
+        )
+    share = _rpki_share(as_info.get("rpki"))
+    if share:
+        text += f"; {_share_text(share[1])} of its prefixes are RPKI-signed"
+        invalid = as_info["rpki"].get("invalid") or 0
+        if invalid:
+            text += f" ({invalid} invalid)"
+    return text + "."
+
+
+def as_summary(as_info: dict, page: dict | None) -> str | None:
+    """The page's plain-English paragraph: who and where, how it connects
+    (only with CAIDA's relationships), what it announces (only with RIS). A
+    part whose data is unavailable is left out, never filled with zeros."""
+    first = _first_sentence(as_info)
+    name = f"AS{as_info['asn']}"
+    second = _second_sentence(as_info, page, "It" if first else name)
+    third = _third_sentence(as_info, "It" if first or second else name)
+    text = " ".join(part for part in (first, second, third) if part)
+    return text or None
+
+
+def _tile(key, label, value, sub, tone="default", segments=None) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "value": value,
+        "sub": sub,
+        "tone": tone,
+        "segments": segments,
+    }
+
+
+def _unknown_tile(key, label, as_info, dataset_ids) -> dict:
+    return _tile(key, label, "Unknown", _as_absent(as_info, dataset_ids), "muted")
+
+
+def _segments(parts: list[tuple[str, int, str]]) -> list[dict]:
+    """[(label, count, tone)] as bar segments with their share of the total."""
+    total = sum(count for _, count, _ in parts)
+    return [
+        {
+            "label": label,
+            "count": count,
+            "tone": tone,
+            "pct": round(count * 100 / total, 2) if total else 0.0,
+        }
+        for label, count, tone in parts
+    ]
+
+
+def _rpki_parts(rpki: dict) -> list[tuple[str, int, str]]:
+    return [
+        ("valid", rpki.get("valid") or 0, "success"),
+        ("invalid", rpki.get("invalid") or 0, "danger"),
+        ("not found", rpki.get("not_found") or 0, "muted"),
+    ]
+
+
+def as_tiles(as_info: dict, page: dict | None) -> list[dict]:
+    """The four count tiles: IPv4 space, prefixes, RPKI signed, neighbours."""
+    ris = ("ris_v4", "ris_v6")
+    prefixes = as_info.get("prefixes")
+    v4_list = ((page or {}).get("prefixes") or {}).get("v4")
+    if prefixes is None:
+        space = _unknown_tile("space", "IPv4 space", as_info, ris)
+        counts = _unknown_tile("prefixes", "Prefixes", as_info, ris)
+    else:
+        addresses = prefixes.get("v4_addresses") or 0
+        sub = None
+        if addresses:
+            sub = f"addresses ≈ one /{_about_slash(addresses)}"
+            if _is_complete(v4_list):
+                blocks = _blocks([p["prefix"] for p in v4_list["list"]])
+                sub += f" · {_plural(blocks, 'block')}"
+        space = _tile("space", "IPv4 space", human_count(addresses), sub)
+        sub = None
+        if _is_complete(v4_list) and v4_list["list"]:
+            k = sum(1 for p in v4_list["list"] if p.get("plen") == 24)
+            sub = f"{k:,} of the v4 are /24s" if k != 1 else "1 of the v4 is a /24"
+        counts = _tile(
+            "prefixes",
+            "Prefixes",
+            f"{prefixes.get('v4') or 0:,} v4 · {prefixes.get('v6') or 0:,} v6",
+            sub,
+        )
+    rpki = as_info.get("rpki")
+    if rpki is None:
+        signed = _unknown_tile("rpki", "RPKI signed", as_info, ("rpki",) + ris)
+    else:
+        share = _rpki_share(rpki)
+        signed = _tile(
+            "rpki",
+            "RPKI signed",
+            _share_text(share[1]) if share else "–",
+            f"{rpki.get('valid') or 0:,} valid · {rpki.get('invalid') or 0:,} invalid"
+            f" · {rpki.get('not_found') or 0:,} not found",
+            segments=_segments(_rpki_parts(rpki)),
+        )
+    relations = [
+        _relation(as_info, page, k) for k in ("upstreams", "downstreams", "peers")
+    ]
+    if any(r is None for r in relations):
+        neighbours = _unknown_tile("neighbours", "Neighbours", as_info, ("caida_rel",))
+    else:
+        neighbours = _tile(
+            "neighbours",
+            "Neighbours",
+            " · ".join(f"{r['count']:,}" for r in relations),
+            "upstreams · downstreams · peers",
+        )
+    return [space, counts, signed, neighbours]
+
+
+def _size_bucket(plen: int) -> int:
+    if plen >= 24:
+        return 0
+    if plen == 23:
+        return 1
+    if plen == 22:
+        return 2
+    return 3 if plen >= 17 else 4
+
+
+def _visibility_bucket(peers: int, median: int) -> int:
+    if peers >= 0.75 * median:
+        return 0
+    return 1 if peers >= 0.25 * median else 2
+
+
+def _bar(key, label, parts=None, empty=None) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "segments": _segments(parts) if parts else [],
+        "empty": empty,
+    }
+
+
+def as_glance(as_info: dict, page: dict | None) -> dict:
+    """The four composition bars (RPKI, visibility, IPv4 sizes, family) and the
+    note about what the counts leave out. A bar drawn from a truncated list
+    says how many of the largest it drew."""
+    ris = ("ris_v4", "ris_v6")
+    lists = (page or {}).get("prefixes")
+    medians = (page or {}).get("medians") or {}
+    bars = []
+
+    rpki = as_info.get("rpki")
+    if rpki is None:
+        bars.append(_bar("rpki", "RPKI", empty=_as_absent(as_info, ("rpki",) + ris)))
+    elif not any(_rpki_parts(rpki)[i][1] for i in range(3)):
+        bars.append(_bar("rpki", "RPKI", empty="No announced prefixes"))
+    else:
+        bars.append(_bar("rpki", "RPKI", _rpki_parts(rpki)))
+
+    def from_lists(key, label, build):
+        if lists is None:
+            return _bar(key, label, empty=_as_absent(as_info, ris))
+        return build(lists)
+
+    def visibility(lists):
+        counts, listed, cut = [0, 0, 0], 0, []
+        for family in ("v4", "v6"):
+            part = lists.get(family) or {}
+            entries = part.get("list") or []
+            listed += len(entries)
+            if len(entries) < (part.get("count") or 0):
+                cut.append(len(entries))
+            median = medians.get(family)
+            if not median:
+                continue  # nothing to compare this family's peer counts with
+            for entry in entries:
+                counts[_visibility_bucket(entry["ris_peers"], median)] += 1
+        label = "Visibility"
+        if cut:
+            label += f" (largest {max(cut):,} per family)"
+        if not listed:
+            return _bar("visibility", label, empty="No announced prefixes")
+        if not sum(counts):
+            return _bar("visibility", label, empty="Unknown")
+        return _bar(
+            "visibility",
+            label,
+            [
+                ("widely seen", counts[0], "success"),
+                ("partly", counts[1], "warning"),
+                ("narrowly", counts[2], "muted"),
+            ],
+        )
+
+    def sizes(lists):
+        part = lists.get("v4") or {}
+        entries = part.get("list") or []
+        label = "Sizes (IPv4)" + _truncated(len(entries), part.get("count") or 0)
+        if not entries:
+            return _bar("sizes", label, empty="No announced prefixes")
+        counts = [0] * 5
+        for entry in entries:
+            counts[_size_bucket(entry["plen"])] += 1
+        names = ("/24", "/23", "/22", "/17–/21", "/16 and shorter")
+        return _bar("sizes", label, [(n, c, "default") for n, c in zip(names, counts)])
+
+    bars.append(from_lists("visibility", "Visibility", visibility))
+    bars.append(from_lists("sizes", "Sizes (IPv4)", sizes))
+
+    prefixes = as_info.get("prefixes")
+    if prefixes is None:
+        bars.append(_bar("family", "Family", empty=_as_absent(as_info, ris)))
+    else:
+        v4, v6 = prefixes.get("v4") or 0, prefixes.get("v6") or 0
+        if v4 + v6:
+            bars.append(
+                _bar(
+                    "family",
+                    "Family",
+                    [("IPv4", v4, "default"), ("IPv6", v6, "default")],
+                )
+            )
+        else:
+            bars.append(_bar("family", "Family", empty="No announced prefixes"))
+    return {
+        "bars": bars,
+        "note": (
+            f"Routes seen by fewer than {ASINFO_MIN_RIS_PEERS} RIS peers are left out, "
+            "so counts can differ from other sites."
+        ),
+    }
+
+
+def _truncated(drawn: int, total: int) -> str:
+    """' (largest 1,000)' when a bar is drawn from fewer prefixes than exist."""
+    return f" (largest {drawn:,})" if drawn < total else ""
+
+
+# ---------------------------------------------------------------------------
+# The /AS<n> page's graph, map and tables.
+# ---------------------------------------------------------------------------
+
+AS_GRAPH_ROWS = 12
+AS_GRAPH_ROW_HEIGHT = 30
+AS_TABLE_ROWS = 10
+_NEIGHBOUR_RELATIONS = (
+    ("upstream", "Upstreams", "upstreams"),
+    ("downstream", "Downstreams", "downstreams"),
+    ("peer", "Peers", "peers"),
+)
+NEIGHBOUR_NOTE = (
+    "Sizes are each neighbour's own: its direct customers and its IPv4 space, "
+    "not traffic through this AS."
+)
+MAP_CREDIT = "\u00a9 OpenStreetMap contributors \u00b7 GeoLite2 by MaxMind"
+
+
+def _neighbour_href(link_for: LinkFor | None, asn: Any) -> str | None:
+    return _href(link_for, f"AS{asn}")
+
+
+def as_upstream_graph(
+    as_info: dict, page: dict | None, link_for: LinkFor | None = None
+) -> dict:
+    """The upstream providers as bars (by their own direct customers, square
+    root scaled so a giant does not flatten the rest) and the SVG paths that
+    fan them into the AS. At most AS_GRAPH_ROWS rows; the rest are `more`."""
+    relation = _relation(as_info, page, "upstreams")
+    graph = {"rows": [], "more": 0, "fan": [], "height": 0, "empty": None}
+    if relation is None:
+        graph["empty"] = _as_absent(as_info, ("caida_rel",))
+        return graph
+    entries = relation.get("list") or []
+    count = relation.get("count") or len(entries)
+    if not count:
+        graph["empty"] = "No upstreams in CAIDA's data"
+        return graph
+    shown = entries[:AS_GRAPH_ROWS]
+    top = max((e.get("customers") or 0 for e in shown), default=0)
+    rows = []
+    for entry in shown:
+        customers = entry.get("customers")
+        pct = 100 * math.sqrt((customers or 0) / top) if top else 0
+        rows.append(
+            {
+                "asn": entry.get("asn"),
+                "href": _neighbour_href(link_for, entry.get("asn")),
+                "flag": country_flag(entry.get("country")),
+                "country": entry.get("country"),
+                "handle": as_handle(entry.get("name")),
+                "customers_text": f"{customers:,}"
+                if customers is not None
+                else "\u2014",
+                "bar_pct": round(max(4, pct), 1),
+            }
+        )
+    more = max(count - len(rows), 0)
+    height = (len(rows) + (1 if more else 0)) * AS_GRAPH_ROW_HEIGHT
+    mid = height / 2
+    graph["rows"] = rows
+    graph["more"] = more
+    graph["height"] = height
+    graph["fan"] = [
+        f"M0,{y} C36,{y} 36,{mid} 72,{mid}"
+        for y in (
+            i * AS_GRAPH_ROW_HEIGHT + AS_GRAPH_ROW_HEIGHT // 2 for i in range(len(rows))
+        )
+    ]
+    return graph
+
+
+def as_map_view(as_info: dict, as_map: dict | None) -> dict | None:
+    """Where the AS's IPv4 addresses geolocate, as tiles and dots in percent
+    and pixels of the canvas `as_map` carries. None without a map, or when
+    there is neither a footprint with cities nor a country to pin. `approx`
+    is the country pin: drawn as "around here", never as a city."""
+    if not as_map:
+        return None
+    canvas = as_map.get("canvas") or {}
+    footprint = as_map.get("footprint")
+    fallback = as_map.get("fallback")
+    cities = (footprint or {}).get("cities") or []
+    width, height = canvas.get("width") or 1, canvas.get("height") or 1
+    size = canvas.get("tile_size") or 256
+    inside = [
+        p
+        for p in canvas.get("points") or []
+        if 0 <= p["x"] <= width and 0 <= p["y"] <= height
+    ]
+    if cities:
+        dots = [
+            {"x": p["x"], "y": p["y"], "r": round(2.5 + 16 * math.sqrt(p["weight"]), 1)}
+            for p in inside
+        ]
+        caption = (
+            "Dots: where its IPv4 addresses geolocate (GeoLite2, by city; "
+            "area = share)."
+        )
+        left_out = []
+        country_share = footprint.get("country_level_share") or 0
+        if country_share:
+            left_out.append(
+                f"{_share_text(country_share * 100).capitalize()} of the space is "
+                "placed only at country level and is not drawn."
+            )
+        unplaced = footprint.get("unplaced_share") or 0
+        if unplaced:
+            left_out.append(
+                f"{_share_text(unplaced * 100).capitalize()} could not be placed."
+            )
+        caption = " ".join([caption, *left_out])
+        alt = "Where its IPv4 addresses geolocate: " + ", ".join(
+            f"{c.get('name') or 'unnamed place'} {round(c['share'] * 100)}%"
+            for c in cities[:5]
+        )
+    elif fallback == "country":
+        place = country_name_in_text(as_info.get("country")) or (
+            "its registered country"
+        )
+        dots = [{"x": p["x"], "y": p["y"], "r": 6.0} for p in inside]
+        # Without the route data there were no prefixes to place: that is
+        # unknown, never "no city-level placement".
+        unread = {entry.get("dataset") for entry in as_info.get("unavailable") or []}
+        if unread & {"ris_v4", "ris_v6"}:
+            absent = _as_absent(as_info, ("ris_v4", "ris_v6"))
+            caption = f"{absent}. The pin marks {place}, at country level."
+            alt = f"{absent}. The pin marks {place}"
+        else:
+            caption = (
+                "No city-level placement for its IPv4 addresses; "
+                f"the pin marks {place}, at country level."
+            )
+            alt = (
+                f"No city-level placement for its IPv4 addresses; the pin marks {place}"
+            )
+    else:
+        return None
+    return {
+        "width": width,
+        "height": height,
+        "tiles": [
+            {
+                "url": t["url"],
+                "left": round(100 * t["x"] / width, 3),
+                "top": round(100 * t["y"] / height, 3),
+                "w": round(100 * size / width, 3),
+                "h": round(100 * size / height, 3),
+            }
+            for t in canvas.get("tiles") or []
+        ],
+        "dots": dots,
+        "node": {
+            "label": f"AS{as_info.get('asn')}",
+            "sub": as_handle(as_info.get("name")),
+        },
+        "caption": caption,
+        "credit": MAP_CREDIT,
+        "alt": alt,
+        "approx": not cities,
+    }
+
+
+def as_neighbour_table(
+    as_info: dict, page: dict | None, link_for: LinkFor | None = None
+) -> dict:
+    """Upstreams, downstreams and peers as one table ordered by each
+    neighbour's own customers: the first AS_TABLE_ROWS drawn, every loaded one
+    in `payload` for the page's script, and what was cut said in `truncated`."""
+    relations = {
+        key: _relation(as_info, page, plural) for key, _, plural in _NEIGHBOUR_RELATIONS
+    }
+    counts = {
+        key: (rel.get("count") or len(rel.get("list") or [])) if rel else 0
+        for key, rel in relations.items()
+    }
+    counts = {"all": sum(counts.values()), **counts}
+    merged = []
+    truncated = []
+    for key, _, plural in _NEIGHBOUR_RELATIONS:
+        rel = relations[key]
+        if not rel:
+            continue
+        entries = rel.get("list") or []
+        if len(entries) < counts[key]:
+            truncated.append(
+                f"Largest {len(entries):,} of {counts[key]:,} {plural} loaded."
+            )
+        merged += [(key, entry) for entry in entries]
+    merged.sort(
+        key=lambda item: (-(item[1].get("customers") or 0), item[1].get("asn") or 0)
+    )
+    top = max((e.get("customers") or 0 for _, e in merged), default=0)
+    rows = []
+    for key, entry in merged[:AS_TABLE_ROWS]:
+        customers = entry.get("customers")
+        space = entry.get("v4_addresses")
+        rows.append(
+            {
+                "asn": entry.get("asn"),
+                "href": _neighbour_href(link_for, entry.get("asn")),
+                "holder": as_holder(entry.get("name")),
+                "flag": country_flag(entry.get("country")),
+                "country": entry.get("country"),
+                "relation": key,
+                "customers_text": f"{customers:,}"
+                if customers is not None
+                else "\u2014",
+                "bar_pct": (
+                    round(
+                        100 * math.log10((customers or 0) + 1) / math.log10(top + 1), 1
+                    )
+                    if top
+                    else 0
+                ),
+                "space_text": human_count(space) if space is not None else "\u2014",
+            }
+        )
+    empty = None
+    if all(rel is None for rel in relations.values()):
+        empty = _as_absent(as_info, ("caida_rel",))
+    elif not counts["all"]:
+        empty = "No neighbours in CAIDA's data"
+    return {
+        "chips": [
+            {"key": "all", "label": "All", "count": counts["all"]},
+            *(
+                {"key": key, "label": label, "count": counts[key]}
+                for key, label, _ in _NEIGHBOUR_RELATIONS
+            ),
+        ],
+        "rows": rows,
+        "payload": {
+            "columns": [
+                "asn",
+                "name",
+                "country",
+                "relation",
+                "customers",
+                "v4_addresses",
+            ],
+            "rows": [
+                [
+                    e.get("asn"),
+                    e.get("name"),
+                    e.get("country"),
+                    key,
+                    e.get("customers"),
+                    e.get("v4_addresses"),
+                ]
+                for key, e in merged
+            ],
+            "counts": counts,
+            "max_customers": top,
+        },
+        "truncated": truncated,
+        "note": NEIGHBOUR_NOTE,
+        "empty": empty,
+    }
+
+
+def _prefix_exponent(plen: int | None, family: str) -> int:
+    """log2 of a prefix's size: addresses for IPv4, /48s for IPv6 (0 past /48)."""
+    return max((32 if family == "v4" else 48) - (plen or 0), 0)
+
+
+def _prefix_size_text(plen: int | None, family: str) -> str:
+    exponent = _prefix_exponent(plen, family)
+    if family == "v4":
+        return human_count(2**exponent)
+    if (plen or 0) > 48:
+        return "under a /48"
+    count = human_count(2**exponent)
+    return f"{count} /48" if count == "1" else f"{count} /48s"
+
+
+def as_prefix_table(as_info: dict, page: dict | None) -> dict:
+    """The announced prefixes, largest first: the first AS_TABLE_ROWS of IPv4
+    (of IPv6 when there is no IPv4 listed), every loaded one in `payload`."""
+    lists = (page or {}).get("prefixes")
+    table = {
+        "rows": [],
+        "counts": {"v4": 0, "v6": 0},
+        "payload": {
+            "columns": ["prefix", "plen", "ris_peers", "state", "reason"],
+            "v4": [],
+            "v6": [],
+        },
+        "truncated": [],
+        "empty": None,
+    }
+    if lists is None:
+        table["empty"] = _as_absent(as_info, ("ris_v4", "ris_v6"))
+        return table
+    entries = {}
+    for family, word in (("v4", "IPv4"), ("v6", "IPv6")):
+        part = lists.get(family) or {}
+        loaded = sorted(part.get("list") or [], key=lambda e: e.get("plen") or 0)
+        entries[family] = loaded
+        count = part.get("count") or 0
+        table["counts"][family] = count
+        if len(loaded) < count:
+            table["truncated"].append(
+                f"Largest {len(loaded):,} of {count:,} {word} prefixes loaded."
+            )
+        table["payload"][family] = [
+            [
+                e.get("prefix"),
+                e.get("plen"),
+                e.get("ris_peers"),
+                (e.get("rpki") or {}).get("state"),
+                (e.get("rpki") or {}).get("reason"),
+            ]
+            for e in loaded
+        ]
+    if not any(table["counts"].values()):
+        table["empty"] = "No announced prefixes"
+        return table
+    family = "v4" if entries["v4"] else "v6"
+    loaded = entries[family]
+    top = max((2 ** _prefix_exponent(e.get("plen"), family) for e in loaded), default=1)
+    for entry in loaded[:AS_TABLE_ROWS]:
+        plen = entry.get("plen")
+        size = 2 ** _prefix_exponent(plen, family)
+        rpki = entry.get("rpki") or {}
+        state = rpki.get("state")
+        text = _RPKI_STATES.get(state, "Unknown")
+        if state == "invalid" and rpki.get("reason"):
+            text += f": {rpki['reason']}"
+        peers = entry.get("ris_peers")
+        table["rows"].append(
+            {
+                "prefix": entry.get("prefix"),
+                "size_text": _prefix_size_text(plen, family),
+                "bar_pct": round(100 * math.log2(size + 1) / math.log2(top + 1), 1),
+                "peers_text": f"{peers:,}" if isinstance(peers, int) else "\u2014",
+                "rpki_text": text,
+                "rpki_tone": _RPKI_TONES.get(state, "default" if state else "muted"),
+            }
+        )
+    return table

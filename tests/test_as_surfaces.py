@@ -1465,3 +1465,11 @@ def test_privacy_names_caida_only_while_its_datasets_are_in_use(monkeypatch, tmp
     text = _privacy_text()
     assert "RPKI data validated by rpki-client.org" in text
     assert "CAIDA" not in text
+
+
+def test_mcp_as_card_keeps_number_and_name_only(asinfo_enabled):
+    card = mcp_server.compact_as_info(
+        lookup.as_info_for_asn(4766, full=True), full=True
+    )
+    assert set(card["upstreams"][0]) == {"asn", "name"}
+    assert set(card["downstreams"]["list"][0]) == {"asn", "name"}

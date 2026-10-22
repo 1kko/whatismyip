@@ -403,7 +403,11 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # ASINFO_MAX_AGE_HOURS=72            # older daily datasets are "unknown" + degraded
 # ASINFO_CAIDA_ENABLED=true          # false: relationships and organizations are unknown
 # ASINFO_CAIDA_REL_MAX_AGE_DAYS=75   # and ASINFO_CAIDA_ORG_MAX_AGE_DAYS (200)
-# ASINFO_LIST_LIMIT=100              # cap on the downstream, peer and prefix lists
+# ASINFO_LIST_LIMIT=100              # cap on the card's and the JSON's downstream, peer and prefix lists
+# ASINFO_PAGE_LIMIT=1000             # the /AS<n> page's own cap, per relation and prefix family
+# AS_MAP_SAMPLE_BUDGET=2000          # GeoLite2-City reads for one /AS<n> map
+# AS_MAP_MAX_DOTS=200                # city dots drawn on it
+# AS_MAP_MAX_ZOOM=8                  # the map never zooms in past this
 
 # AbuseIPDB (see "IP reputation" below); off without a key
 # ABUSEIPDB_API_KEY=your_api_key
@@ -526,8 +530,14 @@ says so (see below).
 An autonomous system on its own: `/AS4766`, or `/as4766` (a bare `/4766` is not
 an AS lookup). The answer is the AS card of the
 [AS information](#as-information) section, with the full upstream, downstream and
-peer lists (capped at `ASINFO_LIST_LIMIT`) and the announced prefixes with each
-one's RPKI state, as a page, as JSON, or as `?format=text`. `?fields=` and
+peer lists (JSON capped at `ASINFO_LIST_LIMIT`; the page reads up to
+`ASINFO_PAGE_LIMIT` per relation and prefix family) and the announced prefixes with each
+one's RPKI state, as a page, as JSON, or as `?format=text`. The page leads with a
+one-sentence summary, four headline tiles, the upstreams beside a map of where
+the AS's IPv4 space geolocates (GeoLite2-City, sampled; tiles come from
+OpenStreetMap through your browser), and then neighbour and prefix tables you can
+filter. The JSON adds each neighbour's `country`, `customers`, `v4_addresses`,
+`v4_prefixes` and `v6_prefixes`. `?fields=` and
 `?subdomains=` are `400`s on it. An AS no dataset knows is a `200` saying so.
 
 A special-purpose number (0, `AS_TRANS` 23456, the documentation, private-use and

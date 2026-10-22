@@ -1910,3 +1910,83 @@ def test_download_raises_on_an_error_status(tmp_path, source):
     _Source.reply = (404, {}, b"not here")
     with pytest.raises(OSError):
         asinfo._download(source, str(tmp_path / "copy.tmp"), 100)
+
+
+def test_schema_3_stores_each_family_s_median_ris_peers(tmp_path):
+    manager = build_manager(tmp_path)
+    assert asinfo.SCHEMA_VERSION == 3
+    page = manager.page_data(4766)
+    # v4 routes after the filters: 326, 330, 340 -> lower median 330;
+    # v6: 120, 150 -> 120.
+    assert page["medians"] == {"v4": 330, "v6": 120}
+
+
+def test_page_data_lists_every_relation_with_each_neighbour_s_own_size(tmp_path):
+    page = build_manager(tmp_path).page_data(4766)
+    assert page["upstreams"]["count"] == 2
+    assert page["upstreams"]["list"][0] == {
+        "asn": 174,
+        "name": "COGENT-174 - Cogent Communications",
+        "country": "US",
+        "customers": 1,
+        "v4_addresses": 0,
+        "v4_prefixes": 0,
+        "v6_prefixes": 0,
+    }
+    assert [n["asn"] for n in page["downstreams"]["list"]] == [17858, 38661, 45400]
+    assert [n["asn"] for n in page["peers"]["list"]] == [9318]
+    assert page["prefixes"]["v4"] == {
+        "count": 2,
+        "list": [
+            {
+                "prefix": "211.252.0.0/15",
+                "plen": 15,
+                "ris_peers": 330,
+                "rpki": {"state": "valid", "reason": None},
+            },
+            {
+                "prefix": "211.252.112.0/24",
+                "plen": 24,
+                "ris_peers": 326,
+                "rpki": {"state": "valid", "reason": None},
+            },
+        ],
+    }
+    assert page["prefixes"]["v6"]["count"] == 1
+
+
+def test_page_data_stops_each_list_at_the_page_limit(tmp_path, monkeypatch):
+    manager = build_manager(tmp_path)
+    monkeypatch.setattr(asinfo, "ASINFO_PAGE_LIMIT", 1)
+    page = manager.page_data(4766)
+    assert page["upstreams"]["count"] == 2 and len(page["upstreams"]["list"]) == 1
+    assert page["downstreams"]["count"] == 3 and len(page["downstreams"]["list"]) == 1
+    assert [p["prefix"] for p in page["prefixes"]["v4"]["list"]] == ["211.252.0.0/15"]
+
+
+def test_page_data_sections_are_none_when_their_dataset_is_unavailable(tmp_path):
+    page = build_manager(tmp_path, drop=("caida_rel", "ris_v6")).page_data(4766)
+    assert page["upstreams"] is None and page["downstreams"] is None
+    assert page["peers"] is None
+    assert page["prefixes"] is None and page["medians"] is None
+
+
+def test_detail_adds_sizes_only_when_asked(tmp_path):
+    manager = build_manager(tmp_path)
+    detailed = manager.for_asn(4766, full=True, detail=True)
+    assert set(detailed["upstreams"][0]) == {
+        "asn",
+        "name",
+        "country",
+        "customers",
+        "v4_addresses",
+        "v4_prefixes",
+        "v6_prefixes",
+    }
+    assert set(detailed["downstreams"]["list"][0]) == set(detailed["upstreams"][0])
+    assert detailed["org"]["siblings"] == [9760]
+    for answer in (
+        manager.for_asn(4766, full=True),
+        manager.for_address("211.252.112.5"),
+    ):
+        assert set(answer["upstreams"][0]) == {"asn", "name"}
