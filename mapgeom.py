@@ -8,6 +8,7 @@ is covered by pytest instead of by eyeballing a map.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 TILE_SIZE = 256
 TILE_URL_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -127,6 +128,41 @@ def _arrow_marker(line: list[list[float]]) -> dict | None:
     return {"x": round(ax, 2), "y": round(ay, 2), "angle": round(angle, 2)}
 
 
+def _tiles(
+    zoom: int, tile_zoom_offset: int, left: float, top: float, width: int, height: int
+) -> list[dict]:
+    """OSM tiles covering the canvas whose top-left is (left, top) in world pixels.
+
+    Tile x wraps around the world (a canvas over the Pacific spans the
+    antimeridian); rows outside the map are dropped.
+    """
+    tile_zoom = max(zoom - tile_zoom_offset, 0)
+    # One tile of tile_zoom covers this many canvas pixels at the current zoom.
+    tile_span = TILE_SIZE * (2 ** (zoom - tile_zoom))
+    tile_count = 2**tile_zoom
+
+    tiles = []
+    first_col = math.floor(left / tile_span)
+    last_col = math.floor((left + width - 1) / tile_span)
+    first_row = math.floor(top / tile_span)
+    last_row = math.floor((top + height - 1) / tile_span)
+
+    for col in range(first_col, last_col + 1):
+        for row in range(first_row, last_row + 1):
+            if row < 0 or row >= tile_count:
+                continue
+            tiles.append(
+                {
+                    "url": TILE_URL_TEMPLATE.format(
+                        z=tile_zoom, x=col % tile_count, y=row
+                    ),
+                    "x": round(col * tile_span - left, 2),
+                    "y": round(row * tile_span - top, 2),
+                }
+            )
+    return tiles
+
+
 def build_canvas(
     target: dict[str, float],
     origin: dict[str, float] | None,
@@ -172,29 +208,8 @@ def build_canvas(
         )
 
     tile_zoom = max(zoom - tile_zoom_offset, 0)
-    # One tile of tile_zoom covers this many canvas pixels at the current zoom.
     tile_span = TILE_SIZE * (2 ** (zoom - tile_zoom))
-    tile_count = 2**tile_zoom
-
-    tiles = []
-    first_col = math.floor(left / tile_span)
-    last_col = math.floor((left + width - 1) / tile_span)
-    first_row = math.floor(top / tile_span)
-    last_row = math.floor((top + height - 1) / tile_span)
-
-    for col in range(first_col, last_col + 1):
-        for row in range(first_row, last_row + 1):
-            if row < 0 or row >= tile_count:
-                continue
-            tiles.append(
-                {
-                    "url": TILE_URL_TEMPLATE.format(
-                        z=tile_zoom, x=col % tile_count, y=row
-                    ),
-                    "x": round(col * tile_span - left, 2),
-                    "y": round(row * tile_span - top, 2),
-                }
-            )
+    tiles = _tiles(zoom, tile_zoom_offset, left, top, width, height)
 
     target_x, target_y = project(*target_point)
     canvas = {
@@ -223,3 +238,84 @@ def build_canvas(
         ]
         canvas["arrow"] = _arrow_marker(canvas["line"])
     return canvas
+
+
+def points_center_lon(lons: Sequence[float]) -> float:
+    """Centre longitude of the smallest arc holding every longitude.
+
+    The mean of -118 and 139 is 10, the wrong side of the world. The widest
+    empty gap between neighbouring longitudes (the last one wrapping to the
+    first) is the part of the globe to leave out; the centre is the middle of
+    what remains, so Tokyo and Los Angeles are framed across the Pacific.
+    """
+    lons = sorted(_wrap180(lon) for lon in lons)
+    gaps = [
+        (lons[(i + 1) % len(lons)] - lons[i]) % 360 or 360 for i in range(len(lons))
+    ]
+    widest = max(range(len(lons)), key=gaps.__getitem__)
+    start = lons[(widest + 1) % len(lons)]
+    return _wrap180(start + (360 - gaps[widest]) / 2)
+
+
+def build_points_canvas(
+    points: Sequence[tuple[float, float, float]],
+    width: int,
+    height: int,
+    fit_share: float = 0.9,
+    fit_ratio: float = FIT_MARGIN,
+    max_zoom: int = 8,
+) -> dict:
+    """Tiles and projected points for many (lat, lon, weight) points.
+
+    The frame fits the core, not everything: the heaviest points, taken until
+    they hold fit_share of the total weight (at least one), so a stray light
+    point on another continent does not zoom a national map out to the world.
+    Points outside the frame still project (their x, y may lie off the canvas)
+    and are left to the caller to clip. max_zoom keeps a single point from
+    zooming past a city-sized frame.
+    """
+    ranked = sorted(range(len(points)), key=lambda i: -points[i][2])
+    total = sum(p[2] for p in points)
+    core: list[tuple[float, float, float]] = []
+    held = 0.0
+    for i in ranked:
+        core.append(points[i])
+        held += points[i][2]
+        if held >= fit_share * total:
+            break
+
+    center_lon = points_center_lon([lon for _, lon, _ in core])
+
+    zoom = MIN_ZOOM
+    for candidate in range(max_zoom, MIN_ZOOM - 1, -1):
+        scale = TILE_SIZE * (2**candidate)
+        xs = [_unwrapped_x(lon, center_lon, scale) for _, lon, _ in core]
+        ys = [_world_y(lat) * scale for lat, _, _ in core]
+        if (
+            max(xs) - min(xs) <= width * fit_ratio
+            and max(ys) - min(ys) <= height * fit_ratio
+        ):
+            zoom = candidate
+            break
+
+    scale = TILE_SIZE * (2**zoom)
+    xs = [_unwrapped_x(lon, center_lon, scale) for _, lon, _ in core]
+    ys = [_world_y(lat) * scale for lat, _, _ in core]
+    left = (min(xs) + max(xs)) / 2.0 - width / 2.0
+    top = (min(ys) + max(ys)) / 2.0 - height / 2.0
+
+    return {
+        "width": width,
+        "height": height,
+        "zoom": zoom,
+        "tile_size": TILE_SIZE,
+        "tiles": _tiles(zoom, 0, left, top, width, height),
+        "points": [
+            {
+                "x": round(_unwrapped_x(lon, center_lon, scale) - left, 2),
+                "y": round(_world_y(lat) * scale - top, 2),
+                "weight": weight,
+            }
+            for lat, lon, weight in points
+        ],
+    }

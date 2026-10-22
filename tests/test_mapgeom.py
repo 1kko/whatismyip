@@ -1,13 +1,16 @@
 import math
+import re
 
 import pytest
 
 from mapgeom import (
     TILE_SIZE,
     build_canvas,
+    build_points_canvas,
     fit_zoom,
     great_circle_points,
     midpoint_lon,
+    points_center_lon,
 )
 
 SEOUL = {"lat": 37.5665, "lon": 126.978}
@@ -201,3 +204,46 @@ class TestBuildCanvas:
 
     def test_city_mode_has_no_arrow(self):
         assert build_canvas(SEOUL, None, *DESKTOP)["arrow"] is None
+
+
+def test_center_lon_takes_the_short_way_across_the_antimeridian():
+    assert points_center_lon([139.69, -118.24]) == pytest.approx(-169.275)
+    assert points_center_lon([126.98, 129.07]) == pytest.approx(128.025)
+
+
+def test_one_point_sits_in_the_middle_at_the_maximum_zoom():
+    canvas = build_points_canvas([(37.57, 126.98, 1.0)], 560, 360, max_zoom=8)
+    assert canvas["zoom"] == 8
+    assert canvas["points"] == [{"x": 280.0, "y": 180.0, "weight": 1.0}]
+
+
+def test_a_light_outlier_does_not_zoom_a_national_map_out():
+    pts = [(37.57, 126.98, 0.6), (35.18, 129.08, 0.35), (51.51, -0.13, 0.05)]
+    canvas = build_points_canvas(pts, 560, 360)
+    assert canvas["zoom"] >= 6
+    for p in canvas["points"][:2]:
+        assert 0 <= p["x"] <= 560 and 0 <= p["y"] <= 360
+
+
+def test_japan_and_the_us_west_coast_share_one_canvas():
+    canvas = build_points_canvas(
+        [(35.68, 139.69, 0.5), (34.05, -118.24, 0.5)], 560, 360
+    )
+    tokyo, la = canvas["points"]
+    assert 0 <= tokyo["x"] < la["x"] <= 560
+
+
+def test_tiles_are_osm_urls_wrapped_into_range():
+    canvas = build_points_canvas(
+        [(35.68, 139.69, 0.5), (34.05, -118.24, 0.5)], 560, 360
+    )
+    n = 2 ** canvas["zoom"]
+    for tile in canvas["tiles"]:
+        z, x, y = map(
+            int,
+            re.match(
+                r"https://tile\.openstreetmap\.org/(\d+)/(\d+)/(\d+)\.png$",
+                tile["url"],
+            ).groups(),
+        )
+        assert z == canvas["zoom"] and 0 <= x < n and 0 <= y < n
