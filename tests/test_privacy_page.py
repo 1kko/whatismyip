@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 import config
 import main
+from asinfo import AsInfoManager
 from main import app, ip_ban_manager, rate_limiter
 from security import SuspiciousPatternDetector, WhitelistManager
 
@@ -236,16 +237,27 @@ class TestContent:
         assert _mentions(text, "tile.openstreetmap.org")
         assert _mentions(text, config.WEBRTC_STUN_HOST)
 
-    def test_the_map_tile_note_mentions_zooming(self):
+    ZOOMING = (
+        "Zooming or moving the map on an AS page fetches more tiles from the same host."
+    )
+
+    def test_the_map_tile_note_mentions_zooming(self, tmp_path):
         """The AS page's map zooms and pans (static/js/as-map.js), and each
-        move fetches tiles the first view's counts do not cover."""
-        text = _privacy_text()
+        move fetches tiles the first view's counts do not cover. Said only
+        while AS pages exist, the condition the AS datasets' hosts are shown
+        on."""
+        on = AsInfoManager(directory=str(tmp_path), enabled=True)
+        text = _privacy_text(asinfo_manager=on)
         assert _mentions(text, "tile.openstreetmap.org")
         assert "about 15 requests on a desktop, 6 on a phone" in text
-        assert (
-            "Zooming or moving the map on an AS page fetches more tiles from "
-            "the same host." in text
-        )
+        assert self.ZOOMING in text
+
+    def test_no_zooming_note_without_as_pages(self, tmp_path):
+        off = AsInfoManager(directory=str(tmp_path), enabled=False)
+        text = _privacy_text(asinfo_manager=off)
+        assert _mentions(text, "tile.openstreetmap.org")
+        assert "about 15 requests on a desktop, 6 on a phone" in text
+        assert "Zooming" not in text
 
     def test_no_stun_server_when_the_test_is_off(self):
         text = _privacy_text(WEBRTC_STUN_URL="", WEBRTC_STUN_HOST="")

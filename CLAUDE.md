@@ -1140,7 +1140,8 @@ gets a square box, so a bubble fits above its dot. Its tiles come through
 Leaflet with `referrerPolicy: "strict-origin"` and the same inverting
 filter, and Leaflet's attribution control is off because the figcaption
 carries `MAP_CREDIT`. Zooming or moving it fetches more tiles, which
-`/privacy` says. `tests/test_as_map_js.py` runs the pure parts in node;
+`/privacy` says while AS information is on (`asinfo_hosts`), as there is no
+AS page otherwise. `tests/test_as_map_js.py` runs the pure parts in node;
 Leaflet does not run there, so the wiring is checked in a browser.
 
 ### Subdomain lookup
