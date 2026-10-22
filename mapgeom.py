@@ -248,7 +248,8 @@ def points_center_lon(lons: Sequence[float]) -> float:
     first) is the part of the globe to leave out; the centre is the middle of
     what remains, so Tokyo and Los Angeles are framed across the Pacific.
     """
-    lons = sorted(_wrap180(lon) for lon in lons)
+    # Repeats would leave a zero gap, which the modulo below reads as 360.
+    lons = sorted({_wrap180(lon) for lon in lons})
     gaps = [
         (lons[(i + 1) % len(lons)] - lons[i]) % 360 or 360 for i in range(len(lons))
     ]
@@ -272,8 +273,10 @@ def build_points_canvas(
     point on another continent does not zoom a national map out to the world.
     Points outside the frame still project (their x, y may lie off the canvas)
     and are left to the caller to clip. max_zoom keeps a single point from
-    zooming past a city-sized frame.
+    zooming past a city-sized frame. Callers pass at least one point.
     """
+    if not points:
+        raise ValueError("no points to frame")
     ranked = sorted(range(len(points)), key=lambda i: -points[i][2])
     total = sum(p[2] for p in points)
     core: list[tuple[float, float, float]] = []

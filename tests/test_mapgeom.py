@@ -247,3 +247,18 @@ def test_tiles_are_osm_urls_wrapped_into_range():
             ).groups(),
         )
         assert z == canvas["zoom"] and 0 <= x < n and 0 <= y < n
+
+
+def test_center_lon_ignores_repeated_longitudes():
+    assert points_center_lon([10, 10, 50]) == pytest.approx(30)
+    # The centre is the dateline; _wrap180 yields -180.
+    assert points_center_lon([-100, -100, 100]) == pytest.approx(-180)
+    # Gaps: -170 to -10 is 160, -10 to 170 is 180 (widest), 170 to -170 is 20,
+    # so the held arc runs 170 east to -10 and its middle is -100.
+    assert points_center_lon([170, 170, -170, -10]) == pytest.approx(-100)
+    assert points_center_lon([42, 42]) == pytest.approx(42)
+
+
+def test_an_empty_point_list_is_refused():
+    with pytest.raises(ValueError, match="no points"):
+        build_points_canvas([], 560, 360)
