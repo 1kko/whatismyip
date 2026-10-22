@@ -71,6 +71,25 @@ function pickDot(points, x, y) {
   return drawn !== -1 ? drawn : near;
 }
 
+/* The keys that move the focus between the dots: one along the payload's
+ * order (largest first), or to its first or last dot. */
+var STEPS = {
+  ArrowRight: 1,
+  ArrowDown: 1,
+  ArrowLeft: -1,
+  ArrowUp: -1,
+  Home: -Infinity,
+  End: Infinity,
+};
+
+/* The index the focus moves to from dot `index` of `count` on `key`: the
+ * same index for any other key and at either end, which does not wrap. */
+function stepDot(count, index, key) {
+  var step = STEPS[key];
+  if (typeof step !== "number") return index;
+  return Math.max(0, Math.min(count - 1, index + step));
+}
+
 /* lon moved by a multiple of 360 to lie within 180 of centerLon, as
  * mapgeom.unwrap_lon: the world copy a dot is drawn on. */
 function nearestCopy(lon, centerLon) {
@@ -225,7 +244,10 @@ function initMap() {
     });
   });
 
-  if (!data.approx) wireBubbles(map, figure, live, data, markers);
+  if (!data.approx) {
+    wireBubbles(map, figure, live, data, markers);
+    wireRoving(map, data, markers);
+  }
   wireWheel(map, live);
 
   // The static picture's own description, for the map that replaces it.
@@ -317,6 +339,43 @@ function wireBubbles(map, figure, live, data, markers) {
   });
 }
 
+/* One dot is a Tab stop, the first (the largest) until the focus moves:
+ * Leaflet makes every keyboard marker one, and getting past a map of 183 dots
+ * would take as many presses. The arrow keys, Home and End move the focus
+ * between the dots (stepDot), and the Tab stop goes with it. */
+function wireRoving(map, data, markers) {
+  var current = 0;
+  function rove(index) {
+    current = index;
+    markers.forEach(function (marker, i) {
+      marker.getElement().setAttribute("tabindex", i === current ? "0" : "-1");
+    });
+  }
+  rove(0);
+  markers.forEach(function (marker, index) {
+    var element = marker.getElement();
+    element.addEventListener("focus", function () {
+      if (index !== current) rove(index);
+    });
+    element.addEventListener("keydown", function (event) {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      if (typeof STEPS[event.key] !== "number") return;
+      // The page does not scroll, even at the first or the last dot.
+      event.preventDefault();
+      var next = stepDot(markers.length, index, event.key);
+      if (next === index) return;
+      var target = markers[next];
+      var pad = 2 * data.dots[next].r + 4;
+      // Off the view the dot is brought in first: focusing it there would
+      // scroll Leaflet's overflow-hidden box. The margin holds the dot, its
+      // focus ring and Leaflet's own pan on focus, which reckons the icon
+      // below and right of its point.
+      map.panInside(target.getLatLng(), { padding: [pad, pad], animate: false });
+      target.getElement().focus({ preventScroll: true });
+    });
+  });
+}
+
 /* The wheel zooms only once the visitor has pressed the mouse in the map, and
  * stops when the pointer or the focus leaves it: scrolling the page past the
  * map never zooms it, nor does tabbing into it with the pointer resting on
@@ -344,6 +403,7 @@ if (typeof module === "object" && module.exports) {
     pickDot: pickDot,
     nearestCopy: nearestCopy,
     keyAction: keyAction,
+    stepDot: stepDot,
     bubble: bubble,
   };
 }

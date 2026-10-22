@@ -2,8 +2,9 @@
 """static/js/as-map.js: the /AS<n> map's zoom, pan and bubbles.
 
 Leaflet does not run in node, so the file keeps what it decides in pure
-functions (the widest zoom, which dot a click picks, the world copy a dot is
-drawn on, what a key does, the bubble) and node runs those against a fake
+functions (the widest zoom, which dot a click picks and how the dots stack,
+the world copy a dot is drawn on, what a key does, where the arrow keys move
+the focus, the bubble) and node runs those against a fake
 document the way tests/test_as_page_js.py runs as.js. Leaflet is not loaded
 here, so the map itself never starts; a browser checks the wiring, and the
 few wiring rules that decide behaviour are pinned by text.
@@ -146,6 +147,53 @@ def test_keys_open_a_dot_as_a_button_does():
     ]
     for kind, key, action in cases:
         assert run_js(f"m.keyAction({json.dumps(kind)}, {json.dumps(key)})") == action
+
+
+@needs_node
+def test_arrow_keys_step_between_the_dots_without_wrapping():
+    """One dot is a Tab stop; the arrows move along the payload's order
+    (largest first), Home and End to its ends, and stop there."""
+    cases = [
+        (5, 0, "ArrowRight", 1),
+        (5, 0, "ArrowDown", 1),
+        (5, 3, "ArrowLeft", 2),
+        (5, 3, "ArrowUp", 2),
+        (5, 3, "Home", 0),
+        (5, 1, "End", 4),
+        (5, 4, "ArrowRight", 4),  # no wrap
+        (5, 4, "ArrowDown", 4),
+        (5, 0, "ArrowLeft", 0),
+        (5, 0, "ArrowUp", 0),
+        (5, 0, "Home", 0),
+        (5, 4, "End", 4),
+        (5, 2, "Enter", 2),  # not a step
+        (5, 2, "a", 2),
+        (5, 2, "Tab", 2),
+        (5, 2, "constructor", 2),
+        (1, 0, "ArrowRight", 0),
+        (1, 0, "End", 0),
+    ]
+    for count, index, key, expected in cases:
+        assert run_js(f"m.stepDot({count}, {index}, {json.dumps(key)})") == expected, (
+            count,
+            index,
+            key,
+        )
+
+
+def test_one_dot_is_a_tab_stop_and_the_arrows_move_focus_without_scrolling():
+    """Leaflet makes every keyboard marker a Tab stop; the map keeps one
+    (a roving tabindex) and moves it with the focus. A dot off the view is
+    panned in before it takes focus, which must not scroll Leaflet's
+    overflow-hidden box."""
+    source = AS_MAP_JS.read_text(encoding="utf-8")
+    assert re.search(
+        r'setAttribute\("tabindex", (?:index|i) === (?:current|roving)\s*\?\s*"0"\s*:\s*"-1"\)',
+        source,
+    )
+    assert re.search(r"panInside\([^;]*animate: false", source)
+    assert re.search(r"panInside\([\s\S]*?\.focus\(\{ preventScroll: true \}\)", source)
+    assert "stepDot(markers.length" in source
 
 
 DOT = {

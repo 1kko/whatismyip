@@ -1118,7 +1118,13 @@ nearest centre; outside every disk, the nearest dot within its hit radius (at
 least 12px, a 24px target). The biggest dot does not win outright: a small dot
 drawn on it would be visible but could not be clicked. Overlapping dots each
 stay reachable once zoomed apart, and each dot is a focusable button that
-Enter or Space opens. A bubble is built from DOM nodes
+Enter or Space opens. Only one dot is a Tab stop (a roving tabindex,
+`wireRoving`): Leaflet makes every keyboard marker one, and a map of 183 dots
+took as many presses to get past. The arrow keys move the focus along the
+payload's order (largest first) and Home and End to its ends, without
+wrapping (`stepDot`), and the Tab stop goes with the focus. A dot off the view
+is panned in before it takes focus with `preventScroll`: focusing it there
+would scroll Leaflet's overflow-hidden box. A bubble is built from DOM nodes
 and `textContent` (a city name is third-party text), never Leaflet's
 HTML-string popup content. Above 900px the AS node label sits on the map and
 steps aside while a bubble is open; under 520px a page that runs scripts
@@ -1569,7 +1575,7 @@ Test files:
   city filter, run in node against a fake document; skips without node),
   `test_as_map_js.py` (`static/js/as-map.js`'s pure parts: the widest zoom,
   the dot a click opens and the stacking, the world copy, keys and the
-  bubble, run in node; the
+  arrow-key steps, and the bubble, run in node; the
   Leaflet wiring rules pinned by text; skips without node),
   `asinfo_fixtures.py` (not a test module: the synthetic files and
   `build_manager()`, with conftest's `asinfo_enabled` fixture on top)
