@@ -33,6 +33,7 @@ from config import (
     APP_VERSION,
     AS_MAP_CANVAS,
     AS_MAP_MAX_ZOOM,
+    AS_MAP_ZOOM_LIMIT,
     ASINFO_CAIDA_ORG_MAX_AGE_DAYS,
     ASINFO_CAIDA_REL_MAX_AGE_DAYS,
     ASINFO_CHECK_INTERVAL_SECONDS,
@@ -98,7 +99,7 @@ from lookup import (
     tld_names_manager,
 )
 from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
-from mapgeom import build_canvas, build_points_canvas
+from mapgeom import TILE_URL_TEMPLATE, build_canvas, build_points_canvas, points_frame
 from mcp_server import (
     McpBarePathRoute,
     McpDisabled,
@@ -678,15 +679,28 @@ def _as_map(as_info: dict, page: dict | None) -> dict | None:
     ]
     if points:
         canvas = build_points_canvas(points, **AS_MAP_CANVAS, max_zoom=AS_MAP_MAX_ZOOM)
-        return {"footprint": footprint, "canvas": canvas, "fallback": None}
+        return {
+            "footprint": footprint,
+            "canvas": canvas,
+            "fallback": None,
+            "frame": points_frame(points),
+            "tile_url": TILE_URL_TEMPLATE,
+            "fit_max_zoom": AS_MAP_MAX_ZOOM,
+            "zoom_limit": AS_MAP_ZOOM_LIMIT,
+        }
     centroid = gazetteer.countries.get((as_info.get("country") or "").upper())
     if centroid:
-        canvas = build_points_canvas(
-            [(centroid[0], centroid[1], 1.0)],
-            **AS_MAP_CANVAS,
-            max_zoom=AS_MAP_COUNTRY_ZOOM,
-        )
-        return {"footprint": footprint, "canvas": canvas, "fallback": "country"}
+        pin = [(centroid[0], centroid[1], 1.0)]
+        canvas = build_points_canvas(pin, **AS_MAP_CANVAS, max_zoom=AS_MAP_COUNTRY_ZOOM)
+        return {
+            "footprint": footprint,
+            "canvas": canvas,
+            "fallback": "country",
+            "frame": points_frame(pin),
+            "tile_url": TILE_URL_TEMPLATE,
+            "fit_max_zoom": AS_MAP_COUNTRY_ZOOM,
+            "zoom_limit": AS_MAP_COUNTRY_ZOOM,
+        }
     return None
 
 

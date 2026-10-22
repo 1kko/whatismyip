@@ -285,6 +285,8 @@ AS_MAP_MAX_DOTS = int(os.getenv("AS_MAP_MAX_DOTS", "200"))
 # The /AS<n> map never zooms in past this (a city-sized frame) and is drawn on
 # one fixed canvas.
 AS_MAP_MAX_ZOOM = int(os.getenv("AS_MAP_MAX_ZOOM", "8"))
+# The most a visitor can zoom in: GeoLite2 city coordinates are no finer.
+AS_MAP_ZOOM_LIMIT = int(os.getenv("AS_MAP_ZOOM_LIMIT", "10"))
 AS_MAP_CANVAS = {
     "width": int(os.getenv("AS_MAP_CANVAS_WIDTH", "560")),
     "height": int(os.getenv("AS_MAP_CANVAS_HEIGHT", "360")),

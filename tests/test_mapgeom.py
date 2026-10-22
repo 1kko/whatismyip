@@ -3,6 +3,8 @@ import re
 
 import pytest
 
+import mapgeom
+
 from mapgeom import (
     TILE_SIZE,
     build_canvas,
@@ -262,3 +264,35 @@ def test_center_lon_ignores_repeated_longitudes():
 def test_an_empty_point_list_is_refused():
     with pytest.raises(ValueError, match="no points"):
         build_points_canvas([], 560, 360)
+
+
+def test_unwrap_lon_takes_the_short_way():
+    assert mapgeom.unwrap_lon(-170.0, 175.0) == 190.0
+    assert mapgeom.unwrap_lon(170.0, -175.0) == -190.0
+    assert mapgeom.unwrap_lon(10.0, 0.0) == 10.0
+
+
+def test_frame_crosses_the_antimeridian_the_short_way():
+    frame = mapgeom.points_frame(
+        [(-17.7, 178.4, 0.5), (21.3, -157.9, 0.5)]
+    )  # Fiji, Hawaii
+    assert frame["east"] - frame["west"] == pytest.approx(
+        23.7
+    )  # across the Pacific, not 336.3
+    assert frame["west"] <= frame["center_lon"] <= frame["east"]
+
+
+def test_frame_fits_the_core_not_a_stray_point():
+    pts = [(37.5, 127.0, 0.95), (40.7, -74.0, 0.05)]
+    assert mapgeom.points_frame(pts) == {
+        "center_lon": 127.0,
+        "south": 37.5,
+        "west": 127.0,
+        "north": 37.5,
+        "east": 127.0,
+    }
+
+
+def test_frame_of_nothing_raises():
+    with pytest.raises(ValueError, match="no points to frame"):
+        mapgeom.points_frame([])

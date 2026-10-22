@@ -22,6 +22,7 @@ import asinfo
 import concurrency
 import lookup
 import main
+import mapgeom
 from asinfo import ANSWER_KEYS
 from asinfo_fixtures import build_manager
 from lookup import (
@@ -924,3 +925,20 @@ def asinfo_fixtures_rel_with(extra):
     import asinfo_fixtures
 
     return asinfo_fixtures.CAIDA_REL + extra
+
+
+def test_as_map_carries_the_frame_for_a_map_that_zooms(monkeypatch):
+    page = {"prefixes": {"v4": {"list": [{"prefix": "211.234.96.0/19"}]}}}
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    result = main._as_map({"country": "KR"}, page)
+    assert result["frame"]["south"] == result["frame"]["north"] == 37.57
+    assert result["tile_url"] == mapgeom.TILE_URL_TEMPLATE
+    assert result["fit_max_zoom"] == 8
+    assert result["zoom_limit"] == 10
+
+
+def test_as_map_country_pin_is_capped_at_the_country_zoom(monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: COUNTRY_LEVEL_ONLY)
+    result = main._as_map({"country": "KR"}, None)
+    assert result["fallback"] == "country"
+    assert result["fit_max_zoom"] == result["zoom_limit"] == 4
