@@ -985,6 +985,7 @@ whatismyip/
 │   ├── js/app.js           # search, copy, accordions, WHOIS fill-in, subdomain panel, lazy JSONEditor
 │   ├── js/map.js           # paints the server's map payload, with the attribution
 │   ├── js/fingerprint.js   # self page's browser fingerprint + clock/languages vs address rows, client-side only; the active probes wait for the panel's first opening
+│   ├── js/as.js            # the /AS<n> page's filter, relation chips, show-all and /8 groups over #as-lists
 │   ├── js/webrtc.js        # opt-in WebRTC leak test (one STUN request from the browser)
 │   ├── js/jsoneditor.min.js # vendored, loaded only when the Raw JSON panel opens
 │   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs): per face a -latin, an -extended-a and a -cyrillic-greek file behind unicode-range
