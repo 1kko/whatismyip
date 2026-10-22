@@ -790,7 +790,7 @@ def address_as_info(ip: str, location: dict | None = None) -> dict | None:
     return answer
 
 
-def as_info_for_asn(asn: int, full: bool = False) -> dict | None:
+def as_info_for_asn(asn: int, full: bool = False, detail: bool = False) -> dict | None:
     """The AS card for AS `asn` (asinfo.py), with `full` its announced
     prefixes, or None when the feature is off, special-purpose numbers
     included.
@@ -798,7 +798,8 @@ def as_info_for_asn(asn: int, full: bool = False) -> dict | None:
     A special-purpose number reads no dataset: a private ASN leaked into RIS,
     or an AS0 ROA, would draw a card that looks like someone's network. Its
     card is every key None but `asn`, `unavailable` (nothing was unavailable;
-    nothing was asked) and `special`."""
+    nothing was asked) and `special`, whatever `detail` (each neighbour's
+    country and size) says."""
     if not asinfo_manager.enabled:
         return None
     special = special_asn(asn)
@@ -809,7 +810,7 @@ def as_info_for_asn(asn: int, full: bool = False) -> dict | None:
             "unavailable": [],
             "special": special,
         }
-    answer = asinfo_manager.for_asn(asn, full=full)
+    answer = asinfo_manager.for_asn(asn, full=full, detail=detail)
     if answer is None:
         return None
     answer["asn_drop"] = reputation_manager.asn_listed(asn)

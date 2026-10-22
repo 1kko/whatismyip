@@ -68,6 +68,7 @@ from config import (
     ASINFO_DIR,
     ASINFO_ENABLED,
     ASINFO_LIST_LIMIT,
+    ASINFO_PAGE_LIMIT,
     ASINFO_MAX_AGE_HOURS,
     ASINFO_MIN_RIS_PEERS,
     ASINFO_NRO_URL,
@@ -393,8 +394,8 @@ def rov_state(
 
 # Bumped when the tables change, so a reader can tell a file built by an older
 # release (stored as PRAGMA user_version), and refresh() rebuilds it from the
-# copies. 2 added route_plen.
-SCHEMA_VERSION = 2
+# copies. 2 added route_plen, 3 route_median.
+SCHEMA_VERSION = 3
 
 # Every dataset the build reads, in build order. `meta` has a row for each,
 # built or not, so a reader can tell "not in this build" from "no row for
@@ -411,7 +412,8 @@ DATASET_IDS = ("asnames", "nro", "ris_v4", "ris_v6", "rpki", "caida_rel", "caida
 # lengths each family has, written at build: finding them in route scans the
 # whole table, too slow for the first read of a file. rpki_state is valid,
 # invalid or not-found, NULL when the build had no VRPs; rpki_reason is origin
-# or length beside invalid.
+# or length beside invalid. route_median is each family's median ris_peers (the
+# lower of the two middle values), written at build for the AS page.
 # registry holds the NRO's ranges as they are, first..last inclusive: the one
 # covering an ASN is the row with the greatest first <= it, if its last >= it.
 # rel is CAIDA's: kind -1 means a provides transit to b, 0 that they peer.
@@ -450,6 +452,9 @@ CREATE TABLE route (
 ) WITHOUT ROWID;
 CREATE TABLE route_plen (
     family INTEGER NOT NULL, plen INTEGER NOT NULL, PRIMARY KEY (family, plen)
+) WITHOUT ROWID;
+CREATE TABLE route_median (
+    family INTEGER PRIMARY KEY, ris_peers INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE rel (
     a INTEGER NOT NULL, b INTEGER NOT NULL, kind INTEGER NOT NULL,
@@ -719,6 +724,14 @@ def build_database(
         con.execute("BEGIN")
         rows = _load(con, sources, min_peers)
         con.execute("INSERT INTO route_plen SELECT DISTINCT family, plen FROM route")
+        for family, count in con.execute(
+            "SELECT family, count(*) FROM route GROUP BY family"
+        ).fetchall():
+            con.execute(
+                "INSERT INTO route_median SELECT ?, ris_peers FROM route"
+                " WHERE family = ? ORDER BY ris_peers LIMIT 1 OFFSET ?",
+                (family, family, (count - 1) // 2),
+            )
         for sql in _LATE_INDEXES:
             con.execute(sql)
         _insert(
@@ -943,7 +956,7 @@ WHERE first <= ? ORDER BY first DESC LIMIT 1
 """
 _STATS = """
 SELECT v4_prefixes, v6_prefixes, v4_addresses, v6_48s, rpki_valid,
-    rpki_invalid, rpki_not_found, customers, peers
+    rpki_invalid, rpki_not_found, providers, customers, peers
 FROM asn_stats WHERE asn = ?
 """
 _STATS_COLUMNS = (
@@ -954,6 +967,7 @@ _STATS_COLUMNS = (
     "rpki_valid",
     "rpki_invalid",
     "rpki_not_found",
+    "providers",
     "customers",
     "peers",
 )
@@ -961,7 +975,7 @@ _STATS_COLUMNS = (
 _UPSTREAMS = """
 SELECT r.a FROM rel AS r LEFT JOIN asn_stats AS s ON s.asn = r.a
 WHERE r.b = ? AND r.kind = -1
-ORDER BY coalesce(s.customers, 0) DESC, r.a
+ORDER BY coalesce(s.customers, 0) DESC, r.a LIMIT ?
 """
 _DOWNSTREAMS = """
 SELECT r.b FROM rel AS r LEFT JOIN asn_stats AS s ON s.asn = r.b
@@ -974,6 +988,11 @@ SELECT n.asn FROM (
     UNION SELECT a FROM rel WHERE b = ? AND kind = 0
 ) AS n LEFT JOIN asn_stats AS s ON s.asn = n.asn
 ORDER BY coalesce(s.customers, 0) DESC, n.asn LIMIT ?
+"""
+# The AS page's prefixes of one family, shortest first.
+_PAGE_PREFIXES = """
+SELECT prefix, plen, ris_peers, rpki_state, rpki_reason FROM route
+WHERE origin = ? AND family = ? ORDER BY plen, start LIMIT ?
 """
 _PREFIXES = """
 SELECT prefix, ris_peers, rpki_state, rpki_reason FROM route
@@ -1055,11 +1074,13 @@ def _rpki(state: str | None, reason: str | None) -> dict | None:
 @dataclass(frozen=True)
 class _Copy:
     """The database as one thread has it open: the connection, its meta rows
-    by dataset, and the prefix lengths each family has, longest first."""
+    by dataset, the prefix lengths each family has, longest first, and each family's
+    median RIS peer count (a family with no routes is absent)."""
 
     con: sqlite3.Connection
     meta: dict[str, tuple]
     plens: dict[int, tuple[int, ...]]
+    medians: dict[int, int]
 
 
 class _Reader:
@@ -1115,7 +1136,7 @@ class _Reader:
         ]
         return {"prefix": rows[0][0], "origins": origins}, True
 
-    def describe(self, asn: int | None) -> dict:
+    def describe(self, asn: int | None, detail: bool = False) -> dict:
         """`asn` through `asn_drop` (which lookup.py fills) for the AS."""
         answer = {"asn": asn, **dict.fromkeys(_AS_SECTIONS), "asn_drop": None}
         if asn is None:
@@ -1147,14 +1168,15 @@ class _Reader:
             }
         if self.can("caida_rel"):
             stats, limit = self.stats(asn), ASINFO_LIST_LIMIT
-            answer["upstreams"] = self._neighbours(_UPSTREAMS, (asn,))
+            # -1 is SQLite's "no limit": an answer's upstreams stay uncapped.
+            answer["upstreams"] = self._neighbours(_UPSTREAMS, (asn, -1), detail)
             answer["downstreams"] = {
                 "count": stats["customers"],
-                "list": self._neighbours(_DOWNSTREAMS, (asn, limit)),
+                "list": self._neighbours(_DOWNSTREAMS, (asn, limit), detail),
             }
             answer["peers"] = {
                 "count": stats["peers"],
-                "list": self._neighbours(_PEERS, (asn, asn, limit)),
+                "list": self._neighbours(_PEERS, (asn, asn, limit), detail),
             }
         return answer
 
@@ -1185,20 +1207,94 @@ class _Reader:
             "sibling_count": count.fetchone()[0],
         }
 
-    def _neighbours(self, sql: str, args: tuple) -> list[dict]:
+    def _neighbours(self, sql: str, args: tuple, detail: bool = False) -> list[dict]:
         """`{asn, name}` for each ASN the query lists; the names are None when
-        the AS names are unavailable."""
+        the AS names are unavailable. With `detail`, each also has `country`
+        (None likewise), `customers` and the three sizes `v4_addresses`,
+        `v4_prefixes` and `v6_prefixes` (None when the routes are
+        unavailable), read for the whole list at once."""
         asns = [asn for (asn,) in self._execute(sql, args)]
-        names: dict[int, str] = {}
-        if asns and self.can("asnames"):
+        names: dict[int, tuple] = {}
+        sizes: dict[int, tuple] = {}
+        named = bool(asns) and self.can("asnames")
+        routed = bool(asns) and detail and self.can("ris_v4", "ris_v6")
+        if named:
             marks = ", ".join("?" * len(asns))
-            names = dict(
-                self._execute(
-                    f"SELECT asn, name FROM asn WHERE asn IN ({marks})",  # noqa: S608 - placeholders only
+            names = {
+                asn: (name, country)
+                for asn, name, country in self._execute(
+                    f"SELECT asn, name, country FROM asn WHERE asn IN ({marks})",  # noqa: S608 - placeholders only
                     tuple(asns),
                 )
+            }
+        if detail and asns:
+            marks = ", ".join("?" * len(asns))
+            sizes = {
+                asn: row
+                for asn, *row in self._execute(
+                    "SELECT asn, customers, v4_addresses, v4_prefixes, v6_prefixes"  # noqa: S608 - placeholders only
+                    f" FROM asn_stats WHERE asn IN ({marks})",
+                    tuple(asns),
+                )
+            }
+        if not detail:
+            return [{"asn": asn, "name": names.get(asn, (None,))[0]} for asn in asns]
+        entries = []
+        for asn in asns:
+            name, country = names.get(asn, (None, None))
+            customers, addresses, v4, v6 = sizes.get(asn, (0, 0, 0, 0))
+            entries.append(
+                {
+                    "asn": asn,
+                    "name": name,
+                    "country": country,
+                    "customers": customers,
+                    "v4_addresses": addresses if routed else None,
+                    "v4_prefixes": v4 if routed else None,
+                    "v6_prefixes": v6 if routed else None,
+                }
             )
-        return [{"asn": asn, "name": names.get(asn)} for asn in asns]
+        return entries
+
+    def page(self, asn: int, limit: int) -> dict:
+        """AsInfoManager.page_data's answer."""
+        page: dict = dict.fromkeys(
+            ("upstreams", "downstreams", "peers", "prefixes", "medians")
+        )
+        if self.can("caida_rel"):
+            stats = self.stats(asn)
+            for key, sql, args, count in (
+                ("upstreams", _UPSTREAMS, (asn, limit), stats["providers"]),
+                ("downstreams", _DOWNSTREAMS, (asn, limit), stats["customers"]),
+                ("peers", _PEERS, (asn, asn, limit), stats["peers"]),
+            ):
+                page[key] = {
+                    "count": count,
+                    "list": self._neighbours(sql, args, detail=True),
+                }
+        if self.can("ris_v4", "ris_v6"):
+            checked = self.can("rpki")
+            stats = self.stats(asn)
+            page["prefixes"] = {
+                f"v{family}": {
+                    "count": stats[f"v{family}_prefixes"],
+                    "list": [
+                        {
+                            "prefix": prefix,
+                            "plen": plen,
+                            "ris_peers": peers,
+                            "rpki": _rpki(state, reason) if checked else None,
+                        }
+                        for prefix, plen, peers, state, reason in self._execute(
+                            _PAGE_PREFIXES, (asn, family, limit)
+                        )
+                    ],
+                }
+                for family in (4, 6)
+            }
+            medians = self.copy.medians
+            page["medians"] = {f"v{family}": medians.get(family) for family in (4, 6)}
+        return page
 
     def originates(self, asn: int) -> bool | None:
         if not self.can("ris_v4", "ris_v6"):
@@ -1338,10 +1434,11 @@ class AsInfoManager:
                 )
                 for family in (4, 6)
             }
+            medians = dict(con.execute("SELECT family, ris_peers FROM route_median"))
         except sqlite3.Error:
             con.close()
             raise
-        return _Copy(con, meta, plens), None
+        return _Copy(con, meta, plens, medians), None
 
     def _release(self) -> None:
         """Close this thread's connection, which holds its file open (on disk,
@@ -1491,16 +1588,19 @@ class AsInfoManager:
 
         return self._answer(read)
 
-    def for_asn(self, asn: int, full: bool = False) -> dict | None:
+    def for_asn(
+        self, asn: int, full: bool = False, detail: bool = False
+    ) -> dict | None:
         """The AS on its own (`source: "asn"`, no `route`). `announced` says
-        whether it originates any route; `full` adds `prefix_list`. None when
+        whether it originates any route; `full` adds `prefix_list`, `detail`
+        gives each neighbour its country and size (the /AS<n> JSON). None when
         disabled, or when `asn` is not a 32-bit AS number."""
         if not self.enabled or not _is_asn(asn):
             return None
 
         def read(reader: _Reader) -> dict:
             return {
-                **reader.describe(asn),
+                **reader.describe(asn, detail),
                 "route": None,
                 "announced": reader.originates(asn),
                 "source": "asn",
@@ -1508,6 +1608,24 @@ class AsInfoManager:
             }
 
         return self._answer(read)
+
+    def page_data(self, asn: int, limit: int | None = None) -> dict | None:
+        """What the /AS<n> page draws beyond the card: every relation and both
+        prefix families (each up to `limit`, ASINFO_PAGE_LIMIT when None, read
+        at call time) with their full counts, each neighbour with its own
+        size, and each family's median RIS peer count. A section is None when
+        a dataset behind it is unavailable. None when disabled, or when `asn`
+        is not a 32-bit AS number."""
+        if not self.enabled or not _is_asn(asn):
+            return None
+        if limit is None:
+            limit = ASINFO_PAGE_LIMIT
+
+        def use(copy: _Copy | None, problem: str | None) -> dict:
+            reader = _Reader(copy, self._availability(copy, problem)[0])
+            return reader.page(asn, limit)
+
+        return self._with_database(use)
 
     def status(self) -> dict:
         """Per dataset fetched here: its dates as stored, age, rows, and

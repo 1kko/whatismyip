@@ -2075,7 +2075,7 @@ def _as_lookup(
             return _text_error(AS_SUBDOMAINS_UNSUPPORTED)
         raise HTTPException(status_code=400, detail=AS_SUBDOMAINS_UNSUPPORTED)
     started = time.perf_counter()
-    as_info = as_info_for_asn(asn, full=True)
+    as_info = as_info_for_asn(asn, full=True, detail=True)
     if as_info is None:
         if fmt == "text":
             return _text_error(AS_LOOKUPS_OFF)

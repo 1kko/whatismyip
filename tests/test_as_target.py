@@ -285,12 +285,13 @@ def test_as_json(asinfo_enabled):
     data = response.json()
     assert data["address"] == "AS4766" and data["asn"] == 4766
     assert data["prefix_list"]["count"] >= 2
-    # as_info_for_asn's card, whole and with its full lists, between the
+    # as_info_for_asn's card, whole and with its full lists and neighbour
+    # sizes (detail), between the
     # address and the time the read took.
     assert list(data) == ["address", *ANSWER_KEYS, "special", "elapsed_ms"]
     assert _without_timing(data) == {
         "address": "AS4766",
-        **lookup.as_info_for_asn(4766, full=True),
+        **lookup.as_info_for_asn(4766, full=True, detail=True),
     }
     assert isinstance(data["elapsed_ms"], int)
     assert [entry["prefix"] for entry in data["prefix_list"]["list"]] == [
@@ -767,3 +768,12 @@ def test_dataset_text_is_escaped_on_the_as_page(monkeypatch, tmp_path):
     embedded = html.split('id="page-data"')[1].split(">", 1)[1].split("</script>")[0]
     assert "<" not in embedded and "\\u003cscript\\u003e" in embedded
     assert _page_data(html)["name"] == "<script>alert(1)</script> & Co"
+
+
+def test_as_json_neighbours_carry_their_own_size(asinfo_enabled):
+    data = client.get("/AS4766", headers=CURL).json()
+    assert data["upstreams"][0]["customers"] == 1
+    assert data["upstreams"][0]["country"] == "US"
+    assert "v4_addresses" in data["downstreams"]["list"][0]
+    assert data["org"]["siblings"] == [9760]
+    assert client.get("/AS4766?format=text").text == AS4766_BLOCK  # text unchanged

@@ -275,6 +275,8 @@ ASINFO_CAIDA_ORG_MAX_AGE_DAYS = float(os.getenv("ASINFO_CAIDA_ORG_MAX_AGE_DAYS",
 ASINFO_CAIDA_ENABLED = os.getenv("ASINFO_CAIDA_ENABLED", "true").lower() != "false"
 # Cap for the downstream, peer and prefix lists in an answer.
 ASINFO_LIST_LIMIT = int(os.getenv("ASINFO_LIST_LIMIT", "100"))
+# The /AS<n> page lists up to this many of each relation and prefix family.
+ASINFO_PAGE_LIMIT = int(os.getenv("ASINFO_PAGE_LIMIT", "1000"))
 # How soon a failed download is tried again, and how often the scheduler
 # checks which datasets are due (a check makes no request unless one is).
 ASINFO_RETRY_SECONDS = int(os.getenv("ASINFO_RETRY_SECONDS", "3600"))
