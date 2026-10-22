@@ -1461,6 +1461,8 @@ _RPKI_TONES = {"valid": "success", "invalid": "warning"}
 # How many neighbours of an AS (and siblings of its organization) the panel
 # names; the rest are counted. The JSON carries the whole capped list.
 AS_LIST_SHOWN = 10
+# The rows of the AS page's details panel, out of the AS card.
+_AS_DETAILS = ("Registry", "Organization", "ASN-DROP")
 
 
 def _part(text: str, href: str | None = None) -> dict:
@@ -1909,6 +1911,8 @@ def as_page_view(
     as_info: dict,
     link_for: LinkFor | None = None,
     credit_links: dict[str, str] | None = None,
+    page: dict | None = None,
+    as_map: dict | None = None,
 ) -> dict:
     """The /AS<n> page (templates/as.html) over its answer: as_info_for_asn's
     card with `address` and `elapsed_ms`. Pure, like build_view;
@@ -1919,7 +1923,13 @@ def as_page_view(
     neighbour lists and the announced prefixes, each in full as the answer
     carries them; then Raw JSON. A special-purpose number is its Use, Range,
     Defined in and Purpose, and nothing else: no dataset was read for it. The
-    page's own number does not link to the page it is on."""
+    page's own number does not link to the page it is on.
+
+    `page` is AsInfoManager.page_data's dict and `as_map` the map's inputs
+    (see as_map_view); both may be None. A number that is not special also
+    carries the new page's pieces (summary, tiles, graph, map, glance,
+    neighbours, prefix_table, details, lists_payload) beside the card, lists
+    and prefixes the current template draws."""
     asn = as_info.get("asn")
     target = f"AS{asn}"
     special = as_info.get("special")
@@ -1941,12 +1951,26 @@ def as_page_view(
         }
         lists: list[dict] = []
         prefixes = None
+        extra: dict = {
+            "summary": None,
+            "tiles": [],
+            "graph": None,
+            "map": None,
+            "glance": None,
+            "neighbours": None,
+            "prefix_table": None,
+            "details": None,
+            "lists_payload": None,
+        }
     else:
         name = as_info.get("name")
         registry = as_info.get("registry") or {}
         tags = [{"text": "ASN", "tone": "default"}]
         if registry.get("rir"):
             tags.append({"text": str(registry["rir"]).upper(), "tone": "default"})
+        year = str(registry.get("assigned") or "")[:4]
+        if year.isdigit():
+            tags.append({"text": f"since {year}", "tone": "default"})
         if as_info.get("announced") is False:
             tags.append({"text": "NOT ANNOUNCED", "tone": "default"})
         if as_info.get("asn_drop") is True:
@@ -1967,6 +1991,26 @@ def as_page_view(
             )
         ]
         prefixes = _as_page_prefixes(as_info)
+        neighbours = as_neighbour_table(as_info, page, link)
+        prefix_table = as_prefix_table(as_info, page)
+        extra = {
+            "summary": as_summary(as_info, page),
+            "tiles": as_tiles(as_info, page),
+            "graph": as_upstream_graph(as_info, page, link),
+            "map": as_map_view(as_info, as_map),
+            "glance": as_glance(as_info, page),
+            "neighbours": neighbours,
+            "prefix_table": prefix_table,
+            "details": {
+                "rows": [row for row in card["rows"] if row["label"] in _AS_DETAILS],
+                "attribution": card["attribution"],
+            },
+            "lists_payload": {
+                "own": asn,
+                "neighbours": neighbours["payload"],
+                "prefixes": prefix_table["payload"],
+            },
+        }
 
     accordions = [{"id": "as", "title": "AS", "hint": card["hint"]}]
     accordions += [
@@ -1992,6 +2036,8 @@ def as_page_view(
         "lists": {item["id"]: item for item in lists},
         "prefixes": prefixes,
         "accordions": accordions,
+        "special": bool(special),
+        **extra,
     }
 
 
@@ -2646,3 +2692,330 @@ def as_glance(as_info: dict, page: dict | None) -> dict:
 def _truncated(drawn: int, total: int) -> str:
     """' (largest 1,000)' when a bar is drawn from fewer prefixes than exist."""
     return f" (largest {drawn:,})" if drawn < total else ""
+
+
+# ---------------------------------------------------------------------------
+# The /AS<n> page's graph, map and tables.
+# ---------------------------------------------------------------------------
+
+AS_GRAPH_ROWS = 12
+AS_GRAPH_ROW_HEIGHT = 30
+AS_TABLE_ROWS = 10
+_NEIGHBOUR_RELATIONS = (
+    ("upstream", "Upstreams", "upstreams"),
+    ("downstream", "Downstreams", "downstreams"),
+    ("peer", "Peers", "peers"),
+)
+NEIGHBOUR_NOTE = (
+    "Sizes are each neighbour's own: its direct customers and its IPv4 space, "
+    "not traffic through this AS."
+)
+MAP_CREDIT = "\u00a9 OpenStreetMap contributors \u00b7 GeoLite2 by MaxMind"
+
+
+def _neighbour_href(link_for: LinkFor | None, asn: Any) -> str | None:
+    return _href(link_for, f"AS{asn}")
+
+
+def as_upstream_graph(
+    as_info: dict, page: dict | None, link_for: LinkFor | None = None
+) -> dict:
+    """The upstream providers as bars (by their own direct customers, square
+    root scaled so a giant does not flatten the rest) and the SVG paths that
+    fan them into the AS. At most AS_GRAPH_ROWS rows; the rest are `more`."""
+    relation = _relation(as_info, page, "upstreams")
+    graph = {"rows": [], "more": 0, "fan": [], "height": 0, "empty": None}
+    if relation is None:
+        graph["empty"] = _as_absent(as_info, ("caida_rel",))
+        return graph
+    entries = relation.get("list") or []
+    count = relation.get("count") or len(entries)
+    if not count:
+        graph["empty"] = "No upstreams in CAIDA's data"
+        return graph
+    shown = entries[:AS_GRAPH_ROWS]
+    top = max((e.get("customers") or 0 for e in shown), default=0)
+    rows = []
+    for entry in shown:
+        customers = entry.get("customers")
+        pct = 100 * math.sqrt((customers or 0) / top) if top else 0
+        rows.append(
+            {
+                "asn": entry.get("asn"),
+                "href": _neighbour_href(link_for, entry.get("asn")),
+                "flag": country_flag(entry.get("country")),
+                "country": entry.get("country"),
+                "handle": as_handle(entry.get("name")),
+                "customers_text": f"{customers:,}"
+                if customers is not None
+                else "\u2014",
+                "bar_pct": round(max(4, pct), 1),
+            }
+        )
+    more = max(count - len(rows), 0)
+    height = (len(rows) + (1 if more else 0)) * AS_GRAPH_ROW_HEIGHT
+    mid = height / 2
+    graph["rows"] = rows
+    graph["more"] = more
+    graph["height"] = height
+    graph["fan"] = [
+        f"M0,{y} C36,{y} 36,{mid} 72,{mid}"
+        for y in (
+            i * AS_GRAPH_ROW_HEIGHT + AS_GRAPH_ROW_HEIGHT // 2 for i in range(len(rows))
+        )
+    ]
+    return graph
+
+
+def as_map_view(as_info: dict, as_map: dict | None) -> dict | None:
+    """Where the AS's IPv4 addresses geolocate, as tiles and dots in percent
+    and pixels of the canvas `as_map` carries. None without a map, or when
+    there is neither a footprint with cities nor a country to pin."""
+    if not as_map:
+        return None
+    canvas = as_map.get("canvas") or {}
+    footprint = as_map.get("footprint")
+    fallback = as_map.get("fallback")
+    cities = (footprint or {}).get("cities") or []
+    width, height = canvas.get("width") or 1, canvas.get("height") or 1
+    size = canvas.get("tile_size") or 256
+    inside = [
+        p
+        for p in canvas.get("points") or []
+        if 0 <= p["x"] <= width and 0 <= p["y"] <= height
+    ]
+    if cities:
+        dots = [
+            {"x": p["x"], "y": p["y"], "r": round(2.5 + 16 * math.sqrt(p["weight"]), 1)}
+            for p in inside
+        ]
+        caption = (
+            "Dots: where its IPv4 addresses geolocate (GeoLite2, by city; "
+            "area = share)."
+        )
+        left_out = []
+        country_share = footprint.get("country_level_share") or 0
+        if country_share:
+            left_out.append(
+                f"{_share_text(country_share * 100)} of the space is placed only "
+                "at country level and is not drawn."
+            )
+        unplaced = footprint.get("unplaced_share") or 0
+        if unplaced:
+            left_out.append(f"{_share_text(unplaced * 100)} could not be placed.")
+        caption = " ".join([caption, *left_out])
+        alt = "Where its IPv4 addresses geolocate: " + ", ".join(
+            f"{c.get('name') or 'unnamed place'} {round(c['share'] * 100)}%"
+            for c in cities[:5]
+        )
+    elif fallback == "country":
+        place = country_name(as_info.get("country")) or "its registered country"
+        dots = [{"x": p["x"], "y": p["y"], "r": 6.0} for p in inside]
+        caption = (
+            "No city-level placement for its IPv4 addresses; "
+            f"the pin marks {place}, at country level."
+        )
+        alt = f"No city-level placement for its IPv4 addresses; the pin marks {place}"
+    else:
+        return None
+    return {
+        "width": width,
+        "height": height,
+        "tiles": [
+            {
+                "url": t["url"],
+                "left": round(100 * t["x"] / width, 3),
+                "top": round(100 * t["y"] / height, 3),
+                "w": round(100 * size / width, 3),
+                "h": round(100 * size / height, 3),
+            }
+            for t in canvas.get("tiles") or []
+        ],
+        "dots": dots,
+        "node": {
+            "label": f"AS{as_info.get('asn')}",
+            "sub": as_handle(as_info.get("name")),
+        },
+        "caption": caption,
+        "credit": MAP_CREDIT,
+        "alt": alt,
+    }
+
+
+def as_neighbour_table(
+    as_info: dict, page: dict | None, link_for: LinkFor | None = None
+) -> dict:
+    """Upstreams, downstreams and peers as one table ordered by each
+    neighbour's own customers: the first AS_TABLE_ROWS drawn, every loaded one
+    in `payload` for the page's script, and what was cut said in `truncated`."""
+    relations = {
+        key: _relation(as_info, page, plural) for key, _, plural in _NEIGHBOUR_RELATIONS
+    }
+    counts = {
+        key: (rel.get("count") or len(rel.get("list") or [])) if rel else 0
+        for key, rel in relations.items()
+    }
+    counts = {"all": sum(counts.values()), **counts}
+    merged = []
+    truncated = []
+    for key, _, plural in _NEIGHBOUR_RELATIONS:
+        rel = relations[key]
+        if not rel:
+            continue
+        entries = rel.get("list") or []
+        if len(entries) < counts[key]:
+            truncated.append(
+                f"Largest {len(entries):,} of {counts[key]:,} {plural} loaded."
+            )
+        merged += [(key, entry) for entry in entries]
+    merged.sort(
+        key=lambda item: (-(item[1].get("customers") or 0), item[1].get("asn") or 0)
+    )
+    top = max((e.get("customers") or 0 for _, e in merged), default=0)
+    rows = []
+    for key, entry in merged[:AS_TABLE_ROWS]:
+        customers = entry.get("customers")
+        space = entry.get("v4_addresses")
+        rows.append(
+            {
+                "asn": entry.get("asn"),
+                "href": _neighbour_href(link_for, entry.get("asn")),
+                "holder": as_holder(entry.get("name")),
+                "flag": country_flag(entry.get("country")),
+                "country": entry.get("country"),
+                "relation": key,
+                "customers_text": f"{customers:,}"
+                if customers is not None
+                else "\u2014",
+                "bar_pct": (
+                    round(
+                        100 * math.log10((customers or 0) + 1) / math.log10(top + 1), 1
+                    )
+                    if top
+                    else 0
+                ),
+                "space_text": human_count(space) if space is not None else "\u2014",
+            }
+        )
+    empty = None
+    if all(rel is None for rel in relations.values()):
+        empty = _as_absent(as_info, ("caida_rel",))
+    elif not counts["all"]:
+        empty = "No neighbours in CAIDA's data"
+    return {
+        "chips": [
+            {"key": "all", "label": "All", "count": counts["all"]},
+            *(
+                {"key": key, "label": label, "count": counts[key]}
+                for key, label, _ in _NEIGHBOUR_RELATIONS
+            ),
+        ],
+        "rows": rows,
+        "payload": {
+            "columns": [
+                "asn",
+                "name",
+                "country",
+                "relation",
+                "customers",
+                "v4_addresses",
+            ],
+            "rows": [
+                [
+                    e.get("asn"),
+                    e.get("name"),
+                    e.get("country"),
+                    key,
+                    e.get("customers"),
+                    e.get("v4_addresses"),
+                ]
+                for key, e in merged
+            ],
+            "counts": counts,
+            "max_customers": top,
+        },
+        "truncated": truncated,
+        "note": NEIGHBOUR_NOTE,
+        "empty": empty,
+    }
+
+
+def _prefix_exponent(plen: int | None, family: str) -> int:
+    """log2 of a prefix's size: addresses for IPv4, /48s for IPv6 (0 past /48)."""
+    return max((32 if family == "v4" else 48) - (plen or 0), 0)
+
+
+def _prefix_size_text(plen: int | None, family: str) -> str:
+    exponent = _prefix_exponent(plen, family)
+    if family == "v4":
+        return human_count(2**exponent)
+    if (plen or 0) > 48:
+        return "under a /48"
+    return f"{human_count(2**exponent)} /48s"
+
+
+def as_prefix_table(as_info: dict, page: dict | None) -> dict:
+    """The announced prefixes, largest first: the first AS_TABLE_ROWS of IPv4
+    (of IPv6 when there is no IPv4 listed), every loaded one in `payload`."""
+    lists = (page or {}).get("prefixes")
+    table = {
+        "rows": [],
+        "counts": {"v4": 0, "v6": 0},
+        "payload": {
+            "columns": ["prefix", "plen", "ris_peers", "state", "reason"],
+            "v4": [],
+            "v6": [],
+        },
+        "truncated": [],
+        "empty": None,
+    }
+    if lists is None:
+        table["empty"] = _as_absent(as_info, ("ris_v4", "ris_v6"))
+        return table
+    entries = {}
+    for family, word in (("v4", "IPv4"), ("v6", "IPv6")):
+        part = lists.get(family) or {}
+        loaded = sorted(part.get("list") or [], key=lambda e: e.get("plen") or 0)
+        entries[family] = loaded
+        count = part.get("count") or 0
+        table["counts"][family] = count
+        if len(loaded) < count:
+            table["truncated"].append(
+                f"Largest {len(loaded):,} of {count:,} {word} prefixes loaded."
+            )
+        table["payload"][family] = [
+            [
+                e.get("prefix"),
+                e.get("plen"),
+                e.get("ris_peers"),
+                (e.get("rpki") or {}).get("state"),
+                (e.get("rpki") or {}).get("reason"),
+            ]
+            for e in loaded
+        ]
+    if not any(table["counts"].values()):
+        table["empty"] = "No announced prefixes"
+        return table
+    family = "v4" if entries["v4"] else "v6"
+    loaded = entries[family]
+    top = max((2 ** _prefix_exponent(e.get("plen"), family) for e in loaded), default=1)
+    for entry in loaded[:AS_TABLE_ROWS]:
+        plen = entry.get("plen")
+        size = 2 ** _prefix_exponent(plen, family)
+        rpki = entry.get("rpki") or {}
+        state = rpki.get("state")
+        text = _RPKI_STATES.get(state, "Unknown")
+        if state == "invalid" and rpki.get("reason"):
+            text += f": {rpki['reason']}"
+        peers = entry.get("ris_peers")
+        table["rows"].append(
+            {
+                "prefix": entry.get("prefix"),
+                "size_text": _prefix_size_text(plen, family),
+                "bar_pct": round(100 * math.log2(size + 1) / math.log2(top + 1), 1),
+                "peers_text": f"{peers:,}" if isinstance(peers, int) else "\u2014",
+                "rpki_text": text,
+                "rpki_tone": _RPKI_TONES.get(state, "default" if state else "muted"),
+            }
+        )
+    return table
