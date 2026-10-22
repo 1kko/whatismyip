@@ -22,6 +22,7 @@ import asinfo
 import concurrency
 import lookup
 import main
+import mapgeom
 from asinfo import ANSWER_KEYS
 from asinfo_fixtures import build_manager
 from lookup import (
@@ -504,7 +505,7 @@ def test_as_html_page_names_the_as_and_links_neighbours(asinfo_enabled, monkeypa
         'id="page-map"',
         'id="mobile-map"',
         'id="map-data"',
-        "map.js",
+        "/static/js/map.js",
         'id="acc-dns"',
         'id="acc-ssl"',
         'id="acc-whois"',
@@ -865,8 +866,10 @@ def test_the_as_page_head_is_every_page_s(asinfo_enabled):
     html = response.text
     head = _head(html)
     assert '<h1 class="ip mono">AS4766</h1>' in html
+    # The map's Leaflet stylesheet comes first, on a page that has a map.
     assert re.findall(r'<link rel="stylesheet" href="([^"]+)"', head) == [
-        f"/static/css/whatismyip.css?v={main.APP_VERSION}"
+        f"/static/css/leaflet.css?v={main.APP_VERSION}",
+        f"/static/css/whatismyip.css?v={main.APP_VERSION}",
     ]
     assert '<link rel="manifest" href="/static/site.webmanifest">' in head
     assert '<meta name="theme-color" content="#0B0D12">' in head
@@ -924,3 +927,122 @@ def asinfo_fixtures_rel_with(extra):
     import asinfo_fixtures
 
     return asinfo_fixtures.CAIDA_REL + extra
+
+
+def test_as_map_carries_the_frame_for_a_map_that_zooms(monkeypatch):
+    page = {"prefixes": {"v4": {"list": [{"prefix": "211.234.96.0/19"}]}}}
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    result = main._as_map({"country": "KR"}, page)
+    assert result["frame"]["south"] == result["frame"]["north"] == 37.57
+    assert result["tile_url"] == mapgeom.TILE_URL_TEMPLATE
+    assert result["fit_max_zoom"] == 8
+    assert result["zoom_limit"] == 10
+
+
+def test_as_map_country_pin_is_capped_at_the_country_zoom(monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: COUNTRY_LEVEL_ONLY)
+    result = main._as_map({"country": "KR"}, None)
+    assert result["fallback"] == "country"
+    assert result["fit_max_zoom"] == result["zoom_limit"] == 4
+
+
+def test_the_page_embeds_the_live_map(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    html = client.get("/AS4766", headers=BROWSER).text
+    match = re.search(
+        r'<script type="application/json" id="as-map-data" nonce="[^"]+">'
+        r"(.*?)</script>",
+        html,
+        re.S,
+    )
+    assert match
+    live = json.loads(match.group(1))
+    assert live["dots"][0]["place"] == "Seoul, South Korea"
+
+
+def test_the_json_answer_has_no_map_keys(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    data = client.get("/AS4766?format=json").json()
+    assert "live" not in data and "dots" not in data and "map" not in data
+
+
+def test_a_page_without_map_embeds_no_map_data(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "_as_map", lambda as_info, page: None)
+    html = client.get("/AS4766", headers=BROWSER).text
+    assert 'id="as-map-data"' not in html
+
+
+LEAFLET_SHA256 = {
+    "static/js/leaflet.js": (
+        "db49d009c841f5ca34a888c96511ae936fd9f5533e90d8b2c4d57596f4e5641a"
+    ),
+    "static/css/leaflet.css": (
+        "a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6"
+    ),
+}
+
+
+def test_leaflet_is_the_pinned_release():
+    import hashlib
+
+    root = Path(__file__).resolve().parent.parent
+    for name, digest in LEAFLET_SHA256.items():
+        assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest
+    assert "Leaflet 1.9.4" in (root / "static/js/leaflet.js").read_text()
+
+
+def test_a_page_with_a_map_loads_leaflet_in_order(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    html = client.get("/AS4766", headers=BROWSER).text
+    head = _head(html)
+    assert head.index("/static/css/leaflet.css?v=") < head.index(
+        "/static/css/whatismyip.css"
+    )
+    scripts = [
+        html.index(f'<script src="/static/js/{name}" nonce="')
+        for name in ("as.js", "leaflet.js", "as-map.js")
+    ]
+    assert scripts == sorted(scripts)
+    for name in ("leaflet.js", "as-map.js"):
+        tag = rf'<script src="/static/js/{re.escape(name)}" nonce="[^"]+" defer>'
+        assert re.search(tag + "</script>", html)
+
+
+def test_a_page_without_a_map_loads_no_leaflet(monkeypatch, tmp_path):
+    manager = build_manager(
+        tmp_path, texts={"asnames": "4766 KIXS-AS-KR-KR - Korea Telecom\n"}
+    )
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: COUNTRY_LEVEL_ONLY)
+    html = client.get("/AS4766", headers=BROWSER).text
+    assert 'id="as-map"' not in html
+    assert "leaflet" not in html.lower()
+
+
+def test_the_csp_is_unchanged(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    policy = client.get("/AS4766", headers=BROWSER).headers["content-security-policy"]
+    assert re.fullmatch(
+        r"default-src 'self'; script-src 'self' 'nonce-[^']+'; "
+        r"style-src 'self' 'unsafe-inline'; "
+        r"img-src 'self' data: https://tile\.openstreetmap\.org; "
+        r"object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        policy,
+    )
+
+
+def test_the_prefix_table_has_a_hidden_city_chip_and_here_column(
+    asinfo_enabled, monkeypatch
+):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    html = client.get("/AS4766", headers=BROWSER).text
+    toolbar = html.split('id="prefix-group"')[1].split("</div>")[0]
+    assert (
+        '<button type="button" class="chip chip--city" id="prefix-city" hidden>'
+        "</button>"
+    ) in toolbar
+    assert '<th scope="col" id="prefix-here-col" hidden>Here</th>' in html
+    assert html.index(">RPKI</th>") < html.index('id="prefix-here-col"')
+    assert 'class="as-map__live" id="as-map-live"' in html
+    assert html.index('class="as-map__static"') < html.index('id="as-map-live"')

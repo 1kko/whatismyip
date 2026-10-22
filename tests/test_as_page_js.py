@@ -227,6 +227,16 @@ def test_the_page_loads_as_js_with_the_nonce(asinfo_enabled):
     assert "onclick=" not in html
 
 
+def test_the_prefix_headings_ordering_phrase_is_its_own_span(asinfo_enabled):
+    """as.js swaps only the phrase while a city filter orders the rows by
+    "% here", and restores the server's when the filter clears."""
+    html = client.get("/AS4766", headers=BROWSER).text
+    assert (
+        '<h2 class="as-panel__title" id="as-prefixes-title">Announced prefixes'
+        ' · <span id="prefix-order">largest first</span></h2>'
+    ) in html
+
+
 def test_as_js_writes_no_markup_from_data():
     source = AS_JS.read_text()
     for banned in (
@@ -251,7 +261,11 @@ class El {
   get firstChild() { return this.children[0] || null; }
   addEventListener(t, f) { this.listeners[t] = f; }
   fire(t) { this.listeners[t](); }
+  scrollIntoView() { calls.push(["scroll", this.attrs.id]); }
+  focus(opts) { calls.push(["focus", opts]); }
 }
+const calls = [];
+const docListeners = {};
 const ids = {};
 const make = (id, tag, attrs = {}) => { const e = new El(tag); Object.assign(e.attrs, attrs); if (id) ids[id] = e; return e; };
 const rel = ["all", "upstream", "downstream", "peer"].map((k) => make(null, "button", { "data-relation": k, "aria-pressed": k === "all" ? "true" : "false" }));
@@ -260,7 +274,12 @@ const jump = make(null, "a", { "data-relation": "upstream" });
 const lists = LISTS;
 const script = make("as-lists", "script"); script.textContent = JSON.stringify(lists);
 ["neighbour-rows", "neighbours-more", "neighbour-filter", "prefix-rows", "prefixes-more", "prefix-filter", "prefix-group"].forEach((i) => make(i, "x", i === "prefix-group" ? { "aria-pressed": "false" } : {}));
+if (CITY_MARKUP) {
+  make("prefix-city", "button"); make("prefix-here-col", "th"); make("as-prefixes", "section", { id: "as-prefixes" });
+  make("prefix-order", "span").textContent = "largest first";
+}
 global.document = {
+  addEventListener: (t, f) => { docListeners[t] = f; },
   createElement: (t) => new El(t),
   createTextNode: (t) => ({ text: t }),
   getElementById: (i) => ids[i] || null,
@@ -273,8 +292,9 @@ SCENARIO
 """
 
 
-def run_wiring(lists, scenario):
+def run_wiring(lists, scenario, city_markup=True):
     script = WIRING.replace("AS_JS", json.dumps(str(AS_JS)))
+    script = script.replace("CITY_MARKUP", "true" if city_markup else "false")
     script = script.replace("LISTS", json.dumps(lists)).replace("SCENARIO", scenario)
     out = subprocess.run(  # noqa: S603
         [NODE, "-e", script], capture_output=True, text=True, check=True, timeout=30
@@ -356,3 +376,108 @@ console.log(JSON.stringify(log));
         [True, "false", 1, True, "true"],
         [False, 10, "Show all 12 prefixes"],
     ]
+
+
+@needs_node
+def test_city_rows_follow_the_pairs_and_skip_bad_indices():
+    rows = [["a"], ["b"], ["c"]]
+    pairs = [[2, "100%"], [9, "5%"], [0, "50%"]]
+    assert _js(f"cityRows({json.dumps(rows)}, {json.dumps(pairs)})") == [
+        {"row": ["c"], "here": "100%"},
+        {"row": ["a"], "here": "50%"},
+    ]
+
+
+@needs_node
+def test_a_here_cell_follows_the_rpki_cell():
+    row = ["58.1.0.0/16", 16, 5, "valid", None]
+    drawn = run_js(f"as.prefixRow({json.dumps(row)}, 'v4', 65536, '6%').html()")
+    assert drawn.endswith(
+        '<td class="tone-success">Valid</td><td class="mono">6%</td></tr>'
+    )
+    plain = run_js(f"as.prefixRow({json.dumps(row)}, 'v4', 65536).html()")
+    assert plain.endswith('<td class="tone-success">Valid</td></tr>')
+
+
+@needs_node
+def test_city_filter_combines_and_clears():
+    v4 = [[f"58.{i}.0.0/16", 16, 5, "valid", None] for i in range(12)]
+    v6 = [["2001:db8::/32", 32, 5, None, None]]
+    lists = {
+        "neighbours": {"rows": [], "max_customers": 0},
+        "prefixes": {"v4": v4, "v6": v6},
+    }
+    out = run_wiring(
+        lists,
+        """
+const rows = ids["prefix-rows"], more = ids["prefixes-more"], group = ids["prefix-group"];
+const filter = ids["prefix-filter"], chip = ids["prefix-city"], col = ids["prefix-here-col"];
+const order = ids["prefix-order"];
+const first = (r) => r.children[0].textContent;
+const log = [];
+log.push(order.textContent);
+docListeners["as:city"]({ detail: { name: "Seoul", pairs: [[3, "100%"], [1, "40%"], [5, "under 1%"]] } });
+log.push(order.textContent);
+log.push([chip.hidden, chip.textContent, chip.attrs["aria-label"], col.hidden,
+  rows.children.map(first), rows.children.map((r) => r.children.length),
+  rows.children.map((r) => r.children[4].textContent),
+  fam[0].attrs["aria-pressed"], more.hidden, calls.filter((c) => c[0] === "scroll").length,
+  calls.filter((c) => c[0] === "focus").length]);
+filter.value = "58.1.0.0"; filter.fire("input");
+log.push(rows.children.map(first));
+filter.value = ""; filter.fire("input");
+group.fire("click");
+log.push(rows.children.map((r) => r.children[0].children[0].children[1].children[0].children.map((t) => t.children[0].textContent)));
+group.fire("click");
+fam[1].fire("click");
+log.push([chip.hidden, col.hidden, rows.children.map(first), order.textContent]);
+fam[0].fire("click");
+docListeners["as:city"]({ detail: { name: "Busan", pairs: [[0, "9%"]] } });
+log.push([chip.textContent, rows.children.length, order.textContent]);
+chip.fire("click");
+log.push([chip.hidden, col.hidden, rows.children.length, more.textContent, order.textContent]);
+console.log(JSON.stringify(log));
+""",
+    )
+    # The heading's ordering phrase follows the rows: "% here" under a city.
+    assert out[:2] == ["largest first", "most here first"]
+    out = out[2:]
+    assert out == [
+        [
+            False,
+            "Seoul \u2715",
+            "Clear the city filter: Seoul",
+            False,
+            ["58.3.0.0/16", "58.1.0.0/16", "58.5.0.0/16"],
+            [5, 5, 5],
+            ["100%", "40%", "under 1%"],
+            "true",
+            True,
+            1,
+            1,
+        ],
+        ["58.1.0.0/16"],
+        [["58.3.0.0/16", "58.1.0.0/16", "58.5.0.0/16"]],
+        [True, True, ["2001:db8::/32"], "largest first"],
+        ["Busan \u2715", 1, "most here first"],
+        [True, True, 10, "Show all 12 prefixes", "largest first"],
+    ]
+
+
+@needs_node
+def test_a_city_event_without_the_new_markup_is_ignored():
+    lists = {
+        "neighbours": {"rows": [], "max_customers": 0},
+        "prefixes": {"v4": [["58.1.0.0/16", 16, 5, "valid", None]] * 12, "v6": []},
+    }
+    out = run_wiring(
+        lists,
+        """
+const rows = ids["prefix-rows"];
+const before = rows.children.length;
+if (docListeners["as:city"]) docListeners["as:city"]({ detail: { name: "Seoul", pairs: [[0, "1%"]] } });
+console.log(JSON.stringify([before, rows.children.length, calls.length]));
+""",
+        city_markup=False,
+    )
+    assert out == [0, 0, 0]

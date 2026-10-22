@@ -5,7 +5,9 @@ addresses (`sample_addresses`), asks a `place` function where each one is, and
 folds the answers into city dots (`footprint`). Pure: `place` comes in as an
 argument (lookup.as_footprint passes GeoIpManager.place), so nothing here
 reads a database. A sample stands for the address space of its prefix, so
-shares are fractions of address space, not of samples."""
+shares are fractions of address space, not of samples. Each drawn city also
+lists the announced prefixes that have addresses there (`_attach`), with the
+share of each prefix placed in that city."""
 
 from __future__ import annotations
 
@@ -57,6 +59,105 @@ def sample_addresses(prefixes: Sequence[str], budget: int) -> list[tuple[str, fl
     return samples
 
 
+def _listed(prefixes: Sequence[str]) -> list[ipaddress.IPv4Network]:
+    """The IPv4 prefixes as announced: de-duplicated, in input order."""
+    seen: dict[ipaddress.IPv4Network, None] = {}
+    for text in prefixes:
+        try:
+            network = ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            continue
+        if network.version == 4:
+            seen.setdefault(network)
+    return list(seen)
+
+
+def _first_address(network: ipaddress.IPv4Network) -> str:
+    """An address inside `network` that is not its network address, unless it
+    has no other (a /31 or /32)."""
+    base = int(network.network_address)
+    return str(ipaddress.IPv4Address(base + 1 if network.prefixlen < 31 else base))
+
+
+def _attach(
+    listed: list[ipaddress.IPv4Network],
+    samples: list[tuple[str, float]],
+    keys: list[tuple | None],
+    drawn: set[tuple],
+    place: Callable[[str], dict | None],
+) -> dict[tuple, list[dict]]:
+    """For each drawn city key, the listed prefixes with addresses there.
+
+    `keys` holds each sample's city key, None when it is not city level. A
+    sample counts for every listed prefix that contains it (one dict per
+    prefix length, keyed by the masked network, not a scan of all prefixes).
+    A listed prefix no sample fell in gets one extra `place` read, after all
+    the sample reads, and joins the city it lands in when that is drawn."""
+    by_length: dict[int, dict[int, ipaddress.IPv4Network]] = {}
+    for network in listed:
+        by_length.setdefault(network.prefixlen, {})[int(network.network_address)] = (
+            network
+        )
+    total: dict[ipaddress.IPv4Network, float] = {}
+    here: dict[ipaddress.IPv4Network, dict[tuple, list]] = {}
+    for (address, weight), key in zip(samples, keys):
+        value = int(ipaddress.IPv4Address(address))
+        for length, networks in by_length.items():
+            mask = (0xFFFFFFFF << (32 - length)) & 0xFFFFFFFF
+            network = networks.get(value & mask)
+            if network is None:
+                continue
+            total[network] = total.get(network, 0.0) + weight
+            if key in drawn:
+                # [weight in this city, first address placed there]
+                entry = here.setdefault(network, {}).setdefault(key, [0.0, address])
+                entry[0] += weight
+    pairs: dict[tuple, list[tuple]] = {key: [] for key in drawn}
+    for network, cities in here.items():
+        for key, (weight, address) in cities.items():
+            if address == str(network.network_address) and network.prefixlen < 31:
+                address = _first_address(network)
+            pairs[key].append((network, round(weight / total[network], 4), address))
+    for network in listed:
+        if network in total:
+            continue
+        address = _first_address(network)
+        found = place(address)
+        if (
+            found is None
+            or not found.get("city")
+            or coordinate_precision(found) != "city"
+        ):
+            continue
+        key = _city_key(found)
+        if key in drawn:
+            pairs[key].append((network, 1.0, address))
+    return {
+        key: [
+            {"prefix": str(n), "here": share, "address": address}
+            for n, share, address in sorted(
+                found, key=lambda t: (-t[1], t[0].prefixlen, int(t[0].network_address))
+            )
+        ]
+        for key, found in pairs.items()
+    }
+
+
+def _city_key(found: dict) -> tuple:
+    """The dot a city-level answer joins: GeoLite2's city geoname_id, so the
+    pieces of one city it puts at different points make one dot and two
+    places that share a name stay two; an answer without one falls back to
+    the name on a tenth-of-a-degree grid."""
+    if found.get("geoname_id") is not None:
+        return (found.get("country"), found["geoname_id"])
+    return (
+        found.get("country"),
+        found.get("city"),
+        round(found["lat"], 1),
+        round(found["lon"], 1),
+    )
+
+
 def footprint(
     prefixes: Sequence[str],
     place: Callable[[str], dict | None],
@@ -69,49 +170,57 @@ def footprint(
     A sample is city-level by `geo.coordinate_precision`, the site's one
     precision rule, and only when it names a city: GeoLite2's country-default
     record (a centroid with a 200 km radius and no city) is country level.
-    Samples in the same named city (within a tenth of a degree) merge into one
-    dot at their weighted mean. `sampled_share` is the sampled space over all
-    the IPv4 space of `prefixes`, so a page can say how much of the AS the map
-    looked at."""
+    Samples in the same city (`_city_key`) merge into one dot at their
+    weighted mean, named by the record. `sampled_share` is the sampled space
+    over all the IPv4 space of `prefixes`, so a page can say how much of the
+    AS the map looked at."""
     samples = sample_addresses(prefixes, budget)
     total_space = sum(n.num_addresses for n in _collapsed(prefixes))
     sampled = sum(weight for _, weight in samples)
     cities: dict[tuple, list] = {}
     country_level = unplaced = 0.0
+    keys: list[tuple | None] = []
     for address, weight in samples:
         found = place(address)
+        key = None
         if found is None:
             unplaced += weight
         elif not found.get("city") or coordinate_precision(found) != "city":
             country_level += weight
         else:
-            key = (
-                found.get("country"),
-                found.get("city"),
-                round(found["lat"], 1),
-                round(found["lon"], 1),
-            )
-            entry = cities.setdefault(key, [0.0, 0.0, 0.0])
+            key = _city_key(found)
+            # [weight, weighted lat, weighted lon, name]
+            entry = cities.setdefault(key, [0.0, 0.0, 0.0, found["city"]])
             entry[0] += weight
             entry[1] += found["lat"] * weight
             entry[2] += found["lon"] * weight
+        keys.append(key)
 
     def share(weight: float) -> float:
         return round(weight / sampled, 4) if sampled else 0.0
 
-    dots = [
-        {
-            "name": key[1],
-            "country": key[0],
-            "lat": round(lat / weight, 4),
-            "lon": round(lon / weight, 4),
-            "share": share(weight),
-        }
-        for key, (weight, lat, lon) in cities.items()
+    ranked = [
+        (
+            key,
+            {
+                "name": name,
+                "country": key[0],
+                "lat": round(lat / weight, 4),
+                "lon": round(lon / weight, 4),
+                "share": share(weight),
+            },
+        )
+        for key, (weight, lat, lon, name) in cities.items()
     ]
-    dots.sort(key=lambda d: (-d["share"], d["name"] or "", d["country"] or ""))
+    ranked.sort(
+        key=lambda r: (-r[1]["share"], r[1]["name"] or "", r[1]["country"] or "")
+    )
+    ranked = ranked[:max_dots]
+    attached = _attach(
+        _listed(prefixes), samples, keys, {key for key, _ in ranked}, place
+    )
     return {
-        "cities": dots[:max_dots],
+        "cities": [{**dot, "prefixes": attached[key]} for key, dot in ranked],
         "country_level_share": share(country_level),
         "unplaced_share": share(unplaced),
         "sampled_share": round(sampled / total_space, 4) if total_space else 0.0,

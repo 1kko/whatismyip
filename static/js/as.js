@@ -8,6 +8,11 @@
  * as_prefix_table gives the template, cell for cell (tests/test_as_page_js.py
  * compares them), so the formulas below repeat the server's.
  *
+ * The map can narrow the prefix table to one city: it fires `as:city` with
+ * the IPv4 rows to show and each one's server-rounded share, and the table
+ * gains a "Here" column, its heading reading "most here first", until the
+ * filter is cleared.
+ *
  * Text goes in with textContent and nodes with createElement only: an AS name
  * is third-party text and the CSP allows no inline script.
  */
@@ -284,7 +289,18 @@ function topSize(rows, family) {
   return top;
 }
 
-function prefixRow(row, family, top) {
+/* The rows an `as:city` event names, in the event's order. `pairs` is
+ * [[index into rows, share text], ...]; an index outside `rows` is skipped. */
+function cityRows(rows, pairs) {
+  var out = [];
+  (pairs || []).forEach(function (pair) {
+    var row = rows[pair[0]];
+    if (row) out.push({ row: row, here: pair[1] });
+  });
+  return out;
+}
+
+function prefixRow(row, family, top, here) {
   var state = row[3];
   var text = Object.prototype.hasOwnProperty.call(RPKI_TEXT, state) ? RPKI_TEXT[state] : "Unknown";
   if (state === "invalid" && row[4]) text += ": " + row[4];
@@ -302,6 +318,7 @@ function prefixRow(row, family, top) {
     el("td", "mono", typeof row[2] === "number" ? thousands(row[2]) : "—")
   );
   tr.appendChild(el("td", "tone-" + tone, text));
+  if (typeof here === "string") tr.appendChild(el("td", "mono", here));
   return tr;
 }
 
@@ -395,7 +412,7 @@ function wireNeighbours(lists) {
   }
 }
 
-function groupDetails(group, rows, family, top, biggest) {
+function groupDetails(group, entries, family, top, biggest) {
   var details = el("details", "as-group");
   var summary = el("summary", "as-group__summary");
   summary.appendChild(el("span", "mono", group.slash8));
@@ -414,12 +431,12 @@ function groupDetails(group, rows, family, top, biggest) {
   var body = el("tbody");
   replaceChildren(
     body,
-    rows
-      .filter(function (row) {
-        return group.slash8 === slash8Of(row[0]) + ".0.0.0/8";
+    entries
+      .filter(function (entry) {
+        return group.slash8 === slash8Of(entry.row[0]) + ".0.0.0/8";
       })
-      .map(function (row) {
-        return prefixRow(row, family, top);
+      .map(function (entry) {
+        return prefixRow(entry.row, family, top, entry.here);
       })
   );
   table.appendChild(body);
@@ -436,31 +453,51 @@ function wirePrefixes(lists) {
   if (!tbody || !more || !filter || !group || !lists.prefixes) return;
   var data = lists.prefixes;
   var pressed = document.querySelector('button.chip[data-family][aria-pressed="true"]');
-  var state = { family: pressed ? pressed.getAttribute("data-family") : "v4", showAll: false, grouped: false };
+  var state = {
+    family: pressed ? pressed.getAttribute("data-family") : "v4",
+    showAll: false,
+    grouped: false,
+    city: null,
+  };
+  var chip = document.getElementById("prefix-city");
+  var hereCol = document.getElementById("prefix-here-col");
+  // The heading's ordering phrase, which a city filter changes.
+  var order = document.getElementById("prefix-order");
+  var orderText = order ? order.textContent : "";
 
   function draw() {
     var all = data[state.family] || [];
-    var matching = filterPrefixes(all, filter.value);
     var top = topSize(all, state.family);
+    var columns = state.city ? 5 : 4;
+    // Each entry is a row and, while a city is on, its share there.
+    var entries = state.city ? cityRows(all, state.city.pairs) : all.map(function (row) { return { row: row }; });
+    var shown = filterPrefixes(
+      entries.map(function (entry) { return entry.row; }),
+      filter.value
+    );
+    var kept = new Set(shown);
+    var matching = entries.filter(function (entry) {
+      return kept.has(entry.row);
+    });
     if (state.grouped) {
-      var groups = groupBySlash8(matching);
+      var groups = groupBySlash8(shown);
       var biggest = Math.max.apply(null, groups.map(function (g) { return g.addresses; }).concat([1]));
       var cells = groups.map(function (g) {
         var tr = el("tr");
         var td = el("td");
-        td.setAttribute("colspan", "4");
+        td.setAttribute("colspan", String(columns));
         td.appendChild(groupDetails(g, matching, state.family, top, biggest));
         tr.appendChild(td);
         return tr;
       });
-      replaceChildren(tbody, cells.length ? cells : [messageRow(4, "No prefixes match the filter.")]);
+      replaceChildren(tbody, cells.length ? cells : [messageRow(columns, "No prefixes match the filter.")]);
       more.hidden = true;
       return;
     }
-    var rows = visibleRows(matching, state.showAll).map(function (row) {
-      return prefixRow(row, state.family, top);
+    var rows = visibleRows(matching, state.showAll).map(function (entry) {
+      return prefixRow(entry.row, state.family, top, entry.here);
     });
-    replaceChildren(tbody, rows.length ? rows : [messageRow(4, "No prefixes match the filter.")]);
+    replaceChildren(tbody, rows.length ? rows : [messageRow(columns, "No prefixes match the filter.")]);
     syncMore(more, matching.length, state.showAll, "prefixes");
   }
 
@@ -471,6 +508,16 @@ function wirePrefixes(lists) {
     group.setAttribute("aria-pressed", state.grouped ? "true" : "false");
   }
 
+  function clearCity(redraw) {
+    if (!state.city) return;
+    state.city = null;
+    state.showAll = false;
+    chip.hidden = true;
+    hereCol.hidden = true;
+    if (order) order.textContent = orderText;
+    if (redraw) draw();
+  }
+
   reveal(families);
   group.hidden = false;
   filter.hidden = false;
@@ -479,8 +526,10 @@ function wirePrefixes(lists) {
     button.addEventListener("click", function () {
       state.family = button.getAttribute("data-family");
       state.showAll = false;
-      setPressed(families, function (chip) {
-        return chip === button;
+      // A city filter is IPv4 only: choosing IPv6 ends it.
+      if (state.family === "v6") clearCity(false);
+      setPressed(families, function (other) {
+        return other === button;
       });
       syncGroup();
       draw();
@@ -502,6 +551,31 @@ function wirePrefixes(lists) {
     draw();
   });
   syncMore(more, (data[state.family] || []).length, false, "prefixes");
+
+  if (!chip || !hereCol) return; // older markup: no city filter
+  chip.addEventListener("click", function () {
+    clearCity(true);
+  });
+  document.addEventListener("as:city", function (event) {
+    var detail = (event && event.detail) || {};
+    state.city = { name: String(detail.name), pairs: detail.pairs || [] };
+    state.family = "v4";
+    state.showAll = false;
+    setPressed(families, function (chipButton) {
+      return chipButton.getAttribute("data-family") === "v4";
+    });
+    syncGroup();
+    chip.textContent = state.city.name + " \u2715";
+    chip.setAttribute("aria-label", "Clear the city filter: " + state.city.name);
+    chip.hidden = false;
+    hereCol.hidden = false;
+    if (order) order.textContent = "most here first";
+    draw();
+    var section = document.getElementById("as-prefixes");
+    if (section && section.scrollIntoView) section.scrollIntoView();
+    // The map closes its bubble without returning focus; land on the chip.
+    if (chip.focus) chip.focus({ preventScroll: true });
+  });
 }
 
 function init() {
@@ -530,6 +604,7 @@ if (typeof module === "object" && module.exports) {
     neighbourRow: neighbourRow,
     prefixRow: prefixRow,
     topSize: topSize,
+    cityRows: cityRows,
   };
 }
 if (typeof document !== "undefined") init();

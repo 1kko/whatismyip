@@ -13,7 +13,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from config import ASINFO_MIN_RIS_PEERS, SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
-from countrynames import country_name_in_text
+from countrynames import country_name, country_name_in_text
 from eppstatus import explain_status
 from reputation import grade
 
@@ -1916,6 +1916,10 @@ def as_page_view(
         card = as_view(as_info, link, route=False, credit_links=credit_links)
         neighbours = as_neighbour_table(as_info, page, link)
         prefix_table = as_prefix_table(as_info, page)
+        v4_index = {
+            row[0]: position
+            for position, row in enumerate(prefix_table["payload"]["v4"])
+        }
         extra = {
             # The graph's end when there is no map to carry it (as_map_view's
             # node otherwise): the number and its handle.
@@ -1923,7 +1927,7 @@ def as_page_view(
             "summary": as_summary(as_info, page),
             "tiles": as_tiles(as_info, page),
             "graph": as_upstream_graph(as_info, page, link),
-            "map": as_map_view(as_info, as_map),
+            "map": as_map_view(as_info, as_map, v4_index, link),
             "glance": as_glance(as_info, page),
             "neighbours": neighbours,
             "prefix_table": prefix_table,
@@ -2680,7 +2684,84 @@ def as_upstream_graph(
     return graph
 
 
-def as_map_view(as_info: dict, as_map: dict | None) -> dict | None:
+def _live_map(
+    as_map: dict,
+    as_info: dict,
+    cities: list,
+    v4_index: dict[str, int] | None,
+    link: LinkFor | None,
+) -> dict:
+    """The /AS<n> map's payload for static/js/as-map.js: the frame and zoom
+    limits as_map carries, and one entry per dot with everything its bubble
+    says. `pairs` index the IPv4 rows of #as-lists; a prefix not in `v4_index`
+    is dropped first, so `top`, `count` and `pairs` agree."""
+    frame = as_map.get("frame") or {}
+    center = frame.get("center_lon") or 0
+    index = v4_index or {}
+    dots = []
+    for city in cities:
+        lon = city["lon"]
+        # mapgeom.unwrap_lon, which this module may not import.
+        lon += 360 * round((center - lon) / 360)
+        share = city["share"]
+        name = city.get("name")
+        code = city.get("country")
+        country = country_name(code) or code
+        place = ", ".join(part for part in (name, country) if part) or None
+        share_text = _share_text(share * 100)
+        entries = [p for p in city.get("prefixes") or [] if p["prefix"] in index]
+        texts = [_share_text(p["here"] * 100) for p in entries]
+        href = link(entries[0]["address"]) if entries and link else None
+        dots.append(
+            {
+                "lat": city["lat"],
+                "lon": lon,
+                "r": round(2.5 + 16 * math.sqrt(share), 1),
+                "name": name,
+                "place": place,
+                "share_text": share_text,
+                "label": f"{place or 'Unnamed place'}, {share_text}",
+                "top": [[p["prefix"], t] for p, t in zip(entries[:3], texts)],
+                "count": len(entries),
+                "pairs": [[index[p["prefix"]], t] for p, t in zip(entries, texts)],
+                "lookup": {"text": entries[0]["address"], "href": href}
+                if href
+                else None,
+            }
+        )
+    if not dots:
+        place = country_name(as_info.get("country")) or as_info.get("country")
+        dots.append(
+            {
+                "lat": frame.get("south"),
+                "lon": frame.get("west"),
+                "r": 6.0,
+                "name": None,
+                "place": None,
+                "share_text": None,
+                "label": f"{place or 'Its registered country'}, country level",
+                "top": [],
+                "count": 0,
+                "pairs": [],
+                "lookup": None,
+            }
+        )
+    return {
+        "frame": frame,
+        "fit_max_zoom": as_map.get("fit_max_zoom"),
+        "zoom_limit": as_map.get("zoom_limit"),
+        "tile_url": as_map.get("tile_url"),
+        "approx": not cities,
+        "dots": dots,
+    }
+
+
+def as_map_view(
+    as_info: dict,
+    as_map: dict | None,
+    v4_index: dict[str, int] | None = None,
+    link: LinkFor | None = None,
+) -> dict | None:
     """Where the AS's IPv4 addresses geolocate, as tiles and dots in percent
     and pixels of the canvas `as_map` carries. None without a map, or when
     there is neither a footprint with cities nor a country to pin. `approx`
@@ -2768,6 +2849,7 @@ def as_map_view(as_info: dict, as_map: dict | None) -> dict | None:
         "credit": MAP_CREDIT,
         "alt": alt,
         "approx": not cities,
+        "live": _live_map(as_map, as_info, cities, v4_index, link),
     }
 
 

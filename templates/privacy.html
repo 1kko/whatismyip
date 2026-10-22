@@ -141,9 +141,11 @@
         <h2>Who else your browser contacts</h2>
         <ul>
             <li><strong>tile.openstreetmap.org</strong>, for the map tiles on a page that shows a
-                map: about 15 requests on a desktop, 6 on a phone. OpenStreetMap sees your IP
-                address and this site's name, but not the page's address, so not what you looked
-                up. The tiles it serves do show which part of the map you are viewing.</li>
+                map: about 15 requests on a desktop, 6 on a phone.{% if asinfo_hosts %} Zooming or
+                moving the map on an AS page fetches more tiles from the same host.{% endif %}
+                OpenStreetMap sees your IP address and this site's name, but not the page's
+                address, so not what you looked up. The tiles it serves do show which part of the
+                map you are viewing.</li>
             {% if stun_url %}
             <li><strong>{{ stun_host }}</strong>, a STUN server, and only when you press
                 "Run WebRTC leak test" on the home page. It sees your IP addresses: reporting which

@@ -271,11 +271,29 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   at most `AS_MAP_SAMPLE_BUDGET` addresses over the prefixes by size, and
   `footprint` locates them with a `place` callable (`lookup.as_footprint`
   passes `geo_ip_manager.place`: GeoLite2-City only) and groups them by city, at most `AS_MAP_MAX_DOTS`, each with a
-  share. Nested prefixes are collapsed first (`ipaddress.collapse_addresses`),
+  share. A city is GeoLite2's city `geoname_id` (`_city_key`; `place` carries
+  it): GeoLite2 puts one city's blocks at several points, so a key on the name
+  and a 0.1° grid drew Mapo-gu as three dots of one name, each bubble and
+  filter chip holding a piece of it, while two places that share a name (the
+  Jung-gu of Seoul and of Busan) are two ids. A dot sits at its samples'
+  weighted mean; the shares, the prefixes and the extra reads all join a dot
+  by that key, and an answer without an id keeps the name-and-grid key.
+  Nested prefixes are collapsed first (`ipaddress.collapse_addresses`),
   so no address is sampled or weighed twice. A dot is a named city at city
   precision only: GeoLite2's country-default record (a centroid, radius 200,
   no city name) is country level, so the map never draws a country as a city. Imports the standard library, `config` and `geo` only. IPv4 only; an
-  IPv6-only AS gets the country pin.
+  IPv6-only AS gets the country pin. Each drawn city also carries `prefixes`
+  (`_attach`): every listed IPv4 prefix with a sample placed there, as
+  `{prefix, here, address}`, `here` being the share of the prefix's sample
+  weight that landed in the city (country-level and unplaced samples count in
+  the denominator), most concentrated first, then the larger, then by
+  address. A sample counts for every listed prefix that contains it, so a
+  more-specific, which the collapsed sampling skips, is judged on the samples
+  inside its own range. A listed prefix no sample fell in gets one extra
+  `place` read of an address inside it, so the reads are at most
+  `AS_MAP_SAMPLE_BUDGET` plus one per listed prefix (`ASINFO_PAGE_LIMIT`).
+  `address` is the first sample placed there, moved off the network address
+  for a prefix wider than a /31: the bubble's lookup link.
 - `countrynames.py`: pure data, ISO 3166 code to name (flags are
   `viewmodel.country_flag`), for the sentence, the map caption and the
   neighbour tables. `country_name_in_text` adds "the" where running English
@@ -316,7 +334,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
   great-circle math behind it. `build_points_canvas()` frames weighted points
   (the `/AS<n>` map) on one fixed canvas, going the short way across the
-  antimeridian and never zooming past `AS_MAP_MAX_ZOOM`.
+  antimeridian and never zooming past `AS_MAP_MAX_ZOOM`. `points_frame()` is
+  the same core of the points as a degrees box (`south`, `west`, `north`,
+  `east`, `center_lon`) for the live map, which fits it itself; `west` and
+  `east` are unwrapped around the centre (`unwrap_lon`), so a box over the
+  antimeridian has `east` past 180. Both read `_core_points`, so the static
+  and the live map frame the same dots.
 - `healthcheck.py`: the Docker `HEALTHCHECK`: exit 0 when `/healthz` answers
   200, whatever its `status`.
 - `main.py`: the FastAPI app, middleware, routes and page rendering; wires the
@@ -362,9 +385,22 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `asinfo_manager.page_data` for an assignable number only and embeds the rows
   in `#as-lists` (through `_script_json`) for `static/js/as.js`, which filters,
   chips and "Show all" with `textContent` only. A special-purpose number reads
-  neither. The JSON answer is the card, plus the additive neighbour keys
-  (`country`, `customers`, `v4_addresses`, `v4_prefixes`, `v6_prefixes`) on
-  `/AS<n>`'s neighbour lists.
+  neither. The map is served as a static picture, which is what a page
+  without JavaScript keeps, and `static/js/as-map.js` replaces it in the same
+  box with a Leaflet map that zooms and pans (see
+  [Map subsystem](#map-subsystem)). It reads `#as-map-data`
+  (`viewmodel._live_map`, also through `_script_json`): the frame, the zoom
+  limits and, per dot, what its bubble says (the place, its share, the first
+  three prefixes with their "% here", the count, `pairs` of indexes into
+  `#as-lists`' IPv4 rows with each one's "% here", and a lookup link from
+  `main.lookup_href`). A click on a dot opens its bubble; "Show these in
+  Prefixes" fires `as:city` on the document, and as.js narrows the Prefixes
+  table to that city's rows, in the bubble's order, with a "Here" column, a
+  "Seoul ✕" chip and "most here first" in place of the heading's "largest
+  first" (`#prefix-order`) until the chip or IPv6 clears it. The JSON answer is the
+  card, plus the additive neighbour keys (`country`, `customers`,
+  `v4_addresses`, `v4_prefixes`, `v6_prefixes`) on `/AS<n>`'s neighbour
+  lists. The map's data reaches none of the JSON, the text or MCP.
 - `?format=html|json|text` and `?fields=` on both lookup routes
 - `HEAD /`, `HEAD /{domain_ip}` - `main.head_lookup`: `200` with the
   Content-Type GET would answer with (JSON for the `?whois=only` and
@@ -968,8 +1004,8 @@ whatismyip/
 ├── asinfo.py            # AS information: seven datasets -> one SQLite file (data/asinfo/), route and AS reads
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
-├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs, weighted-point canvas
-├── asmap.py             # where an AS's IPv4 space geolocates (sampled, by city)
+├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs, weighted-point canvas and frame
+├── asmap.py             # where an AS's IPv4 space geolocates (sampled, by city, each city with its prefixes)
 ├── countrynames.py      # ISO 3166 code -> name (pure data)
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
 ├── healthcheck.py       # Docker HEALTHCHECK: /healthz answers 200 or not
@@ -988,10 +1024,13 @@ whatismyip/
 │   └── _footer.html     # footer included by all four pages
 ├── static/
 │   ├── css/whatismyip.css  # design tokens + layout (dark only); jsoneditor.css is vendored
+│   ├── css/leaflet.css     # vendored Leaflet 1.9.4, loaded only on an /AS<n> page with a map
 │   ├── js/app.js           # search, copy, accordions, WHOIS fill-in, subdomain panel, lazy JSONEditor
 │   ├── js/map.js           # paints the server's map payload, with the attribution
 │   ├── js/fingerprint.js   # self page's browser fingerprint + clock/languages vs address rows, client-side only; the active probes wait for the panel's first opening
-│   ├── js/as.js            # the /AS<n> page's filter, relation chips, show-all and /8 groups over #as-lists
+│   ├── js/as.js            # the /AS<n> page's filter, relation chips, show-all, /8 groups and city filter over #as-lists
+│   ├── js/as-map.js        # the /AS<n> page's live map: Leaflet over the static one, zoom, pan and a bubble per dot (#as-map-data)
+│   ├── js/leaflet.js       # vendored Leaflet 1.9.4, byte for byte npm's dist/, loaded only with as-map.js
 │   ├── js/webrtc.js        # opt-in WebRTC leak test (one STUN request from the browser)
 │   ├── js/jsoneditor.min.js # vendored, loaded only when the Raw JSON panel opens
 │   ├── fonts/              # self-hosted woff2 (CSP blocks font CDNs): per face a -latin, an -extended-a and a -cyrillic-greek file behind unicode-range
@@ -1040,7 +1079,8 @@ runs it, and the page wiring that feeds it, against a fake document.
 `main.build_map_payload` has `mapgeom.build_canvas` emit tile URLs with pixel
 offsets plus a projected great-circle polyline for two fixed canvases,
 `config.DESKTOP_CANVAS` (a 1440-wide band) and `config.MOBILE_CANVAS` (a
-350-wide card); `static/js/map.js` only paints them.
+350-wide card); `static/js/map.js` only paints them. The `/AS<n>` map is the
+one exception (below).
 
 **Antimeridian**: Seoul → California crosses the Pacific. The map centers on the
 shortest-path midpoint longitude and wraps tile x by 2^zoom; a naive Mercator straight
@@ -1057,6 +1097,62 @@ names stay legible, which costs ~15 tile requests on desktop and ~6 on mobile;
 CSS inverts them to turn OSM's light basemap dark. **Attribution is mandatory**:
 map.js's `attribution()` draws "© OpenStreetMap contributors · GeoLite2 by
 MaxMind" on the map itself.
+
+**The `/AS<n>` map** is the one map the browser does more than paint. The server
+draws it as a static picture (`mapgeom.build_points_canvas`, tiles and an SVG
+of dots), the view without JavaScript, and `static/js/as-map.js` builds a
+Leaflet map over it in the same box, hidden until its first tiles have drawn,
+so the browser projects and zooms. Leaflet 1.9.4 is vendored as
+`static/js/leaflet.js` and `static/css/leaflet.css`, byte for byte the npm
+package's `dist/` files after checking the tarball against the registry's
+`dist.integrity` (`tests/test_as_target.py` pins their SHA-256), and
+`templates/as.html` loads them only on a page with a map; never from a CDN.
+The CSP did not change: the files come from `'self'` and the tiles from the
+one `img-src` host. What the map shows is still the server's: the initial
+frame (`mapgeom.points_frame`, the static canvas's core, fitted to the box's
+own size, at most `AS_MAP_MAX_ZOOM`), the closest zoom (`AS_MAP_ZOOM_LIMIT`,
+10: GeoLite2's city coordinates are no finer), the country pin's frame and
+limit (both `main.AS_MAP_COUNTRY_ZOOM`, so a centroid never sits on one
+village) and every share in a bubble, rounded by `viewmodel._share_text`; JS
+never rounds a share. The widest zoom is `log2(width / 256)` for the box's
+width, fractional, so no width shows the world twice. The wheel zooms only after a
+press in the map and stops when the pointer or the focus leaves it, so
+scrolling past the map never zooms it; on a touch screen one finger scrolls
+the page and two move the map. Dot icons take no pointer events. The drawing
+order is one rule, `drawnAbove`: a smaller dot above a bigger one, so a small
+dot on a big one stays visible, and of one size the later in the payload.
+`stackOffsets` turns it into each marker's `zIndexOffset`, a step that
+outweighs Leaflet's own stacking by latitude, and `pickDot` reads the same
+rule: a click opens the drawn disk on top under the pointer, so the z-index
+and the click cannot disagree, even between two dots of one size. Outside
+every disk it opens the nearest dot within its hit radius (at least 12px, a
+24px target). The biggest dot does not win outright: a small dot drawn on it
+would be visible but could not be clicked. Overlapping dots each stay
+reachable once zoomed apart, and each dot is a focusable button that Enter or
+Space opens. Only one dot is a Tab stop (a roving tabindex, `wireRoving`):
+Leaflet makes every keyboard marker one, and a map of a hundred dots took a
+hundred presses to get past. The arrow keys move the focus along the payload's
+order (largest first) and Home and End to its ends, without wrapping
+(`stepDot`), and the Tab stop goes with the focus; the region's label says so
+(`regionLabel`). A move of the map that takes the Tab stop off the view hands
+it to the first dot in view (`stopAfterMove`): a Tab into the map would
+otherwise land on a dot off the view, and Chrome scrolls the page to it before
+any script can pan it in. A dot off the view is panned in before it takes
+focus with `preventScroll`: focusing it there would scroll Leaflet's
+overflow-hidden box. A dot that takes focus any other way is panned in whole
+by its own focus listener; the markers' `autoPanOnFocus` is off, because
+Leaflet's stops with the dot's centre on the edge of the view, half of it and
+its focus ring cut off. A bubble is built from DOM nodes and `textContent` (a
+city name is third-party text), never Leaflet's HTML-string popup content.
+Above 900px the AS node label sits on the map and steps aside while a bubble
+is open; under 520px a page that runs scripts gets a square box, so a bubble
+fits above its dot. Its tiles come through Leaflet with
+`referrerPolicy: "strict-origin"` and the same inverting filter, and Leaflet's
+attribution control is off because the figcaption carries `MAP_CREDIT`.
+Zooming or moving it fetches more tiles, which `/privacy` says while AS
+information is on (`asinfo_hosts`), as there is no AS page otherwise.
+`tests/test_as_map_js.py` runs the pure parts in node; Leaflet does not run
+there, so the wiring is checked in a browser.
 
 ### Subdomain lookup
 
@@ -1279,14 +1375,24 @@ sets `SQLITE_TMPDIR`.
 **The `/AS<n>` page's cost.** The page reads `page_data` (up to
 `ASINFO_PAGE_LIMIT` rows per relation and family, indexed reads) and the map's
 footprint: at most `AS_MAP_SAMPLE_BUDGET` (2000) GeoLite2-City reads spread over
-the IPv4 prefixes by size, so a huge AS costs what a small one does, and at
-most `AS_MAP_MAX_DOTS` (200) dots. Both run inline like the other local reads,
-for the page only; JSON, text and MCP skip them. Measured on real data
-(2026-10-22, macOS, schema-3 build from the live copies, RPKI absent in the
-measured build, `TestClient` without a lifespan): `page_data` 2 to 13 ms,
-`_as_map` 13 to 19 ms, the whole page 31 to 40 ms (AS3786, AS16509) on a
-quiet run; HTML 190, 219 and 264 KB (AS3786, AS16509, AS6939) of which
-`#as-lists` is 85, 116 and 164 KB; 56 to 185 map dots on 6 to 8 tiles.
+the IPv4 prefixes by size, plus at most one read per listed IPv4 prefix no
+sample landed in (`asmap._attach`, at most `ASINFO_PAGE_LIMIT`), so a huge AS
+costs what a small one does, and at most `AS_MAP_MAX_DOTS` (200) dots. Both
+run inline like the other local reads, for the page only; JSON, text and MCP
+skip them. Measured on real data (2026-10-22, macOS, schema-3 build from the
+live copies, RPKI absent in the measured build, `TestClient` without a
+lifespan, medians of five) on a loaded machine (load average 7 to 8 on 16
+cores), with the page from before the live map timed alternately in the same
+run: for AS3786, AS16509 and AS6939, `page_data` 2 to 15 ms; `_as_map` 35, 33
+and 20 ms against 23, 24 and 14 ms before (13 to 19 ms on an earlier quiet
+run), from 2,690, 2,050 and 1,862 `place` reads (690, 50 and 0 of them extra,
+for 855, 1,000 and 235 listed prefixes); the whole page 61 to 82 ms against
+44 to 67 ms before (31 to 40 ms quiet). With dots keyed by `geoname_id`
+(sizes and counts re-measured; the reads are the same): HTML 240, 244 and
+310 KB (42, 42 and 79 KB gzipped) against 190, 219 and 264 KB, of which
+`#as-lists` is 85, 116 and 164 KB and `#as-map-data` 51, 24 and 46 KB (532,
+561 and 228 city-prefix pairs); 141, 52 and 140 map dots (183, 52 and 157
+keyed by name and a 0.1° grid) on 6 to 8 static tiles.
 
 **Credits and terms.** The card carries the credit lines above, CAIDA's two
 linked to their dataset pages on the panel and the `/AS<n>` page
@@ -1418,13 +1524,13 @@ and importing `main` makes no network call. The suite runs offline, and
   is skipped unless `RUN_NETWORK_TESTS=1`, and then runs with neither layer in
   place. No test needs it today.
 - `test_webrtc_leak.py`, `test_map_pin.py`, `test_fingerprint_probes.py`,
-  `test_fingerprint_consistency.py` and `test_boot.py` run node and a fresh
-  interpreter as subprocesses, outside the guard. The node tests skip when
-  `node` is not installed.
+  `test_fingerprint_consistency.py`, `test_as_page_js.py`, `test_as_map_js.py`
+  and `test_boot.py` run node and a fresh interpreter as subprocesses,
+  outside the guard. The node tests skip when `node` is not installed.
 
 Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
-  tiles, arcs), `test_viewmodel.py` (view model, WHOIS/SSL rendering, the
+  tiles, arcs, the AS map's frame), `test_viewmodel.py` (view model, WHOIS/SSL rendering, the
   FCrDNS verdict, registration and certificate ages),
   `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
   forced bootstrap refresh behavior, JSContact names, thin records, EPP status
@@ -1478,13 +1584,21 @@ Test files:
   build and RPKI state, route and AS reads, staleness and `unavailable`,
   download and refresh rules, swapping the file under readers),
   `test_as_target.py` (`/AS<n>`: classification, JSON, text, page, `HEAD`,
-  the special-purpose numbers, never a ban), `test_as_surfaces.py` (every
+  the special-purpose numbers, never a ban, `#as-map-data`, the pinned
+  Leaflet files and their tags, the unchanged CSP), `test_as_surfaces.py` (every
   other surface: `as_info` on IP, domain and self lookups, the page's AS panel
   and links, `?fields=`, MCP, `/healthz` and `/privacy`, the credits),
-  `test_asmap.py` (the footprint sampler and grouping),
-  `test_as_page_view.py` (`as_page_view`: sentence, tiles, bars, graph, tables),
-  `test_as_page_js.py` (`static/js/as.js`'s filter, chips and show-all, run in
-  node against a fake document; skips without node),
+  `test_asmap.py` (the footprint sampler and grouping, each city's prefixes
+  and the one extra read per unsampled prefix),
+  `test_as_page_view.py` (`as_page_view`: sentence, tiles, bars, graph,
+  tables, the live map's payload),
+  `test_as_page_js.py` (`static/js/as.js`'s filter, chips, show-all and the
+  city filter, run in node against a fake document; skips without node),
+  `test_as_map_js.py` (`static/js/as-map.js`'s pure parts: the widest zoom,
+  the drawing order the stack and the click share, the world copy, keys,
+  the arrow-key steps, the Tab stop after a move, the region label and the
+  bubble, run in node; the
+  Leaflet wiring rules pinned by text; skips without node),
   `asinfo_fixtures.py` (not a test module: the synthetic files and
   `build_manager()`, with conftest's `asinfo_enabled` fixture on top)
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding

@@ -1191,13 +1191,18 @@ table.records--dns td:nth-child(4) {
   min-width: 0;
   margin: 0;
 }
-/* The tiles clip, not the canvas, so a phone can hang the node above it. */
+/* The tiles clip, not the canvas, so a phone can hang the node above it.
+   Isolated, so the live map's z-indices (Leaflet's panes and controls, up to
+   1000) stay inside it, under the page's fixed progress bar. */
 .as-map__canvas {
   position: relative;
+  isolation: isolate;
+  aspect-ratio: var(--map-ratio);
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface-2);
 }
+.as-map__static { position: absolute; inset: 0; }
 .as-map__tiles { position: absolute; inset: 0; overflow: hidden; border-radius: 9px; }
 .as-map__tiles::after {
   content: "";
@@ -1208,8 +1213,9 @@ table.records--dns td:nth-child(4) {
 .as-map__tile {
   position: absolute;
   max-width: none;
-  filter: grayscale(1) invert(1) brightness(1) contrast(1.12);
 }
+.as-map__tile,
+.as-map__live .leaflet-tile { filter: grayscale(1) invert(1) brightness(1) contrast(1.12); }
 .as-map__dots { position: absolute; inset: 0; width: 100%; height: 100%; }
 .as-map__dots circle {
   fill: #34D39966;
@@ -1228,11 +1234,22 @@ table.records--dns td:nth-child(4) {
   transform-box: fill-box;
   transform-origin: center;
 }
+/* Over the live map's tiles, dots and controls too, where the upstream fan
+   ends, and never in the way of a drag or a click on a dot under it. */
 .as-map__node {
   position: absolute;
   top: 50%;
   left: 6px;
+  z-index: 1001;
   transform: translateY(-50%);
+  pointer-events: none;
+}
+/* Leaflet keeps its bubbles inside its map pane, one stacking context with
+   the dots, so no z-index puts the node between them. Where the node sits on
+   the map, it steps aside while a bubble is open (as-map.js); at 900px and
+   below it hangs above the canvas, clear of every bubble. */
+@media (min-width: 901px) {
+  .as-map--bubble .as-map__node { visibility: hidden; }
 }
 .as-map__caption {
   align-self: start;
@@ -1242,6 +1259,142 @@ table.records--dns td:nth-child(4) {
   line-height: 1.5;
 }
 .as-map__credit { white-space: nowrap; }
+
+/* The live map (static/js/as-map.js, Leaflet) in the same box: hidden until
+   its first tiles have drawn, then in place of the static picture, which is
+   what a page without JavaScript keeps. */
+.as-map__live {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  border-radius: 9px;
+}
+.as-map--live .as-map__live { visibility: visible; }
+.as-map--live .as-map__static { visibility: hidden; }
+.as-map__live.leaflet-container {
+  background: var(--bg);
+  font: 13px/1.5 var(--font-sans);
+}
+.as-map__live:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The static tiles' scrim (--bg at 35%) as the tile pane's opacity over the
+   same --bg: one colour, and the dots and the bubble above stay unscrimmed. */
+.as-map__live .leaflet-tile-pane { opacity: 0.65; }
+/* A city dot, drawn like the static map's circles and the same size at every
+   zoom. Pointer events fall through to the map, which opens the dot drawn on
+   top under the pointer, else the nearest within at least 12px (as-map.js
+   pickDot), so overlapping dots each stay reachable. The selector outranks
+   Leaflet's .leaflet-marker-icon.leaflet-interactive, which would take them
+   back. */
+.as-map__live .as-dot {
+  border: 1px solid #34D399D9;
+  border-radius: 50%;
+  background: #34D39966;
+  pointer-events: none;
+}
+.as-map__live .as-dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The country pin's dashed halo, two and a half times the pin like the static
+   one's scale(2.5): on a pseudo-element, as Leaflet places the icon itself
+   with a transform. */
+.as-map__live .as-dot--approx { border: 0; background: none; }
+.as-map__live .as-dot--approx::before {
+  content: "";
+  position: absolute;
+  inset: -75%;
+  border: 1.5px dashed #5B8CFFCC;
+  border-radius: 50%;
+  background: #5B8CFF29;
+}
+/* Over a dot's hit area the pointer says so, except during a drag. */
+body:not(.leaflet-dragging) .as-map__live--hit { cursor: pointer; }
+
+/* Leaflet's controls and bubble in the site's panel colours. */
+.as-map__live .leaflet-bar {
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: none;
+}
+.as-map__live .leaflet-bar a,
+.as-map__live .leaflet-bar button {
+  display: block;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: 500 18px/30px var(--font-sans);
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+.as-map__live .leaflet-bar > :last-child { border-bottom: 0; }
+.as-map__live .leaflet-bar a:hover,
+.as-map__live .leaflet-bar button:hover {
+  background: var(--surface-2);
+  color: var(--accent);
+}
+.as-map__live .leaflet-bar a:focus-visible,
+.as-map__live .leaflet-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.as-map__live .leaflet-bar a.leaflet-disabled {
+  background: var(--surface);
+  color: var(--text-muted);
+  opacity: 0.5;
+  cursor: default;
+}
+.as-map__live .leaflet-popup-content-wrapper,
+.as-map__live .leaflet-popup-tip {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: 0 8px 24px #0000008C;
+}
+.as-map__live .leaflet-popup-content-wrapper { border-radius: 10px; }
+.as-map__live .leaflet-popup-content { margin: 12px 30px 12px 14px; font-size: 13px; line-height: 1.5; }
+.as-map__live a.leaflet-popup-close-button { color: var(--text-muted); }
+.as-map__live a.leaflet-popup-close-button:hover,
+.as-map__live a.leaflet-popup-close-button:focus { color: var(--accent); }
+
+/* The bubble (as-map.js bubble): the place and its share, the prefixes with
+   addresses there, then the table filter and an address to look up. */
+.as-bubble { min-width: 190px; }
+.as-bubble > p,
+.as-bubble > ul { margin: 0; }
+.as-bubble__place { font-weight: 600; }
+.as-bubble__share,
+.as-bubble__more { font-size: 12px; }
+.as-bubble > .as-bubble__head {
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.as-bubble__prefixes { padding: 0; list-style: none; font-size: 12px; }
+.as-bubble__prefixes li { white-space: nowrap; }
+.as-bubble__filter {
+  display: block;
+  margin-top: 10px;
+  padding: 4px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-primary);
+  font: 500 12px/1.4 var(--font-sans);
+  cursor: pointer;
+}
+.as-bubble__filter:hover { border-color: var(--accent); }
+.as-bubble__filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Leaflet colours every link in the map; this one is the bubble's way on. */
+.as-map__live .as-bubble .lookup-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--accent);
+  font-size: 12.5px;
+}
 
 /* Controls: each carries `hidden` in the HTML and static/js/as.js reveals it,
    so a page without JavaScript shows the first rows alone. Their own display
@@ -1389,6 +1542,17 @@ table.as-table {
   .size-cell .size-bar { display: none; }
   /* The relation as a coloured word, without its pill. */
   .relation { padding: 0; border: 0; font-size: 10.5px; }
+}
+/* A phone that runs scripts: a square map, so a bubble fits above its dot.
+   The static picture keeps its own shape, centred, until the live map
+   replaces it; without scripts the box keeps the picture's shape. */
+@media (max-width: 520px) and (scripting: enabled) {
+  .as-map__canvas { aspect-ratio: 1 / 1; }
+  .as-map__static {
+    inset: 50% 0 auto;
+    aspect-ratio: var(--map-ratio);
+    transform: translateY(-50%);
+  }
 }
 
 /* The prefix table grouped by /8 (as.js): one disclosure per /8, its summary a

@@ -258,6 +258,50 @@ def points_center_lon(lons: Sequence[float]) -> float:
     return _wrap180(start + (360 - gaps[widest]) / 2)
 
 
+def _core_points(
+    points: Sequence[tuple[float, float, float]], fit_share: float
+) -> list[tuple[float, float, float]]:
+    """The heaviest points holding fit_share of the total weight (at least
+    one): what a frame fits. Shared by build_points_canvas and points_frame so
+    the two can never frame different points."""
+    if not points:
+        raise ValueError("no points to frame")
+    ranked = sorted(range(len(points)), key=lambda i: -points[i][2])
+    total = sum(p[2] for p in points)
+    core: list[tuple[float, float, float]] = []
+    held = 0.0
+    for i in ranked:
+        core.append(points[i])
+        held += points[i][2]
+        if held >= fit_share * total:
+            break
+    return core
+
+
+def unwrap_lon(lon: float, center_lon: float) -> float:
+    """lon moved by a multiple of 360 to lie within 180 of center_lon."""
+    return lon + 360 * round((center_lon - lon) / 360)
+
+
+def points_frame(
+    points: Sequence[tuple[float, float, float]], fit_share: float = 0.9
+) -> dict:
+    """The degrees box around the core of many (lat, lon, weight) points, for
+    a map that fits it itself. west and east are unwrapped around center_lon,
+    so a box over the antimeridian has east past 180 (or west below -180)."""
+    core = _core_points(points, fit_share)
+    center_lon = points_center_lon([lon for _, lon, _ in core])
+    lons = [unwrap_lon(lon, center_lon) for _, lon, _ in core]
+    lats = [lat for lat, _, _ in core]
+    return {
+        "center_lon": round(center_lon, 4),
+        "south": round(min(lats), 4),
+        "west": round(min(lons), 4),
+        "north": round(max(lats), 4),
+        "east": round(max(lons), 4),
+    }
+
+
 def build_points_canvas(
     points: Sequence[tuple[float, float, float]],
     width: int,
@@ -275,18 +319,7 @@ def build_points_canvas(
     and are left to the caller to clip. max_zoom keeps a single point from
     zooming past a city-sized frame. Callers pass at least one point.
     """
-    if not points:
-        raise ValueError("no points to frame")
-    ranked = sorted(range(len(points)), key=lambda i: -points[i][2])
-    total = sum(p[2] for p in points)
-    core: list[tuple[float, float, float]] = []
-    held = 0.0
-    for i in ranked:
-        core.append(points[i])
-        held += points[i][2]
-        if held >= fit_share * total:
-            break
-
+    core = _core_points(points, fit_share)
     center_lon = points_center_lon([lon for _, lon, _ in core])
 
     zoom = MIN_ZOOM
