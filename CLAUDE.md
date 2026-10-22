@@ -1110,10 +1110,15 @@ never rounds a share. The widest zoom is `log2(width / 256)` for the box's
 width, fractional, so no width shows the world twice. The wheel zooms only after a
 press in the map and stops when the pointer or the focus leaves it, so
 scrolling past the map never zooms it; on a touch screen one finger scrolls
-the page and two move the map. Dot icons take no pointer events: a click
-picks the nearest dot within its hit radius (at least 12px, a 24px target),
-so overlapping dots each stay reachable once zoomed apart, and each dot is a
-focusable button that Enter or Space opens. A bubble is built from DOM nodes
+the page and two move the map. Dot icons take no pointer events, and a
+smaller dot is drawn above a bigger one (`stackOffset`, a `zIndexOffset` that
+outweighs Leaflet's stacking by latitude). A click opens what the eye sees on
+top (`pickDot`): of the drawn disks under the pointer, the smallest, then the
+nearest centre; outside every disk, the nearest dot within its hit radius (at
+least 12px, a 24px target). The biggest dot does not win outright: a small dot
+drawn on it would be visible but could not be clicked. Overlapping dots each
+stay reachable once zoomed apart, and each dot is a focusable button that
+Enter or Space opens. A bubble is built from DOM nodes
 and `textContent` (a city name is third-party text), never Leaflet's
 HTML-string popup content. Above 900px the AS node label sits on the map and
 steps aside while a bubble is open; under 520px a page that runs scripts
@@ -1563,7 +1568,8 @@ Test files:
   `test_as_page_js.py` (`static/js/as.js`'s filter, chips, show-all and the
   city filter, run in node against a fake document; skips without node),
   `test_as_map_js.py` (`static/js/as-map.js`'s pure parts: the widest zoom,
-  the nearest dot, the world copy, keys and the bubble, run in node; the
+  the dot a click opens and the stacking, the world copy, keys and the
+  bubble, run in node; the
   Leaflet wiring rules pinned by text; skips without node),
   `asinfo_fixtures.py` (not a test module: the synthetic files and
   `build_manager()`, with conftest's `asinfo_enabled` fixture on top)

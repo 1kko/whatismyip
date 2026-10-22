@@ -1280,10 +1280,11 @@ table.records--dns td:nth-child(4) {
    same --bg: one colour, and the dots and the bubble above stay unscrimmed. */
 .as-map__live .leaflet-tile-pane { opacity: 0.65; }
 /* A city dot, drawn like the static map's circles and the same size at every
-   zoom. Pointer events fall through to the map, which picks the nearest dot
-   within at least 12px (as-map.js nearestDot), so overlapping dots each stay
-   reachable. The selector outranks Leaflet's .leaflet-marker-icon.leaflet-
-   interactive, which would take them back. */
+   zoom. Pointer events fall through to the map, which opens the dot drawn on
+   top under the pointer, else the nearest within at least 12px (as-map.js
+   pickDot), so overlapping dots each stay reachable. The selector outranks
+   Leaflet's .leaflet-marker-icon.leaflet-interactive, which would take them
+   back. */
 .as-map__live .as-dot {
   border: 1px solid #34D399D9;
   border-radius: 50%;

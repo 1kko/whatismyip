@@ -73,15 +73,51 @@ def test_min_zoom_fills_the_width_once():
 
 
 @needs_node
-def test_nearest_dot_wins_and_misses_far_clicks():
+def test_outside_every_disk_the_nearest_dot_wins_and_far_clicks_miss():
     pts = "[{x:0,y:0,r:3},{x:10,y:0,r:3},{x:100,y:0,r:30}]"
-    assert run_js(f"m.nearestDot({pts}, 4, 0)") == 0
-    assert run_js(f"m.nearestDot({pts}, 7, 0)") == 1
+    assert run_js(f"m.pickDot({pts}, 4, 0)") == 0
+    assert run_js(f"m.pickDot({pts}, 7, 0)") == 1
     # 30 from #1 (hit 12), 60 from #2 (hit 30)
-    assert run_js(f"m.nearestDot({pts}, 40, 0)") == -1
-    assert run_js(f"m.nearestDot({pts}, 75, 0)") == 2
-    assert run_js(f"m.nearestDot({pts}, 5, 0)") == 0  # a tie: the lower index
-    assert run_js("m.nearestDot([], 5, 0)") == -1
+    assert run_js(f"m.pickDot({pts}, 40, 0)") == -1
+    assert run_js(f"m.pickDot({pts}, 75, 0)") == 2
+    assert run_js(f"m.pickDot({pts}, 5, 0)") == 0  # a tie: the lower index
+    assert run_js("m.pickDot([], 5, 0)") == -1
+
+
+@needs_node
+def test_a_click_opens_the_disk_drawn_on_top():
+    """A smaller dot is drawn above a bigger one (stackOffset), so a point in
+    both disks opens the smaller; the bigger one's uncovered ring opens the
+    bigger, even within the smaller one's 12px hit radius."""
+    pts = "[{x:0,y:0,r:20},{x:3,y:0,r:4}]"
+    assert run_js(f"m.pickDot({pts}, 3, 0)") == 1
+    assert run_js(f"m.pickDot({pts}, 0, 0)") == 1  # 3px from #1's centre
+    assert run_js(f"m.pickDot({pts}, 10, 0)") == 0  # 7px from #1, in its hit area
+    assert run_js(f"m.pickDot({pts}, -15, 0)") == 0
+    assert run_js(f"m.pickDot({pts}, 0, 19)") == 0
+    # Just outside the big disk nothing is in reach: its hit radius is its own.
+    assert run_js(f"m.pickDot({pts}, 0, 21)") == -1
+
+
+@needs_node
+def test_overlapping_disks_of_one_size_go_to_the_nearest_centre():
+    pts = "[{x:0,y:0,r:6},{x:4,y:0,r:6},{x:4,y:0,r:6}]"
+    assert run_js(f"m.pickDot({pts}, 1, 0)") == 0
+    assert run_js(f"m.pickDot({pts}, 3, 0)") == 1  # #1 and #2 coincide: the lower
+    # A smaller dot later in the list still wins inside its disk.
+    assert run_js("m.pickDot([{x:0,y:0,r:6},{x:0,y:0,r:5.9}], 0, 0)") == 1
+
+
+@needs_node
+def test_a_smaller_dot_is_stacked_above_any_bigger_one():
+    """Leaflet stacks a marker by its y on the map plus zIndexOffset; the y
+    spans at most a world's height at zoom 10 (256 * 2**10 px), so one tenth
+    of a pixel of radius, the payload's precision, must be worth more."""
+    radii = [round(2.5 + i / 10, 1) for i in range(161)]  # 2.5 to 18.5
+    offsets = run_js(f"{json.dumps(radii)}.map(m.stackOffset)")
+    world = 256 * 2**10
+    assert all(a - b > world for a, b in zip(offsets, offsets[1:]))
+    assert all(abs(offset) + world < 2**31 for offset in offsets)
 
 
 @needs_node

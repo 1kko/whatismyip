@@ -7,10 +7,11 @@
  * #as-map-live, hidden, and swaps it in once its first tiles have drawn (the
  * `as-map--live` class). A failure anywhere before that leaves the picture.
  *
- * The dots' icons take no pointer events: a click on the map picks the
- * nearest dot within its hit area (nearestDot), so dots that overlap each
- * stay reachable. "Show these in Prefixes" hands the city to as.js as an
- * `as:city` event on the document.
+ * The dots' icons take no pointer events: a click on the map opens the dot
+ * drawn on top under the pointer, smaller dots being drawn above bigger ones
+ * (stackOffset), else the nearest within its hit area (pickDot), so dots that
+ * overlap each stay reachable. "Show these in Prefixes" hands the city to
+ * as.js as an `as:city` event on the document.
  *
  * Text goes in with textContent and nodes with createElement only: a city
  * name is third-party text, and a bubble is an element, never a string.
@@ -19,6 +20,10 @@
 
 /* A dot's hit radius is at least this: a 24px target (WCAG 2.2, 2.5.8). */
 var MIN_HIT_RADIUS = 12;
+/* Leaflet stacks a marker by its y on the map, within a world's height
+ * (262,144px at zoom 10), plus its zIndexOffset: a step per tenth of a pixel
+ * of radius, the payload's precision, outweighs any latitude. */
+var STACK_STEP = 1 << 20;
 /* The initial view leaves this share of the box free on each side, so the
  * frame takes mapgeom.FIT_MARGIN's 0.8 of it, as on the static map. */
 var FIT_PADDING = 0.1;
@@ -31,19 +36,39 @@ function minZoomFor(width) {
   return Math.max(0, Math.log2(width / 256));
 }
 
-/* The index of the point nearest (x, y) within its hit radius, else -1; on a
- * tie the lower index wins. Points are container pixels with a radius `r`. */
-function nearestDot(points, x, y) {
-  var best = -1;
-  var bestDistance = Infinity;
+/* A dot's zIndexOffset: the smaller the dot, the higher it is drawn, so a
+ * small dot on a big one stays visible. */
+function stackOffset(r) {
+  return -Math.round(r * 10) * STACK_STEP;
+}
+
+/* The index of the dot a click at (x, y) opens, else -1. What the eye sees
+ * wins: of the drawn disks that hold the point, the one on top (the smallest,
+ * as stackOffset draws them; then the nearest centre; then the lower index).
+ * Outside every disk, the nearest centre within its hit radius, on a tie the
+ * lower index. Points are container pixels with a radius `r`. */
+function pickDot(points, x, y) {
+  var drawn = -1;
+  var drawnR = Infinity;
+  var drawnDistance = Infinity;
+  var near = -1;
+  var nearDistance = Infinity;
   points.forEach(function (point, index) {
     var distance = Math.hypot(point.x - x, point.y - y);
-    if (distance <= Math.max(point.r, MIN_HIT_RADIUS) && distance < bestDistance) {
-      best = index;
-      bestDistance = distance;
+    if (
+      distance <= point.r &&
+      (point.r < drawnR || (point.r === drawnR && distance < drawnDistance))
+    ) {
+      drawn = index;
+      drawnR = point.r;
+      drawnDistance = distance;
+    }
+    if (distance <= Math.max(point.r, MIN_HIT_RADIUS) && distance < nearDistance) {
+      near = index;
+      nearDistance = distance;
     }
   });
-  return best;
+  return drawn !== -1 ? drawn : near;
 }
 
 /* lon moved by a multiple of 360 to lie within 180 of centerLon, as
@@ -179,6 +204,7 @@ function initMap() {
       }),
       keyboard: !data.approx,
       interactive: !data.approx,
+      zIndexOffset: stackOffset(dot.r),
     }).addTo(map);
     var element = marker.getElement();
     // The country pin is a picture, not a control: it has no bubble.
@@ -223,10 +249,13 @@ function initMap() {
 function wireBubbles(map, figure, live, data, markers) {
   function pick(point) {
     var points = markers.map(function (marker, index) {
-      var at = map.latLngToContainerPoint(marker.getLatLng());
+      // Where Leaflet draws the icon: its layer point rounded to a pixel.
+      var at = map.layerPointToContainerPoint(
+        map.latLngToLayerPoint(marker.getLatLng()).round()
+      );
       return { x: at.x, y: at.y, r: data.dots[index].r };
     });
-    return nearestDot(points, point.x, point.y);
+    return pickDot(points, point.x, point.y);
   }
 
   // One bubble at a time: Leaflet closes the open one when another opens.
@@ -311,7 +340,8 @@ function wireWheel(map, live) {
 if (typeof module === "object" && module.exports) {
   module.exports = {
     minZoomFor: minZoomFor,
-    nearestDot: nearestDot,
+    stackOffset: stackOffset,
+    pickDot: pickDot,
     nearestCopy: nearestCopy,
     keyAction: keyAction,
     bubble: bubble,
