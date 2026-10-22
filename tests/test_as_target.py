@@ -578,6 +578,24 @@ def test_no_country_and_no_placement_draws_no_map(monkeypatch, tmp_path):
     assert '<div class="as-graph__node' in _section(html, "as-graph")
 
 
+@pytest.mark.parametrize("dropped", ["ris_v4", "ris_v6"])
+def test_route_data_unavailable_makes_the_map_unknown(monkeypatch, tmp_path, dropped):
+    # Without RIS there are no prefixes to sample: the map pins the country,
+    # and its caption says why nothing is placed rather than that nothing is.
+    manager = build_manager(tmp_path, drop=(dropped,))
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    html = client.get("/AS4766", headers=BROWSER).text
+    (caption,) = re.findall(
+        r'<figcaption class="as-map__caption">(.*?)</figcaption>', html, re.S
+    )
+    assert caption.startswith("Unknown: ")
+    assert "No city-level placement" not in caption
+    assert "The pin marks South Korea, at country level." in caption
+    assert "© OpenStreetMap contributors · GeoLite2 by MaxMind" in caption
+    assert "No city-level placement" not in html
+
+
 def test_the_map_samples_only_the_ipv4_prefixes(asinfo_enabled, monkeypatch):
     asked = []
 

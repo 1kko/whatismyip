@@ -2724,11 +2724,21 @@ def as_map_view(as_info: dict, as_map: dict | None) -> dict | None:
     elif fallback == "country":
         place = country_name(as_info.get("country")) or "its registered country"
         dots = [{"x": p["x"], "y": p["y"], "r": 6.0} for p in inside]
-        caption = (
-            "No city-level placement for its IPv4 addresses; "
-            f"the pin marks {place}, at country level."
-        )
-        alt = f"No city-level placement for its IPv4 addresses; the pin marks {place}"
+        # Without the route data there were no prefixes to place: that is
+        # unknown, never "no city-level placement".
+        unread = {entry.get("dataset") for entry in as_info.get("unavailable") or []}
+        if unread & {"ris_v4", "ris_v6"}:
+            absent = _as_absent(as_info, ("ris_v4", "ris_v6"))
+            caption = f"{absent}. The pin marks {place}, at country level."
+            alt = f"{absent}. The pin marks {place}"
+        else:
+            caption = (
+                "No city-level placement for its IPv4 addresses; "
+                f"the pin marks {place}, at country level."
+            )
+            alt = (
+                f"No city-level placement for its IPv4 addresses; the pin marks {place}"
+            )
     else:
         return None
     return {

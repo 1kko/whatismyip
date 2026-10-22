@@ -301,6 +301,28 @@ def test_map_view_country_fallback_caption():
     assert viewmodel.as_map_view(BASE, None) is None
 
 
+def test_map_view_country_pin_with_route_data_unavailable_is_unknown():
+    # No RIS data: whether its addresses place at city level is unknown, not
+    # "no city-level placement". The pin stays, and so does the credit.
+    canvas = mapgeom.build_points_canvas([(36.5, 127.8, 1.0)], 560, 360, max_zoom=4)
+    card = {
+        **BASE,
+        "country": "KR",
+        "unavailable": [
+            {"dataset": "ris_v4", "label": "RIPE RIS routes (IPv4)", "reason": "old"}
+        ],
+    }
+    view = viewmodel.as_map_view(
+        card, {"footprint": None, "canvas": canvas, "fallback": "country"}
+    )
+    assert view["caption"] == (
+        "Unknown: old. The pin marks South Korea, at country level."
+    )
+    assert "No city-level placement" not in view["alt"]
+    assert view["approx"] is True and len(view["dots"]) == 1
+    assert view["credit"] == "© OpenStreetMap contributors · GeoLite2 by MaxMind"
+
+
 def test_map_view_names_an_unnamed_city_and_clips_dots():
     fp = {
         "cities": [{"name": None, "country": "KR", "lat": 0, "lon": 0, "share": 0.5}],
