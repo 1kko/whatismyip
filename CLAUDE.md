@@ -433,7 +433,8 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    `is_valid_domain` says yes) is `invalid` too, and `gather()` raises
    `InvalidTargetError(code="special_use_name")` with the reason from
    `config.SPECIAL_USE_NAMES` (`lookup.special_use_suffix`, matched on the
-   IDNA 2003 name dnspython queries, not only the raw text); never the rest
+   IDNA 2003 name, not only the raw text: nameprep deletes U+200C, U+200D and
+   U+1806, which dnspython did before 2.9 and refuses since); never the rest
    of `.arpa`, which PTR names live in. The check is not in
    `is_valid_domain`, which `main._suspicious_path_is_ordinary` reads: the
    probe verdict for these paths must not change.

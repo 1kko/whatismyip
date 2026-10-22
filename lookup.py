@@ -498,14 +498,17 @@ _HOST_LABEL = re.compile(r"[a-z0-9_-]{1,63}", re.IGNORECASE)
 
 
 def _idna2003_hostname(target: str) -> str | None:
-    """The ASCII name dnspython will query, or None when `target` is not one.
+    """The ASCII name an IDNA 2003 encoder would query, or None when `target`
+    is not one.
 
-    `Resolver.resolve` encodes a non-ASCII qname with the stdlib IDNA 2003
-    codec (nameprep). That codec deletes characters UTS 46 leaves in the
-    label — U+200C, U+200D, U+1806 — so the wire name and the raw text are
-    not the same string. Callers that decide whether a name may be queried
-    have to see the wire name; `_is_hostname` used to compute it and discard
-    it.
+    The stdlib IDNA 2003 codec (nameprep), which dnspython's `Resolver.resolve`
+    used for a non-ASCII qname before 2.9, deletes characters UTS 46 leaves in
+    the label — U+200C, U+200D, U+1806 — so the wire name and the raw text are
+    not the same string. dnspython 2.9 encodes with UTS 46 and refuses such a
+    label instead. Callers that decide whether a name may be queried still
+    judge the IDNA 2003 name, so no encoder that deletes those characters can
+    turn a hidden special-use name into a query; `_is_hostname` used to
+    compute it and discard it.
     """
     name = target[:-1] if target.endswith(".") else target
     try:

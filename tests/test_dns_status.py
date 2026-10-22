@@ -153,6 +153,9 @@ OUTCOMES = ["timeout", "servfail", "nxdomain", "noanswer"]
         # Raised outside dnspython's resolver loop (which folds a server's
         # socket error into NoNameservers): no DNS outcome to name.
         (dns.name.LabelTooLong(), "error"),
+        # A label dnspython's IDNA 2008 codec will not encode, such as one
+        # holding U+200D (dnspython 2.9 refuses what nameprep used to delete).
+        (dns.name.IDNAException(), "error"),
         (OSError("network is unreachable"), "error"),
     ],
 )

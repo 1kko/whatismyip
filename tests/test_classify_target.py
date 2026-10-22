@@ -623,9 +623,11 @@ def test_special_use_suffix_is_none_for_everything_else(target):
     assert lookup.special_use_suffix(target) is None
 
 
-# Nameprep (IDNA 2003, what dnspython queries with) deletes these. UTS 46,
-# which normalize_lookup_target applies, does not, so the raw text still
-# contains them and a suffix check of that text misses home.arpa.
+# Nameprep (IDNA 2003: the stdlib codec, and dnspython's before 2.9) deletes
+# these. UTS 46, which normalize_lookup_target applies, does not, so the raw
+# text still contains them and a suffix check of that text misses home.arpa.
+# dnspython 2.9 encodes with UTS 46 and refuses them; the guard still judges
+# the IDNA 2003 name, the one an encoder that deletes them would query.
 _IDNA2003_DROPPED = ("\u200c", "\u200d", "\u1806")
 
 
@@ -646,7 +648,9 @@ def test_special_use_suffix_matches_the_name_idna2003_queries(
     mark, shape, suffix, wire
 ):
     target = shape.format(mark)
-    assert dns.name.from_text(target).to_text(omit_final_dot=True) == wire
+    assert target.encode("idna").decode("ascii") == wire
+    with pytest.raises(dns.name.IDNAException):
+        dns.name.from_text(target)
     assert lookup.normalize_lookup_target(target) == target
     assert lookup.special_use_suffix(target) == suffix
     assert lookup.classify_target(target) == "invalid"
@@ -654,9 +658,12 @@ def test_special_use_suffix_matches_the_name_idna2003_queries(
 
 @pytest.mark.parametrize("mark", _IDNA2003_DROPPED)
 def test_a_dropped_mark_between_not_and_home_is_not_home_arpa(mark):
-    """Deleting the mark joins the labels into nothome.arpa, a different name."""
+    """Deleting the mark joins the labels into nothome.arpa, a different name.
+    dnspython refuses to encode it, so its DNS reads "error" (dns_status)."""
     target = f"not{mark}home.arpa"
-    assert dns.name.from_text(target).to_text(omit_final_dot=True) == "nothome.arpa"
+    assert target.encode("idna").decode("ascii") == "nothome.arpa"
+    with pytest.raises(dns.name.IDNAException):
+        dns.name.from_text(target)
     assert lookup.special_use_suffix(target) is None
     assert lookup.classify_target(target) == "domain"
 
