@@ -80,6 +80,24 @@ def _blocklist(tmp_path, *countries):
     return str(rules)
 
 
+class TestPlace:
+    def test_place_reads_the_city_database_only(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch, CITY_TEST_DB)
+        assert manager.place("81.2.69.142") == {
+            "lat": 51.5142,
+            "lon": -0.0931,
+            "accuracy_km": 10,
+            "city": "London",
+            "country": "GB",
+        }
+        assert manager.place("67.43.156.1")["city"] is None  # radius 534
+        assert manager.place("10.0.0.1") is None
+
+    def test_no_city_database_places_nothing(self, tmp_path, monkeypatch):
+        manager = _manager(tmp_path, monkeypatch)
+        assert manager.place("81.2.69.142") is None
+
+
 class TestGeoLite2Lookup:
     """GeoLite2-City is the primary source: country, city, coordinates and the
     matched block, with the carrier from GeoLite2-ASN."""

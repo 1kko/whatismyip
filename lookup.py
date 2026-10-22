@@ -13,13 +13,14 @@ import logging
 import re
 import time
 import unicodedata
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any, NamedTuple
 
 import idna
 import whois
 
 import abuseipdb
+import asmap
 import dnssecurity
 from abuseipdb import AbuseIPDBClient
 from asinfo import ANSWER_KEYS, AsInfoManager
@@ -32,6 +33,7 @@ from concurrency import (
 )
 from config import (
     ABUSEIPDB_TIMEOUT_SECONDS,
+    AS_MAP_SAMPLE_BUDGET,
     RDAP_TIMEOUT_SECONDS,
     SPECIAL_USE_NAMES,
     SPECIAL_USE_SUFFIXES,
@@ -816,6 +818,12 @@ def as_info_for_asn(asn: int, full: bool = False, detail: bool = False) -> dict 
     answer["asn_drop"] = reputation_manager.asn_listed(asn)
     answer["special"] = None
     return answer
+
+
+def as_footprint(prefixes: Sequence[str]) -> dict:
+    """Where an AS's IPv4 space geolocates (asmap.footprint), read from
+    GeoLite2-City alone: no request, a bounded number of local reads."""
+    return asmap.footprint(prefixes, geo_ip_manager.place, AS_MAP_SAMPLE_BUDGET)
 
 
 # urllib's timeout bounds each socket operation, not the whole request; this

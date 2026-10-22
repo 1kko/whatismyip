@@ -446,6 +446,39 @@ class GeoIpManager:
         self._apply_asn(ip, location)
         return location
 
+    def place(self, ip: str) -> Dict[str, Any] | None:
+        """Where GeoLite2-City puts `ip`: coordinates, accuracy radius, English
+        city name and country code, from the City record alone. The /AS<n>
+        map reads up to a couple of thousand addresses per page, so this skips
+        the ASN read, the geoip2fast fallback and the block arithmetic that
+        fetch_location does. None with no City database, no record or no
+        coordinates; the country is the located one, else the registered one."""
+        # Read once: a refresh may swap the attribute mid-lookup.
+        reader = self.city_reader
+        if reader is None:
+            return None
+        try:
+            record = reader.get(ip)
+        except Exception:
+            return None
+        if not record:
+            return None
+        loc = record.get("location") or {}
+        if loc.get("latitude") is None or loc.get("longitude") is None:
+            return None
+        country = None
+        for key in ("country", "registered_country"):
+            country = (record.get(key) or {}).get("iso_code")
+            if country:
+                break
+        return {
+            "lat": loc["latitude"],
+            "lon": loc["longitude"],
+            "accuracy_km": loc.get("accuracy_radius"),
+            "city": _english_name(record.get("city")),
+            "country": country,
+        }
+
     @staticmethod
     def _apply_city(reader, ip: str, location: Dict[str, Any]) -> None:
         """Country, city, coordinates, time zone and block from GeoLite2-City.
