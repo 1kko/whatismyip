@@ -1118,34 +1118,41 @@ never rounds a share. The widest zoom is `log2(width / 256)` for the box's
 width, fractional, so no width shows the world twice. The wheel zooms only after a
 press in the map and stops when the pointer or the focus leaves it, so
 scrolling past the map never zooms it; on a touch screen one finger scrolls
-the page and two move the map. Dot icons take no pointer events, and a
-smaller dot is drawn above a bigger one (`stackOffset`, a `zIndexOffset` that
-outweighs Leaflet's stacking by latitude). A click opens what the eye sees on
-top (`pickDot`): of the drawn disks under the pointer, the smallest, then the
-nearest centre; outside every disk, the nearest dot within its hit radius (at
-least 12px, a 24px target). The biggest dot does not win outright: a small dot
-drawn on it would be visible but could not be clicked. Overlapping dots each
-stay reachable once zoomed apart, and each dot is a focusable button that
-Enter or Space opens. Only one dot is a Tab stop (a roving tabindex,
-`wireRoving`): Leaflet makes every keyboard marker one, and a map of a hundred
-dots took a hundred presses to get past. The arrow keys move the focus along the
-payload's order (largest first) and Home and End to its ends, without
-wrapping (`stepDot`), and the Tab stop goes with the focus. A dot off the view
-is panned in before it takes focus with `preventScroll`: focusing it there
-would scroll Leaflet's overflow-hidden box. A dot that takes focus any other
-way (a Tab into the map) is panned in whole by its own focus listener; the
-markers' `autoPanOnFocus` is off, because Leaflet's stops with the dot's
-centre on the edge of the view, half of it and its focus ring cut off. A
-bubble is built from DOM nodes and `textContent` (a city name is third-party
-text), never Leaflet's HTML-string popup content. Above 900px the AS node
-label sits on the map and steps aside while a bubble is open; under 520px a
-page that runs scripts gets a square box, so a bubble fits above its dot. Its
-tiles come through Leaflet with `referrerPolicy: "strict-origin"` and the same
-inverting filter, and Leaflet's attribution control is off because the
-figcaption carries `MAP_CREDIT`. Zooming or moving it fetches more tiles, which
-`/privacy` says while AS information is on (`asinfo_hosts`), as there is no
-AS page otherwise. `tests/test_as_map_js.py` runs the pure parts in node;
-Leaflet does not run there, so the wiring is checked in a browser.
+the page and two move the map. Dot icons take no pointer events. The drawing
+order is one rule, `drawnAbove`: a smaller dot above a bigger one, so a small
+dot on a big one stays visible, and of one size the later in the payload.
+`stackOffsets` turns it into each marker's `zIndexOffset`, a step that
+outweighs Leaflet's own stacking by latitude, and `pickDot` reads the same
+rule: a click opens the drawn disk on top under the pointer, so the z-index
+and the click cannot disagree, even between two dots of one size. Outside
+every disk it opens the nearest dot within its hit radius (at least 12px, a
+24px target). The biggest dot does not win outright: a small dot drawn on it
+would be visible but could not be clicked. Overlapping dots each stay
+reachable once zoomed apart, and each dot is a focusable button that Enter or
+Space opens. Only one dot is a Tab stop (a roving tabindex, `wireRoving`):
+Leaflet makes every keyboard marker one, and a map of a hundred dots took a
+hundred presses to get past. The arrow keys move the focus along the payload's
+order (largest first) and Home and End to its ends, without wrapping
+(`stepDot`), and the Tab stop goes with the focus; the region's label says so
+(`regionLabel`). A move of the map that takes the Tab stop off the view hands
+it to the first dot in view (`stopAfterMove`): a Tab into the map would
+otherwise land on a dot off the view, and Chrome scrolls the page to it before
+any script can pan it in. A dot off the view is panned in before it takes
+focus with `preventScroll`: focusing it there would scroll Leaflet's
+overflow-hidden box. A dot that takes focus any other way is panned in whole
+by its own focus listener; the markers' `autoPanOnFocus` is off, because
+Leaflet's stops with the dot's centre on the edge of the view, half of it and
+its focus ring cut off. A bubble is built from DOM nodes and `textContent` (a
+city name is third-party text), never Leaflet's HTML-string popup content.
+Above 900px the AS node label sits on the map and steps aside while a bubble
+is open; under 520px a page that runs scripts gets a square box, so a bubble
+fits above its dot. Its tiles come through Leaflet with
+`referrerPolicy: "strict-origin"` and the same inverting filter, and Leaflet's
+attribution control is off because the figcaption carries `MAP_CREDIT`.
+Zooming or moving it fetches more tiles, which `/privacy` says while AS
+information is on (`asinfo_hosts`), as there is no AS page otherwise.
+`tests/test_as_map_js.py` runs the pure parts in node; Leaflet does not run
+there, so the wiring is checked in a browser.
 
 ### Subdomain lookup
 
@@ -1588,8 +1595,9 @@ Test files:
   `test_as_page_js.py` (`static/js/as.js`'s filter, chips, show-all and the
   city filter, run in node against a fake document; skips without node),
   `test_as_map_js.py` (`static/js/as-map.js`'s pure parts: the widest zoom,
-  the dot a click opens and the stacking, the world copy, keys and the
-  arrow-key steps, and the bubble, run in node; the
+  the drawing order the stack and the click share, the world copy, keys,
+  the arrow-key steps, the Tab stop after a move, the region label and the
+  bubble, run in node; the
   Leaflet wiring rules pinned by text; skips without node),
   `asinfo_fixtures.py` (not a test module: the synthetic files and
   `build_manager()`, with conftest's `asinfo_enabled` fixture on top)

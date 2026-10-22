@@ -9,7 +9,7 @@
  *
  * The dots' icons take no pointer events: a click on the map opens the dot
  * drawn on top under the pointer, smaller dots being drawn above bigger ones
- * (stackOffset), else the nearest within its hit area (pickDot), so dots that
+ * (drawnAbove), else the nearest within its hit area (pickDot), so dots that
  * overlap each stay reachable. "Show these in Prefixes" hands the city to
  * as.js as an `as:city` event on the document.
  *
@@ -21,9 +21,9 @@
 /* A dot's hit radius is at least this: a 24px target (WCAG 2.2, 2.5.8). */
 var MIN_HIT_RADIUS = 12;
 /* Leaflet stacks a marker by its y on the map, within a world's height
- * (262,144px at zoom 10), plus its zIndexOffset: a step per tenth of a pixel
- * of radius, the payload's precision, outweighs any latitude. */
-var STACK_STEP = 1 << 20;
+ * (262,144px at zoom 10), plus its zIndexOffset: a step of the drawing order
+ * outweighs any latitude, and 4,000 steps stay inside a z-index. */
+var STACK_STEP = 1 << 19;
 /* The initial view leaves this share of the box free on each side, so the
  * frame takes mapgeom.FIT_MARGIN's 0.8 of it, as on the static map. */
 var FIT_PADDING = 0.1;
@@ -36,32 +36,46 @@ function minZoomFor(width) {
   return Math.max(0, Math.log2(width / 256));
 }
 
-/* A dot's zIndexOffset: the smaller the dot, the higher it is drawn, so a
- * small dot on a big one stays visible. */
-function stackOffset(r) {
-  return -Math.round(r * 10) * STACK_STEP;
+/* The drawing order, the one rule the z-index (stackOffsets) and the click
+ * (pickDot) both read: dot a (radius ra, payload index ia) is drawn above dot
+ * b when it is smaller, so a small dot on a big one stays visible, or the
+ * same size and later in the payload. */
+function drawnAbove(ra, ia, rb, ib) {
+  return ra < rb || (ra === rb && ia > ib);
+}
+
+/* Each dot's zIndexOffset: its place in drawnAbove's order, bottom first,
+ * a STACK_STEP apart. */
+function stackOffsets(radii) {
+  var order = radii.map(function (r, index) {
+    return index;
+  });
+  order.sort(function (a, b) {
+    return drawnAbove(radii[a], a, radii[b], b) ? 1 : -1;
+  });
+  var offsets = [];
+  order.forEach(function (index, place) {
+    offsets[index] = place * STACK_STEP;
+  });
+  return offsets;
 }
 
 /* The index of the dot a click at (x, y) opens, else -1. What the eye sees
- * wins: of the drawn disks that hold the point, the one on top (the smallest,
- * as stackOffset draws them; then the nearest centre; then the lower index).
+ * wins: of the drawn disks that hold the point, the one on top (drawnAbove).
  * Outside every disk, the nearest centre within its hit radius, on a tie the
- * lower index. Points are container pixels with a radius `r`. */
+ * lower index. Points are container pixels with a radius `r`, in the
+ * payload's order. */
 function pickDot(points, x, y) {
   var drawn = -1;
-  var drawnR = Infinity;
-  var drawnDistance = Infinity;
   var near = -1;
   var nearDistance = Infinity;
   points.forEach(function (point, index) {
     var distance = Math.hypot(point.x - x, point.y - y);
     if (
       distance <= point.r &&
-      (point.r < drawnR || (point.r === drawnR && distance < drawnDistance))
+      (drawn === -1 || drawnAbove(point.r, index, points[drawn].r, drawn))
     ) {
       drawn = index;
-      drawnR = point.r;
-      drawnDistance = distance;
     }
     if (distance <= Math.max(point.r, MIN_HIT_RADIUS) && distance < nearDistance) {
       near = index;
@@ -88,6 +102,24 @@ function stepDot(count, index, key) {
   var step = STEPS[key];
   if (typeof step !== "number") return index;
   return Math.max(0, Math.min(count - 1, index + step));
+}
+
+/* The dot that carries the Tab stop once the map has moved: `current` while
+ * it is in view, else the first dot in view in the payload's order, else
+ * `current`. A Tab into the map then never lands on a dot off the view, which
+ * Chrome would scroll the page to before the dot could be panned in. */
+function stopAfterMove(current, inView) {
+  if (inView[current]) return current;
+  var first = inView.indexOf(true);
+  return first === -1 ? current : first;
+}
+
+/* The live map's label: the static picture's and, for city dots, how to move
+ * between them, since they are one Tab stop (wireRoving). */
+function regionLabel(label, approx) {
+  if (approx) return label;
+  var sentence = /[.!?]$/.test(label) ? label : label + ".";
+  return sentence + " Use the arrow keys to move between places.";
 }
 
 /* lon moved by a multiple of 360 to lie within 180 of centerLon, as
@@ -214,7 +246,12 @@ function initMap() {
   };
   reset.addTo(map);
 
-  var markers = data.dots.map(function (dot) {
+  var offsets = stackOffsets(
+    data.dots.map(function (dot) {
+      return dot.r;
+    })
+  );
+  var markers = data.dots.map(function (dot, index) {
     var size = 2 * dot.r;
     var marker = L.marker([dot.lat, dot.lon], {
       icon: L.divIcon({
@@ -223,7 +260,7 @@ function initMap() {
       }),
       keyboard: !data.approx,
       interactive: !data.approx,
-      zIndexOffset: stackOffset(dot.r),
+      zIndexOffset: offsets[index],
       // wireRoving pans a focused dot in itself.
       autoPanOnFocus: false,
     }).addTo(map);
@@ -256,7 +293,10 @@ function initMap() {
   var picture = figure.querySelector(".as-map__dots");
   if (picture && picture.getAttribute("aria-label")) {
     live.setAttribute("role", "region");
-    live.setAttribute("aria-label", picture.getAttribute("aria-label"));
+    live.setAttribute(
+      "aria-label",
+      regionLabel(picture.getAttribute("aria-label"), data.approx)
+    );
   }
 
   // Last, so a failure above leaves the static map in place.
@@ -344,7 +384,9 @@ function wireBubbles(map, figure, live, data, markers) {
 /* One dot is a Tab stop, the first (the largest) until the focus moves:
  * Leaflet makes every keyboard marker one, and getting past a map of a
  * hundred dots would take a hundred presses. The arrow keys, Home and End
- * move the focus between the dots (stepDot), and the Tab stop goes with it. */
+ * move the focus between the dots (stepDot), and the Tab stop goes with it;
+ * a move of the map that takes it off the view hands it to a dot in view
+ * (stopAfterMove). */
 function wireRoving(map, data, markers) {
   var current = 0;
   function rove(index) {
@@ -359,7 +401,21 @@ function wireRoving(map, data, markers) {
     var pad = data.dots[index].r + 4;
     map.panInside(markers[index].getLatLng(), { padding: [pad, pad], animate: false });
   }
+  // Whole in the view with its focus ring, the margin reveal pans to.
+  function inView(index) {
+    var at = map.latLngToContainerPoint(markers[index].getLatLng());
+    var size = map.getSize();
+    var pad = data.dots[index].r + 4;
+    return at.x >= pad && at.y >= pad && at.x <= size.x - pad && at.y <= size.y - pad;
+  }
   rove(0);
+  map.on("moveend", function () {
+    var visible = markers.map(function (marker, index) {
+      return inView(index);
+    });
+    var next = stopAfterMove(current, visible);
+    if (next !== current) rove(next);
+  });
   markers.forEach(function (marker, index) {
     var element = marker.getElement();
     element.addEventListener("focus", function () {
@@ -404,11 +460,14 @@ function wireWheel(map, live) {
 if (typeof module === "object" && module.exports) {
   module.exports = {
     minZoomFor: minZoomFor,
-    stackOffset: stackOffset,
+    drawnAbove: drawnAbove,
+    stackOffsets: stackOffsets,
     pickDot: pickDot,
     nearestCopy: nearestCopy,
     keyAction: keyAction,
     stepDot: stepDot,
+    stopAfterMove: stopAfterMove,
+    regionLabel: regionLabel,
     bubble: bubble,
   };
 }

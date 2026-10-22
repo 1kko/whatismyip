@@ -101,24 +101,54 @@ def test_a_click_opens_the_disk_drawn_on_top():
 
 
 @needs_node
-def test_overlapping_disks_of_one_size_go_to_the_nearest_centre():
-    pts = "[{x:0,y:0,r:6},{x:4,y:0,r:6},{x:4,y:0,r:6}]"
-    assert run_js(f"m.pickDot({pts}, 1, 0)") == 0
-    assert run_js(f"m.pickDot({pts}, 3, 0)") == 1  # #1 and #2 coincide: the lower
-    # A smaller dot later in the list still wins inside its disk.
-    assert run_js("m.pickDot([{x:0,y:0,r:6},{x:0,y:0,r:5.9}], 0, 0)") == 1
+def test_overlapping_disks_of_one_size_go_to_the_one_drawn_on_top():
+    """Of two dots the same size the later in the payload is drawn on top
+    (drawnAbove), so a point in both opens it, even nearer the other's
+    centre; size still comes first."""
+    pts = "[{x:0,y:0,r:6},{x:4,y:0,r:6}]"
+    assert run_js(f"m.pickDot({pts}, 1, 0)") == 1  # 1 from #0, 3 from #1
+    assert run_js(f"m.pickDot({pts}, -3, 0)") == 0  # in #0's disk only
+    assert run_js("m.pickDot([{x:0,y:0,r:6},{x:0,y:0,r:6},{x:0,y:0,r:6}], 0, 0)") == 2
+    assert run_js("m.pickDot([{x:0,y:0,r:5.9},{x:0,y:0,r:6}], 0, 0)") == 0
 
 
 @needs_node
-def test_a_smaller_dot_is_stacked_above_any_bigger_one():
+def test_the_drawing_order_is_one_rule_for_the_stack_and_the_click():
+    """stackOffsets draws the dots in drawnAbove's order and pickDot opens the
+    one drawnAbove puts on top, so the z-index and the click cannot disagree:
+    bottom to top, the bigger first and, of one size, the earlier first."""
+    radii = [18.5, 7.1, 7.1, 4.4, 2.6, 4.4, 2.6, 2.6, 6.0, 3.0]
+    out = run_js(
+        f"""(() => {{
+  const radii = {json.dumps(radii)};
+  const offsets = m.stackOffsets(radii);
+  const pairs = [];
+  radii.forEach((ra, a) => radii.forEach((rb, b) => {{
+    if (a !== b) pairs.push([a, b, m.drawnAbove(ra, a, rb, b), offsets[a] > offsets[b]]);
+  }}));
+  return {{ offsets, pairs }};
+}})()"""
+    )
+    for a, b, above, higher in out["pairs"]:
+        assert above == higher, (a, b)
+    offsets = out["offsets"]
+    order = sorted(range(len(radii)), key=lambda i: offsets[i])
+    assert order == [0, 1, 2, 8, 3, 5, 9, 4, 6, 7]
+    # Every disk holds the point: the click opens the top of the stack.
+    pts = json.dumps([{"x": 0, "y": 0, "r": r} for r in radii])
+    assert run_js(f"m.pickDot({pts}, 0, 0)") == order[-1]
+
+
+@needs_node
+def test_a_step_of_the_stack_outweighs_any_latitude():
     """Leaflet stacks a marker by its y on the map plus zIndexOffset; the y
-    spans at most a world's height at zoom 10 (256 * 2**10 px), so one tenth
-    of a pixel of radius, the payload's precision, must be worth more."""
-    radii = [round(2.5 + i / 10, 1) for i in range(161)]  # 2.5 to 18.5
-    offsets = run_js(f"{json.dumps(radii)}.map(m.stackOffset)")
+    spans at most a world's height at zoom 10 (256 * 2**10 px), so one step of
+    the drawing order must be worth more, and 4,000 dots stay inside int32."""
+    radii = [round(2.5 + (i % 161) / 10, 1) for i in range(4000)]
+    offsets = sorted(run_js(f"m.stackOffsets({json.dumps(radii)})"))
     world = 256 * 2**10
-    assert all(a - b > world for a, b in zip(offsets, offsets[1:]))
-    assert all(abs(offset) + world < 2**31 for offset in offsets)
+    assert all(b - a > world for a, b in zip(offsets, offsets[1:]))
+    assert offsets[0] >= 0 and offsets[-1] + world < 2**31
 
 
 @needs_node
@@ -204,6 +234,42 @@ def test_one_dot_is_a_tab_stop_and_the_arrows_move_focus_without_scrolling():
         roving,
     )
     assert "stepDot(markers.length" in roving
+
+
+@needs_node
+def test_the_tab_stop_moves_to_the_first_dot_in_view():
+    """After the map moves, a Tab stop off the view goes to the first dot in
+    the payload's order that is in it, so a Tab back into the map never lands
+    off the view (Chrome would scroll the page to it); with none in view it
+    stays."""
+    cases = [
+        (0, [True, True, False], 0),  # in view: stays
+        (2, [False, True, True], 2),
+        (0, [False, False, True, True], 2),  # off: the first in view
+        (3, [False, True, False, False], 1),  # before it too
+        (1, [False, False, False], 1),  # none in view: stays
+        (0, [False], 0),
+    ]
+    for current, in_view, expected in cases:
+        assert (
+            run_js(f"m.stopAfterMove({current}, {json.dumps(in_view)})") == expected
+        ), (current, in_view)
+
+
+@needs_node
+def test_the_region_label_names_the_arrow_keys():
+    alt = "Where its IPv4 addresses geolocate: Seoul 8%, Busan 1%"
+    assert run_js(f"m.regionLabel({json.dumps(alt)}, false)") == (
+        alt + ". Use the arrow keys to move between places."
+    )
+    assert run_js("m.regionLabel('A map.', false)") == (
+        "A map. Use the arrow keys to move between places."
+    )
+    # The country pin is a picture with no dots to move between.
+    pin = "Where its IPv4 addresses geolocate: South Korea, country level"
+    assert run_js(f"m.regionLabel({json.dumps(pin)}, true)") == pin
+    source = AS_MAP_JS.read_text(encoding="utf-8")
+    assert re.search(r'setAttribute\(\s*"aria-label",\s*regionLabel\(', source)
 
 
 DOT = {
