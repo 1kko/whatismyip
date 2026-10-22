@@ -1380,10 +1380,12 @@ run: for AS3786, AS16509 and AS6939, `page_data` 2 to 15 ms; `_as_map` 35, 33
 and 20 ms against 23, 24 and 14 ms before (13 to 19 ms on an earlier quiet
 run), from 2,690, 2,050 and 1,862 `place` reads (690, 50 and 0 of them extra,
 for 855, 1,000 and 235 listed prefixes); the whole page 61 to 82 ms against
-44 to 67 ms before (31 to 40 ms quiet); HTML 256, 244 and 315 KB (44, 42 and
-80 KB gzipped) against 190, 219 and 264 KB, of which `#as-lists` is 85, 116
-and 164 KB and `#as-map-data` 65, 24 and 51 KB (576, 561 and 238 city-prefix
-pairs); 52 to 183 map dots on 6 to 8 static tiles.
+44 to 67 ms before (31 to 40 ms quiet). With dots keyed by `geoname_id`
+(sizes and counts re-measured; the reads are the same): HTML 240, 244 and
+310 KB (42, 42 and 79 KB gzipped) against 190, 219 and 264 KB, of which
+`#as-lists` is 85, 116 and 164 KB and `#as-map-data` 51, 24 and 46 KB (532,
+561 and 228 city-prefix pairs); 141, 52 and 140 map dots (183, 52 and 157
+keyed by name and a 0.1° grid) on 6 to 8 static tiles.
 
 **Credits and terms.** The card carries the credit lines above, CAIDA's two
 linked to their dataset pages on the panel and the `/AS<n>` page
