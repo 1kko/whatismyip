@@ -13,7 +13,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from config import ASINFO_MIN_RIS_PEERS, SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
-from countrynames import country_name
+from countrynames import country_name_in_text
 from eppstatus import explain_status
 from reputation import grade
 
@@ -2251,7 +2251,7 @@ def _rpki_share(rpki: dict | None) -> tuple[int, float] | None:
 
 def _share_text(share: float) -> str:
     """'under 1%' for a share that exists but would round to 0."""
-    return "under 1%" if 0 < share < 0.5 else f"{round(share)}%"
+    return "under 1%" if share and round(share) == 0 else f"{round(share)}%"
 
 
 def _is_complete(relation: dict | None) -> bool:
@@ -2282,7 +2282,7 @@ def _downstream_scope(as_info: dict, downstreams: dict) -> str:
     k = tally.get(own, 0)
     if not k or k < max(tally.values()):
         return ""
-    name = country_name(own)
+    name = country_name_in_text(own)
     if k == len(downstreams["list"]):
         return f" (all in {name})"
     return f" ({k} in {name})"
@@ -2290,7 +2290,7 @@ def _downstream_scope(as_info: dict, downstreams: dict) -> str:
 
 def _first_sentence(as_info: dict) -> str | None:
     registry = as_info.get("registry") or {}
-    country = country_name(as_info.get("country"))
+    country = country_name_in_text(as_info.get("country"))
     rir = registry.get("rir")
     registered = ""
     if rir:
@@ -2334,7 +2334,8 @@ def _second_sentence(as_info: dict, page: dict | None, subject: str) -> str | No
             text = f"peers with {_plural(n, 'network')}"
             if _is_complete(peers):
                 known = {e["country"] for e in peers["list"] if e.get("country")}
-                text += f" in {_plural(len(known), 'country', 'countries')}"
+                if known:
+                    text += f" in {_plural(len(known), 'country', 'countries')}"
             clauses.append(text)
     if not clauses:
         return None
@@ -2450,11 +2451,11 @@ def as_tiles(as_info: dict, page: dict | None) -> list[dict]:
         sub = None
         if _is_complete(v4_list) and v4_list["list"]:
             k = sum(1 for p in v4_list["list"] if p.get("plen") == 24)
-            sub = f"{k} of the v4 are /24s"
+            sub = f"{k:,} of the v4 are /24s" if k != 1 else "1 of the v4 is a /24"
         counts = _tile(
             "prefixes",
             "Prefixes",
-            f"{prefixes.get('v4') or 0} v4 · {prefixes.get('v6') or 0} v6",
+            f"{prefixes.get('v4') or 0:,} v4 · {prefixes.get('v6') or 0:,} v6",
             sub,
         )
     rpki = as_info.get("rpki")
@@ -2466,8 +2467,8 @@ def as_tiles(as_info: dict, page: dict | None) -> list[dict]:
             "rpki",
             "RPKI signed",
             _share_text(share[1]) if share else "–",
-            f"{rpki.get('valid') or 0} valid · {rpki.get('invalid') or 0} invalid"
-            f" · {rpki.get('not_found') or 0} not found",
+            f"{rpki.get('valid') or 0:,} valid · {rpki.get('invalid') or 0:,} invalid"
+            f" · {rpki.get('not_found') or 0:,} not found",
             segments=_segments(_rpki_parts(rpki)),
         )
     relations = [
@@ -2479,7 +2480,7 @@ def as_tiles(as_info: dict, page: dict | None) -> list[dict]:
         neighbours = _tile(
             "neighbours",
             "Neighbours",
-            " · ".join(str(r["count"]) for r in relations),
+            " · ".join(f"{r['count']:,}" for r in relations),
             "upstreams · downstreams · peers",
         )
     return [space, counts, signed, neighbours]
@@ -2710,19 +2711,23 @@ def as_map_view(as_info: dict, as_map: dict | None) -> dict | None:
         country_share = footprint.get("country_level_share") or 0
         if country_share:
             left_out.append(
-                f"{_share_text(country_share * 100)} of the space is placed only "
-                "at country level and is not drawn."
+                f"{_share_text(country_share * 100).capitalize()} of the space is "
+                "placed only at country level and is not drawn."
             )
         unplaced = footprint.get("unplaced_share") or 0
         if unplaced:
-            left_out.append(f"{_share_text(unplaced * 100)} could not be placed.")
+            left_out.append(
+                f"{_share_text(unplaced * 100).capitalize()} could not be placed."
+            )
         caption = " ".join([caption, *left_out])
         alt = "Where its IPv4 addresses geolocate: " + ", ".join(
             f"{c.get('name') or 'unnamed place'} {round(c['share'] * 100)}%"
             for c in cities[:5]
         )
     elif fallback == "country":
-        place = country_name(as_info.get("country")) or "its registered country"
+        place = country_name_in_text(as_info.get("country")) or (
+            "its registered country"
+        )
         dots = [{"x": p["x"], "y": p["y"], "r": 6.0} for p in inside]
         # Without the route data there were no prefixes to place: that is
         # unknown, never "no city-level placement".
@@ -2875,7 +2880,8 @@ def _prefix_size_text(plen: int | None, family: str) -> str:
         return human_count(2**exponent)
     if (plen or 0) > 48:
         return "under a /48"
-    return f"{human_count(2**exponent)} /48s"
+    count = human_count(2**exponent)
+    return f"{count} /48" if count == "1" else f"{count} /48s"
 
 
 def as_prefix_table(as_info: dict, page: dict | None) -> dict:

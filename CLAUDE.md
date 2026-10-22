@@ -271,10 +271,16 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   at most `AS_MAP_SAMPLE_BUDGET` addresses over the prefixes by size, and
   `footprint` locates them with a `place` callable (`lookup.as_footprint`
   passes `geo_ip_manager.place`: GeoLite2-City only) and groups them by city, at most `AS_MAP_MAX_DOTS`, each with a
-  share. Imports the standard library, `config` and `geo` only. IPv4 only; an
+  share. Nested prefixes are collapsed first (`ipaddress.collapse_addresses`),
+  so no address is sampled or weighed twice. A dot is a named city at city
+  precision only: GeoLite2's country-default record (a centroid, radius 200,
+  no city name) is country level, so the map never draws a country as a city. Imports the standard library, `config` and `geo` only. IPv4 only; an
   IPv6-only AS gets the country pin.
-- `countrynames.py`: pure data, ISO 3166 code to name and flag, for the
-  neighbour tables. `viewmodel.py` may import it and stay pure.
+- `countrynames.py`: pure data, ISO 3166 code to name (flags are
+  `viewmodel.country_flag`), for the sentence, the map caption and the
+  neighbour tables. `country_name_in_text` adds "the" where running English
+  wants it ("the United States"); tables keep the plain name. `viewmodel.py`
+  may import it and stay pure.
 - `mcp_server.py`: the public MCP server mounted at `/mcp` (official `mcp` SDK,
   Streamable HTTP, stateless). Five tools, six with `ASINFO_ENABLED`: `lookup` over `lookup.gather()`,
   `dns_records` and `ssl_certificate` over `gather(legs=)` narrowed to their
@@ -294,7 +300,7 @@ poetry run ruff format .         # CI runs `ruff format --check .`
 - `viewmodel.py`: `build_view()` turns a response dict into what
   `templates/browser.html` renders (`as_view` is the "AS" accordion's rows,
   hint and credits; `as_page_view` the `/AS<n>` page's). Pure, with no I/O, and it imports only
-  `config`, `eppstatus`, `reputation.grade` and the standard library, so
+  `config`, `countrynames`, `eppstatus`, `reputation.grade` and the standard library, so
   `mcp_server.py` reuses its certificate helpers without a cycle. The one
   decision that needs `lookup` — which values link to their own lookup —
   comes in as the `link_for` argument (`main.lookup_href`); the default
@@ -964,7 +970,7 @@ whatismyip/
 ├── geo.py               # Gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs, weighted-point canvas
 ├── asmap.py             # where an AS's IPv4 space geolocates (sampled, by city)
-├── countrynames.py      # ISO 3166 code -> name and flag (pure data)
+├── countrynames.py      # ISO 3166 code -> name (pure data)
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
 ├── healthcheck.py       # Docker HEALTHCHECK: /healthz answers 200 or not
 ├── server.json          # official MCP Registry entry (see mcp-publish.yml)

@@ -263,3 +263,34 @@ def country_name(code: str | None) -> str | None:
     if not code:
         return None
     return COUNTRY_NAMES.get(code.upper(), code)
+
+
+_THE_NAMES = frozenset(
+    {
+        "United States",
+        "United Kingdom",
+        "Netherlands",
+        "Philippines",
+        "United Arab Emirates",
+        "Bahamas",
+        "Gambia",
+        "Maldives",
+        "Comoros",
+        "Seychelles",
+        "Central African Republic",
+        "Dominican Republic",
+        "DR Congo",
+        "Republic of the Congo",
+        "Isle of Man",
+        "British Indian Ocean Territory",
+    }
+)
+
+
+def country_name_in_text(code: str | None) -> str | None:
+    """`country_name` for running English: "the United States", "the
+    Netherlands", but "South Korea". Tables keep the plain name."""
+    name = country_name(code)
+    if name and (name in _THE_NAMES or name.endswith("Islands")):
+        return f"the {name}"
+    return name

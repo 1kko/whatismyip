@@ -16,14 +16,9 @@ from config import AS_MAP_MAX_DOTS
 from geo import coordinate_precision
 
 
-def sample_addresses(prefixes: Sequence[str], budget: int) -> list[tuple[str, float]]:
-    """(address, weight) pairs, at most `budget` of them, weights being the
-    address counts each sample stands for.
-
-    Largest prefixes first, each getting a share of the budget in proportion
-    to its size and never more than one sample per /24 (GeoLite2 does not
-    split finer in practice). When the budget runs out the remaining, smaller
-    prefixes go unsampled. IPv6 and unparsable entries are ignored."""
+def _collapsed(prefixes: Sequence[str]) -> list[ipaddress.IPv4Network]:
+    """The IPv4 blocks of `prefixes` with nested and adjacent ones merged,
+    largest first, so no address is sampled or weighed twice."""
     networks = []
     for text in prefixes:
         try:
@@ -32,7 +27,20 @@ def sample_addresses(prefixes: Sequence[str], budget: int) -> list[tuple[str, fl
             continue
         if network.version == 4:
             networks.append(network)
-    networks.sort(key=lambda n: (-n.num_addresses, int(n.network_address)))
+    blocks = list(ipaddress.collapse_addresses(networks))
+    blocks.sort(key=lambda n: (-n.num_addresses, int(n.network_address)))
+    return blocks
+
+
+def sample_addresses(prefixes: Sequence[str], budget: int) -> list[tuple[str, float]]:
+    """(address, weight) pairs, at most `budget` of them, weights being the
+    address counts each sample stands for.
+
+    Largest prefixes first, each getting a share of the budget in proportion
+    to its size and never more than one sample per /24 (GeoLite2 does not
+    split finer in practice). When the budget runs out the remaining, smaller
+    prefixes go unsampled. IPv6 and unparsable entries are ignored."""
+    networks = _collapsed(prefixes)
     total = sum(n.num_addresses for n in networks)
     samples: list[tuple[str, float]] = []
     remaining = budget
@@ -59,19 +67,14 @@ def footprint(
     no database places.
 
     A sample is city-level by `geo.coordinate_precision`, the site's one
-    precision rule; samples in the same named city (within a tenth of a degree)
-    merge into one dot at their weighted mean. `sampled_share` is the sampled
-    space over all the IPv4 space of `prefixes`, so a page can say how much of
-    the AS the map looked at."""
+    precision rule, and only when it names a city: GeoLite2's country-default
+    record (a centroid with a 200 km radius and no city) is country level.
+    Samples in the same named city (within a tenth of a degree) merge into one
+    dot at their weighted mean. `sampled_share` is the sampled space over all
+    the IPv4 space of `prefixes`, so a page can say how much of the AS the map
+    looked at."""
     samples = sample_addresses(prefixes, budget)
-    total_space = 0
-    for text in prefixes:
-        try:
-            network = ipaddress.ip_network(text, strict=False)
-        except ValueError:
-            continue
-        if network.version == 4:
-            total_space += network.num_addresses
+    total_space = sum(n.num_addresses for n in _collapsed(prefixes))
     sampled = sum(weight for _, weight in samples)
     cities: dict[tuple, list] = {}
     country_level = unplaced = 0.0
@@ -79,7 +82,7 @@ def footprint(
         found = place(address)
         if found is None:
             unplaced += weight
-        elif coordinate_precision(found) != "city":
+        elif not found.get("city") or coordinate_precision(found) != "city":
             country_level += weight
         else:
             key = (

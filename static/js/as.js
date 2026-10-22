@@ -271,7 +271,8 @@ function sizeText(plen, family) {
   var exponent = exponentOf(plen, family);
   if (family === "v4") return humanCount(Math.pow(2, exponent));
   if ((plen || 0) > 48) return "under a /48";
-  return humanCount(Math.pow(2, exponent)) + " /48s";
+  var count = humanCount(Math.pow(2, exponent));
+  return count === "1" ? count + " /48" : count + " /48s";
 }
 
 /* The widest prefix in `rows`, the 100% of the size bars. */

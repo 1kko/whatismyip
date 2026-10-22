@@ -34,7 +34,7 @@ def fake_place(ip):
 
 
 def test_the_budget_caps_the_reads():
-    prefixes = [f"30.{i // 256}.{i % 256}.0/24" for i in range(5000)]
+    prefixes = [f"30.{(2 * i) // 256}.{(2 * i) % 256}.0/24" for i in range(5000)]
     calls = []
     asmap.footprint(prefixes, lambda ip: calls.append(ip) or None, budget=2000)
     assert len(calls) == 2000
@@ -84,3 +84,24 @@ def test_at_most_max_dots_cities():
         [f"40.{i}.0.0/24" for i in range(50)], places, budget=50, max_dots=10
     )
     assert len(fp["cities"]) == 10
+
+
+def test_nested_prefixes_are_sampled_and_weighed_once():
+    samples = asmap.sample_addresses(["20.0.0.0/16", "20.0.5.0/24"], budget=300)
+    assert sum(w for _, w in samples) == 65536
+    fp = asmap.footprint(["20.0.0.0/16", "20.0.5.0/24"], fake_place, budget=300)
+    assert fp["sampled_share"] == 1.0
+
+
+def test_an_unnamed_place_is_country_level_whatever_its_radius():
+    def default_record(ip):
+        return {
+            "lat": 37.5112,
+            "lon": 126.9741,
+            "accuracy_km": 200,
+            "city": None,
+            "country": "KR",
+        }
+
+    fp = asmap.footprint(["20.0.0.0/24"], default_record, budget=4)
+    assert fp["cities"] == [] and fp["country_level_share"] == 1.0

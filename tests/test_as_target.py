@@ -900,3 +900,27 @@ def test_as_json_neighbours_carry_their_own_size(asinfo_enabled):
     assert "v4_addresses" in data["downstreams"]["list"][0]
     assert data["org"]["siblings"] == [9760]
     assert client.get("/AS4766?format=text").text == AS4766_BLOCK  # text unchanged
+
+
+def test_the_server_renders_ten_neighbour_rows_and_the_true_total(
+    tmp_path, monkeypatch
+):
+    extra = "".join(f"{asn}|4766|-1|bgp\n" for asn in range(60000, 60014))
+    manager = build_manager(
+        tmp_path,
+        texts={"caida_rel": asinfo_fixtures_rel_with(extra)},
+    )
+    monkeypatch.setattr(lookup, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "asinfo_manager", manager)
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    html = client.get("/AS4766", headers=BROWSER).text
+    body = html.split('id="neighbour-rows"')[1].split("</tbody>")[0]
+    assert body.count("<tr") == 10
+    total = 6 + 14
+    assert f"Show all {total} neighbours" in html
+
+
+def asinfo_fixtures_rel_with(extra):
+    import asinfo_fixtures
+
+    return asinfo_fixtures.CAIDA_REL + extra

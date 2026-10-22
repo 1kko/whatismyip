@@ -126,7 +126,7 @@ def test_tiles_for_as4766(as_info, page):
     assert tiles["space"]["value"] == "131k"
     assert tiles["space"]["sub"] == "addresses ≈ one /15 · 1 block"
     assert tiles["prefixes"]["value"] == "2 v4 · 1 v6"
-    assert tiles["prefixes"]["sub"] == "1 of the v4 are /24s"
+    assert tiles["prefixes"]["sub"] == "1 of the v4 is a /24"
     assert tiles["rpki"]["value"] == "67%"
     assert tiles["rpki"]["sub"] == "2 valid · 0 invalid · 1 not found"
     assert [s["label"] for s in tiles["rpki"]["segments"]] == [
@@ -423,3 +423,101 @@ def test_special_page_view_is_unchanged(asinfo_enabled):
         "Defined in",
         "Purpose",
     ]
+
+
+def test_the_sentence_uses_the_article_where_english_does(tmp_path):
+    info = {
+        **BASE,
+        "country": "US",
+        "registry": None,
+        "upstreams": [],
+        "downstreams": {"count": 1, "list": [{"asn": 1, "country": "US"}]},
+    }
+    text = viewmodel.as_summary(info, None)
+    assert text.startswith("A network in the United States.")
+    assert "(all in the United States)" in text
+    assert viewmodel.as_summary({**BASE, "country": "KR"}, None).startswith(
+        "A network in South Korea."
+    )
+    info["downstreams"] = {
+        "count": 3,
+        "list": [{"asn": i, "country": c} for i, c in enumerate(["NL", "NL", "DE"])],
+    }
+    assert "(2 in the Netherlands)" in viewmodel.as_summary(
+        {**info, "country": "NL"}, None
+    )
+
+
+def test_country_name_in_text():
+    f = countrynames.country_name_in_text
+    assert f("GB") == "the United Kingdom" and f("PH") == "the Philippines"
+    assert f("KY") == "the Cayman Islands" and f("VA") == "Vatican City"
+    assert f("KR") == "South Korea" and f(None) is None
+
+
+def test_the_country_pin_caption_takes_the_article():
+    canvas = mapgeom.build_points_canvas([(54.0, -2.0, 1.0)], 560, 360, max_zoom=4)
+    view = viewmodel.as_map_view(
+        {**BASE, "country": "GB"},
+        {"footprint": None, "canvas": canvas, "fallback": "country"},
+    )
+    assert "the pin marks the United Kingdom, at country level." in view["caption"]
+
+
+def test_a_share_that_rounds_to_zero_is_under_one_percent():
+    info = {**BASE, "rpki": {"valid": 1, "invalid": 0, "not_found": 199}}
+    assert viewmodel.as_summary(info, None).endswith(
+        "; under 1% of its prefixes are RPKI-signed."
+    )
+    canvas = mapgeom.build_points_canvas([(36.5, 127.8, 1.0)], 560, 360, max_zoom=4)
+    fp = {
+        "cities": [
+            {"name": "Seoul", "country": "KR", "lat": 37, "lon": 127, "share": 1}
+        ],
+        "country_level_share": 0.004,
+        "unplaced_share": 0.003,
+    }
+    view = viewmodel.as_map_view(
+        BASE, {"footprint": fp, "canvas": canvas, "fallback": None}
+    )
+    assert "Under 1% of the space is placed only at country level" in view["caption"]
+    assert "Under 1% could not be placed." in view["caption"]
+
+
+def test_peers_without_countries_drop_the_country_count():
+    info = {**BASE, "peers": {"count": 2, "list": [{"asn": 1}, {"asn": 2}]}}
+    text = viewmodel.as_summary(info, None)
+    assert "peers with 2 networks" in text and "countries" not in text
+
+
+def test_counts_are_singular_and_grouped():
+    page = {
+        "prefixes": {
+            "v4": {"count": 1, "list": [{"prefix": "1.0.0.0/24", "plen": 24}]},
+            "v6": {"count": 0, "list": []},
+        }
+    }
+    info = {**BASE, "prefixes": {**BASE["prefixes"], "v4": 17518, "v4_addresses": 256}}
+    tiles = {t["key"]: t for t in viewmodel.as_tiles(info, page)}
+    assert tiles["prefixes"]["value"] == "17,518 v4 · 0 v6"
+    assert tiles["prefixes"]["sub"] == "1 of the v4 is a /24"
+    row = viewmodel.as_prefix_table(
+        {},
+        {
+            "prefixes": {
+                "v4": {"count": 0, "list": []},
+                "v6": {
+                    "count": 1,
+                    "list": [
+                        {
+                            "prefix": "2001:db8::/48",
+                            "plen": 48,
+                            "ris_peers": 3,
+                            "rpki": {},
+                        }
+                    ],
+                },
+            }
+        },
+    )["rows"][0]
+    assert row["size_text"] == "1 /48"
