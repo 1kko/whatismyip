@@ -279,11 +279,13 @@
         </section>
 
         {# The announced prefixes, largest first, one family at a time: IPv4,
-           or IPv6 when it announces no IPv4 (viewmodel.as_prefix_table). #}
+           or IPv6 when it announces no IPv4 (viewmodel.as_prefix_table). The
+           ordering phrase is its own span: as.js swaps it while a city filter
+           orders the rows by "% here". #}
         {% set prefixes = view.prefix_table %}
         {% set family = "v4" if prefixes.payload.v4 else "v6" %}
         <section class="as-panel as-prefixes" id="as-prefixes" aria-labelledby="as-prefixes-title">
-            <h2 class="as-panel__title" id="as-prefixes-title">Announced prefixes · largest first</h2>
+            <h2 class="as-panel__title" id="as-prefixes-title">Announced prefixes · <span id="prefix-order">largest first</span></h2>
             {% if prefixes.empty %}
             <p class="as-empty tone-muted">{{ prefixes.empty }}</p>
             {% else %}

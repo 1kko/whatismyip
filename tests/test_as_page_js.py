@@ -227,6 +227,16 @@ def test_the_page_loads_as_js_with_the_nonce(asinfo_enabled):
     assert "onclick=" not in html
 
 
+def test_the_prefix_headings_ordering_phrase_is_its_own_span(asinfo_enabled):
+    """as.js swaps only the phrase while a city filter orders the rows by
+    "% here", and restores the server's when the filter clears."""
+    html = client.get("/AS4766", headers=BROWSER).text
+    assert (
+        '<h2 class="as-panel__title" id="as-prefixes-title">Announced prefixes'
+        ' · <span id="prefix-order">largest first</span></h2>'
+    ) in html
+
+
 def test_as_js_writes_no_markup_from_data():
     source = AS_JS.read_text()
     for banned in (
@@ -266,6 +276,7 @@ const script = make("as-lists", "script"); script.textContent = JSON.stringify(l
 ["neighbour-rows", "neighbours-more", "neighbour-filter", "prefix-rows", "prefixes-more", "prefix-filter", "prefix-group"].forEach((i) => make(i, "x", i === "prefix-group" ? { "aria-pressed": "false" } : {}));
 if (CITY_MARKUP) {
   make("prefix-city", "button"); make("prefix-here-col", "th"); make("as-prefixes", "section", { id: "as-prefixes" });
+  make("prefix-order", "span").textContent = "largest first";
 }
 global.document = {
   addEventListener: (t, f) => { docListeners[t] = f; },
@@ -401,9 +412,12 @@ def test_city_filter_combines_and_clears():
         """
 const rows = ids["prefix-rows"], more = ids["prefixes-more"], group = ids["prefix-group"];
 const filter = ids["prefix-filter"], chip = ids["prefix-city"], col = ids["prefix-here-col"];
+const order = ids["prefix-order"];
 const first = (r) => r.children[0].textContent;
 const log = [];
+log.push(order.textContent);
 docListeners["as:city"]({ detail: { name: "Seoul", pairs: [[3, "100%"], [1, "40%"], [5, "under 1%"]] } });
+log.push(order.textContent);
 log.push([chip.hidden, chip.textContent, chip.attrs["aria-label"], col.hidden,
   rows.children.map(first), rows.children.map((r) => r.children.length),
   rows.children.map((r) => r.children[4].textContent),
@@ -416,15 +430,18 @@ group.fire("click");
 log.push(rows.children.map((r) => r.children[0].children[0].children[1].children[0].children.map((t) => t.children[0].textContent)));
 group.fire("click");
 fam[1].fire("click");
-log.push([chip.hidden, col.hidden, rows.children.map(first)]);
+log.push([chip.hidden, col.hidden, rows.children.map(first), order.textContent]);
 fam[0].fire("click");
 docListeners["as:city"]({ detail: { name: "Busan", pairs: [[0, "9%"]] } });
-log.push([chip.textContent, rows.children.length]);
+log.push([chip.textContent, rows.children.length, order.textContent]);
 chip.fire("click");
-log.push([chip.hidden, col.hidden, rows.children.length, more.textContent]);
+log.push([chip.hidden, col.hidden, rows.children.length, more.textContent, order.textContent]);
 console.log(JSON.stringify(log));
 """,
     )
+    # The heading's ordering phrase follows the rows: "% here" under a city.
+    assert out[:2] == ["largest first", "most here first"]
+    out = out[2:]
     assert out == [
         [
             False,
@@ -441,9 +458,9 @@ console.log(JSON.stringify(log));
         ],
         ["58.1.0.0/16"],
         [["58.3.0.0/16", "58.1.0.0/16", "58.5.0.0/16"]],
-        [True, True, ["2001:db8::/32"]],
-        ["Busan \u2715", 1],
-        [True, True, 10, "Show all 12 prefixes"],
+        [True, True, ["2001:db8::/32"], "largest first"],
+        ["Busan \u2715", 1, "most here first"],
+        [True, True, 10, "Show all 12 prefixes", "largest first"],
     ]
 
 

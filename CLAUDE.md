@@ -395,8 +395,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `#as-lists`' IPv4 rows with each one's "% here", and a lookup link from
   `main.lookup_href`). A click on a dot opens its bubble; "Show these in
   Prefixes" fires `as:city` on the document, and as.js narrows the Prefixes
-  table to that city's rows, in the bubble's order, with a "Here" column and
-  a "Seoul ✕" chip until the chip or IPv6 clears it. The JSON answer is the
+  table to that city's rows, in the bubble's order, with a "Here" column, a
+  "Seoul ✕" chip and "most here first" in place of the heading's "largest
+  first" (`#prefix-order`) until the chip or IPv6 clears it. The JSON answer is the
   card, plus the additive neighbour keys (`country`, `customers`,
   `v4_addresses`, `v4_prefixes`, `v6_prefixes`) on `/AS<n>`'s neighbour
   lists. The map's data reaches none of the JSON, the text or MCP.

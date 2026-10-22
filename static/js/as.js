@@ -10,7 +10,8 @@
  *
  * The map can narrow the prefix table to one city: it fires `as:city` with
  * the IPv4 rows to show and each one's server-rounded share, and the table
- * gains a "Here" column until the filter is cleared.
+ * gains a "Here" column, its heading reading "most here first", until the
+ * filter is cleared.
  *
  * Text goes in with textContent and nodes with createElement only: an AS name
  * is third-party text and the CSP allows no inline script.
@@ -460,6 +461,9 @@ function wirePrefixes(lists) {
   };
   var chip = document.getElementById("prefix-city");
   var hereCol = document.getElementById("prefix-here-col");
+  // The heading's ordering phrase, which a city filter changes.
+  var order = document.getElementById("prefix-order");
+  var orderText = order ? order.textContent : "";
 
   function draw() {
     var all = data[state.family] || [];
@@ -510,6 +514,7 @@ function wirePrefixes(lists) {
     state.showAll = false;
     chip.hidden = true;
     hereCol.hidden = true;
+    if (order) order.textContent = orderText;
     if (redraw) draw();
   }
 
@@ -564,6 +569,7 @@ function wirePrefixes(lists) {
     chip.setAttribute("aria-label", "Clear the city filter: " + state.city.name);
     chip.hidden = false;
     hereCol.hidden = false;
+    if (order) order.textContent = "most here first";
     draw();
     var section = document.getElementById("as-prefixes");
     if (section && section.scrollIntoView) section.scrollIntoView();
