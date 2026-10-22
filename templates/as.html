@@ -355,6 +355,9 @@
    answer rather than in it, so Raw JSON stays what ?format=json returns.
    main._script_json escapes <, > and &, as an AS name is third-party text. #}
 <script type="application/json" id="as-lists" nonce="{{ nonce }}">{{ as_lists | safe }}</script>
+{% if as_map_data %}
+<script type="application/json" id="as-map-data" nonce="{{ nonce }}">{{ as_map_data | safe }}</script>
+{% endif %}
 {% endif %}
 <script src="/static/js/app.js" nonce="{{ nonce }}" defer></script>
 {% if not view.special %}

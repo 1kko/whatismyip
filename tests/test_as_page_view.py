@@ -521,3 +521,161 @@ def test_counts_are_singular_and_grouped():
         },
     )["rows"][0]
     assert row["size_text"] == "1 /48"
+
+
+FRAME = {
+    "center_lon": 126.98,
+    "south": 37.5,
+    "west": 126.9,
+    "north": 37.6,
+    "east": 127.0,
+}
+
+
+def _live_map(cities, frame=None, fallback=None):
+    fp = {
+        "cities": cities,
+        "country_level_share": 0.0,
+        "unplaced_share": 0.0,
+        "sampled_share": 1.0,
+        "samples": 1,
+    }
+    points = [(c["lat"], c["lon"], c["share"]) for c in cities] or [(36.5, 127.8, 1.0)]
+    return {
+        "footprint": fp if cities else None,
+        "canvas": mapgeom.build_points_canvas(points, 560, 360),
+        "fallback": fallback,
+        "frame": frame or FRAME,
+        "tile_url": "https://tile.example/{z}/{x}/{y}.png",
+        "fit_max_zoom": 8,
+        "zoom_limit": 10,
+    }
+
+
+def _seoul(prefixes=None, **extra):
+    city = {
+        "name": "Seoul",
+        "country": "KR",
+        "lat": 37.57,
+        "lon": 126.98,
+        "share": 0.41,
+        **extra,
+    }
+    if prefixes is not None:
+        city["prefixes"] = prefixes
+    return city
+
+
+def _pair(prefix, here, address="20.0.0.1"):
+    return {"prefix": prefix, "here": here, "address": address}
+
+
+def _live(cities, v4_index=None, link=None, **kw):
+    view = viewmodel.as_map_view(BASE, _live_map(cities, **kw), v4_index, link)
+    return view["live"]
+
+
+def test_live_payload_carries_frame_zooms_and_tiles():
+    live = _live([_seoul()])
+    assert live["frame"] == FRAME
+    assert live["fit_max_zoom"] == 8
+    assert live["zoom_limit"] == 10
+    assert live["tile_url"] == "https://tile.example/{z}/{x}/{y}.png"
+    assert live["approx"] is False
+
+
+def test_live_dot_reads_place_share_and_label():
+    dot = _live([_seoul()])["dots"][0]
+    assert dot["name"] == "Seoul"
+    assert dot["place"] == "Seoul, South Korea"
+    assert dot["share_text"] == "41%"
+    assert dot["label"] == "Seoul, South Korea, 41%"
+    assert dot["lat"] == 37.57 and dot["lon"] == 126.98
+    assert dot["r"] == round(2.5 + 16 * 0.41**0.5, 1)
+
+
+def test_live_pairs_are_indices_into_the_v4_payload():
+    prefixes = [
+        _pair("20.0.0.0/8", 1.0),
+        _pair("9.9.9.0/24", 0.7),
+        _pair("20.1.0.0/24", 0.5),
+    ]
+    dot = _live([_seoul(prefixes)], {"20.0.0.0/8": 3, "20.1.0.0/24": 7})["dots"][0]
+    assert dot["pairs"] == [[3, "100%"], [7, "50%"]]
+    assert dot["top"] == [["20.0.0.0/8", "100%"], ["20.1.0.0/24", "50%"]]
+    assert dot["count"] == 2
+
+
+def test_live_top_is_three_and_count_is_all():
+    prefixes = [_pair(f"20.{i}.0.0/16", 0.9 - i / 10) for i in range(5)]
+    index = {p["prefix"]: i for i, p in enumerate(prefixes)}
+    dot = _live([_seoul(prefixes)], index)["dots"][0]
+    assert len(dot["top"]) == 3
+    assert dot["count"] == 5 == len(dot["pairs"])
+
+
+def test_live_here_text_says_under_one_percent():
+    dot = _live([_seoul([_pair("20.0.0.0/8", 0.004)])], {"20.0.0.0/8": 0})["dots"][0]
+    assert dot["pairs"] == [[0, "under 1%"]]
+
+
+def test_live_lookup_links_the_first_pairs_address():
+    prefixes = [
+        _pair("20.0.0.0/8", 1.0, "20.0.0.1"),
+        _pair("20.1.0.0/24", 0.5, "20.1.0.9"),
+    ]
+    index = {"20.0.0.0/8": 0, "20.1.0.0/24": 1}
+    dot = _live([_seoul(prefixes)], index, link=lambda v: "/" + v)["dots"][0]
+    assert dot["lookup"] == {"text": "20.0.0.1", "href": "/20.0.0.1"}
+
+
+def test_live_lookup_is_none_when_link_refuses():
+    prefixes = [_pair("20.0.0.0/8", 1.0)]
+    index = {"20.0.0.0/8": 0}
+    assert (
+        _live([_seoul(prefixes)], index, link=lambda v: None)["dots"][0]["lookup"]
+        is None
+    )
+    assert _live([_seoul(prefixes)], index, link=None)["dots"][0]["lookup"] is None
+
+
+def test_live_dot_longitudes_are_unwrapped_around_the_frame():
+    frame = {**FRAME, "center_lon": 178.0}
+    dot = _live([_seoul(lon=-179.0)], frame=frame)["dots"][0]
+    assert dot["lon"] == 181.0
+
+
+def test_live_country_pin_is_approx_and_has_no_bubble_data():
+    frame = {
+        "center_lon": 127.8,
+        "south": 36.5,
+        "west": 127.8,
+        "north": 36.5,
+        "east": 127.8,
+    }
+    view = viewmodel.as_map_view(
+        {**BASE, "country": "KR"}, _live_map([], frame=frame, fallback="country")
+    )
+    live = view["live"]
+    assert live["approx"] is True
+    assert live["dots"] == [
+        {
+            "lat": 36.5,
+            "lon": 127.8,
+            "r": 6.0,
+            "name": None,
+            "place": None,
+            "share_text": None,
+            "label": "South Korea, country level",
+            "top": [],
+            "count": 0,
+            "pairs": [],
+            "lookup": None,
+        }
+    ]
+
+
+def test_live_tolerates_cities_without_prefixes():
+    dot = _live([_seoul()], {"20.0.0.0/8": 0}, link=lambda v: "/" + v)["dots"][0]
+    assert dot["top"] == [] and dot["pairs"] == [] and dot["count"] == 0
+    assert dot["lookup"] is None

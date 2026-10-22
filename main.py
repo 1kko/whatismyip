@@ -732,6 +732,9 @@ def render_as_page(request: Request, response_data: dict):
             "site_domain": site_domain(request),
             "json_data": _script_json(response_data),
             "as_lists": _script_json(view["lists_payload"], indent=None),
+            "as_map_data": _script_json(view["map"]["live"], indent=None)
+            if view.get("map")
+            else None,
             "nonce": getattr(request.state, "csp_nonce", ""),
         },
     )

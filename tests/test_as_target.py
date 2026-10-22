@@ -942,3 +942,29 @@ def test_as_map_country_pin_is_capped_at_the_country_zoom(monkeypatch):
     result = main._as_map({"country": "KR"}, None)
     assert result["fallback"] == "country"
     assert result["fit_max_zoom"] == result["zoom_limit"] == 4
+
+
+def test_the_page_embeds_the_live_map(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    html = client.get("/AS4766", headers=BROWSER).text
+    match = re.search(
+        r'<script type="application/json" id="as-map-data" nonce="[^"]+">'
+        r"(.*?)</script>",
+        html,
+        re.S,
+    )
+    assert match
+    live = json.loads(match.group(1))
+    assert live["dots"][0]["place"] == "Seoul, South Korea"
+
+
+def test_the_json_answer_has_no_map_keys(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "as_footprint", lambda prefixes: SEOUL_FOOTPRINT)
+    data = client.get("/AS4766?format=json").json()
+    assert "live" not in data and "dots" not in data and "map" not in data
+
+
+def test_a_page_without_map_embeds_no_map_data(asinfo_enabled, monkeypatch):
+    monkeypatch.setattr(main, "_as_map", lambda as_info, page: None)
+    html = client.get("/AS4766", headers=BROWSER).text
+    assert 'id="as-map-data"' not in html
