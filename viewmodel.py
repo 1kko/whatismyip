@@ -2435,7 +2435,7 @@ def as_summary(as_info: dict, page: dict | None) -> str | None:
     return text or None
 
 
-def _tile(key, label, value, sub, tone="neutral", segments=None) -> dict:
+def _tile(key, label, value, sub, tone="default", segments=None) -> dict:
     return {
         "key": key,
         "label": label,
@@ -2537,9 +2537,7 @@ def _size_bucket(plen: int) -> int:
     return 3 if plen >= 17 else 4
 
 
-def _visibility_bucket(peers: int, median: int | None) -> int:
-    if not median:
-        return 0
+def _visibility_bucket(peers: int, median: int) -> int:
     if peers >= 0.75 * median:
         return 0
     return 1 if peers >= 0.25 * median else 2
@@ -2577,16 +2575,25 @@ def as_glance(as_info: dict, page: dict | None) -> dict:
         return build(lists)
 
     def visibility(lists):
-        counts, drawn, total = [0, 0, 0], 0, 0
+        counts, listed, cut = [0, 0, 0], 0, []
         for family in ("v4", "v6"):
             part = lists.get(family) or {}
-            total += part.get("count") or 0
-            for entry in part.get("list") or []:
-                counts[_visibility_bucket(entry["ris_peers"], medians.get(family))] += 1
-                drawn += 1
-        label = "Visibility" + _truncated(drawn, total)
-        if not drawn:
+            entries = part.get("list") or []
+            listed += len(entries)
+            if len(entries) < (part.get("count") or 0):
+                cut.append(len(entries))
+            median = medians.get(family)
+            if not median:
+                continue  # nothing to compare this family's peer counts with
+            for entry in entries:
+                counts[_visibility_bucket(entry["ris_peers"], median)] += 1
+        label = "Visibility"
+        if cut:
+            label += f" (largest {max(cut):,} per family)"
+        if not listed:
             return _bar("visibility", label, empty="No announced prefixes")
+        if not sum(counts):
+            return _bar("visibility", label, empty="Unknown")
         return _bar(
             "visibility",
             label,
@@ -2607,7 +2614,7 @@ def as_glance(as_info: dict, page: dict | None) -> dict:
         for entry in entries:
             counts[_size_bucket(entry["plen"])] += 1
         names = ("/24", "/23", "/22", "/17–/21", "/16 and shorter")
-        return _bar("sizes", label, [(n, c, "accent") for n, c in zip(names, counts)])
+        return _bar("sizes", label, [(n, c, "default") for n, c in zip(names, counts)])
 
     bars.append(from_lists("visibility", "Visibility", visibility))
     bars.append(from_lists("sizes", "Sizes (IPv4)", sizes))
@@ -2619,7 +2626,11 @@ def as_glance(as_info: dict, page: dict | None) -> dict:
         v4, v6 = prefixes.get("v4") or 0, prefixes.get("v6") or 0
         if v4 + v6:
             bars.append(
-                _bar("family", "Family", [("IPv4", v4, "accent"), ("IPv6", v6, "info")])
+                _bar(
+                    "family",
+                    "Family",
+                    [("IPv4", v4, "default"), ("IPv6", v6, "default")],
+                )
             )
         else:
             bars.append(_bar("family", "Family", empty="No announced prefixes"))

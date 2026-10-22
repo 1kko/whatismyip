@@ -180,7 +180,7 @@ def test_a_truncated_list_is_said_in_the_bar_label(as_info, page):
     }
     bars = {b["key"]: b for b in viewmodel.as_glance(as_info, short)["bars"]}
     assert bars["sizes"]["label"] == "Sizes (IPv4) (largest 2)"
-    assert bars["visibility"]["label"] == "Visibility (largest 3)"
+    assert bars["visibility"]["label"] == "Visibility (largest 2 per family)"
     assert bars["rpki"]["label"] == "RPKI"
 
 
@@ -188,3 +188,27 @@ def test_a_missing_page_leaves_list_bars_unknown(as_info):
     bars = {b["key"]: b for b in viewmodel.as_glance(as_info, None)["bars"]}
     assert bars["visibility"]["empty"].startswith(("Unknown", "Not in"))
     assert bars["family"]["empty"] is None
+
+
+def test_tones_are_the_codebase_vocabulary(as_info, page):
+    allowed = {"default", "muted", "success", "warning", "danger"}
+    tones = {t["tone"] for t in viewmodel.as_tiles(as_info, page)}
+    for bar in viewmodel.as_glance(as_info, page)["bars"]:
+        tones |= {s["tone"] for s in bar["segments"]}
+    assert tones <= allowed
+
+
+def test_a_family_without_a_median_is_left_out_of_visibility(as_info, page):
+    v6 = {"prefix": "2001:db8::/32", "plen": 32, "ris_peers": 5, "rpki": None}
+    lists = {**page["prefixes"], "v6": {"count": 1, "list": [v6]}}
+    for median in (None, 0):
+        drawn = {**page, "prefixes": lists, "medians": {"v4": 330, "v6": median}}
+        bar = viewmodel.as_glance(as_info, drawn)["bars"][1]
+        assert sum(s["count"] for s in bar["segments"]) == 2
+        assert bar["label"] == "Visibility"
+
+
+def test_visibility_is_unknown_when_no_family_has_a_median(as_info, page):
+    drawn = {**page, "medians": {"v4": None, "v6": None}}
+    bar = viewmodel.as_glance(as_info, drawn)["bars"][1]
+    assert bar["empty"] == "Unknown" and bar["segments"] == []
