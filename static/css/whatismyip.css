@@ -1198,6 +1198,8 @@ table.records--dns td:nth-child(4) {
   border-radius: 10px;
   background: var(--surface-2);
 }
+.as-map__canvas { aspect-ratio: var(--map-ratio); }
+.as-map__static { position: absolute; inset: 0; }
 .as-map__tiles { position: absolute; inset: 0; overflow: hidden; border-radius: 9px; }
 .as-map__tiles::after {
   content: "";

@@ -25,6 +25,7 @@
     {% include "_agent_discovery.html" %}
 
     <link rel="preload" href="/static/fonts/InterVariable-latin.woff2" as="font" type="font/woff2" crossorigin>
+    {% if view.map %}<link rel="stylesheet" href="/static/css/leaflet.css?v={{ APP_VERSION }}">{% endif %}
     <link rel="stylesheet" href="/static/css/whatismyip.css?v={{ APP_VERSION }}">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="shortcut icon" href="/static/favicon.ico">
@@ -180,7 +181,8 @@
                    no-referrer: the origin, never the path. #}
                 {% set as_map = view.map %}
                 <figure class="as-map{% if as_map.approx %} as-map--approx{% endif %}" id="as-map">
-                    <div class="as-map__canvas" style="aspect-ratio: {{ as_map.width }} / {{ as_map.height }}">
+                    <div class="as-map__canvas" style="--map-ratio: {{ as_map.width }} / {{ as_map.height }}">
+                        <div class="as-map__static">
                         <div class="as-map__tiles">
                             {% for tile in as_map.tiles %}
                             <img class="as-map__tile" src="{{ tile.url }}" referrerpolicy="strict-origin" loading="lazy" alt="" style="left:{{ tile.left }}%;top:{{ tile.top }}%;width:{{ tile.w }}%;height:{{ tile.h }}%">
@@ -189,6 +191,8 @@
                         <svg class="as-map__dots" viewBox="0 0 {{ as_map.width }} {{ as_map.height }}" role="img" aria-label="{{ as_map.alt }}">
                             {% for dot in as_map.dots %}<circle cx="{{ dot.x }}" cy="{{ dot.y }}" r="{{ dot.r }}"/>{% endfor %}
                         </svg>
+                        </div>
+                        <div class="as-map__live" id="as-map-live"></div>
                         {# HTML, not SVG text, so the label keeps its size when
                            the canvas is scaled down to a phone. #}
                         <div class="as-map__node as-node"><strong class="mono">{{ as_map.node.label }}</strong>{% if as_map.node.sub %}<span>{{ as_map.node.sub }}</span>{% endif %}</div>
@@ -289,6 +293,7 @@
                 <button type="button" class="chip" data-family="{{ key }}" aria-pressed="{{ 'true' if key == family else 'false' }}"{% if not prefixes.counts[key] %} disabled{% endif %} hidden>{{ word }} <span class="chip__count">{{ "{:,}".format(prefixes.counts[key]) }}</span></button>
                 {% endfor %}
                 <button type="button" class="chip" id="prefix-group" aria-pressed="false" hidden>Group by /8</button>
+                <button type="button" class="chip chip--city" id="prefix-city" hidden></button>
             </div>
             <div class="as-table-wrap">
                 <table class="as-table as-table--prefixes">
@@ -298,6 +303,7 @@
                             <th scope="col">Size</th>
                             <th scope="col">RIS peers</th>
                             <th scope="col">RPKI</th>
+                            <th scope="col" id="prefix-here-col" hidden>Here</th>
                         </tr>
                     </thead>
                     <tbody id="prefix-rows">
@@ -362,6 +368,10 @@
 <script src="/static/js/app.js" nonce="{{ nonce }}" defer></script>
 {% if not view.special %}
 <script src="/static/js/as.js" nonce="{{ nonce }}" defer></script>
+{% if as_map_data %}
+<script src="/static/js/leaflet.js" nonce="{{ nonce }}" defer></script>
+<script src="/static/js/as-map.js" nonce="{{ nonce }}" defer></script>
+{% endif %}
 {% endif %}
 </body>
 </html>
