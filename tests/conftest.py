@@ -121,6 +121,22 @@ def asinfo_enabled(monkeypatch, tmp_path):
 
 
 @pytest.fixture
+def reverseip_enabled(monkeypatch, tmp_path):
+    """The reverse IP feature on, over a freshly built database in `tmp_path`:
+    the suite runs with REVERSEIP_ENABLED=false, so a test of the `reverse_ip`
+    section asks for this. Returns the manager (its clock reads
+    tests/reverseip_fixtures.NOW)."""
+    import lookup
+    import main
+    from reverseip_fixtures import build_manager
+
+    manager = build_manager(tmp_path)
+    monkeypatch.setattr(lookup, "reverse_ip_manager", manager)
+    monkeypatch.setattr(main, "reverse_ip_manager", manager)
+    return manager
+
+
+@pytest.fixture
 def reset_state():
     """Return the reset callable for tests that inspect its coverage."""
     return _reset_mutable_state

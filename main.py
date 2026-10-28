@@ -59,6 +59,7 @@ from config import (
     PUBLIC_RESOLVERS,
     RATE_LIMIT_CLEANUP_INTERVAL,
     REPUTATION_CHECK_INTERVAL_SECONDS,
+    REVERSEIP_CHECK_INTERVAL_SECONDS,
     REPUTATION_MAX_AGE_HOURS,
     SELF_WHOIS_SOFT_DEADLINE_SECONDS,
     SITE_DOMAIN_FALLBACK,
@@ -95,6 +96,7 @@ from lookup import (
     normalize_lookup_target,
     parse_asn,
     reputation_manager,
+    reverse_ip_manager,
     sanitize_log_input,
     tld_names_manager,
 )
@@ -1051,6 +1053,23 @@ scheduler.add_job(
     coalesce=True,
     id="refresh-asinfo",
 )
+# Reverse IP (reverseip.py). The same shape as the AS job, but refresh() runs
+# its download and build in a child process, so the parent keeps no pyarrow
+# and no large heap. max_instances=1 keeps two children from overlapping (a
+# run that outlasts the interval is skipped, not stacked); the child itself
+# enforces one download per source per UTC day, so the hourly check costs
+# nothing between days. REVERSEIP_ENABLED=false makes refresh() a no-op.
+scheduler.add_job(
+    reverse_ip_manager.refresh,
+    "interval",
+    seconds=REVERSEIP_CHECK_INTERVAL_SECONDS,
+    next_run_time=datetime.datetime.now(),
+    # Due at import, run after the lifespan starts the scheduler: see above.
+    misfire_grace_time=None,
+    max_instances=1,
+    coalesce=True,
+    id="refresh-reverseip",
+)
 
 
 def _fetch_unloaded_geoip_dbs():
@@ -1693,6 +1712,26 @@ def health_reasons() -> list[dict[str, str]]:
                 "no AS information",
             )
         )
+    for message in reverse_ip_manager.stale_sources():
+        reasons.append(_reason("reverseip_source_stale", message))
+    reverseip = reverse_ip_manager.status()
+    # As for the AS database: no database after a build was tried, or a file
+    # that will not read, is a fault; a fresh volume is not.
+    if (
+        reverseip["enabled"]
+        and not reverseip["database"]
+        and (
+            reverse_ip_manager.build_attempted
+            or os.path.exists(reverse_ip_manager.path)
+        )
+    ):
+        reasons.append(
+            _reason(
+                "reverseip_unavailable",
+                "the reverse IP database is missing or unreadable, so IP "
+                "lookups carry no domain names",
+            )
+        )
     for message in abuseipdb_client.problems():
         reasons.append(_reason("abuseipdb_key_rejected", message))
     open_hosts = rdap_breaker.open_hosts()
@@ -1733,6 +1772,7 @@ async def healthz():
         "public_suffix_list": tld_names_manager.status(),
         "reputation": reputation_manager.status(),
         "asinfo": asinfo_manager.status(),
+        "reverseip": reverse_ip_manager.status(),
         "abuseipdb": abuseipdb_client.status(),
     }
 
@@ -2500,6 +2540,8 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
         response_data["dns_security"] = data["dns_security"]
     if data.get("as_info") is not None:
         response_data["as_info"] = data["as_info"]
+    if data.get("reverse_ip") is not None:
+        response_data["reverse_ip"] = data["reverse_ip"]
     if subdomain_task is not None:
         response_data["subdomains"] = await subdomain_task
 

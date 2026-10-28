@@ -54,6 +54,7 @@ from managers import (
 )
 from rdap import RIR_RDAP_UNAVAILABLE, is_ip, lookup_rdap, normalize_whois
 from reputation import ReputationManager
+from reverseip import ReverseIpManager
 
 
 class PrivateAddressError(Exception):
@@ -488,6 +489,10 @@ reputation_manager = ReputationManager()
 # one; main.py's scheduler downloads the datasets and rebuilds it. Reads
 # `data/` only.
 asinfo_manager = AsInfoManager()
+# Opens the reverse IP database a previous run built in the data volume, if
+# there is one; main.py's scheduler downloads the lists and rebuilds it. Reads
+# `data/` only, and builds nothing at import.
+reverse_ip_manager = ReverseIpManager()
 # AbuseIPDB's API, asked only for an address looked up directly (see
 # _run_legs). Off without ABUSEIPDB_API_KEY.
 abuseipdb_client = AbuseIPDBClient()
@@ -792,6 +797,23 @@ def address_as_info(ip: str, location: dict | None = None) -> dict | None:
     return answer
 
 
+def address_reverse_ip(ip: str) -> dict | None:
+    """The listed domain names that resolve to `ip` (reverseip.py), or None
+    when the feature is off. A read of the local database, so it runs inline
+    and sends nothing anywhere."""
+    if not reverse_ip_manager.enabled:
+        return None
+    return reverse_ip_manager.for_address(ip)
+
+
+def top_list_subdomains(domain: str) -> dict | None:
+    """The listed names under `domain` (reverseip.py), or None when the
+    feature is off. A read of the local database."""
+    if not reverse_ip_manager.enabled:
+        return None
+    return reverse_ip_manager.names_under(domain)
+
+
 def as_info_for_asn(asn: int, full: bool = False, detail: bool = False) -> dict | None:
     """The AS card for AS `asn` (asinfo.py), with `full` its announced
     prefixes, or None when the feature is off, special-purpose numbers
@@ -857,7 +879,9 @@ async def abuse_report(ip: str) -> dict:
 # against the lists in memory, and for an address looked up directly, against
 # AbuseIPDB too; "security" is a domain's DNS security posture (dnssecurity.py),
 # checked beside its sweep; "asinfo" is the address's route and AS, read from
-# the local AS database (asinfo.py).
+# the local AS database (asinfo.py); "reverseip" is the listed domain names that
+# resolve to an address looked up directly, from the local reverse IP database
+# (reverseip.py).
 LEGS = frozenset(
     {
         "resolve",
@@ -869,6 +893,7 @@ LEGS = frozenset(
         "reputation",
         "security",
         "asinfo",
+        "reverseip",
     }
 )
 
@@ -1136,6 +1161,14 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
         if resolved_ip and "asinfo" in want
         else None
     )
+    # Only for an address given as an IP, like AbuseIPDB: a domain's resolved
+    # address is shared with every other name on it, and the names listed for
+    # it are a question about the address, not about the domain.
+    reverse_ip = (
+        address_reverse_ip(resolved_ip)
+        if kind in ("ipv4", "ipv6") and resolved_ip and "reverseip" in want
+        else None
+    )
 
     # SPF and DMARC are graded from the sweep, so only when the sweep ran.
     dns_security = (
@@ -1156,4 +1189,5 @@ async def _run_legs(target: str, kind: str, want: frozenset[str]) -> dict:
         "reputation": reputation,
         "dns_security": dns_security,
         "as_info": as_info,
+        "reverse_ip": reverse_ip,
     }
