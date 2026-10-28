@@ -436,6 +436,7 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # REVERSEIP_ENABLED=true
 # REVERSEIP_DIR=./data/reverseip
 # REVERSEIP_SOURCES=tranco,umbrella,radar,majestic,crux:global,crux:kr
+# REVERSEIP_BASE_URL=https://object.openintel.nl/openintel-public/
 # REVERSEIP_MAX_AGE_HOURS=96         # older lists are "unknown" + degraded
 # REVERSEIP_CHECK_INTERVAL_SECONDS=3600
 # REVERSEIP_LIST_LIMIT=100           # names the page lists
@@ -712,7 +713,7 @@ which the text block skips. It has no counterpart in the MCP tools, whose
 only while AS information is on (`ASINFO_ENABLED`). With it off they are left
 out, where a `-` would read as "not announced", and read `-` when asked for by
 name.
-`reverse_ip_total`, `reverse_ip_names` (the first 20, comma-separated),
+`reverse_ip_total`, `reverse_ip_names` (the first `REVERSEIP_MCP_LIMIT`, 20, comma-separated),
 `reverse_ip_block_addresses` and `reverse_ip_block_names` are asked for by name only,
 for an IP target, and add `reverse_ip_license`, `reverse_ip_attribution` and
 `reverse_ip_terms_url` to the answer, in text and in JSON alike.

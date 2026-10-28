@@ -1595,8 +1595,9 @@ they are sparse files of 274 MB). Reads: 121.53.204.130 has 24,781 names in its
 block of no listed address; `names_under("coupang.com")` finds 64 in 0.07 ms. The
 six-list figures are an estimate, not a measurement: a database of about 660 MB and
 a directory of about 860 MB with the copies (about 1.5 GB while a new file sits
-beside the old one), and the Korea list alone built in 3.8 s with a peak RSS of
-305 MB. Measure all six after 2026-10-29 UTC and replace this paragraph.
+beside the old one). Today's first run, which built the Korea list alone (the
+other lists had failed), took 36.97 s wall, mostly download time, with a 279 MB
+maximum resident set size and a 37.2 MB database. Measure all six after 2026-10-29 UTC and replace this paragraph.
 
 **Tests.** `tests/conftest.py` sets `REVERSEIP_ENABLED=false`, so the scheduler
 downloads nothing and no IP lookup grows a `reverse_ip` key; a test of the
