@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 import config
 import lookup
 import main
+import mcp_server
 from reverseip import ReverseIpManager
 from reverseip_fixtures import NOW, build_manager
 
@@ -230,3 +231,132 @@ def test_no_panel_on_a_domain_or_the_self_page(reverseip_enabled, legs):
 
 def test_no_panel_while_disabled(legs):
     assert 'id="acc-reverseip"' not in client.get(f"/{LISTED_IP}", headers=BROWSER).text
+
+
+# --- MCP lookup and ?fields= -------------------------------------------------
+
+JSON = {"user-agent": "curl/8", "accept": "application/json"}
+LICENCE = [
+    "CC BY-NC-SA 4.0",
+    config.OPENINTEL_ATTRIBUTION,
+    config.REVERSEIP_TERMS_URL,
+]
+
+
+async def test_mcp_lookup_carries_compact_reverse_ip(reverseip_enabled, legs):
+    result = await mcp_server.lookup(LISTED_IP)
+    rip = result["reverse_ip"]
+    assert rip["total"] == 4 and rip["names"][0] == "example.com"
+    assert rip["license"] == "CC BY-NC-SA 4.0"
+    assert rip["attribution"] == config.OPENINTEL_ATTRIBUTION
+    assert rip["terms_url"] == config.REVERSEIP_TERMS_URL
+    assert set(rip) == {
+        "total",
+        "names",
+        "truncated",
+        "block",
+        "as_of",
+        "unavailable",
+        "coverage",
+        "license",
+        "attribution",
+        "terms_url",
+    }
+
+
+async def test_mcp_lookup_has_no_reverse_ip_for_a_domain_or_when_disabled(
+    reverseip_enabled, legs
+):
+    assert "reverse_ip" not in await mcp_server.lookup(DOMAIN)
+
+
+def test_compact_reverse_ip_cuts_at_the_limit():
+    info = {"total": 25, "names": [f"n{i}.test" for i in range(25)], "block": None}
+    out = mcp_server.compact_reverse_ip(info, limit=20)
+    assert len(out["names"]) == 20 and out["truncated"] is True
+    whole = mcp_server.compact_reverse_ip({**info, "total": 3, "names": ["a"] * 3})
+    assert whole["truncated"] is False
+    assert mcp_server.compact_reverse_ip(None) is None
+
+
+def test_compact_reverse_ip_unknown_is_null_not_empty():
+    out = mcp_server.compact_reverse_ip(
+        {
+            "total": None,
+            "names": None,
+            "unavailable": [{"source": "tranco", "label": "Tranco", "reason": "old"}],
+        }
+    )
+    assert out["total"] is None and out["names"] is None and out["truncated"] is None
+    assert out["unavailable"] == [{"source": "Tranco", "reason": "old"}]
+
+
+def test_the_lookup_description_says_empty_is_not_none():
+    doc = " ".join(mcp_server.lookup.__doc__.split())
+    assert "not no domains" in doc
+    assert "Repeat `attribution`, `license` and `terms_url`" in doc
+
+
+def test_fields_bring_the_licence_lines(reverseip_enabled, legs):
+    text = client.get(f"/{LISTED_IP}?fields=reverse_ip_total,ip&format=text").text
+    assert text.splitlines() == ["4", LISTED_IP, *LICENCE]
+
+
+def test_fields_json_carries_them_too(reverseip_enabled, legs):
+    body = client.get(
+        f"/{LISTED_IP}?fields=reverse_ip_block_names", headers=JSON
+    ).json()
+    assert body == {
+        "reverse_ip_block_names": 7,
+        "reverse_ip_license": LICENCE[0],
+        "reverse_ip_attribution": LICENCE[1],
+        "reverse_ip_terms_url": LICENCE[2],
+    }
+
+
+def test_fields_names_are_comma_joined(reverseip_enabled, legs):
+    value = client.get(f"/{LISTED_IP}?fields=reverse_ip_names&format=text").text
+    assert value.splitlines()[0].startswith("example.com,")
+
+
+def test_unknown_is_a_question_mark_with_the_reason(
+    reverseip_enabled, legs, monkeypatch
+):
+    monkeypatch.setattr(reverseip_enabled, "_availability", lambda *a: ({}, {}))
+    lines = client.get(
+        f"/{LISTED_IP}?fields=reverse_ip_total,reverse_ip_names&format=text"
+    ).text.splitlines()
+    assert lines[:2] == ["?", "?"]
+    assert lines[2:] == LICENCE
+
+
+def test_not_in_the_text_block(reverseip_enabled, legs):
+    assert "reverse_ip" not in client.get(f"/{LISTED_IP}?format=text").text
+
+
+def test_a_domain_reads_dash(reverseip_enabled, legs):
+    fields = ",".join(
+        ["reverse_ip_total", "reverse_ip_license", "reverse_ip_terms_url"]
+    )
+    text = client.get(f"/{DOMAIN}?fields={fields}&format=text").text
+    assert text.splitlines()[:3] == ["-", "-", "-"]
+
+
+def test_the_self_route_reads_dash(reverseip_enabled, legs):
+    text = client.get(
+        "/?fields=reverse_ip_total&format=text", headers={"x-real-ip": LISTED_IP}
+    ).text
+    assert set(text.split()) == {"-"}
+
+
+def test_asking_for_a_licence_field_alone_adds_nothing():
+    import textfmt
+
+    assert textfmt.parse_fields(["reverse_ip_license"]) == ["reverse_ip_license"]
+    assert textfmt.parse_fields(["reverse_ip_names,ip,reverse_ip_license"]) == [
+        "reverse_ip_names",
+        "ip",
+        "reverse_ip_license",
+        "reverse_ip_attribution",
+        "reverse_ip_terms_url",
+    ]

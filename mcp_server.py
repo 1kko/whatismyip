@@ -37,6 +37,7 @@ from config import (
     MCP_SERVER_TITLE,
     MCP_WEBSITE_URL,
     RDAP_TIMEOUT_SECONDS,
+    REVERSEIP_MCP_LIMIT,
     SUBDOMAIN_ENABLED,
     SUBDOMAIN_MCP_DEFAULT_LIMIT,
     SUBDOMAIN_MCP_MAX_LIMIT,
@@ -424,6 +425,35 @@ def _compact_list(entry: dict | None, full: bool) -> dict | None:
     return out
 
 
+def compact_reverse_ip(
+    info: dict | None, limit: int = REVERSEIP_MCP_LIMIT
+) -> dict | None:
+    """The reverse IP answer for an LLM context: the first `limit` names
+    (`truncated` says when there are more), the /24 or /48 block's counts and
+    the licence lines that travel with every use of the names. `total`, `names`
+    and `truncated` are null when the data could not be read; `unavailable`
+    says why. 0 is "no name on these lists", never "no domains"."""
+    if not info:
+        return None
+    total = info.get("total")
+    names = None if total is None else list(info.get("names") or [])[:limit]
+    return {
+        "total": total,
+        "names": names,
+        "truncated": None if names is None else total > len(names),
+        "block": info.get("block"),
+        "as_of": info.get("as_of"),
+        "unavailable": [
+            {"source": item.get("label"), "reason": item.get("reason")}
+            for item in info.get("unavailable") or []
+        ],
+        "coverage": info.get("coverage"),
+        "license": info.get("license"),
+        "attribution": info.get("attribution"),
+        "terms_url": info.get("terms_url"),
+    }
+
+
 def compact_as_info(info: dict | None, full: bool = False) -> dict | None:
     """asinfo's card for an LLM context: the numbers and names, without the
     dataset dates or the long lists (`full` keeps the downstream, peer and
@@ -600,6 +630,14 @@ async def lookup(target: str) -> dict[str, Any]:
     was found for the address, and the card is then its route, `announced`,
     `source` and `unavailable` alone. An AS number is not a target here: use
     `as_info`.
+
+    `reverse_ip` (IP targets) lists domain names from public top lists (Tranco,
+    Umbrella, Radar, Majestic, Chrome UX Report) that resolved to this address
+    on `as_of`, most popular first, with `total` and the counts for the
+    address's /24 or /48 in `block`. Most addresses carry none: `total` 0 means
+    no name on these lists, not no domains, and null means the data could not
+    be read (see `unavailable`). Repeat `attribution`, `license` and
+    `terms_url` wherever you use these names.
     """
     try:
         data = await _bounded_gather(target)
@@ -636,6 +674,8 @@ async def lookup(target: str) -> dict[str, Any]:
         result["dns_security"] = compact_dns_security(data["dns_security"])
     if data.get("as_info"):
         result["as_info"] = compact_as_info(data["as_info"])
+    if data.get("reverse_ip"):
+        result["reverse_ip"] = compact_reverse_ip(data["reverse_ip"])
     return result
 
 
