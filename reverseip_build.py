@@ -35,14 +35,17 @@ import reverseip
 
 logger = logging.getLogger(__name__)
 
-WANTED_COLUMNS = (
+REQUIRED_COLUMNS = (
     "query_name",
     "response_type",
     "section",
     "ip4_address",
     "ip6_address",
-    "rank",
 )
+# Read where a file has them: on 2026-10-28 the Tranco, Umbrella, Radar and
+# Majestic files had no `rank`, and CrUX's had it.
+OPTIONAL_COLUMNS = ("rank",)
+WANTED_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 # A name on a list that gives no position sorts after every ranked one.
 NO_RANK = 2**31 - 1
 BATCH_ROWS = 65536
@@ -90,12 +93,20 @@ def _rank(text: str | None) -> int:
 def read_pairs(path: str) -> Iterator[tuple[str, bytes, int]]:
     """`(name, packed address, rank)` for each answer row of a Parquet file.
 
-    Only WANTED_COLUMNS are read: a local copy holds real bytes for no others.
-    Batches are filtered in Arrow before any row becomes a Python object."""
+    Only REQUIRED_COLUMNS and the OPTIONAL_COLUMNS the file's schema has are
+    read: a local copy holds real bytes for no others. A file without `rank`
+    gives every pair NO_RANK. Batches are filtered in Arrow before any row
+    becomes a Python object."""
     reader = pq.ParquetFile(path)
-    for batch in reader.iter_batches(
-        batch_size=BATCH_ROWS, columns=list(WANTED_COLUMNS)
-    ):
+    present = set(reader.schema_arrow.names)
+    has_rank = "rank" in present
+    if not has_rank:
+        logger.info(
+            "reverse IP: %s has no rank column; its pairs are read unranked",
+            os.path.basename(path),
+        )
+    columns = [*REQUIRED_COLUMNS, *(c for c in OPTIONAL_COLUMNS if c in present)]
+    for batch in reader.iter_batches(batch_size=BATCH_ROWS, columns=columns):
         is_a = pc.and_(
             pc.equal(batch["response_type"], "A"), pc.is_valid(batch["ip4_address"])
         )
@@ -105,12 +116,13 @@ def read_pairs(path: str) -> Iterator[tuple[str, bytes, int]]:
         )
         keep = pc.and_(pc.equal(batch["section"], "ans"), pc.or_(is_a, is_aaaa))
         kept = batch.filter(pc.fill_null(keep, False))
+        ranks = kept["rank"].to_pylist() if has_rank else [None] * kept.num_rows
         for name, kind, ip4, ip6, rank in zip(
             kept["query_name"].to_pylist(),
             kept["response_type"].to_pylist(),
             kept["ip4_address"].to_pylist(),
             kept["ip6_address"].to_pylist(),
-            kept["rank"].to_pylist(),
+            ranks,
         ):
             if not name:
                 continue
@@ -459,10 +471,15 @@ def _fetch_range(
 
 
 def _chunk_ranges(
-    url: str, path: str, columns: Sequence[str], footer: int
+    url: str,
+    path: str,
+    columns: Sequence[str],
+    optional: Sequence[str],
+    footer: int,
 ) -> list[tuple[int, int]]:
     """The byte range of each wanted column chunk in every row group, read
-    from the footer already written at its offset in `path`."""
+    from the footer already written at its offset in `path`: every one of
+    `columns`, which must all be there, and those of `optional` that are."""
     try:
         metadata = pq.ParquetFile(path).metadata
     except pa.ArrowException as exc:
@@ -471,12 +488,13 @@ def _chunk_ranges(
     missing = [name for name in columns if name not in present]
     if missing:
         raise FetchError(f"{url}: no column {', '.join(missing)}")
+    wanted = {*columns, *(name for name in optional if name in present)}
     ranges = []
     for group in range(metadata.num_row_groups):
         row_group = metadata.row_group(group)
         for i in range(row_group.num_columns):
             chunk = row_group.column(i)
-            if chunk.path_in_schema not in columns:
+            if chunk.path_in_schema not in wanted:
                 continue
             # A chunk starts at its dictionary page when it has one. Some
             # writers leave the offset 0 or None without one, so trust it only
@@ -510,17 +528,20 @@ def fetch_columns(
     size: int,
     dest: str,
     transport: Transport,
-    columns: Sequence[str] = WANTED_COLUMNS,
+    columns: Sequence[str] = REQUIRED_COLUMNS,
     tail: int = 65536,
+    optional: Sequence[str] = OPTIONAL_COLUMNS,
 ) -> int:
     """Copy the Parquet object at `url` (`size` bytes, from its listing) to
-    `dest` as a sparse file of the same size that holds only the footer and
-    the `columns`' chunks; the rest reads as zeros. Returns the bytes fetched.
+    `dest` as a sparse file of the same size that holds only the footer, the
+    `columns`' chunks and the chunks of those `optional` columns the schema
+    has; the rest reads as zeros. Returns the bytes fetched.
 
     The last `tail` bytes come first, and the rest of the footer when it is
-    longer. Any answer that is not exactly the range asked for, or a wanted
-    column missing from the schema, raises FetchError. The copy is written to
-    `dest`.tmp and swapped in only whole, so `dest` is absent or as it was."""
+    longer. Any answer that is not exactly the range asked for, or one of
+    `columns` missing from the schema, raises FetchError; a missing optional
+    column is skipped. The copy is written to `dest`.tmp and swapped in only
+    whole, so `dest` is absent or as it was."""
     if size < 2 * len(_MAGIC) + 4:
         raise FetchError(f"{url}: {size} bytes is too small for Parquet")
     tmp = dest + ".tmp"
@@ -549,7 +570,8 @@ def fetch_columns(
                 put(footer, covered - 1)
                 covered = footer
             handle.flush()
-            for first, last in _merged(_chunk_ranges(url, tmp, columns, footer)):
+            ranges = _chunk_ranges(url, tmp, columns, optional, footer)
+            for first, last in _merged(ranges):
                 if first < covered:
                     put(first, min(last, covered - 1))
         os.replace(tmp, dest)

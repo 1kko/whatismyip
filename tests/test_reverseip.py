@@ -71,6 +71,9 @@ class TestSources:
         assert sources[1].label == "Cisco Umbrella"
         assert sources[5].label == "Chrome UX Report (KR)"
         assert sources[5].path == "source=crux/country-code=kr"
+        # the bucket keeps global CrUX under a country code of its own
+        assert sources[4].label == "Chrome UX Report (global)"
+        assert sources[4].path == "source=crux/country-code=global"
         assert sources[0].path == "source=tranco"
 
     def test_an_unknown_source_is_refused(self):

@@ -3,6 +3,7 @@ import email.message
 import io
 import ipaddress
 import json
+import logging
 import os
 import sqlite3
 import urllib.error
@@ -42,6 +43,8 @@ from reverseip_fixtures import (
 
 TRANCO = reverseip.parse_sources("tranco")
 BOTH = reverseip.parse_sources("tranco,umbrella")
+# The columns a file must have; `rank` is read only where it is there.
+REQUIRED = ["query_name", "response_type", "section", "ip4_address", "ip6_address"]
 
 
 def _build(tmp_path, copies, sources):
@@ -250,6 +253,62 @@ def test_read_pairs_reads_only_the_wanted_columns(tmp_path):
     ) in pairs
 
 
+def test_a_file_without_rank_reads_every_pair_unranked(tmp_path, monkeypatch, caplog):
+    write_parquet(tmp_path / "ranked.parquet", ROWS)
+    write_parquet(tmp_path / "tranco-0.parquet", ROWS, with_rank=False)
+    caplog.set_level(logging.INFO, logger="reverseip_build")
+    ranked = list(read_pairs(str(tmp_path / "ranked.parquet")))
+    seen = []
+    real = pq.ParquetFile.iter_batches
+
+    def spy(self, *args, **kwargs):
+        seen.append(kwargs.get("columns"))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", spy)
+    pairs = list(read_pairs(str(tmp_path / "tranco-0.parquet")))
+    # only columns the file has, so only chunks a copy holds, are read
+    assert seen == [REQUIRED]
+    assert pairs == [(name, ip, NO_RANK) for name, ip, _ in ranked]
+    # one line for the file without rank, none for the one with it
+    lines = [r for r in caplog.records if r.name == "reverseip_build"]
+    assert [r.levelno for r in lines] == [logging.INFO]
+    assert "tranco-0.parquet" in lines[0].getMessage()
+    assert "no rank column" in lines[0].getMessage()
+    con = _build(
+        tmp_path, {"tranco": {"date": DAY, "files": ["tranco-0.parquet"]}}, TRANCO
+    )
+    assert con.execute("SELECT date, pairs, error FROM source_meta").fetchall() == [
+        (DAY, len(pairs), None)
+    ]
+    assert con.execute("SELECT DISTINCT rank FROM names").fetchall() == [(NO_RANK,)]
+
+
+def test_names_only_a_list_without_rank_holds_sort_after_the_ranked(tmp_path):
+    umbrella = [
+        Row("example.com.", "A", "A", "ans", "93.184.215.14", None, None),
+        Row("aaa.example.com.", "A", "A", "ans", "93.184.215.14", None, None),
+    ]
+    write_parquet(tmp_path / "tranco-0.parquet", ROWS)
+    write_parquet(tmp_path / "umbrella-0.parquet", umbrella, with_rank=False)
+    copies = {
+        "tranco": {"date": DAY, "files": ["tranco-0.parquet"]},
+        "umbrella": {"date": DAY, "files": ["umbrella-0.parquet"]},
+    }
+    con = _build(tmp_path, copies, BOTH)
+    manager = reverseip.ReverseIpManager(
+        str(tmp_path), BOTH, enabled=True, clock=lambda: NOW
+    )
+    names = manager.for_address("93.184.215.14")["names"]
+    # example.com keeps Tranco's position though Umbrella lists it unranked
+    assert names[:3] == ["example.com", "shop.example.org", "upper.example.net"]
+    assert set(names[3:]) == {"norank.example.com", "aaa.example.com"}
+    assert con.execute(
+        "SELECT name, rank, sources FROM names"
+        " WHERE name IN ('example.com', 'aaa.example.com') ORDER BY name"
+    ).fetchall() == [("aaa.example.com", NO_RANK, 0b10), ("example.com", 5, 0b11)]
+
+
 def test_a_sqlite_failure_is_the_builds_own_and_keeps_the_previous_file(
     tmp_path, monkeypatch
 ):
@@ -327,15 +386,27 @@ def test_every_part_of_the_newest_day_is_listed():
     assert part.keys == ((key("tranco", "2026-10-20"), 20), (second, 30))
 
 
-def test_crux_countries_list_under_country_code():
+def test_crux_lists_under_country_code():
+    # global CrUX as the bucket lays it out (a listing of 2026-10-22): a
+    # country code of its own, beside kr
+    global_key = (
+        "fdns/basis=toplist/source=crux/country-code=global/year=2026/month=10"
+        "/day=21/part-00000-x.c000.gz.parquet"
+    )
     bucket = FakeBucket()
     bucket.add(key("crux:kr", "2026-10-20"), b"k" * 8)
-    bucket.add(key("crux:global", "2026-10-21"), b"g" * 8)
+    bucket.add(global_key, b"g" * 8)
     part = newest_partition(BASE, src("crux:kr"), date(2026, 10, 21), bucket)
     assert part.keys == ((key("crux:kr", "2026-10-20"), 8),)
     (url, _), *_ = bucket.requests
     assert url.startswith(BASE + "?list-type=2&prefix=fdns/basis=toplist/")
     assert "source=crux/country-code=kr/year=2026/month=10/" in url
+    sent = len(bucket.requests)
+    part = newest_partition(BASE, src("crux:global"), date(2026, 10, 21), bucket)
+    assert part is not None and part.date == "2026-10-21"
+    assert part.keys == ((global_key, 8),)
+    (url, _), *_ = bucket.requests[sent:]
+    assert "source=crux/country-code=global/year=2026/month=10/" in url
 
 
 def test_a_truncated_listing_is_followed():
@@ -358,9 +429,11 @@ def test_a_listing_that_is_not_200_raises():
         newest_partition(BASE, src("tranco"), date(2026, 10, 21), unavailable)
 
 
-def _wide(tmp_path, rows=ROWS, pad_columns=0):
+def _wide(tmp_path, rows=ROWS, pad_columns=0, with_rank=True):
     """A source file in the bucket as `k`: its bytes and the bucket."""
-    write_parquet(tmp_path / "src.parquet", rows, pad_columns=pad_columns)
+    write_parquet(
+        tmp_path / "src.parquet", rows, pad_columns=pad_columns, with_rank=with_rank
+    )
     data = (tmp_path / "src.parquet").read_bytes()
     bucket = FakeBucket()
     bucket.add("k", data)
@@ -407,6 +480,34 @@ def test_only_the_wanted_column_chunks_are_fetched(tmp_path):
     assert all(nxt[0] > prev[1] + 1 for prev, nxt in zip(chunks, chunks[1:]))
     assert fetched == sum(last - first + 1 for first, last in [tail, *chunks])
     assert os.path.getsize(tmp_path / "copy.parquet") == len(data)
+
+
+def _joined(spans):
+    """The spans with adjacent ones joined, as one range request asks them."""
+    joined = []
+    for first, last in sorted(spans):
+        if joined and first == joined[-1][1] + 1:
+            joined[-1] = (joined[-1][0], last)
+        else:
+            joined.append((first, last))
+    return joined
+
+
+def test_a_file_without_rank_is_fetched_without_it(tmp_path):
+    # the pad columns put the required chunks well ahead of the 64 KiB tail
+    data, bucket = _wide(tmp_path, ROWS * 40, pad_columns=20, with_rank=False)
+    src_path = tmp_path / "src.parquet"
+    assert "rank" not in pq.ParquetFile(src_path).schema_arrow.names
+    copy = tmp_path / "copy.parquet"
+    fetched = fetch_columns(BASE + "k", len(data), str(copy), bucket)
+    tail, *chunks = _requested(bucket)
+    assert tail == (len(data) - 65536, len(data) - 1)
+    # past the tail, the required columns' chunks and nothing else
+    assert chunks == _joined(_chunks(src_path, REQUIRED))
+    assert fetched == sum(last - first + 1 for first, last in [tail, *chunks])
+    assert os.path.getsize(copy) == len(data)
+    assert sorted(read_pairs(str(copy))) == sorted(read_pairs(str(src_path)))
+    assert {rank for *_, rank in read_pairs(str(copy))} == {NO_RANK}
 
 
 def test_a_file_inside_the_tail_is_one_request(tmp_path):
@@ -480,14 +581,16 @@ def test_a_failure_after_the_footer_keeps_the_previous_copy(tmp_path):
     assert sorted(os.listdir(tmp_path)) == ["copy.parquet", "src.parquet"]
 
 
-def test_a_missing_column_is_refused(tmp_path):
+@pytest.mark.parametrize("column", REQUIRED)
+def test_a_missing_required_column_is_refused(tmp_path, column):
     write_parquet(tmp_path / "full.parquet", ROWS)
-    table = pq.read_table(tmp_path / "full.parquet").drop_columns(["rank"])
+    table = pq.read_table(tmp_path / "full.parquet").drop_columns([column])
     pq.write_table(table, tmp_path / "src.parquet")
     data = (tmp_path / "src.parquet").read_bytes()
     bucket = FakeBucket()
     bucket.add("k", data)
-    _refused(tmp_path, bucket, len(data), "rank")
+    _refused(tmp_path, bucket, len(data), f"no column {column}$")
+    # neither the copy nor its .tmp is left behind
     assert sorted(os.listdir(tmp_path)) == ["full.parquet", "src.parquet"]
 
 
@@ -746,6 +849,19 @@ def test_a_two_part_day_is_built_whole(tmp_path):
     names = {name for (name,) in con.execute("SELECT name FROM names")}
     con.close()
     assert {"example.com", "a.b.example.com"} <= names  # one from each part
+
+
+def test_a_list_without_rank_downloads_and_builds(tmp_path):
+    # the newest Tranco, Umbrella, Radar and Majestic files have no rank
+    bucket = FakeBucket()
+    bucket.add(key("tranco", DAY), parquet_bytes(ROWS, with_rank=False))
+    summary = _refresh(tmp_path, bucket, Clock(NOW))
+    assert summary == {
+        "built": True,
+        "sources": {"tranco": {"state": "downloaded", "date": DAY, "error": None}},
+    }
+    date_, pairs, error = _source_meta(tmp_path)["tranco"]
+    assert date_ == DAY and pairs > 0 and error is None
 
 
 def test_a_day_that_fails_midway_keeps_the_whole_previous_day(tmp_path):

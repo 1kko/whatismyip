@@ -56,7 +56,9 @@ _COUNTRY = re.compile(r"[a-z]{2}")
 class Source:
     id: str
     label: str
-    # The bucket path segment: `source=tranco` or `source=crux/country-code=kr`.
+    # The bucket path segment: `source=tranco`, or `source=crux/country-code=kr`
+    # and `source=crux/country-code=global` (CrUX's global list is a country
+    # code of its own in the bucket).
     path: str
 
 
@@ -66,7 +68,11 @@ def _source(source_id: str) -> Source:
     if source_id.startswith(f"{_CRUX}:"):
         scope = source_id.split(":", 1)[1]
         if scope == "global":
-            return Source(source_id, "Chrome UX Report (global)", "source=crux")
+            return Source(
+                source_id,
+                "Chrome UX Report (global)",
+                "source=crux/country-code=global",
+            )
         if _COUNTRY.fullmatch(scope):
             return Source(
                 source_id,

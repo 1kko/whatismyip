@@ -71,11 +71,12 @@ ROWS: list[Row] = [
 ]
 
 
-def write_parquet(path, rows, pad_columns: int = 0) -> None:
-    """The six columns the build reads plus the ones it must not, in one row
-    group, gzip-compressed, to `path` (a file name or a binary file).
-    `pad_columns` adds string columns of its own, a distinct digest a row, so
-    their chunks do not compress away."""
+def write_parquet(path, rows, pad_columns: int = 0, with_rank: bool = True) -> None:
+    """The columns the build reads (five, and `rank`) plus the ones it must
+    not, in one row group, gzip-compressed, to `path` (a file name or a binary
+    file). `pad_columns` adds string columns of its own, a distinct digest a
+    row, so their chunks do not compress away. `with_rank=False` leaves `rank`
+    out, as the 2026-10-28 Tranco, Umbrella, Radar and Majestic files do."""
     columns = {
         "query_name": [r.query_name for r in rows],
         "query_type": [r.query_type for r in rows],
@@ -86,6 +87,8 @@ def write_parquet(path, rows, pad_columns: int = 0) -> None:
         "rank": [r.rank for r in rows],
         "cname_name": [None] * len(rows),
     }
+    if not with_rank:
+        del columns["rank"]
     arrays = {k: pa.array(v, type=pa.string()) for k, v in columns.items()}
     arrays["rtt"] = pa.array([0.5] * len(rows), type=pa.float64())
     for i in range(pad_columns):
@@ -101,10 +104,10 @@ def write_parquet(path, rows, pad_columns: int = 0) -> None:
     )
 
 
-def parquet_bytes(rows, pad_columns: int = 0) -> bytes:
+def parquet_bytes(rows, pad_columns: int = 0, with_rank: bool = True) -> bytes:
     """What write_parquet writes, as bytes for a bucket object."""
     buffer = io.BytesIO()
-    write_parquet(buffer, rows, pad_columns)
+    write_parquet(buffer, rows, pad_columns, with_rank)
     return buffer.getvalue()
 
 
