@@ -2,17 +2,21 @@
 the columns the build needs, and build one SQLite file from those copies. The
 child is the only place pyarrow is imported.
 
-Imports `config`, `reverseip`, pyarrow and the standard library. Nothing in
-the web process imports it."""
+Run as `python -m reverseip_build '<json>'` by `reverseip.ReverseIpManager`
+(see `main`). Imports `config`, `reverseip`, pyarrow and the standard library.
+Nothing in the web process imports it."""
 
+import contextlib
 import datetime
 import html
 import http.client
 import ipaddress
+import json
 import logging
 import os
 import re
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -553,3 +557,256 @@ def fetch_columns(
         if os.path.exists(tmp):
             os.remove(tmp)
     return fetched
+
+
+def _copies_path(directory: str) -> str:
+    return os.path.join(directory, reverseip.COPIES_NAME)
+
+
+def _is_copy(directory: str, record) -> bool:
+    """A record of copies.json that names a date and files that are there."""
+    if not isinstance(record, dict) or not isinstance(record.get("date"), str):
+        return False
+    files = record.get("files")
+    return (
+        isinstance(files, list)
+        and bool(files)
+        and all(
+            isinstance(name, str)
+            and os.path.basename(name) == name
+            and os.path.isfile(os.path.join(directory, name))
+            for name in files
+        )
+    )
+
+
+def _read_copies(directory: str) -> dict[str, dict]:
+    """Each source's copy, from copies.json: {date, files, fetched_at, bytes}.
+    One that is malformed or whose files are gone is left out, so its source
+    has no copy."""
+    try:
+        with open(_copies_path(directory), encoding="utf-8") as handle:
+            records = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        logger.exception(
+            "reverse IP: ignoring the unreadable %s", reverseip.COPIES_NAME
+        )
+        return {}
+    if not isinstance(records, dict):
+        return {}
+    return {
+        source_id: record
+        for source_id, record in records.items()
+        if _is_copy(directory, record)
+    }
+
+
+def _write_copies(directory: str, copies: dict[str, dict]) -> None:
+    path = _copies_path(directory)
+    with open(path + ".tmp", "w", encoding="utf-8") as handle:
+        json.dump(copies, handle, indent=1, sort_keys=True)
+    os.replace(path + ".tmp", path)
+
+
+def _remove(path: str) -> None:
+    with contextlib.suppress(OSError):
+        os.remove(path)
+
+
+def _utc_date(t: float) -> datetime.date:
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).date()
+
+
+def _requested_today(stamp: str, today: datetime.date) -> bool:
+    """Whether the stamp says this UTC day's download was asked for already.
+    One dated after today, under a clock set back, counts too."""
+    try:
+        return _utc_date(os.path.getmtime(stamp)) >= today
+    except OSError:
+        return False
+
+
+def _download(
+    directory: str,
+    stem: str,
+    partition: Partition,
+    base_url: str,
+    transport: Transport,
+) -> tuple[list[str], int]:
+    """Every part of the partition, each to a file named for its day, so the
+    previous copy's files stay as they are until the whole day has arrived.
+    Returns the file names and the bytes fetched. On a failure the parts that
+    did arrive are removed and the error raised."""
+    files: list[str] = []
+    fetched = 0
+    try:
+        for part, (object_key, size) in enumerate(partition.keys):
+            name = f"{stem}-{partition.date}-{part}.parquet"
+            dest = os.path.join(directory, name)
+            # The base URL ends with "/", and a listed key never starts with one.
+            fetched += fetch_columns(base_url + object_key, size, dest, transport)
+            files.append(name)
+    except BaseException:
+        for name in files:
+            _remove(os.path.join(directory, name))
+        raise
+    return files, fetched
+
+
+def _remove_unrecorded(directory: str, stem: str, files: list[str]) -> None:
+    """The source's day files other than `files`: the previous copy's."""
+    day_file = re.compile(re.escape(stem) + r"-\d{4}-\d{2}-\d{2}-\d+\.parquet")
+    for name in os.listdir(directory):
+        if day_file.fullmatch(name) and name not in files:
+            _remove(os.path.join(directory, name))
+
+
+def _refresh_source(
+    directory: str,
+    source: reverseip.Source,
+    base_url: str,
+    transport: Transport,
+    now: Callable[[], float],
+    copies: dict[str, dict],
+) -> dict:
+    """Bring one source's copy up to date; its entry in the summary. Records
+    a new copy in `copies` and copies.json."""
+    stem = reverseip.file_stem(source.id)
+    stamp = os.path.join(directory, f"{stem}.requested")
+    copy = copies.get(source.id)
+    have = copy["date"] if copy else None
+    idle = {"state": "current" if copy else "waiting", "date": have, "error": None}
+    t = now()
+    today = _utc_date(t)
+    if _requested_today(stamp, today):
+        return idle
+    try:
+        partition = newest_partition(base_url, source, today, transport)
+    except (FetchError, OSError) as exc:
+        logger.warning("reverse IP: cannot list %s: %s", source.id, exc)
+        return {"state": "failed", "date": have, "error": str(exc)}
+    if partition is None or (have is not None and partition.date <= have):
+        return idle
+    # The day's one request, stamped before anything is sent: a failure and a
+    # restart count as much as a download that worked.
+    with open(stamp, "w", encoding="utf-8"):
+        pass
+    os.utime(stamp, (t, t))
+    try:
+        files, fetched = _download(directory, stem, partition, base_url, transport)
+    except (FetchError, OSError) as exc:
+        logger.warning(
+            "reverse IP: %s %s not downloaded, keeping %s: %s",
+            source.id,
+            partition.date,
+            have or "no copy",
+            exc,
+        )
+        return {"state": "failed", "date": have, "error": str(exc)}
+    copies[source.id] = {
+        "date": partition.date,
+        "files": files,
+        "fetched_at": t,
+        "bytes": fetched,
+    }
+    _write_copies(directory, copies)
+    _remove_unrecorded(directory, stem, files)
+    logger.info(
+        "reverse IP: %s %s downloaded, %d bytes in %d part(s)",
+        source.id,
+        partition.date,
+        fetched,
+        len(files),
+    )
+    return {"state": "downloaded", "date": partition.date, "error": None}
+
+
+def _built_dates(path: str) -> dict[str, str | None] | None:
+    """The copy date each source in the database was built from, or None when
+    the file is missing, does not open, or is from another release."""
+    uri = f"file:{urllib.parse.quote(os.path.abspath(path))}?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            (version,) = con.execute("PRAGMA user_version").fetchone()
+            if version != reverseip.SCHEMA_VERSION:
+                return None
+            return dict(con.execute("SELECT id, date FROM source_meta"))
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
+def refresh_sources(
+    directory: str,
+    sources: Sequence[reverseip.Source],
+    base_url: str,
+    transport: Transport,
+    now: Callable[[], float] = time.time,
+) -> dict:
+    """Download each source's newest day when due, then build the database
+    when it is behind the copies. The summary: {"built", "sources": {id:
+    {"state", "date", "error"}}}.
+
+    A source sends nothing at all when its `<stem>.requested` is dated this
+    UTC day: at most one download per source per UTC day, OpenINTEL's rule,
+    not a setting. Otherwise its bucket is listed, which is not a download
+    and writes no stamp, and the newest day is downloaded when it is newer
+    than the copy. The state is `downloaded` then, `current` when the copy is
+    as new as it gets (or this day's request is spent), `waiting` when there
+    is no copy yet, and `failed` (with the error) when the listing or the
+    download failed; the previous copy stays.
+
+    The database is built when a source was downloaded, when it is missing,
+    does not open or is from another release, or when the dates it was built
+    from are not the copies' (a build that failed, the sources changed). With
+    no copy of any source there is nothing to build. A build that fails is
+    logged and leaves the previous database."""
+    os.makedirs(directory, exist_ok=True)
+    copies = _read_copies(directory)
+    results = {
+        source.id: _refresh_source(directory, source, base_url, transport, now, copies)
+        for source in sources
+    }
+    built = False
+    if any(source.id in copies for source in sources):
+        wanted = {
+            source.id: copies.get(source.id, {}).get("date") for source in sources
+        }
+        path = os.path.join(directory, reverseip.DATABASE_NAME)
+        downloaded = any(r["state"] == "downloaded" for r in results.values())
+        if downloaded or _built_dates(path) != wanted:
+            try:
+                build_database(directory, copies, sources, now=now())
+                built = True
+                logger.info("reverse IP: database built")
+            except Exception:
+                logger.exception(
+                    "reverse IP: the build failed; keeping the previous database"
+                )
+    return {"built": built, "sources": results}
+
+
+def main(argv: list[str]) -> int:
+    """`python -m reverseip_build '{"directory", "sources", "base_url"}'`:
+    `sources` is REVERSEIP_SOURCES' comma-separated ids. Logs to stderr, and
+    prints nothing on stdout but the summary, as one JSON line."""
+    logging.basicConfig(
+        level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s"
+    )
+    settings = json.loads(argv[0])
+    summary = refresh_sources(
+        settings["directory"],
+        reverseip.parse_sources(settings["sources"]),
+        settings["base_url"],
+        urllib_transport,
+    )
+    print(json.dumps(summary), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

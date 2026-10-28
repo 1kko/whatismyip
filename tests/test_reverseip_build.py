@@ -1,11 +1,13 @@
+import calendar
 import email.message
 import io
 import ipaddress
+import json
 import os
 import sqlite3
 import urllib.error
 import urllib.response
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pyarrow.parquet as pq
 import pytest
@@ -22,9 +24,21 @@ from reverseip_build import (
     fetch_columns,
     newest_partition,
     read_pairs,
+    refresh_sources,
     urllib_transport,
 )
-from reverseip_fixtures import DAY, NOW, ROWS, FakeBucket, Row, write_parquet
+from reverseip_fixtures import (
+    DAY,
+    NOW,
+    ROWS,
+    Clock,
+    FakeBucket,
+    Row,
+    bucket_with,
+    key,
+    parquet_bytes,
+    write_parquet,
+)
 
 TRANCO = reverseip.parse_sources("tranco")
 BOTH = reverseip.parse_sources("tranco,umbrella")
@@ -258,14 +272,6 @@ BASE = "https://openintel.test/openintel-public/"
 def src(source_id):
     (source,) = reverseip.parse_sources(source_id)
     return source
-
-
-def key(source_id, day, part=0):
-    year, month, dd = day.split("-")
-    return (
-        f"fdns/basis=toplist/{src(source_id).path}/year={year}/month={month}"
-        f"/day={dd}/part-{part:05d}-x.c000.gz.parquet"
-    )
 
 
 def test_the_newest_day_of_this_month():
@@ -555,3 +561,316 @@ def test_urllib_transport_holds_the_body_to_the_hint(monkeypatch, stated, body, 
     monkeypatch.setattr(reverseip_build.urllib.request, "urlopen", urlopen)
     with pytest.raises(FetchError, match=match):
         urllib_transport(BASE + "k", {"x-max-bytes": "10"})
+
+
+# 2026-10-22T00:30:00Z: just past midnight, the UTC day after NOW's.
+NEXT_DAY = float(calendar.timegm((2026, 10, 22, 0, 30, 0)))
+NEWER = "2026-10-21"
+
+
+def ranged(bucket):
+    """The range requests the bucket was sent: the downloads, not listings."""
+    return [request for request in bucket.requests if request[1] is not None]
+
+
+def _refresh(tmp_path, bucket, clock, sources=TRANCO):
+    return refresh_sources(str(tmp_path), sources, BASE, bucket, clock)
+
+
+def _copies(tmp_path):
+    return json.loads((tmp_path / reverseip.COPIES_NAME).read_text(encoding="utf-8"))
+
+
+def _source_meta(tmp_path):
+    con = sqlite3.connect(str(tmp_path / reverseip.DATABASE_NAME))
+    try:
+        rows = con.execute("SELECT id, date, pairs, error FROM source_meta")
+        return {source_id: rest for source_id, *rest in rows}
+    finally:
+        con.close()
+
+
+def _parts(tmp_path, stem="tranco"):
+    return sorted(path.name for path in tmp_path.glob(f"{stem}-*"))
+
+
+def test_one_download_per_source_per_utc_day(tmp_path):
+    bucket = bucket_with(DAY)  # one tranco partition
+    clock = Clock(NOW)
+    summary = refresh_sources(str(tmp_path), [src("tranco")], BASE, bucket, clock)
+    assert summary["sources"]["tranco"] == {
+        "state": "downloaded",
+        "date": DAY,
+        "error": None,
+    }
+    first = ranged(bucket)  # range requests sent
+    assert first
+    bucket.add(key("tranco", NEWER), parquet_bytes(ROWS))  # a newer day appears
+    clock.advance(3 * 3600)  # same UTC day
+    summary = refresh_sources(str(tmp_path), [src("tranco")], BASE, bucket, clock)
+    assert ranged(bucket) == first  # nothing more downloaded
+    assert summary["sources"]["tranco"] == {
+        "state": "current",
+        "date": DAY,
+        "error": None,
+    }
+
+
+def test_a_failed_download_counts_as_the_days_request(tmp_path):
+    bucket = bucket_with(DAY)
+    bucket.fail[key("tranco", DAY)] = Response(500, {}, b"<Error/>")
+    clock = Clock(NOW)
+    summary = _refresh(tmp_path, bucket, clock)
+    assert summary["sources"]["tranco"]["state"] == "failed"
+    assert "HTTP 500" in summary["sources"]["tranco"]["error"]
+    assert len(ranged(bucket)) == 1
+    # with no copy of any source there is nothing to build
+    assert summary["built"] is False
+    assert not (tmp_path / reverseip.DATABASE_NAME).exists()
+    del bucket.fail[key("tranco", DAY)]  # the bucket answers again
+    clock.advance(3600)
+    sent = len(bucket.requests)
+    summary = _refresh(tmp_path, bucket, clock)
+    assert bucket.requests[sent:] == []
+    assert summary["sources"]["tranco"] == {
+        "state": "waiting",
+        "date": None,
+        "error": None,
+    }
+
+
+def test_a_restart_keeps_the_stamp(tmp_path):
+    _refresh(tmp_path, bucket_with(DAY), Clock(NOW))
+    assert (tmp_path / "tranco.requested").stat().st_mtime == NOW
+    # a new process: a new transport and clock, nothing held over in memory
+    later = bucket_with(NEWER)
+    summary = _refresh(tmp_path, later, Clock(NOW + 3600))
+    assert later.requests == []
+    assert summary["sources"]["tranco"] == {
+        "state": "current",
+        "date": DAY,
+        "error": None,
+    }
+
+
+def test_the_next_utc_day_may_download_again(tmp_path):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    _refresh(tmp_path, bucket, clock)
+    first = len(ranged(bucket))
+    newer = key("tranco", NEWER)
+    bucket.add(newer, parquet_bytes(ROWS[:2]))
+    clock.t = NEXT_DAY
+    summary = _refresh(tmp_path, bucket, clock)
+    assert summary["sources"]["tranco"] == {
+        "state": "downloaded",
+        "date": NEWER,
+        "error": None,
+    }
+    assert summary["built"] is True
+    # the object's URL is the base URL and its key, joined with no slash added
+    assert {url for url, _ in ranged(bucket)[first:]} == {BASE + newer}
+    assert _copies(tmp_path)["tranco"] == {
+        "date": NEWER,
+        "files": [f"tranco-{NEWER}-0.parquet"],
+        "fetched_at": NEXT_DAY,
+        "bytes": len(bucket.objects[newer]),
+    }
+    # the previous day's file went once the new day was recorded
+    assert _parts(tmp_path) == [f"tranco-{NEWER}-0.parquet"]
+    assert _source_meta(tmp_path)["tranco"][0] == NEWER
+    assert (tmp_path / "tranco.requested").stat().st_mtime == NEXT_DAY
+
+
+def test_listing_alone_is_not_a_request(tmp_path):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    _refresh(tmp_path, bucket, clock)
+    first = ranged(bucket)
+    sent = len(bucket.requests)
+    clock.t = NEXT_DAY  # the newest partition is still the copy's day
+    summary = _refresh(tmp_path, bucket, clock)
+    assert summary["sources"]["tranco"] == {
+        "state": "current",
+        "date": DAY,
+        "error": None,
+    }
+    assert ranged(bucket) == first
+    listings = bucket.requests[sent:]
+    assert listings and all("?list-type=2&" in url for url, _ in listings)
+    assert (tmp_path / "tranco.requested").stat().st_mtime == NOW
+
+
+def test_a_two_part_day_is_built_whole(tmp_path):
+    bucket = bucket_with(DAY, parts=(ROWS[:6], ROWS[6:]))
+    summary = _refresh(tmp_path, bucket, Clock(NOW))
+    assert summary["sources"]["tranco"]["state"] == "downloaded"
+    files = [f"tranco-{DAY}-0.parquet", f"tranco-{DAY}-1.parquet"]
+    record = _copies(tmp_path)["tranco"]
+    assert record["files"] == files
+    assert record["bytes"] == sum(len(data) for data in bucket.objects.values())
+    each = [len(list(read_pairs(str(tmp_path / name)))) for name in files]
+    assert all(each)
+    assert _source_meta(tmp_path)["tranco"] == [DAY, sum(each), None]
+    con = sqlite3.connect(str(tmp_path / reverseip.DATABASE_NAME))
+    names = {name for (name,) in con.execute("SELECT name FROM names")}
+    con.close()
+    assert {"example.com", "a.b.example.com"} <= names  # one from each part
+
+
+def test_a_day_that_fails_midway_keeps_the_whole_previous_day(tmp_path):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    _refresh(tmp_path, bucket, clock)
+    before = (tmp_path / reverseip.DATABASE_NAME).read_bytes()
+    bucket.add(key("tranco", NEWER, 0), parquet_bytes(ROWS[:6]))
+    bucket.add(key("tranco", NEWER, 1), parquet_bytes(ROWS[6:]))
+    bucket.fail[key("tranco", NEWER, 1)] = Response(500, {}, b"<Error/>")
+    clock.t = NEXT_DAY
+    summary = _refresh(tmp_path, bucket, clock)
+    assert summary["sources"]["tranco"]["state"] == "failed"
+    assert summary["sources"]["tranco"]["date"] == DAY
+    assert summary["built"] is False
+    assert _copies(tmp_path)["tranco"]["files"] == [f"tranco-{DAY}-0.parquet"]
+    assert list(read_pairs(str(tmp_path / f"tranco-{DAY}-0.parquet")))
+    # part 0 of the new day arrived and is gone again
+    assert _parts(tmp_path) == [f"tranco-{DAY}-0.parquet"]
+    assert (tmp_path / reverseip.DATABASE_NAME).read_bytes() == before
+
+
+def test_one_source_failing_does_not_stop_the_others(tmp_path):
+    bucket = bucket_with(DAY)
+    bucket.add(key("umbrella", DAY), parquet_bytes(ROWS))
+    bucket.fail[key("tranco", DAY)] = Response(500, {}, b"<Error/>")
+    summary = _refresh(tmp_path, bucket, Clock(NOW), sources=BOTH)
+    assert summary["sources"]["tranco"]["state"] == "failed"
+    assert summary["sources"]["umbrella"] == {
+        "state": "downloaded",
+        "date": DAY,
+        "error": None,
+    }
+    assert summary["built"] is True
+    meta = _source_meta(tmp_path)
+    assert meta["tranco"] == [None, 0, "no copy"]
+    assert meta["umbrella"][0] == DAY and meta["umbrella"][1] > 0
+
+
+@pytest.mark.parametrize("failure", ["HTTP 503", "refused"])
+def test_a_listing_that_fails_is_failed_and_writes_no_stamp(tmp_path, failure):
+    bucket = bucket_with(DAY, source_id="umbrella")
+
+    def transport(url, headers):
+        if "/source=tranco/" in url:
+            if failure == "refused":
+                raise urllib.error.URLError("refused")
+            return Response(503, {}, b"<Error><Code>SlowDown</Code></Error>")
+        return bucket(url, headers)
+
+    summary = _refresh(tmp_path, transport, Clock(NOW), sources=BOTH)
+    assert summary["sources"]["tranco"]["state"] == "failed"
+    assert failure in summary["sources"]["tranco"]["error"]
+    assert not (tmp_path / "tranco.requested").exists()
+    assert summary["sources"]["umbrella"]["state"] == "downloaded"
+
+
+def test_no_partition_yet_is_waiting(tmp_path):
+    bucket = FakeBucket()
+    summary = _refresh(tmp_path, bucket, Clock(NOW))
+    assert summary == {
+        "built": False,
+        "sources": {"tranco": {"state": "waiting", "date": None, "error": None}},
+    }
+    assert len(bucket.requests) == 2 and ranged(bucket) == []  # this month, last
+    assert not (tmp_path / "tranco.requested").exists()
+
+
+def test_a_failed_build_keeps_the_previous_database(tmp_path, monkeypatch, caplog):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    assert _refresh(tmp_path, bucket, clock)["built"] is True
+    before = (tmp_path / reverseip.DATABASE_NAME).read_bytes()
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(reverseip_build, "build_database", boom)
+    bucket.add(key("tranco", NEWER), parquet_bytes(ROWS[:2]))
+    clock.t = NEXT_DAY
+    summary = _refresh(tmp_path, bucket, clock)
+    assert summary["sources"]["tranco"]["state"] == "downloaded"
+    assert summary["built"] is False
+    assert (tmp_path / reverseip.DATABASE_NAME).read_bytes() == before
+    assert "disk is full" in caplog.text
+    # the next run builds from the copy the failed build left, downloading nothing
+    monkeypatch.undo()
+    sent = len(bucket.requests)
+    clock.advance(3600)
+    summary = _refresh(tmp_path, bucket, clock)
+    assert bucket.requests[sent:] == []
+    assert summary["built"] is True
+    assert _source_meta(tmp_path)["tranco"][0] == NEWER
+
+
+def test_nothing_is_built_when_nothing_changed(tmp_path):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    _refresh(tmp_path, bucket, clock)
+    database = tmp_path / reverseip.DATABASE_NAME
+    before = database.stat()
+    for t in (NOW + 3600, NEXT_DAY):  # stamped; then listed, nothing newer
+        clock.t = t
+        assert _refresh(tmp_path, bucket, clock)["built"] is False
+    after = database.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+@pytest.mark.parametrize("damage", ["missing", "another release", "not a database"])
+def test_a_database_that_will_not_serve_is_rebuilt_from_the_copies(tmp_path, damage):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    _refresh(tmp_path, bucket, clock)
+    database = tmp_path / reverseip.DATABASE_NAME
+    if damage == "missing":
+        database.unlink()
+    elif damage == "another release":
+        con = sqlite3.connect(str(database))
+        con.execute(f"PRAGMA user_version = {reverseip.SCHEMA_VERSION + 1}")
+        con.close()
+    else:
+        database.write_bytes(b"not a database" * 100)
+    sent = len(bucket.requests)
+    clock.advance(3600)
+    summary = _refresh(tmp_path, bucket, clock)
+    assert bucket.requests[sent:] == []
+    assert summary["sources"]["tranco"]["state"] == "current"
+    assert summary["built"] is True
+    con = sqlite3.connect(str(database))
+    assert con.execute("PRAGMA user_version").fetchone() == (reverseip.SCHEMA_VERSION,)
+    con.close()
+    assert _source_meta(tmp_path)["tranco"][0] == DAY
+
+
+def test_a_source_added_to_the_settings_rebuilds_once(tmp_path):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    _refresh(tmp_path, bucket, clock)
+    clock.advance(3600)
+    # umbrella has nothing yet: the database records it once, as no copy
+    assert _refresh(tmp_path, bucket, clock, sources=BOTH)["built"] is True
+    assert _source_meta(tmp_path)["umbrella"] == [None, 0, "no copy"]
+    clock.advance(3600)
+    assert _refresh(tmp_path, bucket, clock, sources=BOTH)["built"] is False
+
+
+def test_main_prints_only_the_summary(tmp_path, monkeypatch, capsys):
+    # main reads the real clock, so the partition is today's
+    today = datetime.now(timezone.utc).date().isoformat()
+    monkeypatch.setattr(reverseip_build, "urllib_transport", bucket_with(today))
+    settings = {"directory": str(tmp_path), "sources": "tranco", "base_url": BASE}
+    assert reverseip_build.main([json.dumps(settings)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {
+        "built": True,
+        "sources": {"tranco": {"state": "downloaded", "date": today, "error": None}},
+    }

@@ -2,15 +2,21 @@
 IP tests: plain helpers and constants, no pytest fixtures."""
 
 import calendar
+import contextlib
 import hashlib
+import io
 import re
+import threading
 import urllib.parse
+from collections.abc import Iterator, Sequence
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import NamedTuple
 from xml.sax.saxutils import escape
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import reverseip
 from reverseip_build import Response
 
 DAY = "2026-10-20"
@@ -67,8 +73,9 @@ ROWS: list[Row] = [
 
 def write_parquet(path, rows, pad_columns: int = 0) -> None:
     """The six columns the build reads plus the ones it must not, in one row
-    group, gzip-compressed. `pad_columns` adds string columns of its own, a
-    distinct digest a row, so their chunks do not compress away."""
+    group, gzip-compressed, to `path` (a file name or a binary file).
+    `pad_columns` adds string columns of its own, a distinct digest a row, so
+    their chunks do not compress away."""
     columns = {
         "query_name": [r.query_name for r in rows],
         "query_type": [r.query_type for r in rows],
@@ -88,9 +95,26 @@ def write_parquet(path, rows, pad_columns: int = 0) -> None:
         )
     pq.write_table(
         pa.table(arrays),
-        str(path),
+        path,
         compression="gzip",
         row_group_size=max(len(rows), 1),
+    )
+
+
+def parquet_bytes(rows, pad_columns: int = 0) -> bytes:
+    """What write_parquet writes, as bytes for a bucket object."""
+    buffer = io.BytesIO()
+    write_parquet(buffer, rows, pad_columns)
+    return buffer.getvalue()
+
+
+def key(source_id: str, day: str, part: int = 0) -> str:
+    """The bucket key of one part of `source_id`'s partition for `day`."""
+    (source,) = reverseip.parse_sources(source_id)
+    year, month, dd = day.split("-")
+    return (
+        f"fdns/basis=toplist/{source.path}/year={year}/month={month}"
+        f"/day={dd}/part-{part:05d}-x.c000.gz.parquet"
     )
 
 
@@ -186,3 +210,60 @@ class FakeBucket:
 def _error(status: int, code: str) -> Response:
     body = f"<Error><Code>{code}</Code></Error>".encode()
     return Response(status, {"content-type": "application/xml"}, body)
+
+
+def bucket_with(
+    day: str, source_id: str = "tranco", parts: Sequence[list[Row]] = (ROWS,)
+) -> "FakeBucket":
+    """A bucket holding one partition of `source_id` for `day`, a part per
+    entry of `parts`."""
+    bucket = FakeBucket()
+    for part, rows in enumerate(parts):
+        bucket.add(key(source_id, day, part), parquet_bytes(rows))
+    return bucket
+
+
+class Clock:
+    """A clock to pass as `now`: it reads `t` until moved."""
+
+    def __init__(self, t: float):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+@contextlib.contextmanager
+def serve(bucket: FakeBucket) -> Iterator[str]:
+    """`bucket` over real HTTP on 127.0.0.1, for the child process; yields the
+    base URL, which ends with `/` as REVERSEIP_BASE_URL does."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - the stdlib's name
+            response = bucket(
+                f"http://127.0.0.1:{self.server.server_port}{self.path}",
+                dict(self.headers.items()),
+            )
+            self.send_response(response.status)
+            for name, value in response.headers.items():
+                if name != "content-length":
+                    self.send_header(name, value)
+            self.send_header("Content-Length", str(len(response.body)))
+            self.end_headers()
+            self.wfile.write(response.body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/openintel-public/"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
