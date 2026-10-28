@@ -321,6 +321,46 @@ ASINFO_CAIDA_REL_URL = os.getenv(
 ASINFO_CAIDA_ORG_URL = os.getenv(
     "ASINFO_CAIDA_ORG_URL", "https://publicdata.caida.org/datasets/as-organizations/"
 )
+
+# Reverse IP (reverseip.py): which names on the public top lists resolved to an
+# address, from OpenINTEL's daily DNS measurements. The scheduler downloads
+# only the columns it needs into REVERSEIP_DIR and builds one SQLite file; a
+# lookup reads that file and sends nothing anywhere. OpenINTEL asks for at
+# most one download per calendar day, so there is no setting for that gap.
+REVERSEIP_ENABLED = os.getenv("REVERSEIP_ENABLED", "true").lower() != "false"
+REVERSEIP_DIR = os.getenv("REVERSEIP_DIR", os.path.join(_APP_DIR, "data", "reverseip"))
+# Comma-separated source ids: tranco, umbrella, radar, majestic, crux:global
+# and crux:<cc> (two lower-case letters).
+REVERSEIP_SOURCES = os.getenv(
+    "REVERSEIP_SOURCES", "tranco,umbrella,radar,majestic,crux:global,crux:kr"
+)
+# The bucket. Object keys are appended to it as they are, so it ends with
+# exactly one "/" however it was given.
+REVERSEIP_BASE_URL = (
+    os.getenv(
+        "REVERSEIP_BASE_URL", "https://object.openintel.nl/openintel-public/"
+    ).rstrip("/")
+    + "/"
+)
+REVERSEIP_MAX_AGE_HOURS = float(os.getenv("REVERSEIP_MAX_AGE_HOURS", "96"))
+REVERSEIP_CHECK_INTERVAL_SECONDS = int(
+    os.getenv("REVERSEIP_CHECK_INTERVAL_SECONDS", "3600")
+)
+REVERSEIP_LIST_LIMIT = int(os.getenv("REVERSEIP_LIST_LIMIT", "100"))
+REVERSEIP_MCP_LIMIT = int(os.getenv("REVERSEIP_MCP_LIMIT", "20"))
+REVERSEIP_BUILD_TIMEOUT_SECONDS = int(
+    os.getenv("REVERSEIP_BUILD_TIMEOUT_SECONDS", "3600")
+)
+# OpenINTEL's terms ask for this sentence, verbatim, wherever its data is used.
+OPENINTEL_ATTRIBUTION = (
+    "The research leading to these results was made possible by OpenINTEL "
+    "(https://www.openintel.nl/), a joint project of the University of Twente, "
+    "SIDN, NLnet Labs and SURF."
+)
+OPENINTEL_LICENSE = "CC BY-NC-SA 4.0"
+OPENINTEL_LICENSE_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+# The saved copy of OpenINTEL's terms, served from static/.
+REVERSEIP_TERMS_PATH = "/static/licenses/openintel-terms.html"
 # The grade (none/low/medium/high) is the band the summed weights of the
 # signals found fall in. The defaults give the rule: on Spamhaus DROP or
 # ASN-DROP is high; a Tor exit is medium (anonymity, not malice); a VPN low; a
@@ -499,6 +539,11 @@ MCP_SERVER_DESCRIPTION = (
     "any IP or domain"
 )
 MCP_WEBSITE_URL = "https://ip.1kko.com"
+# Absolute link to the terms copy: the public base URL when set, else the MCP
+# card's host.
+REVERSEIP_TERMS_URL = (PUBLIC_BASE_URL or MCP_WEBSITE_URL).rstrip(
+    "/"
+) + REVERSEIP_TERMS_PATH
 MCP_ICON_URL = "https://ip.1kko.com/static/image/logo.png"
 
 # Subdomain lookup (Certificate Transparency). Opt-in per request: the default

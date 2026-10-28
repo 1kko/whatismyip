@@ -377,3 +377,21 @@ class TestFingerprintPanel:
         what keeps the fingerprint in the browser."""
         source = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
         assert "CSP forbids" not in source
+
+
+class TestOpenIntel:
+    """The reverse IP data (reverseip.py): said only while the manager is on,
+    like the AS datasets' hosts."""
+
+    def test_names_openintel_while_enabled(self, reverseip_enabled):
+        html = client.get("/privacy", headers=CHROME).text
+        text = _text(html)
+        assert _mentions(text, "object.openintel.nl")
+        assert config.OPENINTEL_ATTRIBUTION in text
+        assert 'href="/static/licenses/openintel-terms.html"' in html
+        assert "once a day" in text
+        assert "never for a particular lookup" in text
+        assert f"{config.REVERSEIP_MAX_AGE_HOURS // 24:g} days" in text
+
+    def test_says_nothing_while_disabled(self):
+        assert "openintel" not in client.get("/privacy", headers=CHROME).text.lower()

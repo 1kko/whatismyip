@@ -171,7 +171,7 @@
                         <a href="https://crt.sh" rel="noreferrer">crt.sh</a>
                     </p>
                     {% if view.subdomains %}
-                      {% if view.subdomains.error %}
+                      {% if view.subdomains_failed %}
                       <p class="subdomains__error">Lookup failed: {{ view.subdomains.error }}</p>
                       {% else %}
                       {% set s = view.subdomains %}
@@ -179,6 +179,11 @@
                          #page-data, which carries every loaded name rather than the
                          100 drawn here, so the filter and Copy all see the whole list. #}
                       <div id="subdomains-rendered" data-target="{{ view.target }}">
+                      {# crt.sh failed but the top lists answered: app.js draws the
+                         union from #page-data; this says why crt.sh is missing. #}
+                      {% if s.error %}
+                      <p class="subdomains__meta">crt.sh lookup failed: {{ s.error }}</p>
+                      {% endif %}
                       {# The count lives in the summary hint above; repeating it
                          here would just say the same thing twice. This line is
                          only for what the hint cannot show. fetched_at is always
@@ -307,6 +312,24 @@
                     {% for credit in view.as_info.attribution %}
                     <p class="api-note tone-muted">{% if credit.href %}<a href="{{ credit.href }}" rel="noopener noreferrer">{{ credit.text }}</a>{% else %}{{ credit.text }}{% endif %}</p>
                     {% endfor %}
+                    {% elif item.id == 'reverseip' %}
+                    {# viewmodel.reverse_ip_view: the names OpenINTEL's lists hold for
+                       this address. Names are third-party text: autoescaped, never
+                       |safe. The coverage, attribution and licence lines show in every
+                       state, unknown included, because its terms ask for them. #}
+                    {% set r = view.reverse_ip %}
+                    {% if r.names %}
+                    <ul class="subdomains__list">
+                        {% for name in r.names %}<li>{% if name.href %}<a class="lookup-link" href="{{ name.href }}" rel="nofollow">{{ name.text }}</a>{% else %}{{ name.text }}{% endif %}</li>{% endfor %}
+                    </ul>
+                    {% if r.more %}<p class="api-note">and {{ "{:,}".format(r.more) }} more</p>{% endif %}
+                    {% endif %}
+                    {% if r.state_line %}<p class="api-note">{{ r.state_line }}</p>{% endif %}
+                    {% if r.not_checked %}<p class="api-note">{{ r.not_checked }}</p>{% endif %}
+                    {% if r.block_line %}<p class="api-note">{{ r.block_line }}</p>{% endif %}
+                    <p class="api-note tone-muted">{{ r.coverage }}</p>
+                    <p class="api-note tone-muted">{{ r.attribution }}</p>
+                    <p class="api-note tone-muted"><a href="{{ r.license_url }}" rel="noopener noreferrer">{{ r.license }}</a> · <a href="{{ r.terms_path }}">OpenINTEL terms</a></p>
                     {% elif item.id == 'reputation' %}
                     {# viewmodel.reputation_view: each list the address is on, is not
                        on, or could not be checked, with its source and when the copy

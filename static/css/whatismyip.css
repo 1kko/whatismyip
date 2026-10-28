@@ -936,6 +936,14 @@ table.records--dns td:nth-child(4) {
   margin: 0.5rem 0;
 }
 
+/* "top lists": a name crt.sh did not list, after its link. */
+.subdomains__source {
+  margin-left: 0.75ch;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+}
+
 .subdomains__error {
   color: var(--danger);
   font-size: 0.8125rem;

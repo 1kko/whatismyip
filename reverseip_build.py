@@ -1,0 +1,988 @@
+"""Reverse IP, the child process's work: list OpenINTEL's bucket, range-read
+the columns the build needs, and build one SQLite file from those copies. The
+child is the only place pyarrow is imported.
+
+Run as `python -m reverseip_build '<json>'` by `reverseip.ReverseIpManager`
+(see `main`). Imports `config`, `reverseip`, pyarrow and the standard library.
+Nothing in the web process imports it."""
+
+import contextlib
+import datetime
+import fcntl
+import html
+import http.client
+import ipaddress
+import json
+import logging
+import os
+import re
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from calendar import timegm
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
+from typing import NamedTuple
+
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+
+import config
+import reverseip
+
+logger = logging.getLogger(__name__)
+
+REQUIRED_COLUMNS = (
+    "query_name",
+    "response_type",
+    "section",
+    "ip4_address",
+    "ip6_address",
+)
+# Read where a file has them: on 2026-10-28 the Tranco, Umbrella, Radar and
+# Majestic files had no `rank`, and CrUX's had it.
+OPTIONAL_COLUMNS = ("rank",)
+WANTED_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
+# A name on a list that gives no position sorts after every ranked one.
+NO_RANK = 2**31 - 1
+BATCH_ROWS = 65536
+
+_NAME = re.compile(r"[a-z0-9._-]{1,253}")
+_SCRATCH_NAME = "reverseip.build.sqlite3"
+
+_SCHEMA = """
+CREATE TABLE names(id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                   rank INTEGER NOT NULL, sources INTEGER NOT NULL);
+CREATE UNIQUE INDEX names_name ON names(name);
+CREATE TABLE pair(ip BLOB NOT NULL, name_id INTEGER NOT NULL,
+                  PRIMARY KEY (ip, name_id)) WITHOUT ROWID;
+CREATE TABLE addr(ip BLOB, rank INTEGER, name_id INTEGER,
+                  PRIMARY KEY (ip, rank, name_id)) WITHOUT ROWID;
+CREATE TABLE ip_count(ip BLOB PRIMARY KEY, names INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE block(prefix BLOB PRIMARY KEY, addresses INTEGER NOT NULL,
+                   names INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE sub(rname TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE source_meta(id TEXT PRIMARY KEY, date TEXT,
+                         pairs INTEGER NOT NULL, error TEXT);
+"""
+
+
+def _packed(text: str | None) -> bytes | None:
+    """The address as bytes (an IPv4-mapped one as IPv4), or None unless it is
+    a global unicast address."""
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if not address.is_global or address.is_multicast:
+        return None
+    return address.packed
+
+
+def _rank(value: object) -> int:
+    """A name's position on its list: the digits of a string column, or the
+    value of an integer one (lists differ, and a list may change its type);
+    NO_RANK for anything else."""
+    if isinstance(value, bool):
+        return NO_RANK
+    if isinstance(value, int):
+        return min(value, NO_RANK) if value >= 0 else NO_RANK
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return min(int(value), NO_RANK)
+    return NO_RANK
+
+
+def read_pairs(path: str) -> Iterator[tuple[str, bytes, int]]:
+    """`(name, packed address, rank)` for each answer row of a Parquet file.
+
+    Only REQUIRED_COLUMNS and the OPTIONAL_COLUMNS the file's schema has are
+    read: a local copy holds real bytes for no others. A file without `rank`
+    gives every pair NO_RANK. Batches are filtered in Arrow before any row
+    becomes a Python object."""
+    reader = pq.ParquetFile(path)
+    present = set(reader.schema_arrow.names)
+    has_rank = "rank" in present
+    if not has_rank:
+        logger.info(
+            "reverse IP: %s has no rank column; its pairs are read unranked",
+            os.path.basename(path),
+        )
+    columns = [*REQUIRED_COLUMNS, *(c for c in OPTIONAL_COLUMNS if c in present)]
+    for batch in reader.iter_batches(batch_size=BATCH_ROWS, columns=columns):
+        is_a = pc.and_(
+            pc.equal(batch["response_type"], "A"), pc.is_valid(batch["ip4_address"])
+        )
+        is_aaaa = pc.and_(
+            pc.equal(batch["response_type"], "AAAA"),
+            pc.is_valid(batch["ip6_address"]),
+        )
+        keep = pc.and_(pc.equal(batch["section"], "ans"), pc.or_(is_a, is_aaaa))
+        kept = batch.filter(pc.fill_null(keep, False))
+        ranks = kept["rank"].to_pylist() if has_rank else [None] * kept.num_rows
+        for name, kind, ip4, ip6, rank in zip(
+            kept["query_name"].to_pylist(),
+            kept["response_type"].to_pylist(),
+            kept["ip4_address"].to_pylist(),
+            kept["ip6_address"].to_pylist(),
+            ranks,
+        ):
+            if not name:
+                continue
+            name = name.lower().removesuffix(".")
+            if "." not in name or not _NAME.fullmatch(name):
+                continue
+            packed = _packed(ip4 if kind == "A" else ip6)
+            if packed is not None:
+                yield name, packed, _rank(rank)
+
+
+# A token of an error message that holds a directory separator: a path.
+_PATH_LIKE = re.compile(r"""[^\s'"()\[\]<>,;]*[\\/][^\s'"()\[\]<>,;]*""")
+
+
+def _without_directories(text: str) -> str:
+    """`text` with every path in it cut to its last part: a reason ends up in
+    the public JSON and on the page, and the volume's layout is nobody's
+    business there."""
+    return _PATH_LIKE.sub(lambda match: re.split(r"[\\/]", match[0])[-1], text)
+
+
+class _Unreadable(Exception):
+    """A copy stopped reading. `reason` names the file and the error, with no
+    directory in it; `source` is set by the build that was reading it."""
+
+    def __init__(self, name: str, exc: Exception):
+        detail = _without_directories(f"{type(exc).__name__}: {exc}")
+        self.reason = f"could not read {name}: {detail}"
+        self.source = ""
+        super().__init__(self.reason)
+
+
+def _read_copy(path: str) -> Iterator[tuple[str, bytes, int]]:
+    """read_pairs, with whatever stops the file reading raised as _Unreadable:
+    a pyarrow or OS error, and equally a KeyError or TypeError from a list
+    whose schema drifted. Only the reading is covered; a SQLite error is the
+    build's own (the consumer's inserts run outside this frame)."""
+    try:
+        yield from read_pairs(path)
+    except sqlite3.Error:
+        raise
+    except Exception as exc:
+        raise _Unreadable(os.path.basename(path), exc) from exc
+
+
+def _insert_file(con: sqlite3.Connection, path: str, bit: int) -> int:
+    """Stream one copy into `names` and `pair`; returns the pairs read."""
+    count = 0
+    batch: list[tuple[str, bytes, int]] = []
+
+    def flush() -> None:
+        best: dict[str, int] = {}
+        for name, _, rank in batch:
+            if rank < best.get(name, NO_RANK + 1):
+                best[name] = rank
+        con.executemany(
+            "INSERT INTO names(name, rank, sources) VALUES (?, ?, ?)"
+            " ON CONFLICT(name) DO UPDATE SET rank = min(rank, excluded.rank),"
+            " sources = sources | excluded.sources",
+            [(name, rank, bit) for name, rank in best.items()],
+        )
+        con.executemany(
+            "INSERT OR IGNORE INTO pair(ip, name_id)"
+            " SELECT ?, id FROM names WHERE name = ?",
+            [(ip, name) for name, ip, _ in batch],
+        )
+        batch.clear()
+
+    for item in _read_copy(path):
+        batch.append(item)
+        count += 1
+        if len(batch) >= BATCH_ROWS:
+            flush()
+    if batch:
+        flush()
+    return count
+
+
+def _age_error(date: str, now: float) -> str | None:
+    """The reason a copy is too old to build from, counted from the start of
+    its UTC day: the one rule the read side applies too."""
+    try:
+        year, month, day = (int(part) for part in date.split("-"))
+        started = timegm((year, month, day, 0, 0, 0))
+    except (ValueError, OverflowError):
+        return f"unreadable date {date!r}"
+    if now - started > config.REVERSEIP_MAX_AGE_HOURS * 3600:
+        return f"older than {config.REVERSEIP_MAX_AGE_HOURS:g} hours"
+    return None
+
+
+def _add_source(
+    con: sqlite3.Connection,
+    directory: str,
+    source: reverseip.Source,
+    bit: int,
+    copy: dict | None,
+    now: float,
+    failed: dict[str, str],
+) -> None:
+    """Read one source's copy into the scratch file and record it in
+    `source_meta`. A source in `failed` (its copy stopped reading in an
+    earlier attempt) is recorded with that reason and not read again. A copy
+    that stops reading raises _Unreadable, with some of its rows already
+    written: the caller abandons the whole file."""
+    date = copy.get("date") if copy else None
+    pairs = 0
+    if copy is None:
+        error = "no copy"
+    else:
+        error = failed.get(source.id) or _age_error(str(date), now)
+    if error is None:
+        try:
+            for name in copy.get("files", []):
+                pairs += _insert_file(con, os.path.join(directory, name), bit)
+        except _Unreadable as exc:
+            exc.source = source.id
+            raise
+    con.execute(
+        "INSERT INTO source_meta(id, date, pairs, error) VALUES (?, ?, ?, ?)",
+        (source.id, date, pairs, error),
+    )
+
+
+def _build_scratch(
+    scratch: str,
+    directory: str,
+    copies: dict[str, dict],
+    sources: Sequence[reverseip.Source],
+    now: float,
+    failed: dict[str, str],
+) -> None:
+    """One attempt at the scratch file, from every source not in `failed`.
+
+    The file has no journal (`journal_mode = OFF`: it is built once and
+    either swapped in whole or thrown away), so nothing written can be rolled
+    back; a copy that stops reading raises _Unreadable and the attempt is
+    abandoned, never patched up."""
+    con = sqlite3.connect(scratch, isolation_level=None)
+    try:
+        con.execute("PRAGMA journal_mode = OFF")
+        con.execute("PRAGMA synchronous = OFF")
+        con.executescript(_SCHEMA)
+        con.execute("BEGIN")
+        for position, source in enumerate(sources):
+            _add_source(
+                con,
+                directory,
+                source,
+                1 << position,
+                copies.get(source.id),
+                now,
+                failed,
+            )
+        _fill(con)
+        con.execute(f"PRAGMA user_version = {int(reverseip.SCHEMA_VERSION)}")
+        con.execute("COMMIT")
+    finally:
+        con.close()
+
+
+def _fill(con: sqlite3.Connection) -> None:
+    """Everything derived from `names` and `pair`, once every source is in."""
+    # www.<x> is left off an address that <x> is also on.
+    con.execute(
+        "INSERT INTO addr(ip, rank, name_id)"
+        " SELECT p.ip, n.rank, p.name_id FROM pair p JOIN names n ON n.id = p.name_id"
+        " WHERE NOT (substr(n.name, 1, 4) = 'www.' AND EXISTS ("
+        "   SELECT 1 FROM names a JOIN pair q ON q.name_id = a.id"
+        "   WHERE a.name = substr(n.name, 5) AND q.ip = p.ip))"
+    )
+    con.execute(
+        "INSERT INTO ip_count(ip, names) SELECT ip, count(*) FROM addr GROUP BY ip"
+    )
+    con.execute(
+        "INSERT INTO block(prefix, addresses, names)"
+        " SELECT prefix, count(DISTINCT ip), count(DISTINCT name_id) FROM ("
+        "   SELECT CASE WHEN length(ip) = 4 THEN substr(ip, 1, 3)"
+        "          ELSE substr(ip, 1, 6) END AS prefix, ip, name_id FROM addr)"
+        " GROUP BY prefix"
+    )
+    con.create_function("rev", 1, lambda s: s[::-1], deterministic=True)
+    con.execute(
+        "INSERT INTO sub(rname) SELECT rev(name) FROM names"
+        " WHERE length(name) - length(replace(name, '.', '')) >= 2"
+        " AND NOT (substr(name, 1, 4) = 'www.'"
+        "   AND substr(name, 5) IN (SELECT name FROM names))"
+    )
+
+
+def _finish(scratch: str, tmp: str, final: str) -> None:
+    """Write the scratch file out whole and swap it in."""
+    con = sqlite3.connect(scratch, isolation_level=None)
+    try:
+        con.execute("DROP TABLE pair")
+        con.execute("DROP INDEX names_name")
+        con.execute("VACUUM INTO ?", (tmp,))
+    finally:
+        con.close()
+    os.replace(tmp, final)
+
+
+def build_database(
+    directory: str,
+    copies: dict[str, dict],
+    sources: Sequence[reverseip.Source],
+    now: float | None = None,
+) -> None:
+    """Build `reverseip.sqlite3` in `directory` from the copies it lists.
+
+    A source whose copy is missing, too old or unreadable is recorded in
+    `source_meta` (with the copy's date, 0 pairs and the error) and left out;
+    the others still build. A copy that stops reading partway costs one more
+    attempt from a fresh scratch file without it, so each attempt leaves out
+    one more source and there are at most len(sources) + 1. A failure of the
+    build itself (a SQLite error) raises and leaves the previous database in
+    place."""
+    now = time.time() if now is None else now
+    scratch = os.path.join(directory, _SCRATCH_NAME)
+    final = os.path.join(directory, reverseip.DATABASE_NAME)
+    tmp = final + ".tmp"
+    failed: dict[str, str] = {}
+    try:
+        for _ in range(len(sources) + 1):
+            for stale in (scratch, tmp):
+                if os.path.exists(stale):
+                    os.remove(stale)
+            try:
+                _build_scratch(scratch, directory, copies, sources, now, failed)
+            except _Unreadable as exc:
+                logger.warning(
+                    "reverse IP: %s copy left out, building again without it: %s",
+                    exc.source,
+                    exc.reason,
+                )
+                failed[exc.source] = exc.reason
+                continue
+            break
+        else:  # every source is in `failed`, so the last attempt read nothing
+            raise RuntimeError("reverse IP: the build did not finish")
+        _finish(scratch, tmp, final)
+    finally:
+        for leftover in (scratch, tmp):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+
+
+class Response(NamedTuple):
+    status: int
+    # Header names are lower-case.
+    headers: dict[str, str]
+    body: bytes
+
+
+# (url, headers) -> Response. `x-max-bytes` in the headers is a hint to the
+# transport, the most body it may read; it is never sent.
+Transport = Callable[[str, dict[str, str]], Response]
+
+
+class FetchError(Exception):
+    """A listing or a range the bucket did not answer as asked."""
+
+
+_TIMEOUT_SECONDS = 60
+_CHUNK = 1 << 20
+# One ListObjectsV2 page is at most 1,000 keys, a few hundred KB.
+_LISTING_MAX_BYTES = 8 << 20
+
+
+def _read(response, limit: int, url: str) -> bytes:
+    """The body, refused past `limit` (unread when the response says up front
+    that it is longer) and when it ends short of its Content-Length:
+    http.client's read(amt) answers a dropped connection with an early b"",
+    not an error."""
+    status = response.status
+    stated = response.headers.get("Content-Length", "")
+    if stated.isdigit() and int(stated) > limit:
+        raise FetchError(f"HTTP {status}: {url} is {stated} bytes, more than {limit}")
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := response.read(min(_CHUNK, limit + 1 - size)):
+        size += len(chunk)
+        if size > limit:
+            raise FetchError(f"HTTP {status}: {url} sent more than {limit} bytes")
+        chunks.append(chunk)
+    if stated.isdigit() and size != int(stated):
+        raise FetchError(
+            f"HTTP {status}: {url} ended after {size} of its {stated} bytes"
+        )
+    return b"".join(chunks)
+
+
+def urllib_transport(url: str, headers: dict[str, str]) -> Response:
+    """GET `url` with `headers` and REPUTATION_USER_AGENT, reading at most the
+    `x-max-bytes` hint. An HTTP error status is a Response, not an exception.
+    The URL is the operator's REVERSEIP_BASE_URL, or a key its listing gave
+    that matched a partition's pattern, never user input."""
+    limit = int(headers["x-max-bytes"])
+    sent = {name: value for name, value in headers.items() if name != "x-max-bytes"}
+    sent["User-Agent"] = config.REPUTATION_USER_AGENT
+    request = urllib.request.Request(url, headers=sent)  # noqa: S310
+    try:
+        try:
+            response = urllib.request.urlopen(  # noqa: S310
+                request, timeout=_TIMEOUT_SECONDS
+            )
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            received = {name.lower(): value for name, value in response.headers.items()}
+            return Response(response.status, received, _read(response, limit, url))
+    except http.client.HTTPException as exc:
+        raise FetchError(f"{url}: {exc!r}") from exc
+
+
+@dataclass(frozen=True)
+class Partition:
+    date: str
+    # (object key, size) of every part-*.parquet of that day, sorted by key.
+    keys: tuple[tuple[str, int], ...]
+
+
+_CONTENTS = re.compile(r"<Contents>(.*?)</Contents>", re.S)
+_KEY = re.compile(r"<Key>(.*?)</Key>", re.S)
+_SIZE = re.compile(r"<Size>(\d+)</Size>")
+_TRUNCATED = re.compile(r"<IsTruncated>(true|false)</IsTruncated>")
+_NEXT = re.compile(r"<NextContinuationToken>(.*?)</NextContinuationToken>", re.S)
+
+
+def _month_days(
+    base_url: str, prefix: str, transport: Transport
+) -> dict[str, list[tuple[str, int]]]:
+    """The part files listed under one month's prefix, by zero-padded day.
+    Follows continuation tokens while the listing is truncated."""
+    day_part = re.compile(re.escape(prefix) + r"day=(\d{2})/part-[^/]+\.parquet")
+    days: dict[str, list[tuple[str, int]]] = {}
+    token = None
+    while True:
+        url = f"{base_url}?list-type=2&prefix={prefix}"
+        if token is not None:
+            url += "&continuation-token=" + urllib.parse.quote(token, safe="")
+        response = transport(url, {"x-max-bytes": str(_LISTING_MAX_BYTES)})
+        if response.status != 200:
+            raise FetchError(f"listing {prefix}: HTTP {response.status}")
+        text = response.body.decode("utf-8", "replace")
+        truncated = _TRUNCATED.search(text)
+        if truncated is None:
+            raise FetchError(f"listing {prefix}: not a ListObjectsV2 answer")
+        for block in _CONTENTS.findall(text):
+            found = _KEY.search(block)
+            key = html.unescape(found[1]) if found else ""
+            match = day_part.fullmatch(key)
+            if match is None:
+                continue
+            size = _SIZE.search(block)
+            if size is None:
+                raise FetchError(f"listing {prefix}: no size for {key}")
+            days.setdefault(match[1], []).append((key, int(size[1])))
+        if truncated[1] == "false":
+            return days
+        following = _NEXT.search(text)
+        if following is None:
+            raise FetchError(f"listing {prefix}: truncated without a token")
+        token = html.unescape(following[1])
+
+
+def newest_partition(
+    base_url: str,
+    source: reverseip.Source,
+    today: datetime.date,
+    transport: Transport,
+) -> Partition | None:
+    """The newest day of `source` in today's month, or in the month before
+    when today's holds none yet; None when neither does. A listing that is not
+    200 raises FetchError."""
+    year, month = today.year, today.month
+    for _ in range(2):
+        prefix = f"fdns/basis=toplist/{source.path}/year={year}/month={month:02d}/"
+        days = _month_days(base_url, prefix, transport)
+        if days:
+            day = max(days)
+            return Partition(f"{year}-{month:02d}-{day}", tuple(sorted(days[day])))
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    return None
+
+
+_MAGIC = b"PAR1"
+
+
+def _fetch_range(
+    url: str, first: int, last: int, size: int, transport: Transport
+) -> bytes:
+    """Bytes `first`..`last` of the object, refused unless the answer is
+    exactly those: a 206 with their Content-Range and length."""
+    length = last - first + 1
+    response = transport(
+        url, {"range": f"bytes={first}-{last}", "x-max-bytes": str(length)}
+    )
+    if response.status != 206:
+        raise FetchError(f"{url}: HTTP {response.status} for bytes {first}-{last}")
+    stated = response.headers.get("content-range")
+    if stated != f"bytes {first}-{last}/{size}":
+        raise FetchError(
+            f"{url}: content-range {stated!r} for bytes {first}-{last}/{size}"
+        )
+    if len(response.body) != length:
+        raise FetchError(
+            f"{url}: a body of {len(response.body)} bytes for bytes {first}-{last}"
+        )
+    return response.body
+
+
+def _chunk_ranges(
+    url: str,
+    path: str,
+    columns: Sequence[str],
+    optional: Sequence[str],
+    footer: int,
+) -> list[tuple[int, int]]:
+    """The byte range of each wanted column chunk in every row group, read
+    from the footer already written at its offset in `path`: every one of
+    `columns`, which must all be there, and those of `optional` that are."""
+    try:
+        metadata = pq.ParquetFile(path).metadata
+    except pa.ArrowException as exc:
+        raise FetchError(f"{url}: unreadable footer: {exc}") from exc
+    present = {metadata.schema.column(i).path for i in range(metadata.num_columns)}
+    missing = [name for name in columns if name not in present]
+    if missing:
+        raise FetchError(f"{url}: no column {', '.join(missing)}")
+    wanted = {*columns, *(name for name in optional if name in present)}
+    ranges = []
+    for group in range(metadata.num_row_groups):
+        row_group = metadata.row_group(group)
+        for i in range(row_group.num_columns):
+            chunk = row_group.column(i)
+            if chunk.path_in_schema not in wanted:
+                continue
+            # A chunk starts at its dictionary page when it has one. Some
+            # writers leave the offset 0 or None without one, so trust it only
+            # when set and ahead of the first data page.
+            first = chunk.data_page_offset
+            dictionary = chunk.dictionary_page_offset
+            if chunk.has_dictionary_page and dictionary and dictionary < first:
+                first = dictionary
+            last = first + chunk.total_compressed_size - 1
+            if first < len(_MAGIC) or last >= footer:
+                raise FetchError(
+                    f"{url}: column {chunk.path_in_schema} lies outside the data"
+                )
+            ranges.append((first, last))
+    return ranges
+
+
+def _merged(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The ranges with adjacent and overlapping ones joined, in order."""
+    merged: list[tuple[int, int]] = []
+    for first, last in sorted(ranges):
+        if merged and first <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    return merged
+
+
+def fetch_columns(
+    url: str,
+    size: int,
+    dest: str,
+    transport: Transport,
+    columns: Sequence[str] = REQUIRED_COLUMNS,
+    tail: int = 65536,
+    optional: Sequence[str] = OPTIONAL_COLUMNS,
+) -> int:
+    """Copy the Parquet object at `url` (`size` bytes, from its listing) to
+    `dest` as a sparse file of the same size that holds only the footer, the
+    `columns`' chunks and the chunks of those `optional` columns the schema
+    has; the rest reads as zeros. Returns the bytes fetched.
+
+    The last `tail` bytes come first, and the rest of the footer when it is
+    longer. Any answer that is not exactly the range asked for, or one of
+    `columns` missing from the schema, raises FetchError; a missing optional
+    column is skipped. The copy is written to `dest`.tmp and swapped in only
+    whole, so `dest` is absent or as it was."""
+    if size < 2 * len(_MAGIC) + 4:
+        raise FetchError(f"{url}: {size} bytes is too small for Parquet")
+    tmp = dest + ".tmp"
+    fetched = 0
+    try:
+        with open(tmp, "wb") as handle:
+            handle.truncate(size)
+
+            def put(first: int, last: int) -> bytes:
+                nonlocal fetched
+                body = _fetch_range(url, first, last, size, transport)
+                handle.seek(first)
+                handle.write(body)
+                fetched += len(body)
+                return body
+
+            # From `covered` to the end of the file is already in place.
+            covered = max(0, size - tail)
+            end = put(covered, size - 1)[-8:]
+            if end[4:] != _MAGIC:
+                raise FetchError(f"{url} does not end like a Parquet file")
+            footer = size - 8 - int.from_bytes(end[:4], "little")
+            if footer < len(_MAGIC):
+                raise FetchError(f"{url}: a footer longer than the file")
+            if footer < covered:
+                put(footer, covered - 1)
+                covered = footer
+            handle.flush()
+            ranges = _chunk_ranges(url, tmp, columns, optional, footer)
+            for first, last in _merged(ranges):
+                if first < covered:
+                    put(first, min(last, covered - 1))
+        os.replace(tmp, dest)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return fetched
+
+
+def _copies_path(directory: str) -> str:
+    return os.path.join(directory, reverseip.COPIES_NAME)
+
+
+def _is_copy(directory: str, record) -> bool:
+    """A record of copies.json that names a date and files that are there."""
+    if not isinstance(record, dict) or not isinstance(record.get("date"), str):
+        return False
+    files = record.get("files")
+    return (
+        isinstance(files, list)
+        and bool(files)
+        and all(
+            isinstance(name, str)
+            and os.path.basename(name) == name
+            and os.path.isfile(os.path.join(directory, name))
+            for name in files
+        )
+    )
+
+
+def _read_copies(directory: str) -> dict[str, dict] | None:
+    """Each source's copy, from copies.json: {date, files, fetched_at, bytes}.
+    One that is malformed or whose files are gone is left out, so its source
+    has no copy. None when copies.json is there but does not read."""
+    try:
+        with open(_copies_path(directory), encoding="utf-8") as handle:
+            records = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        logger.exception(
+            "reverse IP: ignoring the unreadable %s", reverseip.COPIES_NAME
+        )
+        return None
+    if not isinstance(records, dict):
+        logger.warning(
+            "reverse IP: ignoring %s, which is not an object", reverseip.COPIES_NAME
+        )
+        return None
+    return {
+        source_id: record
+        for source_id, record in records.items()
+        if _is_copy(directory, record)
+    }
+
+
+def _write_copies(directory: str, copies: dict[str, dict]) -> None:
+    path = _copies_path(directory)
+    with open(path + ".tmp", "w", encoding="utf-8") as handle:
+        json.dump(copies, handle, indent=1, sort_keys=True)
+    os.replace(path + ".tmp", path)
+
+
+def _remove(path: str) -> None:
+    with contextlib.suppress(OSError):
+        os.remove(path)
+
+
+def _utc_date(t: float) -> datetime.date:
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).date()
+
+
+def _requested_today(stamp: str, today: datetime.date) -> bool:
+    """Whether the stamp says this UTC day's download was asked for already.
+    One dated after today, under a clock set back, counts too."""
+    try:
+        return _utc_date(os.path.getmtime(stamp)) >= today
+    except OSError:
+        return False
+
+
+def _download(
+    directory: str,
+    stem: str,
+    partition: Partition,
+    base_url: str,
+    transport: Transport,
+) -> tuple[list[str], int]:
+    """Every part of the partition, each to a file named for its day, so the
+    previous copy's files stay as they are until the whole day has arrived.
+    Returns the file names and the bytes fetched. On a failure the parts that
+    did arrive are removed and the error raised."""
+    files: list[str] = []
+    fetched = 0
+    try:
+        for part, (object_key, size) in enumerate(partition.keys):
+            name = f"{stem}-{partition.date}-{part}.parquet"
+            dest = os.path.join(directory, name)
+            # The base URL ends with "/", and a listed key never starts with one.
+            fetched += fetch_columns(base_url + object_key, size, dest, transport)
+            files.append(name)
+    except BaseException:
+        for name in files:
+            _remove(os.path.join(directory, name))
+        raise
+    return files, fetched
+
+
+def _remove_leftovers(
+    directory: str, sources: Sequence[reverseip.Source], copies: dict[str, dict]
+) -> None:
+    """What a child stopped mid-download leaves: every sparse `*.parquet.tmp`
+    and each source's `<stem>-*.parquet` that copies.json does not name (a
+    part of a day that never finished, which the next day's names would never
+    overwrite). The stamps, copies.json and the database are not touched. Run
+    under the lock, so no other child is writing these."""
+    named = {name for copy in copies.values() for name in copy["files"]}
+    stems = tuple(f"{reverseip.file_stem(source.id)}-" for source in sources)
+    for name in os.listdir(directory):
+        unrecorded = (
+            name.startswith(stems) and name.endswith(".parquet") and name not in named
+        )
+        if name.endswith(".parquet.tmp") or unrecorded:
+            logger.info("reverse IP: removing the leftover %s", name)
+            _remove(os.path.join(directory, name))
+
+
+def _remove_unrecorded(directory: str, stem: str, files: list[str]) -> None:
+    """The source's day files other than `files`: the previous copy's."""
+    day_file = re.compile(re.escape(stem) + r"-\d{4}-\d{2}-\d{2}-\d+\.parquet")
+    for name in os.listdir(directory):
+        if day_file.fullmatch(name) and name not in files:
+            _remove(os.path.join(directory, name))
+
+
+def _refresh_source(
+    directory: str,
+    source: reverseip.Source,
+    base_url: str,
+    transport: Transport,
+    now: Callable[[], float],
+    copies: dict[str, dict],
+) -> dict:
+    """Bring one source's copy up to date; its entry in the summary. Records
+    a new copy in `copies` and copies.json."""
+    stem = reverseip.file_stem(source.id)
+    stamp = os.path.join(directory, f"{stem}.requested")
+    copy = copies.get(source.id)
+    have = copy["date"] if copy else None
+    idle = {"state": "current" if copy else "waiting", "date": have, "error": None}
+    t = now()
+    today = _utc_date(t)
+    if _requested_today(stamp, today):
+        return idle
+    try:
+        partition = newest_partition(base_url, source, today, transport)
+    except (FetchError, OSError) as exc:
+        logger.warning("reverse IP: cannot list %s: %s", source.id, exc)
+        return {"state": "failed", "date": have, "error": str(exc)}
+    if partition is None or (have is not None and partition.date <= have):
+        return idle
+    # The day's one request, stamped before anything is sent: a failure and a
+    # restart count as much as a download that worked. The time is read again
+    # here, as the listing may have run past midnight UTC.
+    t = now()
+    with open(stamp, "w", encoding="utf-8"):
+        pass
+    os.utime(stamp, (t, t))
+    try:
+        files, fetched = _download(directory, stem, partition, base_url, transport)
+    except (FetchError, OSError) as exc:
+        logger.warning(
+            "reverse IP: %s %s not downloaded, keeping %s: %s",
+            source.id,
+            partition.date,
+            have or "no copy",
+            exc,
+        )
+        return {"state": "failed", "date": have, "error": str(exc)}
+    copies[source.id] = {
+        "date": partition.date,
+        "files": files,
+        "fetched_at": t,
+        "bytes": fetched,
+    }
+    _write_copies(directory, copies)
+    _remove_unrecorded(directory, stem, files)
+    logger.info(
+        "reverse IP: %s %s downloaded, %d bytes in %d part(s)",
+        source.id,
+        partition.date,
+        fetched,
+        len(files),
+    )
+    return {"state": "downloaded", "date": partition.date, "error": None}
+
+
+def _built_meta(path: str) -> dict[str, tuple[str | None, str | None]] | None:
+    """(copy date, error) of each source the database was built from, or None
+    when the file is missing, does not open, or is from another release."""
+    uri = f"file:{urllib.parse.quote(os.path.abspath(path))}?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            (version,) = con.execute("PRAGMA user_version").fetchone()
+            if version != reverseip.SCHEMA_VERSION:
+                return None
+            return {
+                source_id: (date, error)
+                for source_id, date, error in con.execute(
+                    "SELECT id, date, error FROM source_meta"
+                )
+            }
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
+def _aged_out(meta: dict[str, tuple[str | None, str | None]], now: float) -> bool:
+    """Whether a source the database holds names from (no error) has passed
+    REVERSEIP_MAX_AGE_HOURS since it was built. Rebuilt, it carries the age
+    error with the copy's date, so this asks once per source and copy."""
+    return any(
+        error is None and date is not None and _age_error(date, now) is not None
+        for date, error in meta.values()
+    )
+
+
+_LOCK_NAME = ".lock"
+
+
+def refresh_sources(
+    directory: str,
+    sources: Sequence[reverseip.Source],
+    base_url: str,
+    transport: Transport,
+    now: Callable[[], float] = time.time,
+) -> dict:
+    """Download each source's newest day when due, then build the database
+    when it is behind the copies. The summary: {"built", "sources": {id:
+    {"state", "date", "error"}}}.
+
+    One child at a time per directory: the run holds a non-blocking flock on
+    `<directory>/.lock`. A child that finds it held (a deploy's overlap, an
+    orphan of --reload) sends nothing and reports every source `busy`.
+
+    A source sends nothing at all when its `<stem>.requested` is dated this
+    UTC day: at most one download per source per UTC day, OpenINTEL's rule,
+    not a setting. Otherwise its bucket is listed, which is not a download
+    and writes no stamp, and the newest day is downloaded when it is newer
+    than the copy. The state is `downloaded` then, `current` when the copy is
+    as new as it gets (or this day's request is spent), `waiting` when there
+    is no copy yet, and `failed` (with the error) when the listing or the
+    download failed; the previous copy stays.
+
+    The database is built when a source was downloaded, when it is missing,
+    does not open or is from another release, when the dates it was built
+    from are not the copies' (a build that failed, the sources changed), or
+    when a source it holds names from has aged past REVERSEIP_MAX_AGE_HOURS
+    (the rebuild leaves it out with the age error). With no copy of any
+    source there is nothing to build. A build that fails is logged and leaves
+    the previous database."""
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, _LOCK_NAME), "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info(
+                "reverse IP: another refresh is running in %s; sending nothing",
+                directory,
+            )
+            busy = {"state": "busy", "date": None, "error": None}
+            return {"built": False, "sources": {s.id: dict(busy) for s in sources}}
+        return _refresh_locked(directory, sources, base_url, transport, now)
+
+
+def _refresh_locked(
+    directory: str,
+    sources: Sequence[reverseip.Source],
+    base_url: str,
+    transport: Transport,
+    now: Callable[[], float],
+) -> dict:
+    copies = _read_copies(directory)
+    if copies is None:
+        # Which files are a copy is not known, so none is removed.
+        copies = {}
+    else:
+        _remove_leftovers(directory, sources, copies)
+    results = {
+        source.id: _refresh_source(directory, source, base_url, transport, now, copies)
+        for source in sources
+    }
+    built = False
+    if any(source.id in copies for source in sources):
+        wanted = {
+            source.id: copies.get(source.id, {}).get("date") for source in sources
+        }
+        path = os.path.join(directory, reverseip.DATABASE_NAME)
+        downloaded = any(r["state"] == "downloaded" for r in results.values())
+        meta = _built_meta(path)
+        t = now()
+        if (
+            downloaded
+            or meta is None
+            or {source_id: date for source_id, (date, _) in meta.items()} != wanted
+            or _aged_out(meta, t)
+        ):
+            try:
+                build_database(directory, copies, sources, now=t)
+                built = True
+                logger.info("reverse IP: database built")
+            except Exception:
+                logger.exception(
+                    "reverse IP: the build failed; keeping the previous database"
+                )
+    return {"built": built, "sources": results}
+
+
+def main(argv: list[str]) -> int:
+    """`python -m reverseip_build '{"directory", "sources", "base_url"}'`:
+    `sources` is REVERSEIP_SOURCES' comma-separated ids. Logs to stderr, and
+    prints nothing on stdout but the summary, as one JSON line."""
+    logging.basicConfig(
+        level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s"
+    )
+    settings = json.loads(argv[0])
+    summary = refresh_sources(
+        settings["directory"],
+        reverseip.parse_sources(settings["sources"]),
+        settings["base_url"],
+        urllib_transport,
+    )
+    print(json.dumps(summary), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -178,8 +178,9 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   lookup, the other's leg or an AbuseIPDB request; `?fields=` narrows the
   same way through `textfmt.legs_for()`. Builds the manager singletons
   (`geo_ip_manager`, `tld_names_manager`, `domain_manager`,
-  `reputation_manager`, `abuseipdb_client`) at import, which reads `data/` but
-  makes no network call.
+  `reputation_manager`, `abuseipdb_client`, `asinfo_manager`,
+  `reverse_ip_manager`) at import, which reads `data/` but makes no network
+  call.
   `canonical_hostname` lower-cases, normalizes IDNA dot separators, encodes
   each non-ASCII label with the direct `idna` dependency's UTS 46 processing,
   validates every label, and removes one trailing root dot. ASCII service
@@ -189,7 +190,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `abuse_report` asks AbuseIPDB, from `_run_legs` and only for an IP target.
   The `asinfo` leg (in `LEGS`) reads `address_as_info(ip, location)`, the
   route and AS card of an address from `asinfo_manager`; `as_info_for_asn(asn,
-  full=)` is the card of a number. `classify_target` also answers `"asn"`
+  full=)` is the card of a number. The `reverseip` leg (in `LEGS`, for a
+  target given as an IP only) reads `address_reverse_ip(ip)`, the listed
+  names at the address, from `reverse_ip_manager`, inline like `asinfo`;
+  `top_list_subdomains(domain)` is the listed names under a domain, which
+  `main._subdomain_answer` and MCP `subdomains` attach as `openintel`. Both
+  are None while `REVERSEIP_ENABLED` is off. `classify_target` also answers `"asn"`
   (`parse_asn`: `as` plus 1 to 10 digits, 0 to 4294967295, any case; a bare
   number stays `invalid`). `special_asn(n)` reads `_SPECIAL_ASN`, the
   special-purpose ASN table beside `_SPECIAL_PURPOSE`, and is `None` for an
@@ -225,6 +231,13 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   in `managers.DNS_FAILURES`, and the `tls` fields when the TLS leg came back
   `{"error"}`; `nxdomain`/`noanswer` stay `-`. `resolution` is a name-only
   domain field (never in the text block) that says how the A query ended.
+  The eight `reverse_ip_*` fields are an IP's, asked for by name only (never
+  in the block): `reverse_ip_total`, `_names`, `_block_addresses` and
+  `_block_names` bring `reverse_ip_license`, `_attribution` and `_terms_url`
+  along (`parse_fields`, at the end), and are `?` with the `unavailable`
+  reasons when the answer is unknown; `reverse_ip_unavailable` (each list not
+  read as `label: reason`, joined with `; `, `-` when every list was read)
+  says whether a 0 covers every list, and is never brought along.
 - `subdomains.py`: subdomain discovery from Certificate Transparency (crt.sh),
   opt-in per request. `get_subdomains()` owns normalization, single-flight, and
   a global outbound budget; `invalid_target_reason()` decides which targets may
@@ -267,6 +280,24 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   so a version-2 file is rebuilt on the next refresh rather than read).
   `describe(asn, detail=True)` adds the neighbour keys to the `/AS<n>` JSON
   only; an IP, domain or self lookup's `as_info`, MCP and text never carry them.
+- `reverseip.py`: reverse IP from OpenINTEL's top-list DNS measurements (see
+  [Reverse IP](#reverse-ip)). The source table (`parse_sources`, `Source`),
+  `licence_lines()` (attribution, licence and coverage sentence, which every
+  surface that shows an OpenINTEL name or count carries) and
+  `ReverseIpManager`: `refresh()` runs the child, then `for_address(ip, limit)`
+  (names, total, the /24 or /48 block), `names_under(domain, cap)` (the listed
+  names below a domain), `status()`, `stale_sources()` and `hosts()` (for
+  `/privacy`) read the SQLite file. Imports `config` and the standard library
+  only; must not import `lookup`, `main`, `reverseip_build` or `pyarrow`, for
+  `subdomains.py`'s reason and so that Parquet's memory stays out of the web
+  process.
+- `reverseip_build.py`: the child, run as `python -m reverseip_build '<json>'`
+  (`directory`, `sources`, `base_url`). It lists the bucket, range-reads the
+  wanted columns of the newest partition of each source, keeps the
+  one-download-per-source-per-UTC-day stamps and builds
+  `reverseip.sqlite3`, all under a non-blocking lock on `<dir>/.lock`. The
+  only module that imports `pyarrow`. Prints a one-line JSON summary on
+  stdout and logs on stderr.
 - `asmap.py`: where an AS's IPv4 space geolocates. `sample_addresses` spreads
   at most `AS_MAP_SAMPLE_BUDGET` addresses over the prefixes by size, and
   `footprint` locates them with a `place` callable (`lookup.as_footprint`
@@ -312,6 +343,14 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   among them; `lookup` and `whoami_caller` carry a compact `as_info`). `compact_registration` adds `status_explained`
   (`eppstatus.explain_status`: `[{code, meaning, severity}]`) beside a domain's
   raw `status`; an IP allocation, an error and `registered: false` carry none.
+  `lookup` of an IP carries `reverse_ip` (`compact_reverse_ip`: the first
+  `REVERSEIP_MCP_LIMIT` names, `total`, `truncated`, `block`, `as_of`,
+  `unavailable`, `coverage` and the licence lines `license`, `license_url`,
+  `attribution` and `terms_url`), and `subdomains` adds `openintel`
+  (`compact_top_list_subdomains`, the same licence lines). A crt.sh failure
+  makes `subdomains` an `isError` result unless the lists found at least one
+  name; then crt.sh's `names`, `count` and `truncated` are null with its
+  `error` beside `openintel`.
   A new output key is not a listing change, so `server.json` is not bumped for
   it. `build_mcp`, `McpDispatch`, `McpBarePathRoute` and `McpDisabled` are the
   mount plumbing `main.py` wires.
@@ -328,7 +367,12 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `attribution` as `[{text, href?}]` without importing `asinfo`.
   `dmarc_policy()` is the one reading of a name's
   DMARC record (the Mail row in the DNS column): exactly one record, and an
-  inherited one's `sp=` for a subdomain.
+  inherited one's `sp=` for a subdomain. `reverse_ip_view` is the "Domains on
+  this address" panel (names, none listed or unknown; a partial answer's
+  "Not checked" line; the coverage, attribution and licence lines in every
+  state), and `subdomain_found_count` the subdomain hint's count: crt.sh's
+  plus the names only the top lists know, the arithmetic `static/js/app.js`'s
+  `mergeSubdomains` uses, None when crt.sh failed and the lists found none.
 - `geo.py`: `Gazetteer` (coordinates from `static/geo/*.json`), `haversine_km`,
   and `coordinate_precision`, the one `city`/`country` rule for a fix.
 - `mapgeom.py`: `build_canvas()` and the Web Mercator, antimeridian and
@@ -373,6 +417,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `lookup.gather()`
 - `GET /{domain_ip}?subdomains=include|only` - opt-in Certificate Transparency
   subdomain list; see [Subdomain lookup](#subdomain-lookup)
+- On an IP target, the lookup's JSON carries `reverse_ip` (and the page a
+  "Domains on this address" accordion after the AS panel) while
+  `REVERSEIP_ENABLED`; `?subdomains=` adds `subdomains.openintel` (see
+  [Reverse IP](#reverse-ip))
 - `GET /AS<n>` (`AS4766`, `as4766`; `lookup.parse_asn`) - an autonomous
   system, from the local AS database through `main._as_lookup`, which takes no
   `lookup_gate` slot. A special-purpose number is a `200` that says what it is
@@ -458,11 +506,13 @@ poetry run ruff format .         # CI runs `ruff format --check .`
    `security` leg (`dnssecurity.fetch`) runs beside its sweep, unless the A
    query was `nxdomain`. GeoIP is read inline,
    and reputation from the lists in memory; an IP
-   target is also sent to AbuseIPDB, alongside the rest
+   target is also sent to AbuseIPDB, alongside the rest. The `asinfo` leg and
+   an IP target's `reverseip` leg read their local SQLite files inline
 5. **Response Assembly**: `main.get_ip_info` builds a plain dict (`address`,
    `resolved_ip`, `resolution`, `datetime`, `domain`, `location`, `whois`,
    `ssl`, `headers`, `map`, `distance_km`, `origin`, `elapsed_ms`, plus
-   `reputation`, `dns_security` and `subdomains` when present) and returns it as JSON or
+   `reputation`, `dns_security`, `as_info`, `reverse_ip` and `subdomains`
+   when present) and returns it as JSON or
    renders it through `render_page` and `viewmodel.build_view()`
 6. **Logging**: every lookup is logged as `client={client_ip} lookup={target}`,
    with `<email-like>` in place of a target that has an `@` in it
@@ -493,7 +543,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   start); `refresh-asinfo` every `ASINFO_CHECK_INTERVAL_SECONDS` (first run at
   start, in the background: a fresh volume serves lookups with the AS card
   unavailable until the first build; like the reputation job it is not in
-  `_refresh_with_retry` and adds nothing to `_refresh_failures`); expired-ban cleanup; and cleanup of both rate-limiter buckets.
+  `_refresh_with_retry` and adds nothing to `_refresh_failures`);
+  `refresh-reverseip` every `REVERSEIP_CHECK_INTERVAL_SECONDS` (first run at
+  start, in the background, the same way: it runs the child and a fresh volume
+  serves lookups with `reverse_ip.total` null until the first build); expired-ban cleanup; and cleanup of both rate-limiter buckets.
   `_refresh_with_retry` retries a failed GeoLite2 or suffix-list refresh on a
   one-shot timer and counts consecutive failures for `/healthz`
   (`_refresh_failures`).
@@ -779,8 +832,10 @@ below by text:
 - Every hostname and address the page prints links to its own lookup: the
   DNS table's A/AAAA/NS/MX/CNAME values (the record's field, so an MX links
   its host, never `10 host.`; a CNAME hop row its hop's target), the rDNS and
-  PTR facts, the hero's `A → ip` tag, the WHOIS name servers and the
-  subdomain list. TXT rows and failed (`tone: warning`) rows never link.
+  PTR facts, the hero's `A → ip` tag, the WHOIS name servers, the names in
+  the "Domains on this address" panel (`viewmodel.reverse_ip_view`) and the
+  subdomain list, the top lists' names in it included. TXT rows and failed
+  (`tone: warning`) rows never link.
 - `lookup_href(value)` is the one rule: `/{value}` only when `classify_target`
   calls it a domain (written as `lookup.canonical_hostname` spells it: no
   trailing dot, lower case, A-label) or `is_safe_ip` passes the address
@@ -1003,6 +1058,8 @@ whatismyip/
 ├── reputation.py        # IP reputation lists (data/reputation/), bisect lookups; score 0-100
 ├── abuseipdb.py         # AbuseIPDB score for a directly looked-up IP: cache, daily quota
 ├── asinfo.py            # AS information: seven datasets -> one SQLite file (data/asinfo/), route and AS reads
+├── reverseip.py         # reverse IP: sources, licence lines, ReverseIpManager (reads, status, refresh -> child)
+├── reverseip_build.py   # the child: listing, range reads, daily stamps, SQLite build (the only pyarrow importer)
 ├── mcp_server.py        # public MCP server mounted at /mcp
 ├── geo.py               # Gazetteer lookup + haversine distance
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs, weighted-point canvas and frame
@@ -1039,6 +1096,7 @@ whatismyip/
 │   └── geo/                # cities.json, countries.json (generated, committed)
 ├── tests/                  # see Testing Strategy for each file
 │   ├── asinfo_fixtures.py  # synthetic files in each source format + build_manager(), for the asinfo tests
+│   ├── reverseip_fixtures.py # small Parquet files in OpenINTEL's schema, a fake range-request transport + build_manager()
 │   ├── conftest.py         # env switches and a state dir per run, set before main is imported;
 │   │                       # per-test reset of module state; offline defaults and the network guard
 │   └── fixtures/           # MaxMind's GeoLite2 test mmdbs, the MCP server.json schema
@@ -1415,6 +1473,236 @@ synthetic files, patched into `lookup` and `main`, clock at
 `asinfo_fixtures.NOW`) or builds its own manager. Nothing in the suite touches
 the network.
 
+### Reverse IP
+
+**Downloaded by the scheduler, read from one SQLite file.** The
+`refresh-reverseip` job (`ReverseIpManager.refresh()`) runs one child that
+downloads OpenINTEL's daily top-list measurements into `data/reverseip/` and
+builds `reverseip.sqlite3` from the copies; a request reads the live file
+through `lookup.address_reverse_ip` / `lookup.top_list_subdomains`, which make
+no outbound request. The six default lists (`REVERSEIP_SOURCES`) are Tranco,
+Cisco Umbrella, Cloudflare Radar, Majestic Million and the Chrome UX Report
+globally and for Korea (`crux:global`, `crux:kr`; another country is one env
+change). A source lists under `fdns/basis=toplist/source=<list>/`, and CrUX
+under `source=crux/country-code=<cc>/` (`global` for the global list).
+`REVERSEIP_SOURCES` is parsed only while `REVERSEIP_ENABLED` (an id this
+release does not know raises at import then, and not with the feature off),
+and an id given twice is kept once, where it first appears, with a WARNING.
+
+**What it can say.** OpenINTEL's open data measures only names on public top
+lists, so a hit is a fact and an empty answer is not "nothing points here". The
+three states are never conflated: names found; `total` 0 (none of the lists read
+holds a name here); `total` null (nothing could be read, with the reasons in
+`unavailable`). `names_under` has the same three with `count`. A partial set of
+sources answers from the lists it could read, with the others in `unavailable`,
+so a 0 with `unavailable` non-empty covers only the lists read; `coverage` names
+only those (all the configured lists when none could be read). The page words
+the empty state as "No name on these lists resolved to this address on
+<date>. Names outside them are not covered.", beside the coverage sentence, and
+never "no domains". A partial answer adds "Not checked: <label> (<reason>); …"
+(a reason shared by several lists said once) and its zero hint reads "none in
+N of M lists"; the unknown state's "Unknown: …" line collapses shared reasons
+the same way. `?fields=reverse_ip_unavailable` carries the same list.
+
+**Download rules.** One child at a time per directory: `refresh_sources` holds a
+non-blocking `fcntl.flock` on `<dir>/.lock`, and a child that finds it held (a
+deploy's overlap, a `--reload` orphan) sends nothing and reports every source
+`busy`. Under the lock it first removes what a killed child left: every sparse
+`*.parquet.tmp`, and each configured source's `<stem>-*.parquet` that
+`copies.json` does not name (nothing when `copies.json` is there but does not
+read); the stamps are never touched. At most one download per source per UTC
+day, enforced in code and not configurable: the child writes `<stem>.requested` before the first range
+request and sets its mtime to the injected clock, so a failed request and a
+restart both count, and a source whose stamp is from today is `current` or
+`waiting` with no request, not even a listing. The listing is an S3
+ListObjectsV2 read of the current month, and of the month before when that
+holds nothing, and the newest day is taken. Only the columns the build reads
+are fetched, by HTTP range requests: the footer, then each wanted column chunk
+written at its offset in a sparse local file of the object's size. Every
+response must be `206` with the expected `Content-Range` and length, and the
+schema must hold `REQUIRED_COLUMNS` (`query_name`, `response_type`, `section`,
+`ip4_address`, `ip6_address`); anything else fails the source and keeps the
+previous copy. A day's parts are written as `<stem>-<partition date>-<n>.parquet`,
+so the previous copy's files stay in place until the whole day has arrived;
+`copies.json` is then rewritten and the old day's files removed (a whole-day
+swap). Disk use is the fetched bytes, not the file size. All requests send
+`REPUTATION_USER_AGENT`; `REVERSEIP_BASE_URL` overrides the bucket, and is
+normalised to end with exactly one `/` (keys are appended to it as they are).
+
+**`rank` is optional.** A file's `rank` column is fetched and read when its
+schema has it. Today only the CrUX files do: the Tranco, Umbrella, Radar and
+Majestic files carry none. A file without it gives every pair `NO_RANK`
+(2**31 - 1) and logs one INFO line, so names from such a list sort after every
+ranked name, and `names.rank` and `addr.rank` hold `NO_RANK` for a name only
+those lists know. A name's rank is its best across the lists that hold it. A
+`rank` column may be strings of digits (CrUX's today) or integers; anything
+else is `NO_RANK`.
+
+**Build rules.** A row is kept when `section` is `ans` and `response_type` is
+`A` (with `ip4_address`) or `AAAA` (with `ip6_address`). `query_name` is the name
+OpenINTEL asked, lower-cased without the trailing dot, so a name behind a CNAME
+chain is attributed to the address the chain ended at. A name needs a dot and
+only `[a-z0-9._-]`. The tables are `names`, `addr` (ordered by rank, so a page of
+a CDN address's names is a `LIMIT` read in index order), `ip_count` (the total
+without counting half a million rows), `block` (the /24 or /48: addresses with a
+listed name and the distinct names on them, computed at build) and `sub` (every
+name with three or more labels, spelled backwards, except `www.<x>` when `<x>`
+is listed itself), and `source_meta` (per source: partition date, pairs, error).
+`www.<name>` is dropped from an address when `<name>` is on it too. The unique
+index on `names` exists for deduplication during the build only and is dropped
+before the file is written with `VACUUM INTO`. Batches stream from each file, so
+memory is bounded by the batch size, and deduplication happens in SQLite. The
+scratch file (`reverseip.build.sqlite3`) has `journal_mode = OFF`, so nothing
+written to it can be rolled back: a copy that stops reading partway (any error
+from reading it that is not a SQLite error: pyarrow's, an `OSError`, a
+`KeyError` or `TypeError` from a list whose schema drifted) abandons the
+scratch file, and the build starts again from a fresh one without that source,
+so its partial rows never reach the database. Each attempt leaves out one more
+source, so a build makes at most one attempt more than it has sources. The source is
+recorded in `source_meta` with the copy's date, 0 pairs and the error, and named
+in `unavailable`; the others still build. The error names the file and the
+exception with every directory stripped (`could not read
+tranco-2026-10-27-0.parquet: ArrowInvalid: …`), since it reaches the JSON and
+the page. A SQLite error is the build's own and keeps the previous database.
+The file is built as `.tmp` and swapped with `os.replace()`;
+`source_meta.date` is the copy's date whenever a copy exists.
+
+**The child process.** `refresh()` runs `python -m reverseip_build '<json>'`
+through `subprocess.run`, with the absolute `directory`, the source ids and the
+base URL, within `REVERSEIP_BUILD_TIMEOUT_SECONDS`, and then reopens the
+database if the file changed. A subprocess rather than `multiprocessing`: pyarrow
+and its memory are imported only there and go away with it, and the child gets
+the environment without `PYTHONPATH`, which `opentelemetry-instrument` sets to
+load its `sitecustomize`, so the child is not instrumented and exports nothing.
+Its log lines reach SigNoz through the parent, which relays each stderr line at
+the level the child logged it (the child's format is `%(levelname)s
+%(message)s`; a traceback line goes at the level of the line before it, INFO
+when there is none), so a failed download or build arrives as a WARNING or an
+ERROR. The parent logs an ERROR when the child fails, times out or prints no
+summary, and a WARNING when a source was downloaded but the database was not
+built. `refresh()` returns False in those cases and when a source is `waiting`
+or `failed`, and True when every source is `busy` (another child holds the
+lock; logged at INFO). The scheduler ignores the value: the log is the signal,
+and `/healthz` once a list goes stale.
+
+**Staleness.** A source is unavailable when its copy is missing, failed to build,
+or older than `REVERSEIP_MAX_AGE_HOURS` (96), counted from the partition date's
+midnight UTC at build time and at read time alike. Day `D` is published around
+`D+1 01:30 UTC`, so a healthy copy is 25 to 49 hours old. `as_of` is the oldest
+partition date among the sources read. The job also rebuilds when a source the
+database holds names from (no error in `source_meta`) has passed the limit, so
+its names leave the file within the hour; the rebuild records the copy's date
+with the age error, and the next check does not fire again for that copy.
+
+**The answer and the licence lines.** The data is CC BY-NC-SA 4.0 and OpenINTEL
+asks for its attribution sentence (`config.OPENINTEL_ATTRIBUTION`) with it. Every
+surface that shows a name or a count carries the attribution, the licence and the
+terms link: `reverse_ip` and `subdomains.openintel` in the JSON
+(`license`, `license_url`, `terms_url`, `attribution`, `coverage`), the page's
+panel and subdomain list, MCP `lookup` and `subdomains` (their compact shapes
+carry `terms_url` too), and `?fields=` (`reverse_ip_license`,
+`reverse_ip_attribution` and `reverse_ip_terms_url` are appended whenever
+`reverse_ip_total`, `reverse_ip_names`, `reverse_ip_block_addresses` or
+`reverse_ip_block_names` is asked for, and asking for a licence field alone adds
+nothing). `terms_url` is `config.REVERSEIP_TERMS_URL` (`PUBLIC_BASE_URL`, else
+`MCP_WEBSITE_URL`, plus `REVERSEIP_TERMS_PATH`), because MCP has no request to
+build it from; the page links the path. MCP's two compact shapes carry
+`license_url` too. `?fields=reverse_ip_unavailable` is text about the lists,
+not their data, and brings no licence lines along. The terms are OpenINTEL's document as
+published, saved in `static/licenses/openintel-terms.html`, and a test pins that
+the attribution sentence in the code is the one in the file. Nothing is added to
+reputation and there is no hero tag.
+
+**The block.** The address's IPv4 /24 or IPv6 /48 as counts only: how many
+addresses in it carry a listed name and how many distinct names. `addresses`
+includes the address itself when it has names. A block with no listed name is
+`{prefix, addresses: 0, names: 0}`, never null while the database answers;
+`block` is null exactly when `total` is. There is no hosting or access verdict.
+
+**Read paths.** `for_address(ip, limit)` returns the first `limit` names in rank
+order, which puts the names Chrome UX Report ranks first and the unranked lists'
+names after them in file order (the page `REVERSEIP_LIST_LIMIT` 100, MCP and
+`?fields=` `REVERSEIP_MCP_LIMIT` 20), the true total and `truncated`. The leg `reverseip`
+in `lookup.LEGS` is for an IP target only, read inline like `asinfo`; `?fields=`
+and MCP `dns_records` and `ssl_certificate` skip it, the self page and the domain
+page do not have it. `names_under(domain, cap)` is one range read on `sub`
+(`rname > 'moc.x.' and < 'moc.x/'`), matched on the target as
+`subdomains.py` reads it (stripped, lower-cased, without trailing dots), so a
+padded MCP argument is not a false 0, and on a label boundary, so
+`notexample.com` is not under `example.com`; past `cap` (`SUBDOMAIN_MAX_NAMES`,
+5,000) the names kept are the first in reversed-name order, which is what the
+index range returns, and are then sorted; `count` is the true total.
+`main.get_ip_info` attaches the answer as `subdomains.openintel` on both
+`?subdomains=` paths, in a new dict and never into what `get_subdomains()`
+returned, which may be cached; `subdomains.py` stays crt.sh-only. A crt.sh error
+keeps its `error` beside the listed names. The page's panel (`static/js/app.js`)
+draws the union of both sets, a name only the lists know carrying a `top lists`
+marker, with the licence lines whenever `openintel.count` is above 0; if crt.sh
+failed but the lists found names, those are drawn with the failure in the status
+line, and only when neither answered is the panel a failure. MCP `subdomains`
+(title "Subdomains from Certificate Transparency and DNS top lists") is `isError`
+on a crt.sh failure unless the lists found at least one name. `server.json` does
+not change for any of this.
+
+**`/healthz`.** `reverseip` beside `asinfo`: whether the database opens and, per
+source, its date, age, pairs and whether lookups can read it. The reasons are
+`reverseip_source_stale` (one per source lookups cannot read) and
+`reverseip_unavailable` (after the first build attempt, or when a file exists and
+will not open). A fresh volume is neither, and a failed download alone does not
+degrade health; staleness does.
+
+**`/privacy`.** While the manager is enabled: the host (`object.openintel.nl`),
+that the lists are downloaded at most once a day each and never for a lookup, the
+age after which names are not shown (`reverseip_max_age`), the attribution
+sentence and a link to the terms copy.
+
+**Measured, 2026-10-28, macOS, two of the six lists.** The four other lists (Tranco,
+Umbrella, Radar, Majestic) were not downloaded when this was measured: their first
+attempt that day failed on a missing `rank` column (now optional), and the stamp
+it wrote kept them from a second download until the next UTC day. The numbers are
+for `crux:kr` (876,606 pairs, 56.5 MB file, 9.5 MB fetched, 2026-10-27) and
+`crux:global` (2,708,717 pairs, 217 MB file, 32.5 MB fetched, 2026-10-27), built in
+one run: 58.1 s wall for the download of `crux:global` and the build, 388 MB maximum
+resident set size (309 MB peak footprint) in the child, a `reverseip.sqlite3` of
+142 MB (1,230,889 names, 3,133,930 `addr` rows, 874,634 addresses, 223,324 blocks
+and 838,026 `sub` names) and a directory of 177 MB (the copies hold 42 MB on disk;
+they are sparse files of 274 MB). Reads: 121.53.204.130 has 24,781 names in its
+/24 (one address) in 0.64 ms cold and 0.11 ms warm; 175.214.27.215 has none, in a
+block of no listed address; `names_under("coupang.com")` finds 64 in 0.07 ms. The
+six-list steady state is an estimate, not a measurement: a database of about
+660 MB and a directory of about 860 MB with the copies. The build's peak was not
+measured on either run (see the next paragraph). Today's first run, which built the Korea list alone (the
+other lists had failed), took 36.97 s wall, mostly download time, with a 279 MB
+maximum resident set size and a 37.2 MB database. Measure all six after 2026-10-29 UTC and replace this paragraph.
+
+**Disk during a build.** The volume's peak is during the build, not after it. At
+the moment `VACUUM INTO` finishes, `data/reverseip/` holds at once: the copies;
+the old `reverseip.sqlite3` (after the swap, readers keep it open, unlinked but
+still on disk, until each reopens the new one); the scratch file `reverseip.build.sqlite3`,
+which is the final database plus the `pair` table, the `names_name` index and
+the pages their drops freed; and the new `reverseip.sqlite3.tmp`. Besides the
+volume, SQLite's sort and temporary files for the inserts and `GROUP BY`s grow
+in the system temp directory (the container's `/tmp`; nothing sets
+`SQLITE_TMPDIR`). The scratch file has no rollback journal beside it. A copy that fails to read costs a second build's
+time, not its disk: the abandoned scratch file is removed before the next
+attempt starts. The peak has not been measured: on the six-list run, poll `du`
+on the directory and on `/tmp` through the build, record both peaks here, and
+weigh them against what the volume shares with GeoLite2, the AS database (about
+383 MB at its own swap) and the subdomain cache.
+
+**Tests.** `tests/conftest.py` sets `REVERSEIP_ENABLED=false`, so the scheduler
+downloads nothing and no IP lookup grows a `reverse_ip` key; a test of the
+feature asks for the `reverseip_enabled` fixture (a manager over
+`reverseip_fixtures`' small Parquet files, patched into `lookup` and `main`) or
+builds its own manager. The worker is called in-process with a fake range-request
+transport; one test runs the real child against a loopback server. Nothing in
+the suite touches the network. The build tests (and `reverseip_enabled`) use
+conftest's `stock_sqlite`, which turns `SQLITE_DBCONFIG_DEFENSIVE` off on the
+build's connections, as upstream SQLite has it: macOS's Python turns it on, and
+then `PRAGMA journal_mode = OFF` is quietly refused, so a Mac would build with
+a rollback journal the Linux image does not have. `test_the_build_never_rolls_back`
+pins that the build issues no `SAVEPOINT` or `ROLLBACK`.
+
 ### Dependencies
 
 **Runtime** (`pyproject.toml`):
@@ -1430,6 +1718,8 @@ the network.
 - cryptography: parsing the certificate of a handshake that failed verification
 - mcp: the official MCP SDK (Streamable HTTP)
 - APScheduler: the background refresh and cleanup jobs
+- pyarrow: reading OpenINTEL's Parquet files. Imported only by
+  `reverseip_build.py`, in the child process, never by the web process
 - python-dotenv: `.env` loading
 - opentelemetry-*: traces, metrics and logs via `opentelemetry-instrument`,
   which the Docker entrypoint wraps uvicorn in
@@ -1485,7 +1775,7 @@ Every test runs on FastAPI's `TestClient`; most use one module-level client,
 which never runs the lifespan, and the MCP tests use `with TestClient(app)`,
 which does. `tests/conftest.py` sets the environment before any test module
 imports `main`: `BACKGROUND_REFRESH_ENABLED=false` (no lifespan starts the
-scheduler or downloads anything), `REPUTATION_ENABLED=false`, `ASINFO_ENABLED=false`, an empty
+scheduler or downloads anything), `REPUTATION_ENABLED=false`, `ASINFO_ENABLED=false`, `REVERSEIP_ENABLED=false`, an empty
 `ABUSEIPDB_API_KEY`, the admin key, the trusted proxies, and ban/geo/IP-rule
 files under a per-run temporary `STATE_DIR`; geo-blocking mode, country lists,
 and unknown-country handling are pinned off. `pytest_sessionfinish` removes
@@ -1601,7 +1891,23 @@ Test files:
   bubble, run in node; the
   Leaflet wiring rules pinned by text; skips without node),
   `asinfo_fixtures.py` (not a test module: the synthetic files and
-  `build_manager()`, with conftest's `asinfo_enabled` fixture on top)
+  `build_manager()`, with conftest's `asinfo_enabled` fixture on top),
+  `test_reverseip.py` (the source table and its repeated ids, the three
+  answer states, a partial set and its coverage, staleness, `for_address`,
+  `names_under`, `status`, the child's command line and environment, its log
+  lines at their own level, the refresh's return value, the real child once
+  against a loopback server), `test_reverseip_build.py` (listing and month
+  rollover, the daily stamps, the lock, a killed child's leftovers, range
+  checks, the schema check, optional and integer `rank`, the build with no
+  journal and a copy that fails to read built out, the rebuild once a list
+  ages out),
+  `test_reverseip_surfaces.py` (every surface and its licence lines, the
+  page's "Not checked" line and `reverse_ip_unavailable` over a partial
+  database, the subdomain panel's union in node, MCP `subdomains`' isError
+  rule, `/healthz`),
+  `reverseip_fixtures.py` (not a test module: the small Parquet files, the
+  fake transport and `build_manager()`, with conftest's `reverseip_enabled`
+  fixture on top). `/privacy`'s paragraph is in `test_privacy_page.py`
 - Security: `test_security.py` (proxy-header trust, SSRF and TLS-rebinding
   guards, the admin key, bans, the blocked-ban log dedupe, rate limiting,
   geo-blocking, the probe detector and whitelist, per-IP rules, response

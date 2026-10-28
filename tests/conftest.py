@@ -47,6 +47,7 @@ os.environ["REPUTATION_ENABLED"] = "false"
 # Off, the lookup responses are what they were before the feature;
 # test_asinfo.py builds managers over synthetic files of its own.
 os.environ["ASINFO_ENABLED"] = "false"
+os.environ["REVERSEIP_ENABLED"] = "false"
 # A developer's .env may hold a real AbuseIPDB key, and load_dotenv() never
 # overrides a variable already set: empty, no test spends its quota.
 # test_abuseipdb.py builds enabled clients over a fake transport.
@@ -116,6 +117,47 @@ def asinfo_enabled(monkeypatch, tmp_path):
     manager = build_manager(tmp_path)
     monkeypatch.setattr(lookup, "asinfo_manager", manager)
     monkeypatch.setattr(main, "asinfo_manager", manager)
+    return manager
+
+
+@pytest.fixture
+def stock_sqlite(monkeypatch):
+    """The reverse IP build's SQLite connections with the DEFENSIVE flag off,
+    as upstream SQLite has it (the python:3.12-slim image, the CI runners).
+    macOS's Python turns it on, and then the build's `PRAGMA journal_mode =
+    OFF` is quietly refused: a build test on a Mac would run with a rollback
+    journal that Linux does not have. Returns the connections it opened."""
+    import sqlite3
+    import types
+
+    import reverseip_build
+
+    opened = []
+
+    def connect(*args, **kwargs):
+        con = sqlite3.connect(*args, **kwargs)
+        con.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, False)
+        opened.append(con)
+        return con
+
+    stock = types.SimpleNamespace(**{**vars(sqlite3), "connect": connect})
+    monkeypatch.setattr(reverseip_build, "sqlite3", stock)
+    return opened
+
+
+@pytest.fixture
+def reverseip_enabled(monkeypatch, tmp_path, stock_sqlite):
+    """The reverse IP feature on, over a freshly built database in `tmp_path`:
+    the suite runs with REVERSEIP_ENABLED=false, so a test of the `reverse_ip`
+    section asks for this. Returns the manager (its clock reads
+    tests/reverseip_fixtures.NOW)."""
+    import lookup
+    import main
+    from reverseip_fixtures import build_manager
+
+    manager = build_manager(tmp_path)
+    monkeypatch.setattr(lookup, "reverse_ip_manager", manager)
+    monkeypatch.setattr(main, "reverse_ip_manager", manager)
     return manager
 
 

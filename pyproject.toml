@@ -28,6 +28,7 @@ mcp = "^2.3.0"
 dnspython = "^2.9"
 cryptography = "^50.0.2"
 idna = "^3.20"
+pyarrow = "^26.0.0"
 
 
 [tool.poetry.group.dev.dependencies]

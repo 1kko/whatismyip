@@ -375,12 +375,200 @@ def test_every_name_app_js_draws_is_a_nofollow_lookup_link():
         "subdomainNotes",
         "subdomainCountText",
         "fullListHref",
+        "mergeSubdomains",
+        "topListLines",
         "renderSubdomainPanel",
     )
     assert anchors == [
         ["lookup-link", "nofollow", "/a.example.com", "a.example.com"],
         ["lookup-link", "nofollow", "/b.example.com", "b.example.com"],
     ]
+
+
+@needs_node
+class TestTopLists:
+    def _merge(self, data):
+        return _js(f"mergeSubdomains({json.dumps(data)})", "mergeSubdomains")
+
+    def test_merge_marks_names_only_the_lists_know(self):
+        data = {
+            "names": ["a.example.com", "b.example.com"],
+            "count": 2,
+            "openintel": {"names": ["b.example.com", "c.example.com"], "count": 2},
+        }
+        assert self._merge(data) == {
+            "names": ["a.example.com", "b.example.com", "c.example.com"],
+            "listedOnly": ["c.example.com"],
+            "total": 3,
+            "crtError": None,
+        }
+
+    def test_merge_with_crtsh_failed(self):
+        data = {
+            "names": [],
+            "count": 0,
+            "error": "timed out",
+            "openintel": {"names": ["b.example.com", "a.example.com"], "count": 2},
+        }
+        assert self._merge(data) == {
+            "names": ["a.example.com", "b.example.com"],
+            "listedOnly": ["b.example.com", "a.example.com"],
+            "total": 2,
+            "crtError": "timed out",
+        }
+
+    def test_merge_without_lists_keeps_the_crtsh_count(self):
+        data = {"names": ["a.example.com"], "count": 9123, "truncated": True}
+        merged = self._merge(data)
+        assert merged["total"] == 9123 and merged["listedOnly"] == []
+
+    def test_merge_with_unknown_lists(self):
+        data = {
+            "names": ["a.example.com"],
+            "count": 1,
+            "openintel": {"names": None, "count": None},
+        }
+        assert self._merge(data)["total"] == 1
+
+    def test_no_licence_lines_without_listed_names(self):
+        for lists in ("{count: 0}", "null", "undefined", "{count: null}"):
+            assert _js(f"topListLines({lists})", "topListLines") == []
+
+    def test_the_licence_lines(self):
+        lines = _js(
+            "topListLines({count: 2, as_of: '2026-10-20', attribution: 'A', "
+            "license: 'CC BY-NC-SA 4.0', license_url: 'https://l'})",
+            "topListLines",
+        )
+        assert lines[0] == {"text": "Also from top lists, measured 2026-10-20"}
+        assert lines[1] == {"text": "A"}
+        assert lines[2] == {"text": "CC BY-NC-SA 4.0", "href": "https://l"}
+        assert lines[3] == {
+            "text": "OpenINTEL terms",
+            "href": "/static/licenses/openintel-terms.html",
+        }
+
+    def test_the_panel_draws_the_marker_and_the_credits(self):
+        out = _js(
+            "(() => {"
+            + STUB_DOM
+            + """
+          const line = element("p");
+          const body = element("div");
+          renderSubdomainPanel(
+            body,
+            line,
+            {
+              names: ["a.example.com"],
+              count: 1,
+              error: null,
+              openintel: {
+                names: ["c.example.com"], count: 1, as_of: "2026-10-20",
+                attribution: "Attr", license: "Lic", license_url: "https://l",
+              },
+            },
+            "example.com",
+          );
+          const items = made.filter((el) => el.tag === "li");
+          return {
+            items: items.map((li) =>
+              li.children.map((c) => [c.tag, c.className, c.textContent])),
+            credits: made
+              .filter((el) => el.tag === "p" && el.className === "subdomains__meta")
+              .map((el) => el.textContent ||
+                el.children.map((c) => [c.href, c.rel, c.textContent])),
+            innerHTML: made.some((el) => "innerHTML" in el),
+          };
+        })()""",
+            *PANEL_FUNCTIONS,
+        )
+        assert out["items"] == [
+            [["a", "lookup-link", "a.example.com"]],
+            [
+                ["a", "lookup-link", "c.example.com"],
+                ["span", "subdomains__source", "top lists"],
+            ],
+        ]
+        assert out["credits"][-4:] == [
+            "Also from top lists, measured 2026-10-20",
+            "Attr",
+            [["https://l", "noopener noreferrer", "Lic"]],
+            [
+                [
+                    "/static/licenses/openintel-terms.html",
+                    "noopener noreferrer",
+                    "OpenINTEL terms",
+                ]
+            ],
+        ]
+        assert out["innerHTML"] is False
+
+    def test_the_status_line_leads_with_a_crtsh_failure(self):
+        out = _js(
+            "(() => {"
+            + STUB_DOM
+            + """
+          const status = element("span");
+          const line = element("p");
+          line.querySelector = () => status;
+          renderSubdomainPanel(
+            element("div"),
+            line,
+            { names: [], count: 0, error: "timed out",
+              openintel: { names: ["c.example.com"], count: 1 } },
+            "example.com",
+          );
+          return status.textContent;
+        })()""",
+            *PANEL_FUNCTIONS,
+        )
+        assert out == "crt.sh lookup failed: timed out. Showing 1 of 1."
+
+    def test_only_two_failures_make_a_failed_panel(self):
+        def failed(data):
+            return _js(
+                f"subdomainsFailedOutright({json.dumps(data)})",
+                "subdomainsFailedOutright",
+            )
+
+        assert failed({"error": "x"}) is True
+        assert failed({"error": "x", "openintel": {"count": 0}}) is True
+        assert failed({"error": "x", "openintel": {"count": None}}) is True
+        assert failed({"error": "x", "openintel": {"count": 2}}) is False
+        assert failed({"names": []}) is False
+
+
+PANEL_FUNCTIONS = (
+    "SUBDOMAIN_RENDER_CAP",
+    "filterSubdomains",
+    "formatCount",
+    "subdomainNotes",
+    "subdomainCountText",
+    "fullListHref",
+    "mergeSubdomains",
+    "topListLines",
+    "renderSubdomainPanel",
+)
+
+
+def test_a_crtsh_failure_with_listed_names_is_not_a_failed_panel():
+    """Both the lazy handler and the server-rendered path ask whether the
+    lists answered before they give up."""
+    source = APP_JS.read_text(encoding="utf-8")
+    handler = source.split("subdomainAccordion.addEventListener")[1]
+    assert "subdomainsFailedOutright(data)" in handler
+    assert "openintel" in _function("subdomainsFailedOutright")
+    rendered = source.split('getElementById("subdomains-rendered")')[1].split(
+        "if (subdomainAccordion"
+    )[0]
+    assert "subdomainsFailedOutright(data)" in rendered
+
+
+def test_the_marker_has_a_style_from_existing_tokens():
+    css = (APP_JS.parents[1] / "css" / "whatismyip.css").read_text(encoding="utf-8")
+    rule = css.split(".subdomains__source {")[1].split("}")[0]
+    assert "var(--text-muted)" in rule
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgb", rule)
 
 
 # --- app.js wiring, by source text ---------------------------------------------

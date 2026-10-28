@@ -12,7 +12,12 @@ import math
 from typing import Any, Callable
 from urllib.parse import quote
 
-from config import ASINFO_MIN_RIS_PEERS, SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
+from config import (
+    ASINFO_MIN_RIS_PEERS,
+    REVERSEIP_TERMS_PATH,
+    SUBDOMAIN_ENABLED,
+    YOUNG_DOMAIN_DAYS,
+)
 from countrynames import country_name, country_name_in_text
 from eppstatus import explain_status
 from reputation import grade
@@ -2008,7 +2013,111 @@ def dns_security_view(data: dict | None) -> dict | None:
     return {"hint": hint, "rows": rows}
 
 
-def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
+def _by_reason(unavailable: list[dict]) -> list[tuple[str, str]]:
+    """(labels, reason) for each distinct reason, in the order first seen: on
+    a fresh volume every list is "not downloaded yet", said once."""
+    grouped: dict[str, list[str]] = {}
+    for item in unavailable:
+        grouped.setdefault(str(item.get("reason")), []).append(str(item.get("label")))
+    return [(", ".join(labels), reason) for reason, labels in grouped.items()]
+
+
+def reverse_ip_view(info: dict | None, link_for: LinkFor | None = None) -> dict | None:
+    """The "Domains on this address" panel: the listed names that resolved to
+    an IP, in one of three states (names, none listed, unknown). Every state
+    carries the coverage, attribution and licence lines: OpenINTEL's terms ask
+    for them wherever its data is shown. None for no answer (the feature is
+    off, or the target is not an IP).
+
+    A partial answer (some lists read, the others in `unavailable`) says
+    which were not checked, and why, in `not_checked`; "none" then counts the
+    lists read ("none in 1 of 3 lists"), since the others may hold a name."""
+    if info is None:
+        return None
+    total = info.get("total")
+    names = info.get("names")
+    as_of = info.get("as_of")
+    block = info.get("block")
+    unavailable = info.get("unavailable") or []
+
+    not_checked = None
+    if total is None:
+        hint = "unknown"
+        reasons = "; ".join(
+            f"{labels}: {reason}" for labels, reason in _by_reason(unavailable)
+        )
+        state_line = f"Unknown: {reasons}"
+    else:
+        if unavailable:
+            not_checked = "Not checked: " + "; ".join(
+                f"{labels} ({reason})" for labels, reason in _by_reason(unavailable)
+            )
+        if total == 0:
+            read = len(info.get("sources") or [])
+            hint = (
+                f"none in {read} of {read + len(unavailable)} lists"
+                if unavailable
+                else "none in top lists"
+            )
+            state_line = (
+                f"No name on these lists resolved to this address on {as_of}. "
+                "Names outside them are not covered."
+            )
+        else:
+            hint = f"{total:,} name{'s' if total != 1 else ''}"
+            state_line = None
+
+    shown = [{"text": n, "href": _href(link_for, n)} for n in names or []]
+    more = total - len(shown) if info.get("truncated") and total else 0
+
+    block_line = None
+    if block:
+        addresses, listed = block.get("addresses", 0), block.get("names", 0)
+        prefix = block.get("prefix")
+        if not listed:
+            block_line = f"{prefix}: no address carries a listed name"
+        else:
+            block_line = (
+                f"{prefix}: {addresses:,} address{'es' if addresses != 1 else ''} "
+                f"{'carries' if addresses == 1 else 'carry'} "
+                f"{listed:,} listed name{'s' if listed != 1 else ''}"
+            )
+
+    coverage = info.get("coverage") or ""
+    if as_of:
+        coverage = f"{coverage} Measured {as_of}."
+    return {
+        "hint": hint,
+        "names": shown,
+        "more": more,
+        "state_line": state_line,
+        "not_checked": not_checked,
+        "block_line": block_line,
+        "coverage": coverage,
+        "attribution": info.get("attribution"),
+        "license": info.get("license"),
+        "license_url": info.get("license_url"),
+        "terms_path": REVERSEIP_TERMS_PATH,
+    }
+
+
+def subdomain_found_count(data: dict) -> int | None:
+    """How many subdomains the panel counts: crt.sh's count plus the names
+    only the top lists know. None when crt.sh failed and the lists found
+    none. The same arithmetic as mergeSubdomains in static/js/app.js."""
+    crt_names = data.get("names") or []
+    lists = data.get("openintel") or {}
+    known = set(crt_names)
+    listed_only = [n for n in lists.get("names") or [] if n not in known]
+    if data.get("error"):
+        return len(listed_only) if listed_only else None
+    count = data.get("count")
+    return (len(crt_names) if count is None else count) + len(listed_only)
+
+
+def _accordions(
+    response: dict, subdomains_enabled: bool, reverseip: dict | None = None
+) -> list[dict]:
     domain = response.get("domain") or {}
     headers = response.get("headers") or {}
 
@@ -2059,6 +2168,15 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
     as_card = as_view(response.get("as_info"))
     if as_card:
         accordions.append({"id": "as", "title": "AS", "hint": as_card["hint"]})
+    # Then the names listed at this address (reverseip.py), an IP target only.
+    if reverseip:
+        accordions.append(
+            {
+                "id": "reverseip",
+                "title": "Domains on this address",
+                "hint": reverseip["hint"],
+            }
+        )
     # Beside the DNS records it grades (dnssecurity.py).
     security = dns_security_view(response.get("dns_security"))
     if security:
@@ -2087,11 +2205,12 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
         # will do rather than where the data comes from. static/js/app.js
         # rewrites it to the same "N subdomains found" wording once the lazy
         # fetch lands, so the two paths read identically.
-        if subdomain_data and subdomain_data.get("error"):
-            hint = "lookup failed"
-        elif subdomain_data:
-            count = subdomain_data.get("count", 0)
-            hint = f"{count:,} subdomain{'s' if count != 1 else ''} found"
+        if subdomain_data:
+            count = subdomain_found_count(subdomain_data)
+            if count is None:
+                hint = "lookup failed"
+            else:
+                hint = f"{count:,} subdomain{'s' if count != 1 else ''} found"
         else:
             hint = "click to lookup"
         accordions.append({"id": "subdomains", "title": "Subdomains", "hint": hint})
@@ -2125,6 +2244,7 @@ def build_view(
     address = response.get("address") or ""
     is_ip = _is_ip(address)
     dns_queried_name, dns_zone = dns_names(domain, address)
+    reverseip = reverse_ip_view(response.get("reverse_ip"), link_for) if is_ip else None
 
     if is_ip:
         facts = [
@@ -2169,7 +2289,8 @@ def build_view(
         "dns_zone": dns_zone,
         "whois_pending": whois_pending(response.get("whois")),
         "whois_name_servers": name_server_links(response.get("whois"), link_for),
-        "accordions": _accordions(response, subdomains_enabled),
+        "accordions": _accordions(response, subdomains_enabled, reverseip),
+        "reverse_ip": reverseip,
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         # A domain's address may have been found under another name (a CNAME
         # chain); an IP's sweep is of its PTR name, and its location is its own.
@@ -2180,6 +2301,11 @@ def build_view(
         ),
         "dns_security": dns_security_view(response.get("dns_security")),
         "subdomains": response.get("subdomains"),
+        # Neither crt.sh nor the top lists answered: the panel is a failure.
+        "subdomains_failed": bool(
+            response.get("subdomains")
+            and subdomain_found_count(response["subdomains"]) is None
+        ),
         "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],
     }
 

@@ -30,6 +30,7 @@ IMPORT_PROBE = textwrap.dedent(
     """
     import json
     import socket
+    import sys
     import urllib.request
 
     attempts = []
@@ -52,6 +53,7 @@ IMPORT_PROBE = textwrap.dedent(
     print(json.dumps({
         "attempts": attempts,
         "scheduler_running": main.scheduler.running,
+        "pyarrow": "pyarrow" in sys.modules,
     }))
     """
 )
@@ -71,6 +73,7 @@ def test_importing_main_touches_no_network(tmp_path):
         "TLD_NAMES_DIR": str(data / "tld"),
         "REPUTATION_DIR": str(data / "reputation"),
         "ASINFO_DIR": str(data / "asinfo"),
+        "REVERSEIP_DIR": str(data / "reverseip"),
         "SUBDOMAIN_STORE_FILE": str(data / "subdomains.sqlite3"),
         "BANNED_IPS_FILE": str(data / "banned_ips.json"),
         "GEO_RULES_FILE": str(data / "geo_rules.json"),
@@ -80,6 +83,7 @@ def test_importing_main_touches_no_network(tmp_path):
         "BACKGROUND_REFRESH_ENABLED": "true",
         "REPUTATION_ENABLED": "true",
         "ASINFO_ENABLED": "true",
+        "REVERSEIP_ENABLED": "true",
     }
     # The interpreter running this suite, on a fixed script.
     result = subprocess.run(  # noqa: S603
@@ -94,6 +98,7 @@ def test_importing_main_touches_no_network(tmp_path):
     report = json.loads(result.stdout.strip().splitlines()[-1])
     assert report["attempts"] == []
     assert report["scheduler_running"] is False
+    assert report["pyarrow"] is False
 
 
 def _record_boot(monkeypatch, scheduler: BackgroundScheduler) -> list:

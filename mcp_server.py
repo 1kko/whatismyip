@@ -37,6 +37,7 @@ from config import (
     MCP_SERVER_TITLE,
     MCP_WEBSITE_URL,
     RDAP_TIMEOUT_SECONDS,
+    REVERSEIP_MCP_LIMIT,
     SUBDOMAIN_ENABLED,
     SUBDOMAIN_MCP_DEFAULT_LIMIT,
     SUBDOMAIN_MCP_MAX_LIMIT,
@@ -54,6 +55,7 @@ from lookup import (
     lookup_location,
     parse_asn,
     sanitize_log_input,
+    top_list_subdomains,
 )
 from managers import DNS_FAILURES
 from rdap import NOT_REGISTERED
@@ -424,6 +426,62 @@ def _compact_list(entry: dict | None, full: bool) -> dict | None:
     return out
 
 
+def compact_reverse_ip(
+    info: dict | None, limit: int = REVERSEIP_MCP_LIMIT
+) -> dict | None:
+    """The reverse IP answer for an LLM context: the first `limit` names
+    (`truncated` says when there are more), the /24 or /48 block's counts and
+    the licence lines that travel with every use of the names. `total`, `names`
+    and `truncated` are null when the data could not be read; `unavailable`
+    says why. 0 is "no name on these lists", never "no domains"."""
+    if not info:
+        return None
+    total = info.get("total")
+    names = None if total is None else list(info.get("names") or [])[:limit]
+    return {
+        "total": total,
+        "names": names,
+        "truncated": None if names is None else total > len(names),
+        "block": info.get("block"),
+        "as_of": info.get("as_of"),
+        "unavailable": [
+            {"source": item.get("label"), "reason": item.get("reason")}
+            for item in info.get("unavailable") or []
+        ],
+        "coverage": info.get("coverage"),
+        "license": info.get("license"),
+        "license_url": info.get("license_url"),
+        "attribution": info.get("attribution"),
+        "terms_url": info.get("terms_url"),
+    }
+
+
+def compact_top_list_subdomains(data: dict | None, limit: int) -> dict | None:
+    """The names OpenINTEL's top lists hold under a domain, for an LLM context:
+    the first `limit` (`truncated` says when there are more) and the licence
+    lines that travel with every use of the names. `names`, `count` and
+    `truncated` are null when the data could not be read; `unavailable` says
+    why. 0 is "no name on these lists", never "no subdomains"."""
+    if not data:
+        return None
+    count = data.get("count")
+    names = None if count is None else list(data.get("names") or [])[:limit]
+    return {
+        "names": names,
+        "count": count,
+        "truncated": None if names is None else count > len(names),
+        "as_of": data.get("as_of"),
+        "unavailable": [
+            {"source": item.get("label"), "reason": item.get("reason")}
+            for item in data.get("unavailable") or []
+        ],
+        "license": data.get("license"),
+        "license_url": data.get("license_url"),
+        "attribution": data.get("attribution"),
+        "terms_url": data.get("terms_url"),
+    }
+
+
 def compact_as_info(info: dict | None, full: bool = False) -> dict | None:
     """asinfo's card for an LLM context: the numbers and names, without the
     dataset dates or the long lists (`full` keeps the downstream, peer and
@@ -600,6 +658,14 @@ async def lookup(target: str) -> dict[str, Any]:
     was found for the address, and the card is then its route, `announced`,
     `source` and `unavailable` alone. An AS number is not a target here: use
     `as_info`.
+
+    `reverse_ip` (IP targets) lists domain names from public top lists (Tranco,
+    Umbrella, Radar, Majestic, Chrome UX Report) that resolved to this address
+    on `as_of`, names ranked by Chrome UX Report first, with `total` and the
+    counts for the address's /24 or /48 in `block`. Most addresses carry none:
+    `total` 0 means no name on these lists, not no domains, and null means the
+    data could not be read (see `unavailable`). Repeat `attribution`,
+    `license` and `terms_url` wherever you use these names.
     """
     try:
         data = await _bounded_gather(target)
@@ -636,6 +702,8 @@ async def lookup(target: str) -> dict[str, Any]:
         result["dns_security"] = compact_dns_security(data["dns_security"])
     if data.get("as_info"):
         result["as_info"] = compact_as_info(data["as_info"])
+    if data.get("reverse_ip"):
+        result["reverse_ip"] = compact_reverse_ip(data["reverse_ip"])
     return result
 
 
@@ -815,6 +883,12 @@ async def subdomains(
     come back; `count` always reports the true total. Pass a registered domain
     or a name under one: an IP address, a bare public suffix (com, co.uk,
     github.io) or a .onion or home.arpa name is refused.
+
+    `openintel` adds names under the domain that resolved in OpenINTEL's daily
+    measurement of public top lists; Certificate Transparency misses names a
+    wildcard certificate covers, and the lists see only popular names, so the
+    two complement each other. Repeat its `attribution`, `license` and
+    `terms_url` wherever you use those names.
     """
     if limit < 1:
         return _fail("limit must be at least 1")
@@ -836,12 +910,28 @@ async def subdomains(
     # record type this server does not query for the same reason: a model
     # reading {} or [] states it as fact, and "we could not ask" would reach the
     # user as "there are none".
+    listed = compact_top_list_subdomains(top_list_subdomains(domain), limit)
     if data.get("error"):
+        # The lists answered with at least one name: the call is not a total
+        # failure, and crt.sh's part is null (never an empty list) with its
+        # error beside it.
+        if listed and (listed["count"] or 0) >= 1:
+            return {
+                "domain": domain,
+                "names": None,
+                "count": None,
+                "truncated": None,
+                "source": data.get("source"),
+                "fetched_at": data.get("fetched_at"),
+                "stale": data.get("stale", False),
+                "error": data["error"],
+                "openintel": listed,
+            }
         return _fail(data["error"], domain=domain)
 
     names = data.get("names") or []
     shown = names[:limit]
-    return {
+    result = {
         "domain": domain,
         "names": shown,
         "count": data.get("count", len(names)),
@@ -850,15 +940,19 @@ async def subdomains(
         "fetched_at": data.get("fetched_at"),
         "stale": data.get("stale", False),
     }
+    if listed is not None:
+        result["openintel"] = listed
+    return result
 
 
 # Registered conditionally so that with SUBDOMAIN_ENABLED=false an agent sees a
 # server that does not offer this, rather than one that offers it and always
 # fails. The decorator form cannot express that.
 if SUBDOMAIN_ENABLED:
-    mcp.tool(title="Subdomains from Certificate Transparency", annotations=_READ_ONLY)(
-        subdomains
-    )
+    mcp.tool(
+        title="Subdomains from Certificate Transparency and DNS top lists",
+        annotations=_READ_ONLY,
+    )(subdomains)
 
 
 def registered_tool_names() -> list[str]:

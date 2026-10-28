@@ -17,6 +17,7 @@ from mcp_server import (
     compact_location,
     compact_network,
     compact_registration,
+    compact_reverse_ip,
     compact_reputation,
     compact_ssl,
 )
@@ -75,6 +76,20 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "dmarc_policy": (frozenset({"dns"}), _DOMAIN),
     # dnssecurity.evaluate()'s state per check: pass, warn, fail or info;
     # "unknown" is "?" with the check's summary as the reason.
+    # Reverse IP (OpenINTEL): names on public top lists that resolved to the
+    # address, and the counts for its /24 or /48. The next three are licence
+    # text, brought along by parse_fields beside any of the first four.
+    "reverse_ip_total": (frozenset({"reverseip"}), _IP),
+    "reverse_ip_names": (frozenset({"reverseip"}), _IP),
+    "reverse_ip_block_addresses": (frozenset({"reverseip"}), _IP),
+    "reverse_ip_block_names": (frozenset({"reverseip"}), _IP),
+    "reverse_ip_license": (frozenset({"reverseip"}), _IP),
+    "reverse_ip_attribution": (frozenset({"reverseip"}), _IP),
+    "reverse_ip_terms_url": (frozenset({"reverseip"}), _IP),
+    # The lists that could not be read, "label: reason" joined with "; ";
+    # "-" when every list was. Beside a 0 it says whether that 0 covers every
+    # list. Asked for by name only, and never brought along.
+    "reverse_ip_unavailable": (frozenset({"reverseip"}), _IP),
     **{
         f"{check}_state": (frozenset({"dns", "security"}), _DOMAIN)
         for check in (
@@ -105,6 +120,19 @@ _SECURITY_FIELDS = tuple(
 # would pay for the sweep of its PTR name, which nothing else there reads.
 # dmarc_policy needs the record sweep, which the block is built to skip.
 # The DNS security states need the sweep and about 17 more queries.
+# The reverse IP fields are by name too: they need the OpenINTEL database, and
+# a bare "reverse_ip_total: 0" among the block's lines reads as "no domains".
+_REVERSE_IP_DATA = (
+    "reverse_ip_total",
+    "reverse_ip_names",
+    "reverse_ip_block_addresses",
+    "reverse_ip_block_names",
+)
+_REVERSE_IP_LICENCE = (
+    "reverse_ip_license",
+    "reverse_ip_attribution",
+    "reverse_ip_terms_url",
+)
 _RISK_FIELDS = ("risk_level", "risk_signals", "risk_score")
 _NOT_IN_BLOCK = frozenset(
     {
@@ -114,6 +142,9 @@ _NOT_IN_BLOCK = frozenset(
         "reverse_dns_confirmed",
         "dmarc_policy",
         *_SECURITY_FIELDS,
+        *_REVERSE_IP_DATA,
+        *_REVERSE_IP_LICENCE,
+        "reverse_ip_unavailable",
     }
 )
 
@@ -183,6 +214,10 @@ def parse_fields(values: list[str]) -> list[str] | None:
         raise InvalidFieldError(
             f"unknown field: {', '.join(unknown)}; valid fields: {valid}"
         )
+    # Names from OpenINTEL travel with their licence lines: asking for any of
+    # the data fields appends the ones not already asked for, at the end.
+    if any(name in _REVERSE_IP_DATA for name in names):
+        names += [name for name in _REVERSE_IP_LICENCE if name not in names]
     return names
 
 
@@ -236,6 +271,8 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     dmarc = dmarc_policy(domain) or {}
     security = data.get("dns_security") or {}
     as_info = data.get("as_info")
+    reverse_ip = compact_reverse_ip(data.get("reverse_ip")) or {}
+    block = reverse_ip.get("block") or {}
     route = (as_info or {}).get("route") or {}
     # The origin the card describes: the one seen by the most RIS peers.
     origins = route.get("origins") or []
@@ -279,6 +316,17 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "risk_score": reputation.get("score"),
         "abuse_score": (reputation.get("abuseipdb") or {}).get("abuse_confidence"),
         "dmarc_policy": dmarc.get("policy"),
+        "reverse_ip_total": reverse_ip.get("total"),
+        "reverse_ip_names": ",".join(reverse_ip.get("names") or []),
+        "reverse_ip_block_addresses": block.get("addresses"),
+        "reverse_ip_block_names": block.get("names"),
+        "reverse_ip_license": reverse_ip.get("license"),
+        "reverse_ip_attribution": reverse_ip.get("attribution"),
+        "reverse_ip_terms_url": reverse_ip.get("terms_url"),
+        "reverse_ip_unavailable": "; ".join(
+            f"{item['source']}: {item['reason']}"
+            for item in reverse_ip.get("unavailable") or []
+        ),
         **{
             name: (security.get(name.removesuffix("_state")) or {}).get("state")
             for name in _SECURITY_FIELDS
@@ -360,6 +408,19 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
     dmarc_status = (domain.get("status") or {}).get("dmarc")
     if dmarc_status in DNS_FAILURE_TEXT and kind in FIELDS["dmarc_policy"][1]:
         errors["dmarc_policy"] = dmarc_status
+    # The answer could not be read: the four data fields are unknown, not "-".
+    # The licence lines are text and keep their values.
+    if reverse_ip and reverse_ip.get("total") is None:
+        reason = (
+            "; ".join(
+                f"{item['source']}: {item['reason']}"
+                for item in reverse_ip.get("unavailable") or []
+            )
+            or "unavailable"
+        )
+        for name in _REVERSE_IP_DATA:
+            if kind in FIELDS[name][1]:
+                errors[name] = reason
     # The JSON says null beside the reason, never a policy.
     if "dmarc_policy" in errors:
         values["dmarc_policy"] = None
