@@ -1656,24 +1656,38 @@ that the lists are downloaded at most once a day each and never for a lookup, th
 age after which names are not shown (`reverseip_max_age`), the attribution
 sentence and a link to the terms copy.
 
-**Measured, 2026-10-28, macOS, two of the six lists.** The four other lists (Tranco,
-Umbrella, Radar, Majestic) were not downloaded when this was measured: their first
-attempt that day failed on a missing `rank` column (now optional), and the stamp
-it wrote kept them from a second download until the next UTC day. The numbers are
-for `crux:kr` (876,606 pairs, 56.5 MB file, 9.5 MB fetched, 2026-10-27) and
-`crux:global` (2,708,717 pairs, 217 MB file, 32.5 MB fetched, 2026-10-27), built in
-one run: 58.1 s wall for the download of `crux:global` and the build, 388 MB maximum
-resident set size (309 MB peak footprint) in the child, a `reverseip.sqlite3` of
-142 MB (1,230,889 names, 3,133,930 `addr` rows, 874,634 addresses, 223,324 blocks
-and 838,026 `sub` names) and a directory of 177 MB (the copies hold 42 MB on disk;
-they are sparse files of 274 MB). Reads: 121.53.204.130 has 24,781 names in its
-/24 (one address) in 0.64 ms cold and 0.11 ms warm; 175.214.27.215 has none, in a
-block of no listed address; `names_under("coupang.com")` finds 64 in 0.07 ms. The
-six-list steady state is an estimate, not a measurement: a database of about
-660 MB and a directory of about 860 MB with the copies. The build's peak was not
-measured on either run (see the next paragraph). Today's first run, which built the Korea list alone (the
-other lists had failed), took 36.97 s wall, mostly download time, with a 279 MB
-maximum resident set size and a 37.2 MB database. Measure all six after 2026-10-29 UTC and replace this paragraph.
+**Measured in production, 2026-10-28, all six lists.** The first build on a fresh
+volume (Linux container, partitions dated 2026-10-27), right after the deploy:
+- **Download.** 07:25 to 07:28 UTC. It fetched 194 MB of 1.87 GB of files:
+
+  | List | Fetched |
+  |---|---|
+  | Tranco | 39.7 MB |
+  | Umbrella | 32.9 MB |
+  | Radar | 40.2 MB |
+  | Majestic | 39.3 MB |
+  | `crux:global` | 32.5 MB |
+  | `crux:kr` | 9.5 MB |
+
+- **Build.** It took until 07:40:47, about 12.5 minutes, so the whole refresh was about 15 minutes, well inside `REVERSEIP_BUILD_TIMEOUT_SECONDS`.
+- **Pairs.** 21,773,149 in all:
+
+  | List | Pairs |
+  |---|---|
+  | Tranco | 4,600,316 |
+  | Umbrella | 3,905,068 |
+  | Radar | 4,727,076 |
+  | Majestic | 4,955,366 |
+  | `crux:global` | 2,708,717 |
+  | `crux:kr` | 876,606 |
+
+- **On disk.** `reverseip.sqlite3` is 510 MB (486 MiB), below the 660 MB the spec estimated. `data/reverseip/` takes 672 MiB on disk (`du`): the copies are sparse files of 1.87 GB holding about 186 MiB. That leaves `/app/data` at 954 MiB.
+- **Memory.** Coolify Sentinel's container memory, page cache included, was 124 MiB before the build, peaked at 404 MiB as the build ended and fell to 136 MiB after it. The web process's lifetime peak (VmHWM) stayed at 150 MiB, since the child's memory leaves with the child. The container has no memory limit (the host has 31 GiB).
+- **Reads.**
+  - 121.53.204.130 has 24,783 names, nearly all `*.tistory.com`, on the only listed address in its /24.
+  - 175.214.27.215 has none, in a /24 with no listed address.
+  - `names_under("coupang.com")` finds 74, of which 53 are not among crt.sh's 123.
+- **Earlier macOS run.** The same day, the two CrUX lists alone built 142 MB in 58 s with a 388 MB child RSS.
 
 **Disk during a build.** The volume's peak is during the build, not after it. At
 the moment `VACUUM INTO` finishes, `data/reverseip/` holds at once: the copies;
@@ -1685,10 +1699,13 @@ volume, SQLite's sort and temporary files for the inserts and `GROUP BY`s grow
 in the system temp directory (the container's `/tmp`; nothing sets
 `SQLITE_TMPDIR`). The scratch file has no rollback journal beside it. A copy that fails to read costs a second build's
 time, not its disk: the abandoned scratch file is removed before the next
-attempt starts. The peak has not been measured: on the six-list run, poll `du`
-on the directory and on `/tmp` through the build, record both peaks here, and
+attempt starts. The peak has not been measured yet: the first production build
+(a fresh volume, so no old database) was not sampled, and a daily rebuild, with the
+old 510 MB database beside the new one, is the larger case. To measure it, poll `du`
+on the directory and on `/tmp` through a rebuild, record both peaks here, and
 weigh them against what the volume shares with GeoLite2, the AS database (about
-383 MB at its own swap) and the subdomain cache.
+383 MB at its own swap) and the subdomain cache. The production host had 321 GB
+free on 2026-10-28, so this is a record to keep, not a present risk.
 
 **Tests.** `tests/conftest.py` sets `REVERSEIP_ENABLED=false`, so the scheduler
 downloads nothing and no IP lookup grows a `reverse_ip` key; a test of the
