@@ -98,6 +98,7 @@ from lookup import (
     reputation_manager,
     reverse_ip_manager,
     sanitize_log_input,
+    top_list_subdomains,
     tld_names_manager,
 )
 from managers import MAXMIND_DOWNLOAD_URL, HeaderManager
@@ -2406,6 +2407,17 @@ async def get_self_info(request: Request):
     return response_data
 
 
+async def _subdomain_answer(target: str) -> dict:
+    """crt.sh's answer (get_subdomains) plus the names OpenINTEL's top lists
+    hold under the target, as `openintel`, while the feature is on. A new dict:
+    get_subdomains may hand back a cached object."""
+    answer = await get_subdomains(target)
+    lists = top_list_subdomains(target)
+    if lists is None:
+        return answer
+    return {**answer, "openintel": lists}
+
+
 @app.get("/{domain_ip}", response_model=None)
 async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None = None):
     started = time.perf_counter()
@@ -2462,7 +2474,7 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
             raise HTTPException(status_code=400, detail=reason)
         return {
             "address": domain_ip,
-            "subdomains": await get_subdomains(domain_ip),
+            "subdomains": await _subdomain_answer(domain_ip),
         }
 
     if fmt == "text" or names is not None:
@@ -2484,7 +2496,7 @@ async def get_ip_info(domain_ip: str, request: Request, subdomains: str | None =
     # so the target still gets its normal lookup, only without a subdomains
     # fetch.
     subdomain_task = (
-        asyncio.create_task(get_subdomains(domain_ip))
+        asyncio.create_task(_subdomain_answer(domain_ip))
         if mode == "include" and invalid_target_reason(domain_ip) is None
         else None
     )

@@ -55,6 +55,7 @@ from lookup import (
     lookup_location,
     parse_asn,
     sanitize_log_input,
+    top_list_subdomains,
 )
 from managers import DNS_FAILURES
 from rdap import NOT_REGISTERED
@@ -451,6 +452,31 @@ def compact_reverse_ip(
         "license": info.get("license"),
         "attribution": info.get("attribution"),
         "terms_url": info.get("terms_url"),
+    }
+
+
+def compact_top_list_subdomains(data: dict | None, limit: int) -> dict | None:
+    """The names OpenINTEL's top lists hold under a domain, for an LLM context:
+    the first `limit` (`truncated` says when there are more) and the licence
+    lines that travel with every use of the names. `names`, `count` and
+    `truncated` are null when the data could not be read; `unavailable` says
+    why. 0 is "no name on these lists", never "no subdomains"."""
+    if not data:
+        return None
+    count = data.get("count")
+    names = None if count is None else list(data.get("names") or [])[:limit]
+    return {
+        "names": names,
+        "count": count,
+        "truncated": None if names is None else count > len(names),
+        "as_of": data.get("as_of"),
+        "unavailable": [
+            {"source": item.get("label"), "reason": item.get("reason")}
+            for item in data.get("unavailable") or []
+        ],
+        "license": data.get("license"),
+        "attribution": data.get("attribution"),
+        "terms_url": data.get("terms_url"),
     }
 
 
@@ -855,6 +881,12 @@ async def subdomains(
     come back; `count` always reports the true total. Pass a registered domain
     or a name under one: an IP address, a bare public suffix (com, co.uk,
     github.io) or a .onion or home.arpa name is refused.
+
+    `openintel` adds names under the domain that resolved in OpenINTEL's daily
+    measurement of public top lists; Certificate Transparency misses names a
+    wildcard certificate covers, and the lists see only popular names, so the
+    two complement each other. Repeat its `attribution`, `license` and
+    `terms_url` wherever you use those names.
     """
     if limit < 1:
         return _fail("limit must be at least 1")
@@ -876,12 +908,28 @@ async def subdomains(
     # record type this server does not query for the same reason: a model
     # reading {} or [] states it as fact, and "we could not ask" would reach the
     # user as "there are none".
+    listed = compact_top_list_subdomains(top_list_subdomains(domain), limit)
     if data.get("error"):
+        # The lists answered with at least one name: the call is not a total
+        # failure, and crt.sh's part is null (never an empty list) with its
+        # error beside it.
+        if listed and (listed["count"] or 0) >= 1:
+            return {
+                "domain": domain,
+                "names": None,
+                "count": None,
+                "truncated": None,
+                "source": data.get("source"),
+                "fetched_at": data.get("fetched_at"),
+                "stale": data.get("stale", False),
+                "error": data["error"],
+                "openintel": listed,
+            }
         return _fail(data["error"], domain=domain)
 
     names = data.get("names") or []
     shown = names[:limit]
-    return {
+    result = {
         "domain": domain,
         "names": shown,
         "count": data.get("count", len(names)),
@@ -890,15 +938,19 @@ async def subdomains(
         "fetched_at": data.get("fetched_at"),
         "stale": data.get("stale", False),
     }
+    if listed is not None:
+        result["openintel"] = listed
+    return result
 
 
 # Registered conditionally so that with SUBDOMAIN_ENABLED=false an agent sees a
 # server that does not offer this, rather than one that offers it and always
 # fails. The decorator form cannot express that.
 if SUBDOMAIN_ENABLED:
-    mcp.tool(title="Subdomains from Certificate Transparency", annotations=_READ_ONLY)(
-        subdomains
-    )
+    mcp.tool(
+        title="Subdomains from Certificate Transparency and DNS top lists",
+        annotations=_READ_ONLY,
+    )(subdomains)
 
 
 def registered_tool_names() -> list[str]:

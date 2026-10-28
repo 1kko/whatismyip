@@ -11,11 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from mcp.types import CallToolResult
 
 import config
 import lookup
 import main
 import mcp_server
+import subdomains
 from reverseip import ReverseIpManager
 from reverseip_fixtures import NOW, build_manager
 
@@ -360,3 +362,132 @@ def test_asking_for_a_licence_field_alone_adds_nothing():
         "reverse_ip_attribution",
         "reverse_ip_terms_url",
     ]
+
+
+# --- Subdomains from the lists -------------------------------------------
+
+
+@pytest.fixture
+def crtsh_store(tmp_path):
+    subdomains.reset_state(store_path=str(tmp_path / "s.sqlite3"))
+    yield
+    subdomains.reset_state()
+
+
+@pytest.fixture
+def crtsh_returns(monkeypatch, crtsh_store):
+    def install(names):
+        async def fake(domain):
+            return list(names), len(names)
+
+        monkeypatch.setattr(subdomains, "fetch_from_source", fake)
+
+    return install
+
+
+@pytest.fixture
+def crtsh_fails(monkeypatch, crtsh_store):
+    async def fake(domain):
+        raise subdomains.SubdomainError("crt.sh timed out")
+
+    monkeypatch.setattr(subdomains, "fetch_from_source", fake)
+
+
+LISTED = ["a.b.example.com", "norank.example.com"]
+
+
+def test_only_mode_carries_openintel(reverseip_enabled, crtsh_returns):
+    crtsh_returns(["www.example.com"])
+    body = client.get("/example.com?subdomains=only").json()
+    assert body["subdomains"]["names"] == ["www.example.com"]
+    assert body["subdomains"]["openintel"]["names"] == LISTED
+    assert body["subdomains"]["openintel"]["attribution"] == (
+        config.OPENINTEL_ATTRIBUTION
+    )
+
+
+def test_include_mode_carries_it_too(reverseip_enabled, crtsh_returns, legs):
+    crtsh_returns(["www.example.com"])
+    body = client.get(f"/{DOMAIN}?subdomains=include", headers=CURL).json()
+    assert body["subdomains"]["names"] == ["www.example.com"]
+    assert body["subdomains"]["openintel"]["names"] == LISTED
+
+
+def test_disabled_leaves_the_crtsh_answer_as_it_was(crtsh_returns):
+    crtsh_returns(["www.example.com"])
+    body = client.get("/example.com?subdomains=only").json()
+    assert "openintel" not in body["subdomains"]
+
+
+def test_a_crtsh_error_keeps_its_error_beside_the_names(reverseip_enabled, crtsh_fails):
+    sub = client.get("/example.com?subdomains=only").json()["subdomains"]
+    assert sub["error"]
+    assert sub["openintel"]["names"] == LISTED
+
+
+def test_the_answer_is_a_new_dict_and_the_cached_one_is_untouched(
+    reverseip_enabled, crtsh_returns
+):
+    import asyncio
+
+    crtsh_returns(["www.example.com"])
+    first = asyncio.run(subdomains.get_subdomains("example.com"))
+    answer = asyncio.run(main._subdomain_answer("example.com"))
+    assert answer is not first
+    assert "openintel" in answer
+    assert "openintel" not in first
+
+
+async def test_mcp_subdomains_with_openintel(reverseip_enabled, crtsh_returns):
+    crtsh_returns(["www.example.com"])
+    result = await mcp_server.subdomains("example.com")
+    assert result["names"] == ["www.example.com"]
+    assert result["openintel"]["names"] == LISTED
+    assert result["openintel"]["truncated"] is False
+    assert result["openintel"]["terms_url"] == config.REVERSEIP_TERMS_URL
+    assert result["openintel"]["attribution"] == config.OPENINTEL_ATTRIBUTION
+
+
+async def test_mcp_openintel_honours_limit(reverseip_enabled, crtsh_returns):
+    crtsh_returns(["www.example.com"])
+    result = await mcp_server.subdomains("example.com", limit=1)
+    assert result["openintel"]["names"] == LISTED[:1]
+    assert result["openintel"]["count"] == 2
+    assert result["openintel"]["truncated"] is True
+
+
+async def test_mcp_disabled_has_no_openintel_key(crtsh_returns):
+    crtsh_returns(["www.example.com"])
+    result = await mcp_server.subdomains("example.com")
+    assert "openintel" not in result
+
+
+async def test_mcp_crtsh_failure_with_listed_names_is_a_result(
+    reverseip_enabled, crtsh_fails
+):
+    result = await mcp_server.subdomains("example.com")
+    assert not isinstance(result, CallToolResult)
+    assert result["names"] is None and result["count"] is None
+    assert result["truncated"] is None
+    assert result["error"] and result["openintel"]["count"] == 2
+    assert result["source"] == subdomains.SOURCE
+
+
+async def test_mcp_crtsh_failure_without_listed_names_is_an_error(
+    reverseip_enabled, crtsh_fails
+):
+    result = await mcp_server.subdomains("1kko.com")
+    assert isinstance(result, CallToolResult) and result.is_error
+
+
+async def test_mcp_crtsh_failure_with_lists_off_is_an_error(crtsh_fails):
+    result = await mcp_server.subdomains("example.com")
+    assert isinstance(result, CallToolResult) and result.is_error
+
+
+def test_the_tool_title_names_both_sources():
+    tool = next(
+        t for t in mcp_server.mcp._tool_manager.list_tools() if t.name == "subdomains"
+    )
+    assert tool.title == "Subdomains from Certificate Transparency and DNS top lists"
+    assert "`terms_url`" in tool.description
