@@ -8,6 +8,7 @@ Nothing in the web process imports it."""
 
 import contextlib
 import datetime
+import fcntl
 import html
 import http.client
 import ipaddress
@@ -84,9 +85,16 @@ def _packed(text: str | None) -> bytes | None:
     return address.packed
 
 
-def _rank(text: str | None) -> int:
-    if text and text.isascii() and text.isdigit():
-        return min(int(text), NO_RANK)
+def _rank(value: object) -> int:
+    """A name's position on its list: the digits of a string column, or the
+    value of an integer one (lists differ, and a list may change its type);
+    NO_RANK for anything else."""
+    if isinstance(value, bool):
+        return NO_RANK
+    if isinstance(value, int):
+        return min(value, NO_RANK) if value >= 0 else NO_RANK
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return min(int(value), NO_RANK)
     return NO_RANK
 
 
@@ -134,6 +142,41 @@ def read_pairs(path: str) -> Iterator[tuple[str, bytes, int]]:
                 yield name, packed, _rank(rank)
 
 
+# A token of an error message that holds a directory separator: a path.
+_PATH_LIKE = re.compile(r"""[^\s'"()\[\]<>,;]*[\\/][^\s'"()\[\]<>,;]*""")
+
+
+def _without_directories(text: str) -> str:
+    """`text` with every path in it cut to its last part: a reason ends up in
+    the public JSON and on the page, and the volume's layout is nobody's
+    business there."""
+    return _PATH_LIKE.sub(lambda match: re.split(r"[\\/]", match[0])[-1], text)
+
+
+class _Unreadable(Exception):
+    """A copy stopped reading. `reason` names the file and the error, with no
+    directory in it; `source` is set by the build that was reading it."""
+
+    def __init__(self, name: str, exc: Exception):
+        detail = _without_directories(f"{type(exc).__name__}: {exc}")
+        self.reason = f"could not read {name}: {detail}"
+        self.source = ""
+        super().__init__(self.reason)
+
+
+def _read_copy(path: str) -> Iterator[tuple[str, bytes, int]]:
+    """read_pairs, with whatever stops the file reading raised as _Unreadable:
+    a pyarrow or OS error, and equally a KeyError or TypeError from a list
+    whose schema drifted. Only the reading is covered; a SQLite error is the
+    build's own (the consumer's inserts run outside this frame)."""
+    try:
+        yield from read_pairs(path)
+    except sqlite3.Error:
+        raise
+    except Exception as exc:
+        raise _Unreadable(os.path.basename(path), exc) from exc
+
+
 def _insert_file(con: sqlite3.Connection, path: str, bit: int) -> int:
     """Stream one copy into `names` and `pair`; returns the pairs read."""
     count = 0
@@ -157,7 +200,7 @@ def _insert_file(con: sqlite3.Connection, path: str, bit: int) -> int:
         )
         batch.clear()
 
-    for item in read_pairs(path):
+    for item in _read_copy(path):
         batch.append(item)
         count += 1
         if len(batch) >= BATCH_ROWS:
@@ -187,35 +230,67 @@ def _add_source(
     bit: int,
     copy: dict | None,
     now: float,
+    failed: dict[str, str],
 ) -> None:
+    """Read one source's copy into the scratch file and record it in
+    `source_meta`. A source in `failed` (its copy stopped reading in an
+    earlier attempt) is recorded with that reason and not read again. A copy
+    that stops reading raises _Unreadable, with some of its rows already
+    written: the caller abandons the whole file."""
     date = copy.get("date") if copy else None
-    error = None
     pairs = 0
     if copy is None:
         error = "no copy"
     else:
-        error = _age_error(str(date), now)
+        error = failed.get(source.id) or _age_error(str(date), now)
     if error is None:
-        current = ""
-        con.execute("SAVEPOINT source")
         try:
             for name in copy.get("files", []):
-                current = name
                 pairs += _insert_file(con, os.path.join(directory, name), bit)
-        except (pa.ArrowException, OSError) as exc:
-            # Only a copy that will not read; a SQLite error is the build's own
-            # and propagates, so the previous database stays in place.
-            logger.warning(
-                "reverse IP: %s copy left out, %s: %s", source.id, current, exc
-            )
-            con.execute("ROLLBACK TO source")
-            pairs = 0
-            error = f"could not read {current}: {exc}"
-        con.execute("RELEASE source")
+        except _Unreadable as exc:
+            exc.source = source.id
+            raise
     con.execute(
         "INSERT INTO source_meta(id, date, pairs, error) VALUES (?, ?, ?, ?)",
         (source.id, date, pairs, error),
     )
+
+
+def _build_scratch(
+    scratch: str,
+    directory: str,
+    copies: dict[str, dict],
+    sources: Sequence[reverseip.Source],
+    now: float,
+    failed: dict[str, str],
+) -> None:
+    """One attempt at the scratch file, from every source not in `failed`.
+
+    The file has no journal (`journal_mode = OFF`: it is built once and
+    either swapped in whole or thrown away), so nothing written can be rolled
+    back; a copy that stops reading raises _Unreadable and the attempt is
+    abandoned, never patched up."""
+    con = sqlite3.connect(scratch, isolation_level=None)
+    try:
+        con.execute("PRAGMA journal_mode = OFF")
+        con.execute("PRAGMA synchronous = OFF")
+        con.executescript(_SCHEMA)
+        con.execute("BEGIN")
+        for position, source in enumerate(sources):
+            _add_source(
+                con,
+                directory,
+                source,
+                1 << position,
+                copies.get(source.id),
+                now,
+                failed,
+            )
+        _fill(con)
+        con.execute(f"PRAGMA user_version = {int(reverseip.SCHEMA_VERSION)}")
+        con.execute("COMMIT")
+    finally:
+        con.close()
 
 
 def _fill(con: sqlite3.Connection) -> None:
@@ -268,36 +343,35 @@ def build_database(
     """Build `reverseip.sqlite3` in `directory` from the copies it lists.
 
     A source whose copy is missing, too old or unreadable is recorded in
-    `source_meta` and left out; the others still build. A failure of the build
-    itself raises and leaves the previous database in place."""
+    `source_meta` (with the copy's date, 0 pairs and the error) and left out;
+    the others still build. A copy that stops reading partway costs one more
+    attempt from a fresh scratch file without it, so each attempt leaves out
+    one more source and there are at most len(sources) + 1. A failure of the
+    build itself (a SQLite error) raises and leaves the previous database in
+    place."""
     now = time.time() if now is None else now
     scratch = os.path.join(directory, _SCRATCH_NAME)
     final = os.path.join(directory, reverseip.DATABASE_NAME)
     tmp = final + ".tmp"
-    for stale in (scratch, tmp):
-        if os.path.exists(stale):
-            os.remove(stale)
+    failed: dict[str, str] = {}
     try:
-        con = sqlite3.connect(scratch, isolation_level=None)
-        try:
-            con.execute("PRAGMA journal_mode = OFF")
-            con.execute("PRAGMA synchronous = OFF")
-            con.executescript(_SCHEMA)
-            con.execute("BEGIN")
-            for position, source in enumerate(sources):
-                _add_source(
-                    con,
-                    directory,
-                    source,
-                    1 << position,
-                    copies.get(source.id),
-                    now,
+        for _ in range(len(sources) + 1):
+            for stale in (scratch, tmp):
+                if os.path.exists(stale):
+                    os.remove(stale)
+            try:
+                _build_scratch(scratch, directory, copies, sources, now, failed)
+            except _Unreadable as exc:
+                logger.warning(
+                    "reverse IP: %s copy left out, building again without it: %s",
+                    exc.source,
+                    exc.reason,
                 )
-            _fill(con)
-            con.execute(f"PRAGMA user_version = {int(reverseip.SCHEMA_VERSION)}")
-            con.execute("COMMIT")
-        finally:
-            con.close()
+                failed[exc.source] = exc.reason
+                continue
+            break
+        else:  # every source is in `failed`, so the last attempt read nothing
+            raise RuntimeError("reverse IP: the build did not finish")
         _finish(scratch, tmp, final)
     finally:
         for leftover in (scratch, tmp):
@@ -602,10 +676,10 @@ def _is_copy(directory: str, record) -> bool:
     )
 
 
-def _read_copies(directory: str) -> dict[str, dict]:
+def _read_copies(directory: str) -> dict[str, dict] | None:
     """Each source's copy, from copies.json: {date, files, fetched_at, bytes}.
     One that is malformed or whose files are gone is left out, so its source
-    has no copy."""
+    has no copy. None when copies.json is there but does not read."""
     try:
         with open(_copies_path(directory), encoding="utf-8") as handle:
             records = json.load(handle)
@@ -615,9 +689,12 @@ def _read_copies(directory: str) -> dict[str, dict]:
         logger.exception(
             "reverse IP: ignoring the unreadable %s", reverseip.COPIES_NAME
         )
-        return {}
+        return None
     if not isinstance(records, dict):
-        return {}
+        logger.warning(
+            "reverse IP: ignoring %s, which is not an object", reverseip.COPIES_NAME
+        )
+        return None
     return {
         source_id: record
         for source_id, record in records.items()
@@ -675,6 +752,25 @@ def _download(
             _remove(os.path.join(directory, name))
         raise
     return files, fetched
+
+
+def _remove_leftovers(
+    directory: str, sources: Sequence[reverseip.Source], copies: dict[str, dict]
+) -> None:
+    """What a child stopped mid-download leaves: every sparse `*.parquet.tmp`
+    and each source's `<stem>-*.parquet` that copies.json does not name (a
+    part of a day that never finished, which the next day's names would never
+    overwrite). The stamps, copies.json and the database are not touched. Run
+    under the lock, so no other child is writing these."""
+    named = {name for copy in copies.values() for name in copy["files"]}
+    stems = tuple(f"{reverseip.file_stem(source.id)}-" for source in sources)
+    for name in os.listdir(directory):
+        unrecorded = (
+            name.startswith(stems) and name.endswith(".parquet") and name not in named
+        )
+        if name.endswith(".parquet.tmp") or unrecorded:
+            logger.info("reverse IP: removing the leftover %s", name)
+            _remove(os.path.join(directory, name))
 
 
 def _remove_unrecorded(directory: str, stem: str, files: list[str]) -> None:
@@ -747,9 +843,9 @@ def _refresh_source(
     return {"state": "downloaded", "date": partition.date, "error": None}
 
 
-def _built_dates(path: str) -> dict[str, str | None] | None:
-    """The copy date each source in the database was built from, or None when
-    the file is missing, does not open, or is from another release."""
+def _built_meta(path: str) -> dict[str, tuple[str | None, str | None]] | None:
+    """(copy date, error) of each source the database was built from, or None
+    when the file is missing, does not open, or is from another release."""
     uri = f"file:{urllib.parse.quote(os.path.abspath(path))}?mode=ro"
     try:
         con = sqlite3.connect(uri, uri=True)
@@ -757,11 +853,29 @@ def _built_dates(path: str) -> dict[str, str | None] | None:
             (version,) = con.execute("PRAGMA user_version").fetchone()
             if version != reverseip.SCHEMA_VERSION:
                 return None
-            return dict(con.execute("SELECT id, date FROM source_meta"))
+            return {
+                source_id: (date, error)
+                for source_id, date, error in con.execute(
+                    "SELECT id, date, error FROM source_meta"
+                )
+            }
         finally:
             con.close()
     except sqlite3.Error:
         return None
+
+
+def _aged_out(meta: dict[str, tuple[str | None, str | None]], now: float) -> bool:
+    """Whether a source the database holds names from (no error) has passed
+    REVERSEIP_MAX_AGE_HOURS since it was built. Rebuilt, it carries the age
+    error with the copy's date, so this asks once per source and copy."""
+    return any(
+        error is None and date is not None and _age_error(date, now) is not None
+        for date, error in meta.values()
+    )
+
+
+_LOCK_NAME = ".lock"
 
 
 def refresh_sources(
@@ -775,6 +889,10 @@ def refresh_sources(
     when it is behind the copies. The summary: {"built", "sources": {id:
     {"state", "date", "error"}}}.
 
+    One child at a time per directory: the run holds a non-blocking flock on
+    `<directory>/.lock`. A child that finds it held (a deploy's overlap, an
+    orphan of --reload) sends nothing and reports every source `busy`.
+
     A source sends nothing at all when its `<stem>.requested` is dated this
     UTC day: at most one download per source per UTC day, OpenINTEL's rule,
     not a setting. Otherwise its bucket is listed, which is not a download
@@ -785,12 +903,39 @@ def refresh_sources(
     download failed; the previous copy stays.
 
     The database is built when a source was downloaded, when it is missing,
-    does not open or is from another release, or when the dates it was built
-    from are not the copies' (a build that failed, the sources changed). With
-    no copy of any source there is nothing to build. A build that fails is
-    logged and leaves the previous database."""
+    does not open or is from another release, when the dates it was built
+    from are not the copies' (a build that failed, the sources changed), or
+    when a source it holds names from has aged past REVERSEIP_MAX_AGE_HOURS
+    (the rebuild leaves it out with the age error). With no copy of any
+    source there is nothing to build. A build that fails is logged and leaves
+    the previous database."""
     os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, _LOCK_NAME), "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info(
+                "reverse IP: another refresh is running in %s; sending nothing",
+                directory,
+            )
+            busy = {"state": "busy", "date": None, "error": None}
+            return {"built": False, "sources": {s.id: dict(busy) for s in sources}}
+        return _refresh_locked(directory, sources, base_url, transport, now)
+
+
+def _refresh_locked(
+    directory: str,
+    sources: Sequence[reverseip.Source],
+    base_url: str,
+    transport: Transport,
+    now: Callable[[], float],
+) -> dict:
     copies = _read_copies(directory)
+    if copies is None:
+        # Which files are a copy is not known, so none is removed.
+        copies = {}
+    else:
+        _remove_leftovers(directory, sources, copies)
     results = {
         source.id: _refresh_source(directory, source, base_url, transport, now, copies)
         for source in sources
@@ -802,9 +947,16 @@ def refresh_sources(
         }
         path = os.path.join(directory, reverseip.DATABASE_NAME)
         downloaded = any(r["state"] == "downloaded" for r in results.values())
-        if downloaded or _built_dates(path) != wanted:
+        meta = _built_meta(path)
+        t = now()
+        if (
+            downloaded
+            or meta is None
+            or {source_id: date for source_id, (date, _) in meta.items()} != wanted
+            or _aged_out(meta, t)
+        ):
             try:
-                build_database(directory, copies, sources, now=now())
+                build_database(directory, copies, sources, now=t)
                 built = True
                 logger.info("reverse IP: database built")
             except Exception:

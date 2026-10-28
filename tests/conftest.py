@@ -121,7 +121,32 @@ def asinfo_enabled(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def reverseip_enabled(monkeypatch, tmp_path):
+def stock_sqlite(monkeypatch):
+    """The reverse IP build's SQLite connections with the DEFENSIVE flag off,
+    as upstream SQLite has it (the python:3.12-slim image, the CI runners).
+    macOS's Python turns it on, and then the build's `PRAGMA journal_mode =
+    OFF` is quietly refused: a build test on a Mac would run with a rollback
+    journal that Linux does not have. Returns the connections it opened."""
+    import sqlite3
+    import types
+
+    import reverseip_build
+
+    opened = []
+
+    def connect(*args, **kwargs):
+        con = sqlite3.connect(*args, **kwargs)
+        con.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, False)
+        opened.append(con)
+        return con
+
+    stock = types.SimpleNamespace(**{**vars(sqlite3), "connect": connect})
+    monkeypatch.setattr(reverseip_build, "sqlite3", stock)
+    return opened
+
+
+@pytest.fixture
+def reverseip_enabled(monkeypatch, tmp_path, stock_sqlite):
     """The reverse IP feature on, over a freshly built database in `tmp_path`:
     the suite runs with REVERSEIP_ENABLED=false, so a test of the `reverse_ip`
     section asks for this. Returns the manager (its clock reads

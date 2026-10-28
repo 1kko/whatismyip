@@ -36,6 +36,8 @@ TERMS = ROOT / "static" / "licenses" / "openintel-terms.html"
 DEFAULT_SOURCES = "tranco,umbrella,radar,majestic,crux:global,crux:kr"
 
 client = TestClient(app)
+# Every build here runs on SQLite as Linux has it (conftest's stock_sqlite).
+pytestmark = pytest.mark.usefixtures("stock_sqlite")
 
 
 def _text(html: str) -> str:
@@ -79,6 +81,19 @@ class TestSources:
     def test_an_unknown_source_is_refused(self):
         with pytest.raises(ValueError, match="alexa"):
             reverseip.parse_sources("tranco,alexa")
+
+    def test_a_repeated_id_is_kept_once_and_logged(self, caplog):
+        caplog.set_level(logging.WARNING, logger="reverseip")
+        sources = reverseip.parse_sources("tranco,crux:kr, tranco,crux:kr,umbrella")
+        assert [s.id for s in sources] == ["tranco", "crux:kr", "umbrella"]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 2
+        assert "tranco" in warnings[0].getMessage()
+        assert "crux:kr" in warnings[1].getMessage()
+
+    def test_a_repeated_id_builds(self, tmp_path):
+        manager = build_manager(tmp_path, sources="tranco,tranco")
+        assert manager.for_address("93.184.215.14")["total"] == 4
 
     def test_the_coverage_sentence(self):
         sources = reverseip.parse_sources(DEFAULT_SOURCES)
@@ -288,12 +303,69 @@ class TestRefresh:
         assert os.listdir(tmp_path) == []
 
     def test_the_defaults(self):
-        manager = ReverseIpManager(enabled=False)
+        manager = ReverseIpManager(enabled=True)
         assert manager._runner is subprocess.run
         assert manager.directory == config.REVERSEIP_DIR
         assert manager.path == os.path.join(config.REVERSEIP_DIR, "reverseip.sqlite3")
         assert manager.sources == parse_sources(config.REVERSEIP_SOURCES)
         assert manager.build_attempted is False
+
+    def test_the_sources_are_read_only_when_enabled(self, monkeypatch):
+        # a bad id must not stop the service starting while the feature is off
+        monkeypatch.setattr(config, "REVERSEIP_SOURCES", "tranco,alexa")
+        assert ReverseIpManager(enabled=False).sources == ()
+        with pytest.raises(ValueError, match="alexa"):
+            ReverseIpManager(enabled=True)
+
+    def test_lookup_imports_with_a_bad_id_while_off(self):
+        env = {
+            **os.environ,
+            "REVERSEIP_ENABLED": "false",
+            "REVERSEIP_SOURCES": "tranco,alexa",
+        }
+        done = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import lookup; print(lookup.reverse_ip_manager.sources)",
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.strip() == "()"
+
+    @pytest.mark.parametrize(
+        ("given", "used"),
+        [
+            (
+                "https://mirror.test/openintel-public",
+                "https://mirror.test/openintel-public/",
+            ),
+            (
+                "https://mirror.test/openintel-public/",
+                "https://mirror.test/openintel-public/",
+            ),
+            (
+                "https://mirror.test/openintel-public//",
+                "https://mirror.test/openintel-public/",
+            ),
+        ],
+    )
+    def test_the_base_url_ends_with_one_slash(self, given, used):
+        done = subprocess.run(
+            [sys.executable, "-c", "import config; print(config.REVERSEIP_BASE_URL)"],
+            cwd=ROOT,
+            env={**os.environ, "REVERSEIP_BASE_URL": given},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.strip() == used
 
     def test_the_real_child_builds_over_loopback(self, tmp_path):
         """python -m reverseip_build against FakeBucket served on 127.0.0.1.

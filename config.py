@@ -334,8 +334,13 @@ REVERSEIP_DIR = os.getenv("REVERSEIP_DIR", os.path.join(_APP_DIR, "data", "rever
 REVERSEIP_SOURCES = os.getenv(
     "REVERSEIP_SOURCES", "tranco,umbrella,radar,majestic,crux:global,crux:kr"
 )
-REVERSEIP_BASE_URL = os.getenv(
-    "REVERSEIP_BASE_URL", "https://object.openintel.nl/openintel-public/"
+# The bucket. Object keys are appended to it as they are, so it ends with
+# exactly one "/" however it was given.
+REVERSEIP_BASE_URL = (
+    os.getenv(
+        "REVERSEIP_BASE_URL", "https://object.openintel.nl/openintel-public/"
+    ).rstrip("/")
+    + "/"
 )
 REVERSEIP_MAX_AGE_HOURS = float(os.getenv("REVERSEIP_MAX_AGE_HOURS", "96"))
 REVERSEIP_CHECK_INTERVAL_SECONDS = int(

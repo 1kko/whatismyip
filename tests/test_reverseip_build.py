@@ -5,11 +5,13 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import sqlite3
 import urllib.error
 import urllib.response
 from datetime import date, datetime, timezone
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -40,6 +42,9 @@ from reverseip_fixtures import (
     parquet_bytes,
     write_parquet,
 )
+
+# Every build here runs on SQLite as Linux has it (conftest's stock_sqlite).
+pytestmark = pytest.mark.usefixtures("stock_sqlite")
 
 TRANCO = reverseip.parse_sources("tranco")
 BOTH = reverseip.parse_sources("tranco,umbrella")
@@ -183,6 +188,183 @@ def test_a_copy_that_fails_midway_leaves_none_of_its_names(tmp_path):
     con = _build(tmp_path, copies, reverseip.parse_sources("umbrella"))
     assert con.execute("SELECT count(*) FROM names").fetchone() == (0,)
     assert con.execute("SELECT count(*) FROM addr").fetchone() == (0,)
+
+
+def _traced(monkeypatch):
+    """Every statement the build's connections run, in order."""
+    statements = []
+    connect = reverseip_build.sqlite3.connect
+
+    def traced(*args, **kwargs):
+        con = connect(*args, **kwargs)
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(reverseip_build.sqlite3, "connect", traced)
+    return statements
+
+
+def _meta(con):
+    return {
+        r[0]: r[1:]
+        for r in con.execute("SELECT id, date, pairs, error FROM source_meta")
+    }
+
+
+def test_the_guard_runs_the_build_without_a_journal(tmp_path):
+    # conftest's stock_sqlite: the pragma takes, as on Linux, so no test here
+    # can lean on a rollback journal the production image does not have
+    con = reverseip_build.sqlite3.connect(str(tmp_path / "probe.sqlite3"))
+    assert con.execute("PRAGMA journal_mode = OFF").fetchone() == ("off",)
+    con.close()
+
+
+def test_the_build_never_rolls_back(tmp_path, monkeypatch):
+    statements = _traced(monkeypatch)
+    write_parquet(tmp_path / "tranco-0.parquet", ROWS)
+    write_parquet(tmp_path / "umbrella-0.parquet", ROWS)
+    (tmp_path / "umbrella-1.parquet").write_bytes(b"not parquet")
+    copies = {
+        "tranco": {"date": DAY, "files": ["tranco-0.parquet"]},
+        "umbrella": {
+            "date": DAY,
+            "files": ["umbrella-0.parquet", "umbrella-1.parquet"],
+        },
+    }
+    _build(tmp_path, copies, BOTH)
+    assert "PRAGMA journal_mode = OFF" in statements
+    assert not [
+        s for s in statements if re.match(r"\s*(SAVEPOINT|ROLLBACK|RELEASE)\b", s, re.I)
+    ]
+
+
+def test_a_copy_that_fails_midway_is_left_out_and_the_rest_rebuilt(
+    tmp_path, monkeypatch
+):
+    statements = _traced(monkeypatch)
+    write_parquet(tmp_path / "tranco-0.parquet", ROWS)
+    umbrella = [
+        Row("only.umbrella.example.", "A", "A", "ans", "93.184.215.14", None, "1")
+    ]
+    write_parquet(tmp_path / "umbrella-0.parquet", ROWS + umbrella)
+    (tmp_path / "umbrella-1.parquet").write_bytes(b"not parquet")
+    copies = {
+        "tranco": {"date": DAY, "files": ["tranco-0.parquet"]},
+        "umbrella": {
+            "date": DAY,
+            "files": ["umbrella-0.parquet", "umbrella-1.parquet"],
+        },
+    }
+    con = _build(tmp_path, copies, BOTH)
+    # umbrella's part 0 read whole before part 1 failed: none of it stays
+    assert con.execute(
+        "SELECT count(*) FROM names WHERE name = 'only.umbrella.example'"
+    ).fetchone() == (0,)
+    assert con.execute("SELECT DISTINCT sources FROM names").fetchall() == [(0b01,)]
+    assert con.execute(
+        "SELECT rank FROM names WHERE name = 'example.com'"
+    ).fetchone() == (5,)
+    meta = _meta(con)
+    assert meta["umbrella"][:2] == (DAY, 0)
+    assert meta["umbrella"][2].startswith("could not read umbrella-1.parquet: ")
+    assert meta["tranco"][1] > 0 and meta["tranco"][2] is None
+    # one scratch file abandoned, one built: a second build, no more
+    assert sum(s.lstrip().startswith("CREATE TABLE names") for s in statements) == 2
+    assert sorted(os.listdir(tmp_path)) == [
+        "reverseip.sqlite3",
+        "tranco-0.parquet",
+        "umbrella-0.parquet",
+        "umbrella-1.parquet",
+    ]
+
+
+def test_every_failed_copy_costs_one_build_and_no_more(tmp_path, monkeypatch):
+    statements = _traced(monkeypatch)
+    (tmp_path / "tranco-0.parquet").write_bytes(b"not parquet")
+    (tmp_path / "umbrella-0.parquet").write_bytes(b"nor this")
+    write_parquet(tmp_path / "radar-0.parquet", ROWS)
+    sources = reverseip.parse_sources("tranco,umbrella,radar")
+    copies = {s.id: {"date": DAY, "files": [f"{s.id}-0.parquet"]} for s in sources}
+    con = _build(tmp_path, copies, sources)
+    meta = _meta(con)
+    assert meta["tranco"][1:2] == meta["umbrella"][1:2] == (0,)
+    assert meta["tranco"][2] and meta["umbrella"][2]
+    assert meta["radar"][1] > 0 and meta["radar"][2] is None
+    assert sum(s.lstrip().startswith("CREATE TABLE names") for s in statements) == 3
+
+
+@pytest.mark.parametrize(
+    "error",
+    [KeyError("rank"), TypeError("bad"), AttributeError("no isascii"), OSError("io")],
+    ids=["KeyError", "TypeError", "AttributeError", "OSError"],
+)
+def test_any_read_error_leaves_out_that_source_only(tmp_path, monkeypatch, error):
+    real = reverseip_build.read_pairs
+
+    def reading(path):
+        if os.path.basename(path) == "umbrella-0.parquet":
+            raise error
+        return real(path)
+
+    monkeypatch.setattr(reverseip_build, "read_pairs", reading)
+    con = _two_sources(tmp_path, ROWS)
+    meta = _meta(con)
+    assert meta["umbrella"][:2] == (DAY, 0)
+    assert meta["umbrella"][2] == (
+        f"could not read umbrella-0.parquet: {type(error).__name__}: {error}"
+    )
+    assert meta["tranco"][1] > 0 and meta["tranco"][2] is None
+
+
+def test_a_read_error_names_the_file_and_no_directory(tmp_path, monkeypatch):
+    def reading(path):
+        raise OSError(f"Failed to open local file '{path}'; also /app/data/x/y.bin")
+
+    monkeypatch.setattr(reverseip_build, "read_pairs", reading)
+    con = _built(tmp_path)
+    (error,) = con.execute("SELECT error FROM source_meta").fetchone()
+    assert error == (
+        "could not read tranco-0.parquet: OSError: Failed to open local file "
+        "'tranco-0.parquet'; also y.bin"
+    )
+    assert str(tmp_path) not in error and "/" not in error
+
+
+def test_a_copy_that_is_not_parquet_reads_without_a_path(tmp_path):
+    (tmp_path / "tranco-0.parquet").write_bytes(b"not parquet")
+    con = _build(
+        tmp_path, {"tranco": {"date": DAY, "files": ["tranco-0.parquet"]}}, TRANCO
+    )
+    (error,) = con.execute("SELECT error FROM source_meta").fetchone()
+    assert error.startswith("could not read tranco-0.parquet: ")
+    assert str(tmp_path) not in error
+
+
+def test_an_integer_rank_column_reads(tmp_path):
+    write_parquet(tmp_path / "strings.parquet", ROWS)
+    table = pq.read_table(tmp_path / "strings.parquet")
+    ranks = [None if r.rank is None else int(r.rank) for r in ROWS]
+    index = table.schema.get_field_index("rank")
+    table = table.set_column(index, "rank", pa.array(ranks, type=pa.int64()))
+    pq.write_table(table, tmp_path / "tranco-0.parquet")
+    pairs = list(read_pairs(str(tmp_path / "tranco-0.parquet")))
+    assert pairs == list(read_pairs(str(tmp_path / "strings.parquet")))
+    con = _build(
+        tmp_path, {"tranco": {"date": DAY, "files": ["tranco-0.parquet"]}}, TRANCO
+    )
+    assert _meta(con)["tranco"][2] is None
+    assert names_on(con, "93.184.215.14")[0] == "example.com"
+
+
+def test_rank_reads_digits_and_integers_only():
+    assert reverseip_build._rank("7") == 7
+    assert reverseip_build._rank(7) == 7
+    assert reverseip_build._rank(2**40) == NO_RANK
+    assert reverseip_build._rank(-1) == NO_RANK
+    assert reverseip_build._rank(True) == NO_RANK
+    assert reverseip_build._rank(None) == NO_RANK
+    assert reverseip_build._rank("seven") == NO_RANK
+    assert reverseip_build._rank(7.0) == NO_RANK
 
 
 def test_a_copy_past_the_maximum_age_is_left_out(tmp_path):
@@ -1020,3 +1202,92 @@ def test_main_prints_only_the_summary(tmp_path, monkeypatch, capsys):
         "built": True,
         "sources": {"tranco": {"state": "downloaded", "date": today, "error": None}},
     }
+
+
+def test_a_source_that_ages_out_is_rebuilt_out_once(tmp_path):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)  # DAY began 36 hours ago
+    _refresh(tmp_path, bucket, clock)
+    assert _source_meta(tmp_path)["tranco"] == [DAY, len(ROWS) - 4, None]
+    database = tmp_path / reverseip.DATABASE_NAME
+    clock.advance(48 * 3600)  # 84 hours: still fresh, nothing to do
+    assert _refresh(tmp_path, bucket, clock)["built"] is False
+    clock.advance(24 * 3600)  # 108 hours, and no newer day to download
+    summary = _refresh(tmp_path, bucket, clock)
+    assert summary["sources"]["tranco"]["state"] == "current"
+    assert summary["built"] is True
+    assert _source_meta(tmp_path)["tranco"] == [DAY, 0, "older than 96 hours"]
+    con = sqlite3.connect(str(database))
+    assert con.execute("SELECT count(*) FROM names").fetchone() == (0,)
+    con.close()
+    # the database now says so itself: no rebuild every hour after
+    before = database.stat()
+    for _ in range(3):
+        clock.advance(3600)
+        assert _refresh(tmp_path, bucket, clock)["built"] is False
+    after = database.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_leftovers_of_a_killed_child_are_removed(tmp_path):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    _refresh(tmp_path, bucket, clock)
+    stamp = tmp_path / "tranco.requested"
+    stamped = stamp.stat().st_mtime
+    # a kill mid-download: the sparse .tmp, a part that had arrived, and
+    # another list's parts that copies.json never recorded
+    (tmp_path / f"tranco-{NEWER}-0.parquet.tmp").write_bytes(b"\0" * 64)
+    (tmp_path / f"tranco-{NEWER}-0.parquet").write_bytes(b"part zero")
+    (tmp_path / f"crux-kr-{NEWER}-0.parquet").write_bytes(b"part zero")
+    (tmp_path / "crux-kr.requested").write_bytes(b"")
+    clock.advance(3600)  # stamped today: nothing is sent
+    sent = len(bucket.requests)
+    _refresh(tmp_path, bucket, clock, sources=reverseip.parse_sources("tranco,crux:kr"))
+    assert bucket.requests[sent:] == []
+    assert sorted(os.listdir(tmp_path)) == [
+        ".lock",
+        reverseip.COPIES_NAME,
+        "crux-kr.requested",
+        reverseip.DATABASE_NAME,
+        f"tranco-{DAY}-0.parquet",
+        "tranco.requested",
+    ]
+    assert stamp.stat().st_mtime == stamped
+
+
+def test_an_unreadable_copies_file_removes_nothing(tmp_path):
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    _refresh(tmp_path, bucket, clock)
+    (tmp_path / reverseip.COPIES_NAME).write_text("{not json", encoding="utf-8")
+    clock.advance(3600)
+    _refresh(tmp_path, bucket, clock)
+    assert _parts(tmp_path) == [f"tranco-{DAY}-0.parquet"]
+
+
+def test_a_second_refresh_at_once_sends_nothing(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="reverseip_build")
+    bucket = bucket_with(DAY)
+    clock = Clock(NOW)
+    inner = []
+
+    def transport(url, headers):
+        if not inner:
+            sent = len(bucket.requests)
+            inner.append(_refresh(tmp_path, bucket, clock, sources=BOTH))
+            inner.append(bucket.requests[sent:])
+        return bucket(url, headers)
+
+    outer = _refresh(tmp_path, transport, clock)
+    busy = {"state": "busy", "date": None, "error": None}
+    assert inner == [
+        {"built": False, "sources": {"tranco": busy, "umbrella": busy}},
+        [],
+    ]
+    assert "another refresh" in caplog.text
+    assert outer["sources"]["tranco"]["state"] == "downloaded"
+    assert outer["built"] is True
+    # the lock goes with the first refresh
+    clock.t = NEXT_DAY
+    assert _refresh(tmp_path, bucket, clock)["sources"]["tranco"]["state"] == "current"

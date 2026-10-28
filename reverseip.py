@@ -83,8 +83,23 @@ def _source(source_id: str) -> Source:
 
 
 def parse_sources(text: str) -> tuple[Source, ...]:
-    """The comma-separated ids of REVERSEIP_SOURCES, in the order given."""
-    return tuple(_source(part.strip()) for part in text.split(",") if part.strip())
+    """The comma-separated ids of REVERSEIP_SOURCES, in the order given. An
+    id given twice is kept where it first appears, and the repeat logged: one
+    list, one bit in the build and one `source_meta` row."""
+    sources: dict[str, Source] = {}
+    for part in text.split(","):
+        source_id = part.strip()
+        if not source_id:
+            continue
+        source = _source(source_id)
+        if source.id in sources:
+            logger.warning(
+                "REVERSEIP_SOURCES names %s more than once; reading it once",
+                source.id,
+            )
+            continue
+        sources[source.id] = source
+    return tuple(sources.values())
 
 
 def file_stem(source_id: str) -> str:
@@ -160,12 +175,15 @@ class ReverseIpManager:
     ):
         self.directory = directory
         self.path = os.path.join(directory, DATABASE_NAME)
-        self.sources = (
-            parse_sources(config.REVERSEIP_SOURCES)
-            if sources is None
-            else tuple(sources)
-        )
         self.enabled = enabled
+        # Read only when enabled: an id this release does not know must not
+        # stop the service from starting with the feature off.
+        if sources is not None:
+            self.sources = tuple(sources)
+        elif enabled:
+            self.sources = parse_sources(config.REVERSEIP_SOURCES)
+        else:
+            self.sources = ()
         # Every age check reads this clock.
         self._clock = clock
         # runner(args, **kwargs) -> CompletedProcess, as subprocess.run.
