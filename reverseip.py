@@ -6,13 +6,18 @@ Imports `config` and the standard library only. It must not import `lookup`
 or `main`, for `subdomains.py`'s reason, and never `pyarrow` or
 `reverseip_build`, which only the child process loads."""
 
+import ipaddress
 import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
+from calendar import timegm
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -22,6 +27,8 @@ from config import (
     REVERSEIP_BUILD_TIMEOUT_SECONDS,
     REVERSEIP_DIR,
     REVERSEIP_ENABLED,
+    REVERSEIP_LIST_LIMIT,
+    SUBDOMAIN_MAX_NAMES,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,6 +36,11 @@ logger = logging.getLogger(__name__)
 DATABASE_NAME = "reverseip.sqlite3"
 SCHEMA_VERSION = 1
 COPIES_NAME = "copies.json"
+_NOT_DOWNLOADED = "not downloaded yet"
+_NOT_BUILT = "the database has not been built"
+_UNREADABLE = "the database could not be read"
+_OTHER_RELEASE = "the database is from another release"
+_NOT_IN_DATABASE = "not in the database"
 
 _LABELS = {
     "tranco": "Tranco",
@@ -156,6 +168,10 @@ class ReverseIpManager:
         # the database. Before one, a missing database is a fresh volume, not
         # a fault.
         self.build_attempted = False
+        self._local = threading.local()
+        # The last file that failed to read, logged once rather than per
+        # lookup, named by its device, inode, mtime and size.
+        self._unreadable: tuple | None = None
 
     def refresh(self) -> bool:
         """Run `python -m reverseip_build` and wait for it; whether every
@@ -222,3 +238,284 @@ class ReverseIpManager:
             )
             return False
         return all(state in _CURRENT_STATES for state in states)
+
+    # Reads. A request thread reads the live file through its own read-only
+    # connection; nothing here makes a request or writes.
+
+    def _file_key(self) -> tuple | None:
+        try:
+            stat = os.stat(self.path)
+        except OSError:
+            return None
+        return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+    def _database(self) -> tuple[sqlite3.Connection | None, dict, str | None]:
+        """This thread's open connection and the `source_meta` rows, opened
+        again when the file has changed since; or None and why there is none.
+        Raises sqlite3.Error when the file does not read."""
+        key = self._file_key()
+        if key is None:
+            self._release()
+            return None, {}, (_NOT_BUILT if self.build_attempted else _NOT_DOWNLOADED)
+        held = getattr(self._local, "held", None)
+        if held is None or held[0] != key:
+            self._release()
+            held = (key, *self._open())
+            self._local.held = held
+        return held[1], held[2], held[3]
+
+    def _open(self) -> tuple[sqlite3.Connection | None, dict, str | None]:
+        uri = f"file:{urllib.parse.quote(os.path.abspath(self.path))}?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            version = con.execute("PRAGMA user_version").fetchone()[0]
+            if version != SCHEMA_VERSION:
+                logger.warning(
+                    "Not reading the reverse IP database %s: schema %s, expected %s",
+                    self.path,
+                    version,
+                    SCHEMA_VERSION,
+                )
+                con.close()
+                return None, {}, _OTHER_RELEASE
+            meta = {
+                row[0]: row[1:]
+                for row in con.execute("SELECT id, date, pairs, error FROM source_meta")
+            }
+        except sqlite3.Error:
+            con.close()
+            raise
+        return con, meta, None
+
+    def _release(self) -> None:
+        """Close this thread's connection, which holds its file open (on disk,
+        even after a swap unlinked it) until then."""
+        held = getattr(self._local, "held", None)
+        self._local.held = None
+        if held is not None and held[1] is not None:
+            held[1].close()
+
+    def _with_database[T](
+        self, use: Callable[[sqlite3.Connection | None, dict, str | None], T]
+    ) -> T:
+        """`use(con, meta, problem)` on this thread's connection. When it
+        fails to read, the file is opened afresh and `use` runs once more (a
+        swap fails a read on macOS); a second failure is logged once per file
+        and `use` gets no database. A ProgrammingError, a fault in a query
+        rather than in the file, raises."""
+        error = None
+        for _ in range(2):
+            try:
+                answer = use(*self._database())
+            except sqlite3.DatabaseError as exc:
+                if isinstance(exc, sqlite3.ProgrammingError):
+                    raise
+                error = exc
+                self._release()
+                continue
+            if error is not None:
+                logger.warning(
+                    "Read the reverse IP database %s again after an error (%s)",
+                    self.path,
+                    error,
+                )
+            return answer
+        key = self._file_key()
+        if key != self._unreadable:
+            self._unreadable = key
+            logger.error(
+                "Cannot read the reverse IP database %s (%s)",
+                self.path,
+                error,
+                exc_info=error,
+            )
+        return use(None, {}, _UNREADABLE)
+
+    def _age_hours(self, date: str | None) -> float | None:
+        """Hours from the start of the partition's UTC day, the build's rule."""
+        try:
+            year, month, day = (int(part) for part in str(date).split("-"))
+            started = timegm((year, month, day, 0, 0, 0))
+        except (ValueError, OverflowError):
+            return None
+        return (self._clock() - started) / 3600
+
+    def _availability(
+        self, con: sqlite3.Connection | None, meta: dict, problem: str | None
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """(dates, reasons): the date of each configured source lookups may
+        read, and why each other one may not be."""
+        limit = f"{config.REVERSEIP_MAX_AGE_HOURS:g}"
+        dates: dict[str, str] = {}
+        reasons: dict[str, str] = {}
+        for source in self.sources:
+            if con is None:
+                reasons[source.id] = problem
+                continue
+            row = meta.get(source.id)
+            if row is None:
+                reasons[source.id] = _NOT_IN_DATABASE
+                continue
+            date, _, error = row
+            age = self._age_hours(date)
+            if error is not None and not error.startswith("older than"):
+                reasons[source.id] = error
+            elif error is not None or (
+                age is not None and age > config.REVERSEIP_MAX_AGE_HOURS
+            ):
+                reasons[source.id] = f"last measured {date}, older than {limit} hours"
+            else:
+                dates[source.id] = date
+        return dates, reasons
+
+    def _unavailable(self, reasons: dict[str, str]) -> list[dict]:
+        labels = {source.id: source.label for source in self.sources}
+        return [
+            {"source": i, "label": labels[i], "reason": reason}
+            for i, reason in reasons.items()
+        ]
+
+    def for_address(self, ip: str, limit: int = REVERSEIP_LIST_LIMIT) -> dict | None:
+        """The listed names that resolve to `ip`, with its /24 or /48; None
+        when disabled. `total` 0 is "no listed name"; `total` None is
+        "unknown", with the reasons in `unavailable`."""
+        if not self.enabled:
+            return None
+        address = ipaddress.ip_address(ip)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        packed = address.packed
+        prefix = packed[:3] if address.version == 4 else packed[:6]
+        shown = (
+            f"{ipaddress.IPv4Address(prefix + bytes(1))}/24"
+            if address.version == 4
+            else f"{ipaddress.IPv6Address(prefix + bytes(10))}/48"
+        )
+
+        def read(con, meta, problem):
+            dates, reasons = self._availability(con, meta, problem)
+            answer = {
+                "total": None,
+                "names": None,
+                "truncated": None,
+                "block": None,
+                "as_of": None,
+                "sources": [],
+                "unavailable": self._unavailable(reasons),
+            }
+            if dates:
+                row = con.execute(
+                    "SELECT names FROM ip_count WHERE ip = ?", (packed,)
+                ).fetchone()
+                total = row[0] if row else 0
+                names = [
+                    name
+                    for (name,) in con.execute(
+                        "SELECT n.name FROM addr a JOIN names n ON n.id = a.name_id"
+                        " WHERE a.ip = ? ORDER BY a.rank, a.name_id LIMIT ?",
+                        (packed, limit),
+                    )
+                ]
+                row = con.execute(
+                    "SELECT addresses, names FROM block WHERE prefix = ?", (prefix,)
+                ).fetchone()
+                answer.update(
+                    total=total,
+                    names=names,
+                    truncated=total > len(names),
+                    block={
+                        "prefix": shown,
+                        "addresses": row[0] if row else 0,
+                        "names": row[1] if row else 0,
+                    },
+                    as_of=min(dates.values()),
+                )
+            labels = {source.id: source.label for source in self.sources}
+            answer["sources"] = [
+                {"id": i, "label": labels[i], "date": date} for i, date in dates.items()
+            ]
+            return answer
+
+        return {**self._with_database(read), **licence_lines(self.sources)}
+
+    def names_under(self, domain: str, cap: int = SUBDOMAIN_MAX_NAMES) -> dict | None:
+        """The listed names below `domain`, sorted and capped at `cap`; None
+        when disabled. `count` is the true total, 0 for none listed and None
+        for unknown."""
+        if not self.enabled:
+            return None
+        domain = domain.lower()
+        domain = domain[:-1] if domain.endswith(".") else domain
+        low = domain[::-1] + "."
+        high = domain[::-1] + "/"
+
+        def read(con, meta, problem):
+            dates, reasons = self._availability(con, meta, problem)
+            answer = {
+                "names": None,
+                "count": None,
+                "truncated": None,
+                "as_of": None,
+                "unavailable": self._unavailable(reasons),
+            }
+            if dates:
+                found = sorted(
+                    rname[::-1]
+                    for (rname,) in con.execute(
+                        "SELECT rname FROM sub WHERE rname > ? AND rname < ?",
+                        (low, high),
+                    )
+                )
+                answer.update(
+                    names=found[:cap],
+                    count=len(found),
+                    truncated=len(found) > cap,
+                    as_of=min(dates.values()),
+                )
+            return answer
+
+        return {**self._with_database(read), **licence_lines(self.sources)}
+
+    def status(self) -> dict:
+        """What `/healthz` reports: whether the database opens and, for each
+        configured source, its date, age, pairs and whether lookups can read
+        it."""
+        if not self.enabled:
+            return {"enabled": False}
+
+        def read(con, meta, problem):
+            _, reasons = self._availability(con, meta, problem)
+            sources = {}
+            for source in self.sources if con is not None else ():
+                date, pairs, _ = meta.get(source.id) or (None, 0, None)
+                age = self._age_hours(date)
+                sources[source.id] = {
+                    "label": source.label,
+                    "date": date,
+                    "age_hours": None if age is None else round(age, 1),
+                    "pairs": pairs,
+                    "stale": source.id in reasons,
+                }
+            return {"enabled": True, "database": con is not None, "sources": sources}
+
+        return self._with_database(read)
+
+    def stale_sources(self) -> list[str]:
+        """One message per configured source lookups cannot read; empty when
+        there is no database file (a fresh volume is not a fault)."""
+        if not self.enabled:
+            return []
+
+        def read(con, meta, problem):
+            if problem in (_NOT_DOWNLOADED, _NOT_BUILT):
+                return []
+            _, reasons = self._availability(con, meta, problem)
+            return [
+                f"the {item['label']} list is unavailable to lookups: {item['reason']}"
+                for item in self._unavailable(reasons)
+            ]
+
+        return self._with_database(read)
+
+    def hosts(self) -> list[str]:
+        return [urllib.parse.urlsplit(REVERSEIP_BASE_URL).hostname]

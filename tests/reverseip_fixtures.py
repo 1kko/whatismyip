@@ -267,3 +267,22 @@ def serve(bucket: FakeBucket) -> Iterator[str]:
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def build_manager(
+    tmp_path, rows=ROWS, sources="tranco", now=NOW
+) -> reverseip.ReverseIpManager:
+    """An enabled manager over a database built from `rows` for each source in
+    `sources`, as of `now`, whose clock reads `now`."""
+    from reverseip_build import build_database
+
+    parsed = reverseip.parse_sources(sources)
+    copies = {}
+    for source in parsed:
+        name = f"{reverseip.file_stem(source.id)}-0.parquet"
+        write_parquet(tmp_path / name, rows)
+        copies[source.id] = {"date": DAY, "files": [name]}
+    build_database(str(tmp_path), copies, parsed, now=now)
+    return reverseip.ReverseIpManager(
+        str(tmp_path), parsed, enabled=True, clock=lambda: now
+    )
