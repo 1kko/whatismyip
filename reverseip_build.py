@@ -690,7 +690,9 @@ def _refresh_source(
     if partition is None or (have is not None and partition.date <= have):
         return idle
     # The day's one request, stamped before anything is sent: a failure and a
-    # restart count as much as a download that worked.
+    # restart count as much as a download that worked. The time is read again
+    # here, as the listing may have run past midnight UTC.
+    t = now()
     with open(stamp, "w", encoding="utf-8"):
         pass
     os.utime(stamp, (t, t))

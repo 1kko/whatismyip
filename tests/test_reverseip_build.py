@@ -682,6 +682,36 @@ def test_the_next_utc_day_may_download_again(tmp_path):
     assert (tmp_path / "tranco.requested").stat().st_mtime == NEXT_DAY
 
 
+def test_the_stamp_is_written_and_dated_when_the_first_range_request_goes_out(
+    tmp_path,
+):
+    bucket = bucket_with(DAY)
+    clock = Clock(float(calendar.timegm((2026, 10, 21, 23, 59, 59))))
+    stamp = tmp_path / "tranco.requested"
+    stamped_before = []
+
+    def transport(url, headers):
+        if "range" in headers:
+            stamped_before.append(stamp.exists())
+        else:
+            clock.t = NEXT_DAY  # the listing ends past midnight UTC
+        return bucket(url, headers)
+
+    summary = _refresh(tmp_path, transport, clock)
+    assert summary["sources"]["tranco"]["state"] == "downloaded"
+    assert stamped_before and all(stamped_before)
+    # the download went out on the new day, and the stamp says so
+    stamped = datetime.fromtimestamp(stamp.stat().st_mtime, timezone.utc).date()
+    assert stamped.isoformat() == "2026-10-22"
+    assert _copies(tmp_path)["tranco"]["fetched_at"] == NEXT_DAY
+    # so later that day a newer partition is not downloaded a second time
+    bucket.add(key("tranco", NEWER), parquet_bytes(ROWS[:2]))
+    sent = len(bucket.requests)
+    clock.advance(5 * 3600)
+    assert _refresh(tmp_path, transport, clock)["sources"]["tranco"]["date"] == DAY
+    assert bucket.requests[sent:] == []
+
+
 def test_listing_alone_is_not_a_request(tmp_path):
     bucket = bucket_with(DAY)
     clock = Clock(NOW)
