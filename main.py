@@ -59,7 +59,10 @@ from config import (
     PUBLIC_RESOLVERS,
     RATE_LIMIT_CLEANUP_INTERVAL,
     REPUTATION_CHECK_INTERVAL_SECONDS,
+    OPENINTEL_ATTRIBUTION,
     REVERSEIP_CHECK_INTERVAL_SECONDS,
+    REVERSEIP_MAX_AGE_HOURS,
+    REVERSEIP_TERMS_PATH,
     REPUTATION_MAX_AGE_HOURS,
     SELF_WHOIS_SOFT_DEADLINE_SECONDS,
     SITE_DOMAIN_FALLBACK,
@@ -1867,6 +1870,12 @@ async def privacy(request: Request):
             "asinfo_caida_org_max_age": _span(
                 int(ASINFO_CAIDA_ORG_MAX_AGE_DAYS * 86400)
             ),
+            "reverseip_hosts": (
+                reverse_ip_manager.hosts() if reverse_ip_manager.enabled else []
+            ),
+            "reverseip_attribution": OPENINTEL_ATTRIBUTION,
+            "reverseip_terms_path": REVERSEIP_TERMS_PATH,
+            "reverseip_max_age": _span(int(REVERSEIP_MAX_AGE_HOURS * 3600)),
             "abuseipdb_enabled": abuseipdb_client.enabled,
             "abuseipdb_cache": _span(ABUSEIPDB_CACHE_TTL),
             "stun_url": WEBRTC_STUN_URL,

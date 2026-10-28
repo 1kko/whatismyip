@@ -137,6 +137,17 @@
             are used under CAIDA's acceptable use terms; the AS card names the date of the file it
             read.{% endif %}</p>
         {% endif %}
+        {% if reverseip_hosts %}
+        <p>It also downloads OpenINTEL's daily measurement of the public top lists (Tranco, Cisco
+            Umbrella, Cloudflare Radar, Majestic Million and the Chrome UX Report), at most once a
+            day per list and never for a particular lookup, from
+            {{ reverseip_hosts | join(", ") }}. Only the few columns of each file that hold a name
+            and its address are fetched. An IP address lookup's "Domains on this address" panel
+            and a subdomain list read this server's copy, so that server learns nothing about what
+            was looked up. Names from a list older than {{ reverseip_max_age }} are not shown.
+            {{ reverseip_attribution }} The data is used under CC BY-NC-SA 4.0; an unmodified copy
+            of <a href="{{ reverseip_terms_path }}">OpenINTEL's terms</a> is kept here.</p>
+        {% endif %}
 
         <h2>Who else your browser contacts</h2>
         <ul>

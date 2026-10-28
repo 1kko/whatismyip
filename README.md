@@ -107,6 +107,14 @@ RDAP registration data and the full TLS certificate, expanded.
   Spamhaus ASN-DROP. `/AS4766` looks an AS up on its own. Everything is read from
   public datasets the server downloads on a schedule, so a lookup asks no one
   (see [AS information](#as-information)).
+- **Domains on this address** — for an IP address, the domain names that
+  resolved to it in OpenINTEL's daily measurement of the public top lists
+  (Tranco, Cisco Umbrella, Cloudflare Radar, Majestic Million, Chrome UX Report),
+  how many addresses in its /24 (IPv6 /48) carry a listed name, and, with
+  `?subdomains=`, the listed names under a domain beside Certificate Transparency's.
+  Only names on those lists are covered, so an empty answer is not "no domains".
+  Read from a copy the server downloads once a day, so a lookup asks no one
+  (see [Reverse IP](#reverse-ip)).
 - Every independent leg runs concurrently; the response reports its own
   `elapsed_ms`.
 
@@ -191,7 +199,7 @@ RDAP registration data and the full TLS certificate, expanded.
 - Plain text for a shell with `?format=text`, and `?fields=` to ask for single
   values without paying for the rest of the lookup (see
   [Plain text and `?fields=`](#plain-text-and-fields)).
-- An MCP server at `/mcp` with five tools, six with AS information (see [MCP](#mcp-model-context-protocol)).
+- An MCP server at `/mcp` with five tools, six with AS information; `lookup` and `subdomains` carry the top-list names (see [MCP](#mcp-model-context-protocol)).
 - Discovery metadata in `<head>`, so an agent that lands on the page can find the
   machine interface without scraping the body.
 
@@ -239,6 +247,7 @@ RDAP registration data and the full TLS certificate, expanded.
 | `mcp` | official MCP SDK (Streamable HTTP transport) |
 | `tld` | domain validation against the Public Suffix List |
 | `python-dotenv` | environment configuration |
+| `pyarrow` | reading OpenINTEL's Parquet files, in the reverse IP build's child process only |
 | `opentelemetry-*` | optional OTLP traces, metrics and logs |
 
 See `pyproject.toml` for the complete list.
@@ -422,6 +431,16 @@ BAN_DURATION_SUSPICIOUS=86400        # 24 hours for suspicious requests
 # ABUSEIPDB_API_KEY=your_api_key
 # ABUSEIPDB_DAILY_LIMIT=1000         # the free plan's checks per UTC day
 # ABUSEIPDB_CACHE_TTL=86400          # one check per address per day
+
+# Reverse IP from OpenINTEL's top lists (see "Reverse IP" below); false drops the feature
+# REVERSEIP_ENABLED=true
+# REVERSEIP_DIR=./data/reverseip
+# REVERSEIP_SOURCES=tranco,umbrella,radar,majestic,crux:global,crux:kr
+# REVERSEIP_MAX_AGE_HOURS=96         # older lists are "unknown" + degraded
+# REVERSEIP_CHECK_INTERVAL_SECONDS=3600
+# REVERSEIP_LIST_LIMIT=100           # names the page lists
+# REVERSEIP_MCP_LIMIT=20             # names MCP and ?fields= return
+# REVERSEIP_BUILD_TIMEOUT_SECONDS=3600
 ```
 
 Timeouts and cache TTLs (`RDAP_TIMEOUT_SECONDS`, `WHOIS_TIMEOUT_SECONDS`,
@@ -693,6 +712,10 @@ which the text block skips. It has no counterpart in the MCP tools, whose
 only while AS information is on (`ASINFO_ENABLED`). With it off they are left
 out, where a `-` would read as "not announced", and read `-` when asked for by
 name.
+`reverse_ip_total`, `reverse_ip_names` (the first 20, comma-separated),
+`reverse_ip_block_addresses` and `reverse_ip_block_names` are asked for by name only,
+for an IP target, and add `reverse_ip_license`, `reverse_ip_attribution` and
+`reverse_ip_terms_url` to the answer, in text and in JSON alike.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
 own address; `cert_*` and the domain-only fields are `-`, and so is
@@ -766,6 +789,16 @@ entry (older than `SUBDOMAIN_CACHE_TTL`, 7 days by default) is still returned
 immediately, with a refresh kicked off in the background. Data from
 [crt.sh](https://crt.sh).
 
+While `REVERSEIP_ENABLED`, the `subdomains` object also carries `openintel`: the
+names under the domain in OpenINTEL's top-list measurements
+(`names`, `count`, `truncated`, `as_of`, `unavailable`, plus the licence lines
+`license`, `license_url`, `terms_url` and `attribution`). DNS sees names that a
+wildcard certificate hides from Certificate Transparency, so the two sets
+overlap only partly; the page merges them into one list and marks a name only
+the lists know with `top lists`. `count` 0 means no listed name, `null` means
+the lists could not be read. A crt.sh failure keeps its `error` beside the listed
+names, and the page still draws them. See [Reverse IP](#reverse-ip).
+
 ### `GET /healthz`
 
 Liveness, the deployed commit, whether anything is degraded and why, and which
@@ -810,6 +843,8 @@ is a stable `code` plus a `message` naming what is wrong:
 | `reputation_list_stale` | a reputation list was never downloaded, or is older than `REPUTATION_MAX_AGE_HOURS` (72), so lookups report it as not checked; one reason per list |
 | `asinfo_dataset_stale` | an AS dataset is older than its maximum age (`ASINFO_MAX_AGE_HOURS` for the daily ones, 75 days for CAIDA's relationships, 200 for its organizations), so the card reports that part as unknown; one reason per dataset |
 | `asinfo_unavailable` | AS information is on but there is no usable database after the first build attempt, so lookups carry none |
+| `reverseip_source_stale` | a top list's copy is missing, failed to build or is older than `REVERSEIP_MAX_AGE_HOURS` (96), so lookups report it as unavailable; one reason per list |
+| `reverseip_unavailable` | reverse IP is on but there is no usable database after the first build attempt, so IP lookups carry none |
 
 None of these checks makes a network call, so the endpoint stays cheap to poll.
 
@@ -1175,6 +1210,46 @@ reputation. Credits are on the page and on `/privacy`: "Source: RIPE NCC",
 AS Relationships Dataset" and "The CAIDA UCSD AS Organizations Dataset", each
 with the file's date and, on the page, a link to its dataset page.
 
+### Reverse IP
+
+An IP lookup carries a `reverse_ip` object (absent with `REVERSEIP_ENABLED=false`):
+
+```json
+"reverse_ip": {
+  "total": 3,
+  "names": ["example.com", "example.net", "shop.example.org"],
+  "truncated": false,
+  "block": {"prefix": "93.184.215.0/24", "addresses": 4, "names": 9},
+  "as_of": "2026-10-20",
+  "sources": [{"id": "tranco", "label": "Tranco", "date": "2026-10-20"}],
+  "unavailable": [],
+  "coverage": "Names on the Tranco, Cisco Umbrella, Cloudflare Radar, Majestic Million and Chrome UX Report (global, KR) top lists only.",
+  "license": "CC BY-NC-SA 4.0",
+  "license_url": "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+  "terms_url": "https://ip.example.com/static/licenses/openintel-terms.html",
+  "attribution": "The research leading to these results was made possible by OpenINTEL (https://www.openintel.nl/), a joint project of the University of Twente, SIDN, NLnet Labs and SURF."
+}
+```
+
+The names are those that resolved to the address in [OpenINTEL](https://www.openintel.nl/)'s
+daily measurement of the public top lists, most popular first, and the `block` line counts
+the addresses in the address's IPv4 /24 (IPv6 /48) that carry a listed name and the
+distinct names on them; it states counts and leaves the reading to you. The data covers
+only names on those lists, never a whole zone, so most addresses have none: `total` 0 means
+no listed name resolved there, not that nothing points there, and `null` means the lists
+could not be read (the reasons are in `unavailable`), never "none". The scheduler
+downloads each list at most once a day (OpenINTEL's terms ask for no more), fetching only
+the columns it needs, and builds one SQLite file in `data/reverseip/`; a lookup reads that
+file and sends nothing anywhere. A list older than `REVERSEIP_MAX_AGE_HOURS` (96) is
+`unavailable`. The page shows the first `REVERSEIP_LIST_LIMIT` (100) names; JSON carries
+the same, MCP and `?fields=` the first `REVERSEIP_MCP_LIMIT` (20) with the total.
+
+OpenINTEL's data is CC BY-NC-SA 4.0 and asks for its attribution sentence with it, so every
+surface that shows a name or a count carries the attribution, the licence and a link to
+an unmodified copy of OpenINTEL's terms (`/static/licenses/openintel-terms.html`). The
+service is personal and non-commercial, which is what that licence assumes; if you run an
+instance, check that yours is too. Reverse IP adds nothing to the reputation score.
+
 ### Response codes
 
 | Code | Meaning |
@@ -1233,12 +1308,12 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", that `score` runs from 0 to 100 with 100 the most dangerous (`null` when nothing could be checked, and 0 is not safe), and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). `registration.age_days` and `tls.age_days` count the days since the registration was created and the certificate became valid, and the description calls a days-old domain worth a closer look, not a verdict. |
+| `lookup(target)` | For an IP, also `reverse_ip`: the total, the first 20 names, the block counts, `as_of`, `unavailable`, and the coverage, licence, `terms_url` and attribution; the description says an empty list is not "no domains". Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", that `score` runs from 0 to 100 with 100 the most dangerous (`null` when nothing could be checked, and 0 is not safe), and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). `registration.age_days` and `tls.age_days` count the days since the registration was created and the certificate became valid, and the description calls a days-old domain worth a closer look, not a verdict. |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR / DMARC sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. `dmarc` is a domain's `v=DMARC1` record, or its registrable domain's when it has none, each labelled with the `queried_name` that answered. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, the certificate's age in days (`age_days`), and whether it is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way and the same reputation `score` (no AbuseIPDB part). |
 | `as_info(asn, full=false)` | The AS card for `"AS4766"`, `"as4766"` or `4766`: holder, country, registry, organization, prefix counts, RPKI coverage, upstreams, neighbour counts (`full` adds the capped neighbour and prefix lists), ASN-DROP and which datasets could not be read. Public BGP and RPKI data refreshed daily, not live routing; the description says a `null` section is unknown, not "none". A special-purpose number returns its `special` entry. Hidden when `ASINFO_ENABLED=false`. `lookup` and `whoami_caller` carry a compact `as_info` for an address; `lookup`, `dns_records` and `ssl_certificate` refuse an AS target with the code `asn_target`, naming this tool. |
-| `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs — passive, CT-only. Hidden when `SUBDOMAIN_ENABLED=false`. |
+| `subdomains(domain, limit=200)` | Subdomains seen in public Certificate Transparency logs and in OpenINTEL's DNS top lists — passive. Titled "Subdomains from Certificate Transparency and DNS top lists"; `openintel` carries the listed names, `count`, `as_of`, `unavailable` and the licence lines. A crt.sh failure is an error unless the lists found at least one name. Hidden when `SUBDOMAIN_ENABLED=false`. |
 
 A call that could not answer at all (a private or malformed target, a timeout,
 no TLS handshake, the CT source unavailable) comes back with `isError: true` and
