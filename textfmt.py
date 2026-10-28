@@ -77,7 +77,7 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     # dnssecurity.evaluate()'s state per check: pass, warn, fail or info;
     # "unknown" is "?" with the check's summary as the reason.
     # Reverse IP (OpenINTEL): names on public top lists that resolved to the
-    # address, and the counts for its /24 or /48. The last three are licence
+    # address, and the counts for its /24 or /48. The next three are licence
     # text, brought along by parse_fields beside any of the first four.
     "reverse_ip_total": (frozenset({"reverseip"}), _IP),
     "reverse_ip_names": (frozenset({"reverseip"}), _IP),
@@ -86,6 +86,10 @@ FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "reverse_ip_license": (frozenset({"reverseip"}), _IP),
     "reverse_ip_attribution": (frozenset({"reverseip"}), _IP),
     "reverse_ip_terms_url": (frozenset({"reverseip"}), _IP),
+    # The lists that could not be read, "label: reason" joined with "; ";
+    # "-" when every list was. Beside a 0 it says whether that 0 covers every
+    # list. Asked for by name only, and never brought along.
+    "reverse_ip_unavailable": (frozenset({"reverseip"}), _IP),
     **{
         f"{check}_state": (frozenset({"dns", "security"}), _DOMAIN)
         for check in (
@@ -140,6 +144,7 @@ _NOT_IN_BLOCK = frozenset(
         *_SECURITY_FIELDS,
         *_REVERSE_IP_DATA,
         *_REVERSE_IP_LICENCE,
+        "reverse_ip_unavailable",
     }
 )
 
@@ -318,6 +323,10 @@ def field_values(data: dict, kind: str) -> tuple[dict[str, Any], dict[str, str]]
         "reverse_ip_license": reverse_ip.get("license"),
         "reverse_ip_attribution": reverse_ip.get("attribution"),
         "reverse_ip_terms_url": reverse_ip.get("terms_url"),
+        "reverse_ip_unavailable": "; ".join(
+            f"{item['source']}: {item['reason']}"
+            for item in reverse_ip.get("unavailable") or []
+        ),
         **{
             name: (security.get(name.removesuffix("_state")) or {}).get("state")
             for name in _SECURITY_FIELDS

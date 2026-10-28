@@ -18,7 +18,7 @@ import lookup
 import main
 import mcp_server
 import subdomains
-from reverseip import ReverseIpManager
+from reverseip import ReverseIpManager, parse_sources
 from reverseip_fixtures import NOW, build_manager
 
 client = TestClient(main.app)
@@ -261,9 +261,11 @@ async def test_mcp_lookup_carries_compact_reverse_ip(reverseip_enabled, legs):
         "unavailable",
         "coverage",
         "license",
+        "license_url",
         "attribution",
         "terms_url",
     }
+    assert rip["license_url"] == config.OPENINTEL_LICENSE_URL
 
 
 async def test_mcp_lookup_has_no_reverse_ip_for_a_domain_or_when_disabled(
@@ -334,6 +336,93 @@ def test_unknown_is_a_question_mark_with_the_reason(
 
 def test_not_in_the_text_block(reverseip_enabled, legs):
     assert "reverse_ip" not in client.get(f"/{LISTED_IP}?format=text").text
+
+
+@pytest.fixture
+def partial(monkeypatch, tmp_path, legs, stock_sqlite):
+    """A realistic partial state: the database built from Tranco alone, the
+    manager configured with Tranco and Umbrella (Umbrella never arrived)."""
+    build_manager(tmp_path, sources="tranco")
+    manager = ReverseIpManager(
+        str(tmp_path),
+        parse_sources("tranco,umbrella"),
+        enabled=True,
+        clock=lambda: NOW,
+    )
+    monkeypatch.setattr(lookup, "reverse_ip_manager", manager)
+    monkeypatch.setattr(main, "reverse_ip_manager", manager)
+    return manager
+
+
+EMPTY_IP = "175.214.27.215"
+
+
+def test_the_page_says_which_lists_were_not_checked(partial):
+    html = client.get(f"/{LISTED_IP}", headers=BROWSER).text
+    assert "Not checked: Cisco Umbrella (not in the database)" in html
+    assert 'title="4 names"' in html
+    assert "Names on the Tranco top list only." in html
+    assert "Cisco Umbrella and" not in html
+
+
+def test_the_page_none_found_counts_the_lists_read(partial):
+    html = client.get(f"/{EMPTY_IP}", headers=BROWSER).text
+    assert 'title="none in 1 of 2 lists"' in html
+    assert "none in top lists" not in html
+    assert "Not checked: Cisco Umbrella (not in the database)" in html
+    assert "No name on these lists resolved to this address" in html
+
+
+def test_a_complete_answer_has_no_not_checked_line(reverseip_enabled, legs):
+    html = client.get(f"/{EMPTY_IP}", headers=BROWSER).text
+    assert 'title="none in top lists"' in html
+    assert "Not checked:" not in html
+
+
+def test_fields_unavailable_names_the_lists_not_read(partial):
+    lines = client.get(
+        f"/{EMPTY_IP}?fields=reverse_ip_total,reverse_ip_unavailable&format=text"
+    ).text.splitlines()
+    assert lines == ["0", "Cisco Umbrella: not in the database", *LICENCE]
+
+
+def test_fields_unavailable_is_dash_when_every_list_was_read(reverseip_enabled, legs):
+    text = client.get(f"/{LISTED_IP}?fields=reverse_ip_unavailable&format=text").text
+    assert text.splitlines() == ["-"]
+    body = client.get(f"/{LISTED_IP}?fields=reverse_ip_unavailable", headers=JSON)
+    assert body.json() == {"reverse_ip_unavailable": None}
+
+
+def test_fields_unavailable_when_nothing_was_read(reverseip_enabled, legs, tmp_path):
+    reverseip_enabled._clock = lambda: NOW + 5 * 24 * HOUR
+    text = client.get(f"/{LISTED_IP}?fields=reverse_ip_unavailable&format=text").text
+    assert text.splitlines() == [
+        "Tranco: last measured 2026-10-20, older than 96 hours"
+    ]
+
+
+def test_fields_unavailable_is_dash_for_a_domain_and_the_self_route(
+    reverseip_enabled, legs
+):
+    assert client.get(
+        f"/{DOMAIN}?fields=reverse_ip_unavailable&format=text"
+    ).text.splitlines() == ["-"]
+    assert client.get(
+        "/?fields=reverse_ip_unavailable&format=text",
+        headers={"x-real-ip": LISTED_IP},
+    ).text.splitlines() == ["-"]
+
+
+def test_fields_unavailable_is_asked_for_by_name_only(reverseip_enabled, legs):
+    import textfmt
+
+    assert "reverse_ip_unavailable" not in textfmt.parse_fields(
+        ["reverse_ip_total,reverse_ip_names"]
+    )
+    assert textfmt.parse_fields(["reverse_ip_unavailable"]) == [
+        "reverse_ip_unavailable"
+    ]
+    assert "reverse_ip_unavailable" not in textfmt.block_fields("ip", as_info=True)
 
 
 def test_a_domain_reads_dash(reverseip_enabled, legs):
@@ -446,6 +535,27 @@ async def test_mcp_subdomains_with_openintel(reverseip_enabled, crtsh_returns):
     assert result["openintel"]["truncated"] is False
     assert result["openintel"]["terms_url"] == config.REVERSEIP_TERMS_URL
     assert result["openintel"]["attribution"] == config.OPENINTEL_ATTRIBUTION
+    assert result["openintel"]["license_url"] == config.OPENINTEL_LICENSE_URL
+    assert set(result["openintel"]) == {
+        "names",
+        "count",
+        "truncated",
+        "as_of",
+        "unavailable",
+        "license",
+        "license_url",
+        "attribution",
+        "terms_url",
+    }
+
+
+async def test_mcp_subdomains_reads_a_padded_name_as_the_gate_does(
+    reverseip_enabled, crtsh_returns
+):
+    crtsh_returns(["www.example.com"])
+    result = await mcp_server.subdomains(" example.com ")
+    assert result["openintel"]["names"] == LISTED
+    assert result["openintel"]["count"] == 2
 
 
 async def test_mcp_openintel_honours_limit(reverseip_enabled, crtsh_returns):

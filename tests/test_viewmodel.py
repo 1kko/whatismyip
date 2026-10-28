@@ -2132,8 +2132,73 @@ def test_reverse_ip_view_unknown_keeps_the_licence_lines():
     assert view["hint"] == "unknown" and view["block_line"] is None
     assert view["names"] == [] and view["more"] == 0
     assert view["state_line"] == "Unknown: Tranco: not downloaded yet"
+    # the reasons are the state line; there is nothing else not checked
+    assert view["not_checked"] is None
     assert view["coverage"] == _LICENCE["coverage"]
     assert view["attribution"] == _LICENCE["attribution"]
+
+
+def _unavailable(*pairs):
+    return [
+        {"source": label.lower(), "label": label, "reason": reason}
+        for label, reason in pairs
+    ]
+
+
+def test_reverse_ip_view_unknown_says_a_shared_reason_once():
+    view = reverse_ip_view(
+        {
+            **ANSWER_UNKNOWN,
+            "unavailable": _unavailable(
+                ("Tranco", "not downloaded yet"),
+                ("Cisco Umbrella", "not downloaded yet"),
+                ("Majestic Million", "no copy"),
+                ("Cloudflare Radar", "not downloaded yet"),
+            ),
+        }
+    )
+    assert view["state_line"] == (
+        "Unknown: Tranco, Cisco Umbrella, Cloudflare Radar: not downloaded yet;"
+        " Majestic Million: no copy"
+    )
+
+
+def test_reverse_ip_view_complete_has_no_not_checked_line():
+    assert reverse_ip_view(ANSWER_4_NAMES)["not_checked"] is None
+    assert reverse_ip_view(ANSWER_ZERO)["not_checked"] is None
+
+
+def test_reverse_ip_view_partial_zero_says_how_many_lists():
+    view = reverse_ip_view(
+        {
+            **ANSWER_ZERO,
+            "unavailable": _unavailable(
+                ("Cisco Umbrella", "not in the database"),
+                ("Majestic Million", "last measured 2026-10-15, older than 96 hours"),
+            ),
+        }
+    )
+    assert view["hint"] == "none in 1 of 3 lists"
+    assert view["not_checked"] == (
+        "Not checked: Cisco Umbrella (not in the database);"
+        " Majestic Million (last measured 2026-10-15, older than 96 hours)"
+    )
+
+
+def test_reverse_ip_view_partial_names_keep_their_hint():
+    view = reverse_ip_view(
+        {
+            **ANSWER_4_NAMES,
+            "unavailable": _unavailable(
+                ("Cisco Umbrella", "not downloaded yet"),
+                ("Cloudflare Radar", "not downloaded yet"),
+            ),
+        }
+    )
+    assert view["hint"] == "4 names"
+    assert view["not_checked"] == (
+        "Not checked: Cisco Umbrella, Cloudflare Radar (not downloaded yet)"
+    )
 
 
 def test_one_address_one_name_is_singular():

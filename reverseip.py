@@ -426,6 +426,13 @@ class ReverseIpManager:
                 dates[source.id] = date
         return dates, reasons
 
+    def _licence_lines(self, dates: dict[str, str]) -> dict:
+        """The licence lines, the coverage sentence naming only the lists
+        read (`dates`); all the configured ones when none could be read, so
+        the sentence still says what the lists are."""
+        read = [source for source in self.sources if source.id in dates]
+        return licence_lines(read or self.sources)
+
     def _unavailable(self, reasons: dict[str, str]) -> list[dict]:
         labels = {source.id: source.label for source in self.sources}
         return [
@@ -436,7 +443,9 @@ class ReverseIpManager:
     def for_address(self, ip: str, limit: int = REVERSEIP_LIST_LIMIT) -> dict | None:
         """The listed names that resolve to `ip`, with its /24 or /48; None
         when disabled. `total` 0 is "no listed name"; `total` None is
-        "unknown", with the reasons in `unavailable`."""
+        "unknown", with the reasons in `unavailable`. A partial set answers
+        from the lists that could be read, the rest in `unavailable`, and
+        `coverage` names only the lists read."""
         if not self.enabled:
             return None
         address = ipaddress.ip_address(ip)
@@ -492,20 +501,22 @@ class ReverseIpManager:
             answer["sources"] = [
                 {"id": i, "label": labels[i], "date": date} for i, date in dates.items()
             ]
-            return answer
+            return {**answer, **self._licence_lines(dates)}
 
-        return {**self._with_database(read), **licence_lines(self.sources)}
+        return self._with_database(read)
 
     def names_under(self, domain: str, cap: int = SUBDOMAIN_MAX_NAMES) -> dict | None:
         """The listed names below `domain`, sorted and capped at `cap`; None
         when disabled. `count` is the true total, 0 for none listed and None
-        for unknown. The read is bounded by `cap`: past it the kept names are
-        the first `cap` in reversed-name order (an index range scan), not the
-        alphabetically first `cap`; they are then sorted."""
+        for unknown; `unavailable` and `coverage` as for_address. The read is
+        bounded by `cap`: past it the kept names are the first `cap` in
+        reversed-name order (an index range scan), not the alphabetically
+        first `cap`; they are then sorted."""
         if not self.enabled:
             return None
-        domain = domain.lower()
-        domain = domain[:-1] if domain.endswith(".") else domain
+        # As subdomains.py reads its target, so both sources are asked about
+        # one name.
+        domain = domain.strip().lower().rstrip(".")
         low = domain[::-1] + "."
         high = domain[::-1] + "/"
 
@@ -536,9 +547,9 @@ class ReverseIpManager:
                     truncated=count > len(found),
                     as_of=min(dates.values()),
                 )
-            return answer
+            return {**answer, **self._licence_lines(dates)}
 
-        return {**self._with_database(read), **licence_lines(self.sources)}
+        return self._with_database(read)
 
     def status(self) -> dict:
         """What `/healthz` reports: whether the database opens and, for each

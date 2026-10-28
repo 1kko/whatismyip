@@ -325,6 +325,7 @@
                     {% if r.more %}<p class="api-note">and {{ "{:,}".format(r.more) }} more</p>{% endif %}
                     {% endif %}
                     {% if r.state_line %}<p class="api-note">{{ r.state_line }}</p>{% endif %}
+                    {% if r.not_checked %}<p class="api-note">{{ r.not_checked }}</p>{% endif %}
                     {% if r.block_line %}<p class="api-note">{{ r.block_line }}</p>{% endif %}
                     <p class="api-note tone-muted">{{ r.coverage }}</p>
                     <p class="api-note tone-muted">{{ r.attribution }}</p>

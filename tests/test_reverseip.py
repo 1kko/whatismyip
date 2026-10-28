@@ -636,7 +636,20 @@ def test_a_partial_set_still_answers(tmp_path):
             "reason": "not in the database",
         }
     ]
-    assert "Umbrella" in answer["coverage"]
+    # the sentence names the lists read, never one that was not
+    assert answer["coverage"] == "Names on the Tranco top list only."
+    under = manager.names_under("example.com")
+    assert under["count"] == 2
+    assert under["coverage"] == "Names on the Tranco top list only."
+
+
+def test_nothing_read_names_the_configured_lists(tmp_path):
+    manager = ReverseIpManager(
+        str(tmp_path), parse_sources("tranco,umbrella"), enabled=True, clock=lambda: NOW
+    )
+    expected = "Names on the Tranco and Cisco Umbrella top lists only."
+    assert manager.for_address("93.184.215.14")["coverage"] == expected
+    assert manager.names_under("example.com")["coverage"] == expected
 
 
 def test_disabled_answers_none(tmp_path):
@@ -666,6 +679,14 @@ def test_names_under_matches_on_a_label_boundary(tmp_path):
 def test_names_under_a_deeper_target_and_any_spelling(tmp_path):
     answer = build_manager(tmp_path).names_under("B.Example.COM.")
     assert answer["names"] == ["a.b.example.com"]
+
+
+@pytest.mark.parametrize("spelling", [" example.com ", "example.com..", "EXAMPLE.com."])
+def test_names_under_normalises_as_the_crtsh_gate_does(tmp_path, spelling):
+    # subdomains.invalid_target_reason and get_subdomains read the name as
+    # strip().lower().rstrip("."): a padded name must not read as 0 here
+    answer = build_manager(tmp_path).names_under(spelling)
+    assert answer["names"] == ["a.b.example.com", "norank.example.com"]
 
 
 def test_names_under_caps_and_counts(tmp_path):

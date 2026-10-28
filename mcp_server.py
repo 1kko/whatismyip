@@ -450,6 +450,7 @@ def compact_reverse_ip(
         ],
         "coverage": info.get("coverage"),
         "license": info.get("license"),
+        "license_url": info.get("license_url"),
         "attribution": info.get("attribution"),
         "terms_url": info.get("terms_url"),
     }
@@ -475,6 +476,7 @@ def compact_top_list_subdomains(data: dict | None, limit: int) -> dict | None:
             for item in data.get("unavailable") or []
         ],
         "license": data.get("license"),
+        "license_url": data.get("license_url"),
         "attribution": data.get("attribution"),
         "terms_url": data.get("terms_url"),
     }

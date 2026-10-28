@@ -2013,35 +2013,59 @@ def dns_security_view(data: dict | None) -> dict | None:
     return {"hint": hint, "rows": rows}
 
 
+def _by_reason(unavailable: list[dict]) -> list[tuple[str, str]]:
+    """(labels, reason) for each distinct reason, in the order first seen: on
+    a fresh volume every list is "not downloaded yet", said once."""
+    grouped: dict[str, list[str]] = {}
+    for item in unavailable:
+        grouped.setdefault(str(item.get("reason")), []).append(str(item.get("label")))
+    return [(", ".join(labels), reason) for reason, labels in grouped.items()]
+
+
 def reverse_ip_view(info: dict | None, link_for: LinkFor | None = None) -> dict | None:
     """The "Domains on this address" panel: the listed names that resolved to
     an IP, in one of three states (names, none listed, unknown). Every state
     carries the coverage, attribution and licence lines: OpenINTEL's terms ask
     for them wherever its data is shown. None for no answer (the feature is
-    off, or the target is not an IP)."""
+    off, or the target is not an IP).
+
+    A partial answer (some lists read, the others in `unavailable`) says
+    which were not checked, and why, in `not_checked`; "none" then counts the
+    lists read ("none in 1 of 3 lists"), since the others may hold a name."""
     if info is None:
         return None
     total = info.get("total")
     names = info.get("names")
     as_of = info.get("as_of")
     block = info.get("block")
+    unavailable = info.get("unavailable") or []
 
+    not_checked = None
     if total is None:
         hint = "unknown"
         reasons = "; ".join(
-            f"{u.get('label')}: {u.get('reason')}"
-            for u in info.get("unavailable") or []
+            f"{labels}: {reason}" for labels, reason in _by_reason(unavailable)
         )
         state_line = f"Unknown: {reasons}"
-    elif total == 0:
-        hint = "none in top lists"
-        state_line = (
-            f"No name on these lists resolved to this address on {as_of}. "
-            "Names outside them are not covered."
-        )
     else:
-        hint = f"{total:,} name{'s' if total != 1 else ''}"
-        state_line = None
+        if unavailable:
+            not_checked = "Not checked: " + "; ".join(
+                f"{labels} ({reason})" for labels, reason in _by_reason(unavailable)
+            )
+        if total == 0:
+            read = len(info.get("sources") or [])
+            hint = (
+                f"none in {read} of {read + len(unavailable)} lists"
+                if unavailable
+                else "none in top lists"
+            )
+            state_line = (
+                f"No name on these lists resolved to this address on {as_of}. "
+                "Names outside them are not covered."
+            )
+        else:
+            hint = f"{total:,} name{'s' if total != 1 else ''}"
+            state_line = None
 
     shown = [{"text": n, "href": _href(link_for, n)} for n in names or []]
     more = total - len(shown) if info.get("truncated") and total else 0
@@ -2067,6 +2091,7 @@ def reverse_ip_view(info: dict | None, link_for: LinkFor | None = None) -> dict 
         "names": shown,
         "more": more,
         "state_line": state_line,
+        "not_checked": not_checked,
         "block_line": block_line,
         "coverage": coverage,
         "attribution": info.get("attribution"),
