@@ -537,10 +537,46 @@ function subdomainStatusLine() {
   return line;
 }
 
+// crt.sh's names and the OpenINTEL top lists' (data.openintel) as one sorted
+// list. listedOnly is what only the lists know, which the panel marks. A
+// crt.sh failure (data.error) counts nothing of its own, so the total is the
+// listed names alone, and crtError says why. Same arithmetic as
+// subdomain_found_count in viewmodel.py.
+function mergeSubdomains(data) {
+  const crtNames = data.names || [];
+  const listed = (data.openintel && data.openintel.names) || [];
+  const known = new Set(crtNames);
+  const listedOnly = listed.filter((name) => !known.has(name));
+  const names = [...new Set([...crtNames, ...listed])].sort();
+  const crtCount = data.error ? 0 : (data.count ?? crtNames.length);
+  return {
+    names,
+    listedOnly,
+    total: crtCount + listedOnly.length,
+    crtError: data.error || null,
+  };
+}
+
+// The credit lines the top lists' names carry, from the answer's own
+// attribution and licence. The terms link is the page's own copy.
+function topListLines(lists) {
+  if (!(lists && lists.count > 0)) {
+    return [];
+  }
+  return [
+    { text: "Also from top lists, measured " + lists.as_of },
+    { text: lists.attribution },
+    { text: lists.license, href: lists.license_url },
+    { text: "OpenINTEL terms", href: "/static/licenses/openintel-terms.html" },
+  ];
+}
+
 // Fills `body` with the notes, the filter, Copy all and the list, and keeps
 // `line` (from subdomainStatusLine) saying how much of it is shown.
 function renderSubdomainPanel(body, line, data, target) {
-  const names = data.names || [];
+  const merged = mergeSubdomains(data);
+  const names = merged.names;
+  const listedOnly = new Set(merged.listedOnly);
   const status = line.querySelector('[role="status"]');
   body.textContent = "";
 
@@ -606,17 +642,48 @@ function renderSubdomainPanel(body, line, data, target) {
       link.href = `/${encodeURIComponent(name)}`;
       link.textContent = name;
       item.appendChild(link);
+      if (listedOnly.has(name)) {
+        // After the link, so the link's text and a copy of it stay the name.
+        const source = document.createElement("span");
+        source.className = "subdomains__source";
+        source.textContent = "top lists";
+        item.appendChild(source);
+      }
       list.appendChild(item);
     }
-    status.textContent = subdomainCountText(
+    const count = subdomainCountText(
       shown.length,
       matches.length,
-      data.count ?? names.length,
+      merged.total,
       filter.value.trim() !== "",
     );
+    status.textContent = merged.crtError
+      ? `crt.sh lookup failed: ${merged.crtError}. ${count}`
+      : count;
   };
   filter.addEventListener("input", draw);
   draw();
+
+  for (const entry of topListLines(data.openintel)) {
+    const credit = document.createElement("p");
+    credit.className = "subdomains__meta";
+    if (entry.href) {
+      const anchor = document.createElement("a");
+      anchor.href = entry.href;
+      anchor.rel = "noopener noreferrer";
+      anchor.textContent = entry.text;
+      credit.appendChild(anchor);
+    } else {
+      credit.textContent = entry.text;
+    }
+    body.appendChild(credit);
+  }
+}
+
+// Only when neither source answered is the panel a failure: crt.sh errored
+// and the top lists found nothing.
+function subdomainsFailedOutright(data) {
+  return Boolean(data.error) && !(data.openintel && data.openintel.count > 0);
 }
 
 function subdomainFailed(line, message) {
@@ -633,7 +700,7 @@ const renderedSubdomains = document.getElementById("subdomains-rendered");
 const pageDataScript = document.getElementById("page-data");
 if (renderedSubdomains && pageDataScript) {
   const data = JSON.parse(pageDataScript.textContent).subdomains;
-  if (data && Array.isArray(data.names)) {
+  if (data && Array.isArray(data.names) && !subdomainsFailedOutright(data)) {
     const line = subdomainStatusLine();
     renderedSubdomains.after(line);
     renderSubdomainPanel(renderedSubdomains, line, data, renderedSubdomains.dataset.target);
@@ -692,12 +759,12 @@ if (subdomainAccordion && subdomainSlot) {
         return;
       }
 
-      if (data.error) {
+      if (subdomainsFailedOutright(data)) {
         subdomainFailed(subdomainLine, `Lookup failed: ${data.error}`);
         return;
       }
 
-      setSubdomainHint(subdomainHintText(data.count));
+      setSubdomainHint(subdomainHintText(mergeSubdomains(data).total));
       renderSubdomainPanel(subdomainBody, subdomainLine, data, target);
     } catch (err) {
       subdomainFailed(subdomainLine, "Lookup failed.");

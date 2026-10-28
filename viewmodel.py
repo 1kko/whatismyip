@@ -2076,6 +2076,20 @@ def reverse_ip_view(info: dict | None, link_for: LinkFor | None = None) -> dict 
     }
 
 
+def subdomain_found_count(data: dict) -> int | None:
+    """How many subdomains the panel counts: crt.sh's count plus the names
+    only the top lists know. None when crt.sh failed and the lists found
+    none. The same arithmetic as mergeSubdomains in static/js/app.js."""
+    crt_names = data.get("names") or []
+    lists = data.get("openintel") or {}
+    known = set(crt_names)
+    listed_only = [n for n in lists.get("names") or [] if n not in known]
+    if data.get("error"):
+        return len(listed_only) if listed_only else None
+    count = data.get("count")
+    return (len(crt_names) if count is None else count) + len(listed_only)
+
+
 def _accordions(
     response: dict, subdomains_enabled: bool, reverseip: dict | None = None
 ) -> list[dict]:
@@ -2166,11 +2180,12 @@ def _accordions(
         # will do rather than where the data comes from. static/js/app.js
         # rewrites it to the same "N subdomains found" wording once the lazy
         # fetch lands, so the two paths read identically.
-        if subdomain_data and subdomain_data.get("error"):
-            hint = "lookup failed"
-        elif subdomain_data:
-            count = subdomain_data.get("count", 0)
-            hint = f"{count:,} subdomain{'s' if count != 1 else ''} found"
+        if subdomain_data:
+            count = subdomain_found_count(subdomain_data)
+            if count is None:
+                hint = "lookup failed"
+            else:
+                hint = f"{count:,} subdomain{'s' if count != 1 else ''} found"
         else:
             hint = "click to lookup"
         accordions.append({"id": "subdomains", "title": "Subdomains", "hint": hint})

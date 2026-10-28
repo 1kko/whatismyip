@@ -936,6 +936,37 @@ def test_a_failed_lookup_says_so_rather_than_inviting_another_click():
     assert hint == "lookup failed"
 
 
+def test_subdomain_hint_counts_both_sources():
+    hint = _subdomain_hint(
+        {
+            "names": ["a.example.com", "b.example.com"],
+            "count": 2,
+            "openintel": {"names": ["b.example.com", "c.example.com"], "count": 2},
+        }
+    )
+    assert hint == "3 subdomains found"
+
+
+def test_subdomain_hint_crtsh_failed_lists_found():
+    hint = _subdomain_hint(
+        {
+            "names": [],
+            "count": 0,
+            "error": "timed out",
+            "openintel": {"names": ["a.example.com", "b.example.com"], "count": 2},
+        }
+    )
+    assert hint == "2 subdomains found"
+
+
+def test_subdomain_hint_both_failed():
+    for lists in (None, {"names": None, "count": None}, {"names": [], "count": 0}):
+        data = {"names": [], "count": 0, "error": "timed out"}
+        if lists is not None:
+            data["openintel"] = lists
+        assert _subdomain_hint(data) == "lookup failed"
+
+
 class TestWhoisNotRegistered:
     """An absent registration is an answer and differs from a timeout."""
 
