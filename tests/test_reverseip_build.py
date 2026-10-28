@@ -217,3 +217,19 @@ def test_read_pairs_reads_only_the_wanted_columns(tmp_path):
         ipaddress.ip_address("93.184.215.14").packed,
         NO_RANK,
     ) in pairs
+
+
+def test_a_sqlite_failure_is_the_builds_own_and_keeps_the_previous_file(
+    tmp_path, monkeypatch
+):
+    _built(tmp_path).close()
+    before = (tmp_path / "reverseip.sqlite3").read_bytes()
+
+    def full_disk(*args, **kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(reverseip_build, "_insert_file", full_disk)
+    with pytest.raises(sqlite3.OperationalError):
+        _built(tmp_path)
+    assert (tmp_path / "reverseip.sqlite3").read_bytes() == before
+    assert sorted(os.listdir(tmp_path)) == ["reverseip.sqlite3", "tranco-0.parquet"]

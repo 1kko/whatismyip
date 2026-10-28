@@ -13,6 +13,7 @@ import time
 from calendar import timegm
 from collections.abc import Iterator, Sequence
 
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
@@ -176,7 +177,9 @@ def _add_source(
             for name in copy.get("files", []):
                 current = name
                 pairs += _insert_file(con, os.path.join(directory, name), bit)
-        except Exception as exc:
+        except (pa.ArrowException, OSError) as exc:
+            # Only a copy that will not read; a SQLite error is the build's own
+            # and propagates, so the previous database stays in place.
             logger.warning(
                 "reverse IP: %s copy left out, %s: %s", source.id, current, exc
             )
