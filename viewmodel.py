@@ -2276,6 +2276,11 @@ def build_view(
         ),
         "dns_security": dns_security_view(response.get("dns_security")),
         "subdomains": response.get("subdomains"),
+        # Neither crt.sh nor the top lists answered: the panel is a failure.
+        "subdomains_failed": bool(
+            response.get("subdomains")
+            and subdomain_found_count(response["subdomains"]) is None
+        ),
         "subdomains_shown": (response.get("subdomains") or {}).get("names", [])[:100],
     }
 

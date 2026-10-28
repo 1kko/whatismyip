@@ -491,3 +491,18 @@ def test_the_tool_title_names_both_sources():
     )
     assert tool.title == "Subdomains from Certificate Transparency and DNS top lists"
     assert "`terms_url`" in tool.description
+
+
+def test_a_crtsh_error_with_listed_names_still_renders_the_panel(
+    reverseip_enabled, crtsh_fails, legs
+):
+    html = client.get(f"/{DOMAIN}?subdomains=include", headers=BROWSER).text
+    assert 'id="subdomains-rendered"' in html
+    assert "crt.sh lookup failed: crt.sh timed out" in html
+    assert "Lookup failed:" not in html
+
+
+def test_both_sources_failing_is_still_a_failed_panel(crtsh_fails, legs):
+    html = client.get(f"/{DOMAIN}?subdomains=include", headers=BROWSER).text
+    assert 'id="subdomains-rendered"' not in html
+    assert "Lookup failed: crt.sh timed out" in html

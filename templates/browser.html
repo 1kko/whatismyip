@@ -171,7 +171,7 @@
                         <a href="https://crt.sh" rel="noreferrer">crt.sh</a>
                     </p>
                     {% if view.subdomains %}
-                      {% if view.subdomains.error %}
+                      {% if view.subdomains_failed %}
                       <p class="subdomains__error">Lookup failed: {{ view.subdomains.error }}</p>
                       {% else %}
                       {% set s = view.subdomains %}
@@ -179,6 +179,11 @@
                          #page-data, which carries every loaded name rather than the
                          100 drawn here, so the filter and Copy all see the whole list. #}
                       <div id="subdomains-rendered" data-target="{{ view.target }}">
+                      {# crt.sh failed but the top lists answered: app.js draws the
+                         union from #page-data; this says why crt.sh is missing. #}
+                      {% if s.error %}
+                      <p class="subdomains__meta">crt.sh lookup failed: {{ s.error }}</p>
+                      {% endif %}
                       {# The count lives in the summary hint above; repeating it
                          here would just say the same thing twice. This line is
                          only for what the hint cannot show. fetched_at is always
