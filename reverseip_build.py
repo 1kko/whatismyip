@@ -1,17 +1,26 @@
-"""Reverse IP, the build step: OpenINTEL's Parquet copies in, one SQLite file
-out. Runs in the child process, which is the only place pyarrow is imported.
+"""Reverse IP, the child process's work: list OpenINTEL's bucket, range-read
+the columns the build needs, and build one SQLite file from those copies. The
+child is the only place pyarrow is imported.
 
 Imports `config`, `reverseip`, pyarrow and the standard library. Nothing in
 the web process imports it."""
 
+import datetime
+import html
+import http.client
 import ipaddress
 import logging
 import os
 import re
 import sqlite3
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from calendar import timegm
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
+from typing import NamedTuple
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -278,3 +287,269 @@ def build_database(
         for leftover in (scratch, tmp):
             if os.path.exists(leftover):
                 os.remove(leftover)
+
+
+class Response(NamedTuple):
+    status: int
+    # Header names are lower-case.
+    headers: dict[str, str]
+    body: bytes
+
+
+# (url, headers) -> Response. `x-max-bytes` in the headers is a hint to the
+# transport, the most body it may read; it is never sent.
+Transport = Callable[[str, dict[str, str]], Response]
+
+
+class FetchError(Exception):
+    """A listing or a range the bucket did not answer as asked."""
+
+
+_TIMEOUT_SECONDS = 60
+_CHUNK = 1 << 20
+# One ListObjectsV2 page is at most 1,000 keys, a few hundred KB.
+_LISTING_MAX_BYTES = 8 << 20
+
+
+def _read(response, limit: int, url: str) -> bytes:
+    """The body, refused past `limit` (unread when the response says up front
+    that it is longer) and when it ends short of its Content-Length:
+    http.client's read(amt) answers a dropped connection with an early b"",
+    not an error."""
+    status = response.status
+    stated = response.headers.get("Content-Length", "")
+    if stated.isdigit() and int(stated) > limit:
+        raise FetchError(f"HTTP {status}: {url} is {stated} bytes, more than {limit}")
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := response.read(min(_CHUNK, limit + 1 - size)):
+        size += len(chunk)
+        if size > limit:
+            raise FetchError(f"HTTP {status}: {url} sent more than {limit} bytes")
+        chunks.append(chunk)
+    if stated.isdigit() and size != int(stated):
+        raise FetchError(
+            f"HTTP {status}: {url} ended after {size} of its {stated} bytes"
+        )
+    return b"".join(chunks)
+
+
+def urllib_transport(url: str, headers: dict[str, str]) -> Response:
+    """GET `url` with `headers` and REPUTATION_USER_AGENT, reading at most the
+    `x-max-bytes` hint. An HTTP error status is a Response, not an exception.
+    The URL is the operator's REVERSEIP_BASE_URL, or a key its listing gave
+    that matched a partition's pattern, never user input."""
+    limit = int(headers["x-max-bytes"])
+    sent = {name: value for name, value in headers.items() if name != "x-max-bytes"}
+    sent["User-Agent"] = config.REPUTATION_USER_AGENT
+    request = urllib.request.Request(url, headers=sent)  # noqa: S310
+    try:
+        try:
+            response = urllib.request.urlopen(  # noqa: S310
+                request, timeout=_TIMEOUT_SECONDS
+            )
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            received = {name.lower(): value for name, value in response.headers.items()}
+            return Response(response.status, received, _read(response, limit, url))
+    except http.client.HTTPException as exc:
+        raise FetchError(f"{url}: {exc!r}") from exc
+
+
+@dataclass(frozen=True)
+class Partition:
+    date: str
+    # (object key, size) of every part-*.parquet of that day, sorted by key.
+    keys: tuple[tuple[str, int], ...]
+
+
+_CONTENTS = re.compile(r"<Contents>(.*?)</Contents>", re.S)
+_KEY = re.compile(r"<Key>(.*?)</Key>", re.S)
+_SIZE = re.compile(r"<Size>(\d+)</Size>")
+_TRUNCATED = re.compile(r"<IsTruncated>(true|false)</IsTruncated>")
+_NEXT = re.compile(r"<NextContinuationToken>(.*?)</NextContinuationToken>", re.S)
+
+
+def _month_days(
+    base_url: str, prefix: str, transport: Transport
+) -> dict[str, list[tuple[str, int]]]:
+    """The part files listed under one month's prefix, by zero-padded day.
+    Follows continuation tokens while the listing is truncated."""
+    day_part = re.compile(re.escape(prefix) + r"day=(\d{2})/part-[^/]+\.parquet")
+    days: dict[str, list[tuple[str, int]]] = {}
+    token = None
+    while True:
+        url = f"{base_url}?list-type=2&prefix={prefix}"
+        if token is not None:
+            url += "&continuation-token=" + urllib.parse.quote(token, safe="")
+        response = transport(url, {"x-max-bytes": str(_LISTING_MAX_BYTES)})
+        if response.status != 200:
+            raise FetchError(f"listing {prefix}: HTTP {response.status}")
+        text = response.body.decode("utf-8", "replace")
+        truncated = _TRUNCATED.search(text)
+        if truncated is None:
+            raise FetchError(f"listing {prefix}: not a ListObjectsV2 answer")
+        for block in _CONTENTS.findall(text):
+            found = _KEY.search(block)
+            key = html.unescape(found[1]) if found else ""
+            match = day_part.fullmatch(key)
+            if match is None:
+                continue
+            size = _SIZE.search(block)
+            if size is None:
+                raise FetchError(f"listing {prefix}: no size for {key}")
+            days.setdefault(match[1], []).append((key, int(size[1])))
+        if truncated[1] == "false":
+            return days
+        following = _NEXT.search(text)
+        if following is None:
+            raise FetchError(f"listing {prefix}: truncated without a token")
+        token = html.unescape(following[1])
+
+
+def newest_partition(
+    base_url: str,
+    source: reverseip.Source,
+    today: datetime.date,
+    transport: Transport,
+) -> Partition | None:
+    """The newest day of `source` in today's month, or in the month before
+    when today's holds none yet; None when neither does. A listing that is not
+    200 raises FetchError."""
+    year, month = today.year, today.month
+    for _ in range(2):
+        prefix = f"fdns/basis=toplist/{source.path}/year={year}/month={month:02d}/"
+        days = _month_days(base_url, prefix, transport)
+        if days:
+            day = max(days)
+            return Partition(f"{year}-{month:02d}-{day}", tuple(sorted(days[day])))
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    return None
+
+
+_MAGIC = b"PAR1"
+
+
+def _fetch_range(
+    url: str, first: int, last: int, size: int, transport: Transport
+) -> bytes:
+    """Bytes `first`..`last` of the object, refused unless the answer is
+    exactly those: a 206 with their Content-Range and length."""
+    length = last - first + 1
+    response = transport(
+        url, {"range": f"bytes={first}-{last}", "x-max-bytes": str(length)}
+    )
+    if response.status != 206:
+        raise FetchError(f"{url}: HTTP {response.status} for bytes {first}-{last}")
+    stated = response.headers.get("content-range")
+    if stated != f"bytes {first}-{last}/{size}":
+        raise FetchError(
+            f"{url}: content-range {stated!r} for bytes {first}-{last}/{size}"
+        )
+    if len(response.body) != length:
+        raise FetchError(
+            f"{url}: a body of {len(response.body)} bytes for bytes {first}-{last}"
+        )
+    return response.body
+
+
+def _chunk_ranges(
+    url: str, path: str, columns: Sequence[str], footer: int
+) -> list[tuple[int, int]]:
+    """The byte range of each wanted column chunk in every row group, read
+    from the footer already written at its offset in `path`."""
+    try:
+        metadata = pq.ParquetFile(path).metadata
+    except pa.ArrowException as exc:
+        raise FetchError(f"{url}: unreadable footer: {exc}") from exc
+    present = {metadata.schema.column(i).path for i in range(metadata.num_columns)}
+    missing = [name for name in columns if name not in present]
+    if missing:
+        raise FetchError(f"{url}: no column {', '.join(missing)}")
+    ranges = []
+    for group in range(metadata.num_row_groups):
+        row_group = metadata.row_group(group)
+        for i in range(row_group.num_columns):
+            chunk = row_group.column(i)
+            if chunk.path_in_schema not in columns:
+                continue
+            # A chunk starts at its dictionary page when it has one. Some
+            # writers leave the offset 0 or None without one, so trust it only
+            # when set and ahead of the first data page.
+            first = chunk.data_page_offset
+            dictionary = chunk.dictionary_page_offset
+            if chunk.has_dictionary_page and dictionary and dictionary < first:
+                first = dictionary
+            last = first + chunk.total_compressed_size - 1
+            if first < len(_MAGIC) or last >= footer:
+                raise FetchError(
+                    f"{url}: column {chunk.path_in_schema} lies outside the data"
+                )
+            ranges.append((first, last))
+    return ranges
+
+
+def _merged(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The ranges with adjacent and overlapping ones joined, in order."""
+    merged: list[tuple[int, int]] = []
+    for first, last in sorted(ranges):
+        if merged and first <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    return merged
+
+
+def fetch_columns(
+    url: str,
+    size: int,
+    dest: str,
+    transport: Transport,
+    columns: Sequence[str] = WANTED_COLUMNS,
+    tail: int = 65536,
+) -> int:
+    """Copy the Parquet object at `url` (`size` bytes, from its listing) to
+    `dest` as a sparse file of the same size that holds only the footer and
+    the `columns`' chunks; the rest reads as zeros. Returns the bytes fetched.
+
+    The last `tail` bytes come first, and the rest of the footer when it is
+    longer. Any answer that is not exactly the range asked for, or a wanted
+    column missing from the schema, raises FetchError. The copy is written to
+    `dest`.tmp and swapped in only whole, so `dest` is absent or as it was."""
+    if size < 2 * len(_MAGIC) + 4:
+        raise FetchError(f"{url}: {size} bytes is too small for Parquet")
+    tmp = dest + ".tmp"
+    fetched = 0
+    try:
+        with open(tmp, "wb") as handle:
+            handle.truncate(size)
+
+            def put(first: int, last: int) -> bytes:
+                nonlocal fetched
+                body = _fetch_range(url, first, last, size, transport)
+                handle.seek(first)
+                handle.write(body)
+                fetched += len(body)
+                return body
+
+            # From `covered` to the end of the file is already in place.
+            covered = max(0, size - tail)
+            end = put(covered, size - 1)[-8:]
+            if end[4:] != _MAGIC:
+                raise FetchError(f"{url} does not end like a Parquet file")
+            footer = size - 8 - int.from_bytes(end[:4], "little")
+            if footer < len(_MAGIC):
+                raise FetchError(f"{url}: a footer longer than the file")
+            if footer < covered:
+                put(footer, covered - 1)
+                covered = footer
+            handle.flush()
+            for first, last in _merged(_chunk_ranges(url, tmp, columns, footer)):
+                if first < covered:
+                    put(first, min(last, covered - 1))
+        os.replace(tmp, dest)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return fetched
