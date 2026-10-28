@@ -661,11 +661,11 @@ async def lookup(target: str) -> dict[str, Any]:
 
     `reverse_ip` (IP targets) lists domain names from public top lists (Tranco,
     Umbrella, Radar, Majestic, Chrome UX Report) that resolved to this address
-    on `as_of`, most popular first, with `total` and the counts for the
-    address's /24 or /48 in `block`. Most addresses carry none: `total` 0 means
-    no name on these lists, not no domains, and null means the data could not
-    be read (see `unavailable`). Repeat `attribution`, `license` and
-    `terms_url` wherever you use these names.
+    on `as_of`, names ranked by Chrome UX Report first, with `total` and the
+    counts for the address's /24 or /48 in `block`. Most addresses carry none:
+    `total` 0 means no name on these lists, not no domains, and null means the
+    data could not be read (see `unavailable`). Repeat `attribution`,
+    `license` and `terms_url` wherever you use these names.
     """
     try:
         data = await _bounded_gather(target)

@@ -301,6 +301,13 @@ def test_the_lookup_description_says_empty_is_not_none():
     assert "Repeat `attribution`, `license` and `terms_url`" in doc
 
 
+def test_the_lookup_description_orders_the_names_truly():
+    # only the CrUX lists carry a rank: the others' names follow in file order
+    doc = " ".join(mcp_server.lookup.__doc__.split())
+    assert "most popular" not in doc
+    assert "names ranked by Chrome UX Report first" in doc
+
+
 def test_fields_bring_the_licence_lines(reverseip_enabled, legs):
     text = client.get(f"/{LISTED_IP}?fields=reverse_ip_total,ip&format=text").text
     assert text.splitlines() == ["4", LISTED_IP, *LICENCE]

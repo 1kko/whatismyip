@@ -717,6 +717,10 @@ name.
 `reverse_ip_block_addresses` and `reverse_ip_block_names` are asked for by name only,
 for an IP target, and add `reverse_ip_license`, `reverse_ip_attribution` and
 `reverse_ip_terms_url` to the answer, in text and in JSON alike.
+`reverse_ip_unavailable` names the lists that could not be read, as
+`label: reason` joined with `; ` (`-` when every list was read), so a script can
+tell a 0 from every list from a 0 from some of them; it is asked for by name
+only and adds nothing else.
 Every field that touches the address resolves a domain first, so a domain that resolves to a private
 address is still refused with `400`. On `/`, the fields for an IP apply to your
 own address; `cert_*` and the domain-only fields are `-`, and so is
@@ -792,8 +796,8 @@ immediately, with a refresh kicked off in the background. Data from
 
 While `REVERSEIP_ENABLED`, the `subdomains` object also carries `openintel`: the
 names under the domain in OpenINTEL's top-list measurements
-(`names`, `count`, `truncated`, `as_of`, `unavailable`, plus the licence lines
-`license`, `license_url`, `terms_url` and `attribution`). DNS sees names that a
+(`names`, `count`, `truncated`, `as_of`, `unavailable`, `coverage`, plus the
+licence lines `license`, `license_url`, `terms_url` and `attribution`). DNS sees names that a
 wildcard certificate hides from Certificate Transparency, so the two sets
 overlap only partly; the page merges them into one list and marks a name only
 the lists know with `top lists`. `count` 0 means no listed name, `null` means
@@ -1233,12 +1237,15 @@ An IP lookup carries a `reverse_ip` object (absent with `REVERSEIP_ENABLED=false
 ```
 
 The names are those that resolved to the address in [OpenINTEL](https://www.openintel.nl/)'s
-daily measurement of the public top lists, most popular first, and the `block` line counts
+daily measurement of the public top lists, names ranked by Chrome UX Report first, and the `block` line counts
 the addresses in the address's IPv4 /24 (IPv6 /48) that carry a listed name and the
 distinct names on them; it states counts and leaves the reading to you. The data covers
 only names on those lists, never a whole zone, so most addresses have none: `total` 0 means
 no listed name resolved there, not that nothing points there, and `null` means the lists
-could not be read (the reasons are in `unavailable`), never "none". The scheduler
+could not be read (the reasons are in `unavailable`), never "none". When only some
+lists could be read, the answer comes from those, the others are in `unavailable`
+and `coverage` names only the lists read, so a `total` of 0 then covers those
+lists alone; the page adds a "Not checked" line naming the others and why. The scheduler
 downloads each list at most once a day (OpenINTEL's terms ask for no more), fetching only
 the columns it needs, and builds one SQLite file in `data/reverseip/`; a lookup reads that
 file and sends nothing anywhere. A list older than `REVERSEIP_MAX_AGE_HOURS` (96) is
@@ -1309,7 +1316,7 @@ is unaffected.)
 
 | Tool | What it does |
 |---|---|
-| `lookup(target)` | For an IP, also `reverse_ip`: the total, the first 20 names, the block counts, `as_of`, `unavailable`, and the coverage, licence, `terms_url` and attribution; the description says an empty list is not "no domains". Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", that `score` runs from 0 to 100 with 100 the most dangerous (`null` when nothing could be checked, and 0 is not safe), and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). `registration.age_days` and `tls.age_days` count the days since the registration was created and the certificate became valid, and the description calls a days-old domain worth a closer look, not a verdict. |
+| `lookup(target)` | For an IP, also `reverse_ip`: the total, the first 20 names, the block counts, `as_of`, `unavailable`, and the coverage, `license`, `license_url`, `terms_url` and attribution; the description says an empty list is not "no domains". Geolocation, ASN/carrier, registration, a TLS summary, and the [reputation](#ip-reputation) lists the address is on, for a domain or IP; for an IP, also `reverse_dns_confirmed`, whether its PTR name resolves back to it (`confirmed`, `unconfirmed`, `no_ptr`, or `unknown` when that query failed). Start here. `geo.precision` grades the coordinates (`city`; `country` for a centroid such as GeoLite2's 1,000 km fix for 8.8.8.8; `null` with no coordinates at all): unless it is `city`, the coordinates and time zone are `null`, and `geo.country_source: "registered"` means only the registration country is known. The tool description tells the model that a level of `none` is not "safe", that `score` runs from 0 to 100 with 100 the most dangerous (`null` when nothing could be checked, and 0 is not safe), and to word `unconfirmed` as "does not point back". For a name below a registrable domain (`www.github.com`), `registration` is that domain's record, labelled `registrable_domain`; `registered: false` means the registrable domain itself is unregistered. A domain's `registration.status` is the registry's own words; `registration.status_explained` gives each status as its EPP code with a one-line meaning and a severity (`danger` for clientHold, serverHold, pendingDelete and redemptionPeriod; a transfer lock is a common setting, not a problem; null for a registry-specific word). `registration.age_days` and `tls.age_days` count the days since the registration was created and the certificate became valid, and the description calls a days-old domain worth a closer look, not a verdict. |
 | `dns_records(domain, types?)` | Full A / AAAA / MX / NS / CNAME / TXT / SPF / PTR / DMARC sweep, plus `cname_chain` (every CNAME hop the resolver followed to answer the A query, in order, with the TTLs left in its cache) and `canonical_name` (the name the hops end at — for a domain, the one the address was found under), read off that answer at no extra query. `dmarc` is a domain's `v=DMARC1` record, or its registrable domain's when it has none, each labelled with the `queried_name` that answered. A type whose query failed comes back as `{"error": "timeout"}` (or `servfail`, `error`), never as an empty list; a null `canonical_name` means no A or AAAA answer came back, so the chain is unverified, not empty. |
 | `ssl_certificate(domain)` | Issuer, subject, SANs, validity window, days remaining, the certificate's age in days (`age_days`), and whether it is trusted (with the reason when it is not). |
 | `whoami_caller()` | The IP of whatever opened the MCP connection, with its `geo` graded the same way and the same reputation `score` (no AbuseIPDB part). |
