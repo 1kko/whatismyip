@@ -441,7 +441,9 @@ class ReverseIpManager:
     def names_under(self, domain: str, cap: int = SUBDOMAIN_MAX_NAMES) -> dict | None:
         """The listed names below `domain`, sorted and capped at `cap`; None
         when disabled. `count` is the true total, 0 for none listed and None
-        for unknown."""
+        for unknown. The read is bounded by `cap`: past it the kept names are
+        the first `cap` in reversed-name order (an index range scan), not the
+        alphabetically first `cap`; they are then sorted."""
         if not self.enabled:
             return None
         domain = domain.lower()
@@ -459,17 +461,21 @@ class ReverseIpManager:
                 "unavailable": self._unavailable(reasons),
             }
             if dates:
+                where = "FROM sub WHERE rname > ? AND rname < ?"
+                (count,) = con.execute(
+                    f"SELECT COUNT(*) {where}", (low, high)
+                ).fetchone()
                 found = sorted(
                     rname[::-1]
                     for (rname,) in con.execute(
-                        "SELECT rname FROM sub WHERE rname > ? AND rname < ?",
-                        (low, high),
+                        f"SELECT rname {where} ORDER BY rname LIMIT ?",
+                        (low, high, max(cap, 0)),
                     )
                 )
                 answer.update(
-                    names=found[:cap],
-                    count=len(found),
-                    truncated=len(found) > cap,
+                    names=found,
+                    count=count,
+                    truncated=count > len(found),
                     as_of=min(dates.values()),
                 )
             return answer

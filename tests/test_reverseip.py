@@ -560,3 +560,19 @@ def test_a_swapped_file_is_read_afresh(tmp_path):
     build_manager(other, rows=ROWS[:1])
     os.replace(other / reverseip.DATABASE_NAME, manager.path)
     assert manager.for_address("93.184.215.14")["names"] == ["example.com"]
+
+
+def test_names_under_reads_no_more_than_the_cap(tmp_path):
+    rows = [
+        Row(f"h{i}.big.example.", "A", "A", "ans", "93.184.215.30", None, "5")
+        for i in range(30)
+    ]
+    manager = build_manager(tmp_path, rows)
+    answer = manager.names_under("big.example", cap=5)
+    assert len(answer["names"]) == 5
+    assert answer["count"] == 30 and answer["truncated"] is True
+    assert answer["names"] == sorted(answer["names"])
+    traced = []
+    manager._database()[0].set_trace_callback(traced.append)
+    manager.names_under("big.example", cap=5)
+    assert any("LIMIT ?" in sql or "LIMIT 5" in sql for sql in traced)
