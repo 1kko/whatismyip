@@ -148,14 +148,28 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _CURRENT_STATES = ("current", "downloaded")
 
 
+_CHILD_LEVELS = {
+    name: getattr(logging, name)
+    for name in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+}
+
+
 def _log_child(stderr: str | bytes | None) -> None:
-    """The child's log lines, each as a line of this process's log: the child
-    exports nothing itself."""
+    """The child's log lines, each as a line of this process's log at the
+    level the child logged it: the child exports nothing itself. Its format
+    is `%(levelname)s %(message)s`, so the first word is the level; a line
+    that does not start with one (a traceback's) goes at the level of the
+    line before it, and at INFO when there is none."""
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", "replace")
+    level = logging.INFO
     for line in (stderr or "").splitlines():
-        if line.strip():
-            logger.info("reverseip_build: %s", line)
+        if not line.strip():
+            continue
+        word, _, rest = line.partition(" ")
+        if word in _CHILD_LEVELS:
+            level, line = _CHILD_LEVELS[word], rest
+        logger.log(level, "reverseip_build: %s", line)
 
 
 class ReverseIpManager:
@@ -210,7 +224,12 @@ class ReverseIpManager:
         run REVERSEIP_BUILD_TIMEOUT_SECONDS before it is stopped.
 
         False when the child failed, ran out of time or printed no summary,
-        or when a source in the summary is `waiting` or `failed`."""
+        when a source in the summary is `waiting` or `failed`, or when a
+        source was downloaded and the database was not built (logged as a
+        WARNING; the child's own lines say why). True when another refresh
+        held the directory's lock (every source `busy`): that one is doing
+        the work. The scheduler ignores the value, so whatever went wrong is
+        in the log, at its level."""
         if not self.enabled:
             return True
         try:
@@ -254,14 +273,29 @@ class ReverseIpManager:
             return False
         try:
             summary = json.loads(done.stdout.splitlines()[-1])
-            states = [entry["state"] for entry in summary["sources"].values()]
+            states = {i: entry["state"] for i, entry in summary["sources"].items()}
+            built = summary["built"]
         except (ValueError, LookupError, TypeError, AttributeError):
             logger.error(
                 "reverse IP: the build process printed no summary: %r",
                 done.stdout[-500:],
             )
             return False
-        return all(state in _CURRENT_STATES for state in states)
+        if states and all(state == "busy" for state in states.values()):
+            logger.info(
+                "reverse IP: another refresh holds %s; this one sent nothing",
+                self.directory,
+            )
+            return True
+        downloaded = [i for i, state in states.items() if state == "downloaded"]
+        if downloaded and not built:
+            logger.warning(
+                "reverse IP: %s downloaded but the database was not built;"
+                " lookups read the previous one",
+                ", ".join(downloaded),
+            )
+            return False
+        return all(state in _CURRENT_STATES for state in states.values())
 
     # Reads. A request thread reads the live file through its own read-only
     # connection; nothing here makes a request or writes.

@@ -202,25 +202,123 @@ class TestRefresh:
         assert settings["directory"] == os.path.join(os.getcwd(), "data", "reverseip")
         assert settings["sources"] == "crux:kr,tranco"
 
-    def test_the_child_logs_through_the_parent(self, tmp_path, caplog):
+    def test_the_child_logs_through_the_parent_at_its_own_level(self, tmp_path, caplog):
         caplog.set_level(logging.INFO, logger="reverseip")
+        stderr = (
+            "INFO reverse IP: tranco 2026-10-20 downloaded\n"
+            "WARNING reverse IP: umbrella 2026-10-20 not downloaded, keeping no copy\n"
+            "ERROR reverse IP: the build failed; keeping the previous database\n"
+            "Traceback (most recent call last):\n"
+            '  File "reverseip_build.py", line 1, in build_database\n'
+            "sqlite3.OperationalError: database or disk is full\n"
+            "\n"
+            "INFO reverse IP: database built\n"
+        )
         manager = ReverseIpManager(
             str(tmp_path),
-            parse_sources("tranco"),
+            parse_sources("tranco,umbrella"),
             enabled=True,
             runner=_answering(
-                [],
-                stdout=_summary(tranco="downloaded"),
-                stderr="INFO reverse IP: tranco 2026-10-20\nINFO built\n",
+                [], stdout=_summary(tranco="current", umbrella="current"), stderr=stderr
             ),
         )
         assert manager.refresh() is True
         assert [
             (r.levelno, r.getMessage()) for r in caplog.records if r.name == "reverseip"
         ] == [
-            (logging.INFO, "reverseip_build: INFO reverse IP: tranco 2026-10-20"),
-            (logging.INFO, "reverseip_build: INFO built"),
+            (logging.INFO, "reverseip_build: reverse IP: tranco 2026-10-20 downloaded"),
+            (
+                logging.WARNING,
+                "reverseip_build: reverse IP: umbrella 2026-10-20 not downloaded,"
+                " keeping no copy",
+            ),
+            (
+                logging.ERROR,
+                "reverseip_build: reverse IP: the build failed;"
+                " keeping the previous database",
+            ),
+            # a traceback goes at the level of the line it follows
+            (logging.ERROR, "reverseip_build: Traceback (most recent call last):"),
+            (
+                logging.ERROR,
+                'reverseip_build:   File "reverseip_build.py", line 1,'
+                " in build_database",
+            ),
+            (
+                logging.ERROR,
+                "reverseip_build: sqlite3.OperationalError: database or disk is full",
+            ),
+            (logging.INFO, "reverseip_build: reverse IP: database built"),
         ]
+
+    def test_a_line_before_any_level_goes_at_info(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG, logger="reverseip")
+        manager = ReverseIpManager(
+            str(tmp_path),
+            parse_sources("tranco"),
+            enabled=True,
+            runner=_answering(
+                [],
+                stdout=_summary(tranco="current"),
+                stderr="something the interpreter said\nDEBUG fine detail\n",
+            ),
+        )
+        manager.refresh()
+        assert [
+            (r.levelno, r.getMessage()) for r in caplog.records if r.name == "reverseip"
+        ] == [
+            (logging.INFO, "reverseip_build: something the interpreter said"),
+            (logging.DEBUG, "reverseip_build: fine detail"),
+        ]
+
+    def test_downloaded_but_not_built_is_false_and_a_warning(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger="reverseip")
+        summary = json.dumps(
+            {
+                "built": False,
+                "sources": {
+                    "tranco": {"state": "downloaded", "date": DAY, "error": None},
+                    "umbrella": {"state": "current", "date": DAY, "error": None},
+                },
+            }
+        )
+        manager = ReverseIpManager(
+            str(tmp_path),
+            parse_sources("tranco,umbrella"),
+            enabled=True,
+            runner=_answering([], stdout=summary + "\n"),
+        )
+        assert manager.refresh() is False
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1 and "tranco" in warnings[0]
+        assert "not built" in warnings[0]
+
+    def test_a_busy_child_is_not_a_failure(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger="reverseip")
+        manager = ReverseIpManager(
+            str(tmp_path),
+            parse_sources("tranco,umbrella"),
+            enabled=True,
+            runner=_answering(
+                [],
+                stdout=json.dumps(
+                    {
+                        "built": False,
+                        "sources": {
+                            "tranco": {"state": "busy", "date": None, "error": None},
+                            "umbrella": {"state": "busy", "date": None, "error": None},
+                        },
+                    }
+                )
+                + "\n",
+            ),
+        )
+        assert manager.refresh() is True
+        mine = [r for r in caplog.records if r.name == "reverseip"]
+        assert [r.levelno for r in mine] == [logging.INFO]
+        assert "another refresh" in mine[0].getMessage()
 
     @pytest.mark.parametrize(
         ("state", "current"),
@@ -286,7 +384,7 @@ class TestRefresh:
         assert manager.refresh() is False
         assert manager.build_attempted
         messages = [(r.levelno, r.getMessage()) for r in caplog.records]
-        assert (logging.INFO, "reverseip_build: INFO listing tranco") in messages
+        assert (logging.INFO, "reverseip_build: listing tranco") in messages
         assert any(level == logging.ERROR for level, _ in messages)
 
     def test_disabled_runs_nothing(self, tmp_path):
