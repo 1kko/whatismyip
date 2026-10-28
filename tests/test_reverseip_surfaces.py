@@ -194,3 +194,39 @@ def test_healthz_says_nothing_when_it_is_off(monkeypatch, tmp_path):
     body = client.get("/healthz").json()
     assert body["reverseip"] == {"enabled": False}
     assert not [r for r in body["reasons"] if r["code"].startswith("reverseip")]
+
+
+BROWSER = {"user-agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/130 Safari/537.36"}
+
+
+def test_the_page_panel(reverseip_enabled, legs):
+    html = client.get(f"/{LISTED_IP}", headers=BROWSER).text
+    assert 'id="acc-reverseip"' in html
+    assert (
+        '<a class="lookup-link" href="/example.com" rel="nofollow">example.com</a>'
+        in html
+    )
+    assert config.OPENINTEL_ATTRIBUTION in html
+    assert 'href="/static/licenses/openintel-terms.html"' in html
+    assert f'href="{config.OPENINTEL_LICENSE_URL}" rel="noopener noreferrer"' in html
+    assert html.index('id="acc-geoip"') < html.index('id="acc-reverseip"')
+
+
+def test_the_page_panel_unknown_still_carries_the_licence_lines(
+    reverseip_enabled, legs, monkeypatch
+):
+    monkeypatch.setattr(reverseip_enabled, "_availability", lambda *a: ({}, {}))
+    html = client.get(f"/{LISTED_IP}", headers=BROWSER).text
+    assert 'id="acc-reverseip"' in html
+    assert 'title="unknown"' in html
+    assert config.OPENINTEL_ATTRIBUTION in html
+    assert 'href="/static/licenses/openintel-terms.html"' in html
+
+
+def test_no_panel_on_a_domain_or_the_self_page(reverseip_enabled, legs):
+    assert 'id="acc-reverseip"' not in client.get(f"/{DOMAIN}", headers=BROWSER).text
+    assert 'id="acc-reverseip"' not in client.get("/", headers=BROWSER).text
+
+
+def test_no_panel_while_disabled(legs):
+    assert 'id="acc-reverseip"' not in client.get(f"/{LISTED_IP}", headers=BROWSER).text

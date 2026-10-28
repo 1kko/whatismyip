@@ -17,6 +17,7 @@ from viewmodel import (
     format_distance,
     registration_age,
     reputation_view,
+    reverse_ip_view,
     ssl_rows,
     whois_display,
     whois_fill,
@@ -2016,3 +2017,114 @@ class TestDnsSecurityView:
             ]
         ]
         assert "security" not in ids
+
+
+# ---------------------------------------------------------------------------
+# The "Domains on this address" panel's view.
+# ---------------------------------------------------------------------------
+
+_LICENCE = {
+    "coverage": "Covers only names on the Tranco list.",
+    "license": "CC BY-NC-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+    "terms_url": "https://ip.example/static/licenses/openintel-terms.html",
+    "attribution": "Made possible by OpenINTEL.",
+}
+ANSWER_4_NAMES = {
+    "total": 4,
+    "names": ["example.com", "example.net", "example.org", "<b>x</b>.example"],
+    "truncated": False,
+    "block": {"prefix": "93.184.215.0/24", "addresses": 4, "names": 7},
+    "as_of": "2026-10-20",
+    "sources": [{"id": "tranco", "label": "Tranco", "date": "2026-10-20"}],
+    "unavailable": [],
+    **_LICENCE,
+}
+ANSWER_ZERO = {
+    **ANSWER_4_NAMES,
+    "total": 0,
+    "names": [],
+    "block": {"prefix": "175.214.27.0/24", "addresses": 0, "names": 0},
+}
+ANSWER_UNKNOWN = {
+    **ANSWER_4_NAMES,
+    "total": None,
+    "names": None,
+    "truncated": None,
+    "block": None,
+    "as_of": None,
+    "sources": [],
+    "unavailable": [
+        {"source": "tranco", "label": "Tranco", "reason": "not downloaded yet"}
+    ],
+}
+
+
+def test_reverse_ip_view_none_is_none():
+    assert reverse_ip_view(None) is None
+
+
+def test_reverse_ip_view_names_link_and_count():
+    view = reverse_ip_view(ANSWER_4_NAMES, link_for=lambda v: f"/{v}")
+    assert view["hint"] == "4 names"
+    assert view["names"][0] == {"text": "example.com", "href": "/example.com"}
+    assert view["more"] == 0
+    assert view["state_line"] is None
+    assert view["block_line"] == "93.184.215.0/24: 4 addresses carry 7 listed names"
+    assert (
+        view["coverage"] == "Covers only names on the Tranco list. Measured 2026-10-20."
+    )
+    assert view["attribution"] == "Made possible by OpenINTEL."
+    assert view["license"] == "CC BY-NC-SA 4.0"
+    assert view["license_url"] == _LICENCE["license_url"]
+    assert view["terms_path"] == "/static/licenses/openintel-terms.html"
+
+
+def test_reverse_ip_view_without_link_for_links_nothing():
+    view = reverse_ip_view(ANSWER_4_NAMES)
+    assert view["names"][0] == {"text": "example.com", "href": None}
+
+
+def test_reverse_ip_view_none_listed():
+    view = reverse_ip_view(ANSWER_ZERO)
+    assert view["hint"] == "none in top lists"
+    assert view["names"] == []
+    assert view["state_line"] == (
+        "No name on these lists resolved to this address on "
+        "2026-10-20. Names outside them are not covered."
+    )
+    assert view["block_line"] == "175.214.27.0/24: no address carries a listed name"
+
+
+def test_reverse_ip_view_unknown_keeps_the_licence_lines():
+    view = reverse_ip_view(ANSWER_UNKNOWN)
+    assert view["hint"] == "unknown" and view["block_line"] is None
+    assert view["names"] == [] and view["more"] == 0
+    assert view["state_line"] == "Unknown: Tranco: not downloaded yet"
+    assert view["coverage"] == _LICENCE["coverage"]
+    assert view["attribution"] == _LICENCE["attribution"]
+
+
+def test_one_address_one_name_is_singular():
+    answer = {
+        **ANSWER_4_NAMES,
+        "total": 1,
+        "names": ["example.com"],
+        "block": {"prefix": "93.184.215.0/24", "addresses": 1, "names": 1},
+    }
+    view = reverse_ip_view(answer)
+    assert view["hint"] == "1 name"
+    assert view["block_line"] == "93.184.215.0/24: 1 address carries 1 listed name"
+
+
+def test_truncated_says_how_many_more():
+    answer = {
+        **ANSWER_4_NAMES,
+        "total": 4821,
+        "names": [f"n{i}.example" for i in range(100)],
+        "truncated": True,
+    }
+    view = reverse_ip_view(answer)
+    assert view["hint"] == "4,821 names"
+    assert view["more"] == 4721
+    assert reverse_ip_view({**answer, "total": 250})["more"] == 150

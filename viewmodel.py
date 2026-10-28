@@ -12,7 +12,12 @@ import math
 from typing import Any, Callable
 from urllib.parse import quote
 
-from config import ASINFO_MIN_RIS_PEERS, SUBDOMAIN_ENABLED, YOUNG_DOMAIN_DAYS
+from config import (
+    ASINFO_MIN_RIS_PEERS,
+    REVERSEIP_TERMS_PATH,
+    SUBDOMAIN_ENABLED,
+    YOUNG_DOMAIN_DAYS,
+)
 from countrynames import country_name, country_name_in_text
 from eppstatus import explain_status
 from reputation import grade
@@ -2008,7 +2013,72 @@ def dns_security_view(data: dict | None) -> dict | None:
     return {"hint": hint, "rows": rows}
 
 
-def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
+def reverse_ip_view(info: dict | None, link_for: LinkFor | None = None) -> dict | None:
+    """The "Domains on this address" panel: the listed names that resolved to
+    an IP, in one of three states (names, none listed, unknown). Every state
+    carries the coverage, attribution and licence lines: OpenINTEL's terms ask
+    for them wherever its data is shown. None for no answer (the feature is
+    off, or the target is not an IP)."""
+    if info is None:
+        return None
+    total = info.get("total")
+    names = info.get("names")
+    as_of = info.get("as_of")
+    block = info.get("block")
+
+    if total is None:
+        hint = "unknown"
+        reasons = "; ".join(
+            f"{u.get('label')}: {u.get('reason')}"
+            for u in info.get("unavailable") or []
+        )
+        state_line = f"Unknown: {reasons}"
+    elif total == 0:
+        hint = "none in top lists"
+        state_line = (
+            f"No name on these lists resolved to this address on {as_of}. "
+            "Names outside them are not covered."
+        )
+    else:
+        hint = f"{total:,} name{'s' if total != 1 else ''}"
+        state_line = None
+
+    shown = [{"text": n, "href": _href(link_for, n)} for n in names or []]
+    more = total - len(shown) if info.get("truncated") and total else 0
+
+    block_line = None
+    if block:
+        addresses, listed = block.get("addresses", 0), block.get("names", 0)
+        prefix = block.get("prefix")
+        if not listed:
+            block_line = f"{prefix}: no address carries a listed name"
+        else:
+            block_line = (
+                f"{prefix}: {addresses:,} address{'es' if addresses != 1 else ''} "
+                f"{'carries' if addresses == 1 else 'carry'} "
+                f"{listed:,} listed name{'s' if listed != 1 else ''}"
+            )
+
+    coverage = info.get("coverage") or ""
+    if as_of:
+        coverage = f"{coverage} Measured {as_of}."
+    return {
+        "hint": hint,
+        "names": shown,
+        "more": more,
+        "state_line": state_line,
+        "block_line": block_line,
+        "coverage": coverage,
+        "attribution": info.get("attribution"),
+        "license": info.get("license"),
+        "license_url": info.get("license_url"),
+        "terms_path": REVERSEIP_TERMS_PATH,
+    }
+
+
+def _accordions(
+    response: dict, subdomains_enabled: bool, reverseip: dict | None = None
+) -> list[dict]:
     domain = response.get("domain") or {}
     headers = response.get("headers") or {}
 
@@ -2059,6 +2129,15 @@ def _accordions(response: dict, subdomains_enabled: bool) -> list[dict]:
     as_card = as_view(response.get("as_info"))
     if as_card:
         accordions.append({"id": "as", "title": "AS", "hint": as_card["hint"]})
+    # Then the names listed at this address (reverseip.py), an IP target only.
+    if reverseip:
+        accordions.append(
+            {
+                "id": "reverseip",
+                "title": "Domains on this address",
+                "hint": reverseip["hint"],
+            }
+        )
     # Beside the DNS records it grades (dnssecurity.py).
     security = dns_security_view(response.get("dns_security"))
     if security:
@@ -2125,6 +2204,7 @@ def build_view(
     address = response.get("address") or ""
     is_ip = _is_ip(address)
     dns_queried_name, dns_zone = dns_names(domain, address)
+    reverseip = reverse_ip_view(response.get("reverse_ip"), link_for) if is_ip else None
 
     if is_ip:
         facts = [
@@ -2169,7 +2249,8 @@ def build_view(
         "dns_zone": dns_zone,
         "whois_pending": whois_pending(response.get("whois")),
         "whois_name_servers": name_server_links(response.get("whois"), link_for),
-        "accordions": _accordions(response, subdomains_enabled),
+        "accordions": _accordions(response, subdomains_enabled, reverseip),
+        "reverse_ip": reverseip,
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         # A domain's address may have been found under another name (a CNAME
         # chain); an IP's sweep is of its PTR name, and its location is its own.
