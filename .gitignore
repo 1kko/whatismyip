@@ -187,6 +187,8 @@ data/tld/
 data/reputation/
 # AS information datasets (asinfo.py) and the SQLite file built from them.
 data/asinfo/
+# Reverse IP copies (reverseip.py) and the SQLite file built from them.
+data/reverseip/
 # Subdomain cache (SQLite + WAL sidecars). A local cache of crt.sh data,
 # rebuilt on demand; never part of the source tree.
 data/subdomains.sqlite3*

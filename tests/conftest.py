@@ -47,6 +47,7 @@ os.environ["REPUTATION_ENABLED"] = "false"
 # Off, the lookup responses are what they were before the feature;
 # test_asinfo.py builds managers over synthetic files of its own.
 os.environ["ASINFO_ENABLED"] = "false"
+os.environ["REVERSEIP_ENABLED"] = "false"
 # A developer's .env may hold a real AbuseIPDB key, and load_dotenv() never
 # overrides a variable already set: empty, no test spends its quota.
 # test_abuseipdb.py builds enabled clients over a fake transport.
