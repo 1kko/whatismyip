@@ -160,6 +160,7 @@
 <script type="application/json" id="map-data" nonce="{{ nonce }}">{{ map_data | safe }}</script>
 <script src="/static/js/app.js" nonce="{{ nonce }}" defer></script>
 <script src="/static/js/map.js" nonce="{{ nonce }}" defer></script>
+<script src="/static/js/contents.js" nonce="{{ nonce }}" defer></script>
 {% if view.is_self %}<script src="/static/js/fingerprint.js" nonce="{{ nonce }}" defer></script>{% endif %}
 {% if view.is_self and stun_url %}<script src="/static/js/webrtc.js" nonce="{{ nonce }}" defer></script>{% endif %}
 </body>
