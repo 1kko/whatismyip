@@ -218,7 +218,7 @@ def test_no_address_dns_card_is_info():
         ({"error": "timeout"}, "?", "unknown"),
         ({}, "?", "unknown"),
         ({"source": "whois", "name": "x.kr", "thin": True}, "no details", "info"),
-        ({"pending": True}, "loading", "pending"),
+        ({"pending": True}, "loading…", "pending"),
     ],
 )
 def test_registration_states(whois, value, state):
@@ -347,3 +347,112 @@ def test_overview_is_pure():
         elif isinstance(node, ast.ImportFrom):
             imported.add((node.module or "").split(".")[0])
     assert not imported & {"lookup", "main", "managers", "dnssecurity", "asinfo"}
+
+
+def _ip_response(**over):
+    response = {
+        "address": "121.53.204.130",
+        "location": {
+            "country_code": "KR",
+            "country_name": "South Korea",
+            "city_name": "Seoul",
+            "precision": "city",
+            "accuracy_km": 20,
+            "reverse_dns": "ptr.example.net",
+            "asn_number": 4766,
+        },
+        "whois": {"source": "rdap", "network": "KORNET", "rir": "apnic"},
+    }
+    return {**response, **over}
+
+
+def test_ip_cards_order():
+    cards = overview.ip_cards(
+        _ip_response(
+            reputation={"score": 0, "level": "none"},
+            reverse_ip={"total": 3},
+        )
+    )
+    assert [c["id"] for c in cards] == [
+        "location",
+        "organization",
+        "domains",
+        "reputation",
+        "whois",
+    ]
+    assert cards[1]["label"] == "Organization"
+
+
+@pytest.mark.parametrize(
+    "ptr, domain, reverse_ip, sub, state",
+    [
+        (
+            "ptr.example.net",
+            {"a": [{"ip": "121.53.204.130"}]},
+            {"total": 24783},
+            "confirmed · 24,783 listed names",
+            "info",
+        ),
+        (None, None, {"total": None}, "listed names unknown", "unknown"),
+        (None, None, None, "", "info"),
+        (
+            "ptr.example.net",
+            {"a": [{"ip": "10.9.9.9"}]},
+            None,
+            "does not point back",
+            "info",
+        ),
+    ],
+)
+def test_domains_card(ptr, domain, reverse_ip, sub, state):
+    location = {"reverse_dns": ptr}
+    card = overview.domains_card(location, domain, reverse_ip, "121.53.204.130")
+    assert card["id"] == "domains"
+    assert card["value"] == (ptr or "no PTR")
+    assert (card["sub"], card["state"]) == (sub, state)
+
+
+def test_location_country_level():
+    card = overview.location_card(
+        {"country_code": "KR", "country_name": "South Korea", "precision": "country"}
+    )
+    assert (card["value"], card["sub"], card["state"]) == (
+        "South Korea",
+        "country-level",
+        "info",
+    )
+
+
+def test_location_city_and_unknown():
+    card = overview.location_card(_ip_response()["location"])
+    assert (card["value"], card["sub"]) == ("Seoul", "South Korea · ±20 km")
+    assert overview.location_card({"country_code": "--"})["state"] == "unknown"
+    assert overview.location_card(None)["state"] == "unknown"
+
+
+def test_pending_registration_card():
+    card = overview.registration_card({"pending": True}, is_ip=True)
+    assert (card["label"], card["value"], card["sub"], card["state"]) == (
+        "Registration",
+        "loading…",
+        "",
+        "pending",
+    )
+
+
+def test_ip_registration_card():
+    card = overview.registration_card(
+        {"network": "KORNET", "rir": "apnic", "updated": "2020-01-02T00:00:00+00:00"},
+        is_ip=True,
+    )
+    assert card["value"] == "KORNET"
+    assert card["sub"].startswith("APNIC")
+    assert card["state"] == "info"
+    assert overview.registration_card({"source": "rdap"}, is_ip=True)["value"] == (
+        "record found"
+    )
+
+
+def test_organization_without_asinfo():
+    card = overview.ip_cards(_ip_response())[1]
+    assert (card["value"], card["state"]) == ("AS4766", "info")

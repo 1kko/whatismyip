@@ -71,9 +71,9 @@ def _age_text(days: int) -> str:
 
 def registration_card(whois: dict | None, is_ip: bool) -> dict:
     """The registration: a domain's age, an address block's allocation."""
-    label = "Allocation" if is_ip else "Registration"
+    label = "Registration"
     if viewmodel.whois_pending(whois):
-        return _card("whois", label, "loading", "", "pending")
+        return _card("whois", label, "loading\u2026", "", "pending")
     whois = whois or {}
     error = whois.get("error")
     if error == viewmodel.NOT_REGISTERED:
@@ -82,6 +82,12 @@ def registration_card(whois: dict | None, is_ip: bool) -> dict:
         return _card("whois", label, "?", "lookup failed", "unknown")
     if whois.get("thin"):
         return _card("whois", label, "no details", "no details over WHOIS", "info")
+    if is_ip:
+        value = whois.get("network") or whois.get("name") or "record found"
+        rir = viewmodel._whois_value("rir", whois.get("rir"))
+        updated = viewmodel._whois_value("updated", whois.get("updated"))[:10]
+        sub = " · ".join(part for part in (rir, updated) if part != DASH)
+        return _card("whois", label, str(value), sub, "info")
     created, _ = viewmodel.registration_age(whois)
     value = DASH if created is None else _age_text(created)
     who = whois.get("registrar") or whois.get("registrant")
@@ -241,5 +247,77 @@ def domain_cards(response: dict) -> list[dict]:
         certificate_card(response.get("ssl")),
         network_card(response.get("location"), response.get("as_info")),
         reputation_card(response.get("reputation")),
+    ]
+    return [card for card in cards if card is not None]
+
+
+def location_card(location: dict | None) -> dict:
+    """Where GeoIP puts the address: a city only when the fix is city-precise."""
+    location = location or {}
+    country = location.get("country_name") or ""
+    city = location.get("city_name")
+    if location.get("precision") == "city" and city:
+        value = city
+    else:
+        value = country or "?"
+        city = None
+    accuracy = location.get("accuracy_km")
+    if city and accuracy is not None:
+        reach = f"\u00b1{accuracy} km"
+    elif city:
+        reach = None
+    else:
+        reach = "country-level"
+    sub = " \u00b7 ".join(part for part in (country if city else None, reach) if part)
+    code = location.get("country_code")
+    state = "unknown" if not code or code == "--" else "info"
+    return _card("location", "Location", value, sub, state)
+
+
+_FCRDNS_WORDS = {"confirmed": "confirmed", "unconfirmed": "does not point back"}
+
+
+def domains_card(
+    location: dict | None,
+    domain: dict | None,
+    reverse_ip: dict | None,
+    address: str,
+) -> dict:
+    """The address's PTR name and, while the feature is on, the listed names."""
+    ptr = (location or {}).get("reverse_dns")
+    parts = []
+    word = _FCRDNS_WORDS.get(viewmodel.fcrdns_state(ptr, domain, address))
+    if word:
+        parts.append(word)
+    total = (reverse_ip or {}).get("total")
+    unknown_total = reverse_ip is not None and total is None
+    if isinstance(total, int) and not isinstance(total, bool):
+        parts.append(f"{total:,} listed names")
+    elif unknown_total:
+        parts.append("listed names unknown")
+    state = "unknown" if not ptr and unknown_total else "info"
+    return _card("domains", "Domains", ptr or "no PTR", " \u00b7 ".join(parts), state)
+
+
+def ip_cards(response: dict) -> list[dict]:
+    """The IP and self pages' cards in page order; one with nothing to say is
+    left out."""
+    location = response.get("location")
+    cards = [
+        location_card(location),
+        network_card(
+            location,
+            response.get("as_info"),
+            card_id="organization",
+            label="Organization",
+        ),
+        domains_card(
+            location,
+            response.get("domain"),
+            response.get("reverse_ip"),
+            response.get("address") or "",
+        ),
+        reputation_card(response.get("reputation")),
+        registration_card(response.get("whois"), is_ip=True),
     ]
     return [card for card in cards if card is not None]
