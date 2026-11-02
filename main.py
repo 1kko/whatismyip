@@ -82,6 +82,7 @@ from lookup import (
     PrivateAddressError,
     abuseipdb_client,
     address_as_info,
+    address_reverse_ip,
     as_footprint,
     as_info_for_asn,
     asinfo_manager,
@@ -2407,6 +2408,12 @@ async def get_self_info(request: Request):
     as_info = address_as_info(client_ip, ip_data)
     if as_info is not None:
         response_data["as_info"] = as_info
+    # The names the top lists hold at the visitor's address: a local read too,
+    # for a public address only.
+    if is_safe_ip(client_ip):
+        reverse_ip = address_reverse_ip(client_ip)
+        if reverse_ip is not None:
+            response_data["reverse_ip"] = reverse_ip
 
     if fmt == "html":
         return render_page(request, response_data, is_self=True)
