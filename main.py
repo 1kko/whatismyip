@@ -115,6 +115,7 @@ from mcp_server import (
     registered_tool_names,
 )
 from models import GeoRulesUpdate
+import overview
 from rdap import rdap_breaker, refresh_rdap_bootstrap
 from security import (
     GeoBlockManager,
@@ -364,7 +365,7 @@ def lookup_href(value: str | None) -> str | None:
     """The page's link to a lookup of `value`, or None when it stays text.
 
     One rule for every hostname and address the page prints (the DNS table's
-    values, the rDNS and PTR facts, the hero's A → tag, the WHOIS name
+    values, the rDNS and PTR rows, the hero's A → tag, the WHOIS name
     servers): a link only to what GET /{domain_ip} would answer. classify_target
     admits a hostname under a public suffix, so ns1.corp.internal stays text --
     a path like that, matching a detector pattern, bans the visitor who follows
@@ -643,11 +644,22 @@ def render_page(request: Request, response_data: dict, is_self: bool):
             "origin_precision": origin.get("precision"),
         }
 
+    # The summary, the review chips and the status cards (overview.py), and
+    # the dot of every section, a card's state or what a section without one
+    # shows (overview.section_state).
+    summary = overview.build(response_data)
+    section_states = {
+        section["id"]: overview.section_state(section["id"], summary["states"])
+        for section in view["sections"]
+    }
+
     return templates.TemplateResponse(
         request,
         "browser.html",
         {
             "view": view,
+            "overview": summary,
+            "section_states": section_states,
             "view_map": map_data is not None,
             "mcp_tools": registered_tool_names(),
             "stun_url": WEBRTC_STUN_URL,
@@ -2343,7 +2355,8 @@ async def get_self_info(request: Request):
         # The page's fill-in for a registration it went out without. Always
         # JSON, whatever was negotiated, like ?subdomains=only: there is no
         # page to render for it. `display` is the same record as the page
-        # words it, so app.js only places text.
+        # words it, the section's hint and rows and its Registration card, so
+        # app.js only places text.
         try:
             whois_data = await _self_whois_only(client_ip)
         except LookupBusy:
@@ -2351,7 +2364,10 @@ async def get_self_info(request: Request):
         return {
             "address": client_ip,
             "whois": whois_data,
-            "display": whois_fill(whois_data),
+            "display": {
+                **whois_fill(whois_data),
+                "card": overview.registration_card(whois_data, is_ip=True),
+            },
         }
     if names is not None:
         try:

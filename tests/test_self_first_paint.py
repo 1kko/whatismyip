@@ -35,6 +35,8 @@ import concurrency
 import config
 import lookup
 import main
+import overview
+from pagehelpers import card, section
 from viewmodel import build_view, whois_display, whois_fill
 
 CLIENT_IP = "8.8.8.8"
@@ -177,22 +179,17 @@ async def _until(condition):
             await asyncio.sleep(0.01)
 
 
-def _accordion(html, name):
-    return html.split(f'id="acc-{name}"')[1].split("</details>")[0]
-
-
 def _hint(html, name):
     return re.search(rf'id="hint-{name}"[^>]*>([^<]*)<', html).group(1)
 
 
-def _column(html, name):
-    """The (label, value) rows of one column of the facts strip."""
-    block = html.split(f'id="facts-{name}"')[1]
-    block = re.split(r'<div class="facts__col"|</section>', block)[0]
-    return re.findall(
-        r'class="kv-label">([^<]*)</span>\s*<span class="kv-value[^"]*">([^<]*)<',
-        block,
-    )
+def _card(html, name):
+    """The (state, value, sub) of one status card."""
+    state = re.search(rf'class="card card--(\w+)" id="card-{name}"', html).group(1)
+    body = card(html, name)
+    value = re.search(r'class="card__value" title="([^"]*)">', body).group(1)
+    sub = re.search(r'class="card__sub" title="([^"]*)">', body).group(1)
+    return state, value, sub
 
 
 def _page_data(html):
@@ -231,9 +228,8 @@ class TestFirstPaint:
             await settle()
         html = page.text
         assert _hint(html, "whois") == "loading…"
-        assert _column(html, "whois")[0] == ("Status", "loading…")
-        assert {value for _, value in _column(html, "whois")[1:]} == {"…"}
-        panel = _accordion(html, "whois")
+        assert _card(html, "whois") == ("pending", "loading…", "")
+        panel = section(html, "whois")
         assert 'role="status"' in panel
         assert "unavailable" not in panel and "lookup failed" not in html
         assert "No WHOIS data" not in panel
@@ -245,7 +241,7 @@ class TestFirstPaint:
             page = await client.get("/", headers=CHROME)
             registry.release.set()
             await settle()
-        noscript = _accordion(page.text, "whois").split("<noscript>")[1]
+        noscript = section(page.text, "whois").split("<noscript>")[1]
         noscript = noscript.split("</noscript>")[0]
         assert '<a href="/">' in noscript
 
@@ -254,7 +250,7 @@ class TestFirstPaint:
             page = await client.get("/", headers=CHROME)
             registry.release.set()
             await settle()
-        panel = _accordion(page.text, "whois")
+        panel = section(page.text, "whois")
         assert "<script" not in panel
         assert "style=" not in panel
         assert re.search(r"\son\w+=", panel) is None
@@ -277,8 +273,8 @@ class TestFirstPaint:
         async with _client() as client:
             page = await client.get("/", headers=CHROME)
         assert 'id="whois-pending"' not in page.text
-        assert ("Network", "8.8.8.0/24") in _column(page.text, "whois")
-        assert "Google LLC" in _accordion(page.text, "whois")
+        assert _card(page.text, "whois")[:2] == ("info", "8.8.8.0/24")
+        assert "Google LLC" in section(page.text, "whois")
         assert _page_data(page.text)["whois"]["network"] == "8.8.8.0/24"
 
 
@@ -377,13 +373,28 @@ class TestWhoisOnly:
             fill = await client.get("/?whois=only", headers=CHROME)
         display = fill.json()["display"]
         assert display["hint"] == _hint(page.text, "whois")
-        assert [(r["label"], r["value"]) for r in display["column"]] == _column(
+        shown = display["card"]
+        assert (shown["state"], shown["value"], shown["sub"]) == _card(
             page.text, "whois"
         )
-        panel = _accordion(page.text, "whois")
+        panel = section(page.text, "whois")
         for row in display["rows"]:
             assert f"<td>{row['label']}</td>" in panel
             assert row["value"] in panel
+
+    async def test_whois_only_display_has_card(self, quick_registry):
+        """The fill-in carries the Registration card as overview words it, so
+        app.js sets the card's value, sub and state without wording any of
+        it; the facts column it once filled is gone."""
+        async with _client() as client:
+            fill = await client.get("/?whois=only", headers=CHROME)
+        display = fill.json()["display"]
+        assert set(display) == {"hint", "rows", "card"}
+        assert "column" not in display
+        assert display["card"]["state"] in overview.STATES
+        assert display["card"] == overview.registration_card(dict(RECORD), is_ip=True)
+        assert display["card"]["id"] == "whois"
+        assert display["card"]["value"] == "8.8.8.0/24"
 
     async def test_a_private_address_is_not_looked_up(self, quick_registry):
         async with _client("10.1.2.3") as client:
@@ -392,9 +403,12 @@ class TestWhoisOnly:
         assert response.json() == {
             "address": "10.1.2.3",
             "whois": {"error": "Not looked up: private or reserved address"},
-            "display": whois_fill(
-                {"error": "Not looked up: private or reserved address"}
-            ),
+            "display": {
+                **whois_fill({"error": "Not looked up: private or reserved address"}),
+                "card": overview.registration_card(
+                    {"error": "Not looked up: private or reserved address"}, is_ip=True
+                ),
+            },
         }
         assert quick_registry.call_count == 0
 
@@ -653,27 +667,17 @@ def _view(whois):
     return build_view({"address": CLIENT_IP, "whois": whois}, is_self=True)
 
 
-def _whois_column(view):
-    return next(c for c in view["facts"] if c["title"] == "WHOIS")
-
-
-def _whois_accordion(view):
-    return next(a for a in view["accordions"] if a["id"] == "whois")
+def _whois_section(view):
+    return next(a for a in view["sections"] if a["id"] == "whois")
 
 
 class TestView:
     def test_pending_reads_as_loading(self):
         view = _view({"pending": True})
         assert view["whois_pending"] is True
-        column = _whois_column(view)
-        assert column["id"] == "whois"
-        assert column["rows"][0] == {
-            "label": "Status",
-            "value": "loading…",
-            "tone": "muted",
-        }
-        assert {row["value"] for row in column["rows"][1:]} == {"…"}
-        assert _whois_accordion(view)["hint"] == "loading…"
+        assert _whois_section(view)["hint"] == "loading…"
+        card = overview.registration_card({"pending": True}, is_ip=True)
+        assert (card["state"], card["value"]) == ("pending", "loading…")
 
     def test_an_answer_is_not_pending(self):
         assert _view(dict(RECORD))["whois_pending"] is False
@@ -693,20 +697,22 @@ class TestView:
     def test_the_fill_in_says_what_the_page_would_have(self, whois):
         view = _view(whois)
         fill = whois_fill(whois)
-        assert fill["hint"] == _whois_accordion(view)["hint"]
-        assert fill["column"] == _whois_column(view)["rows"]
+        assert set(fill) == {"hint", "rows"}
+        assert fill["hint"] == _whois_section(view)["hint"]
         assert fill["rows"] == [
             {"label": label, "value": value}
             for label, value in whois_display(whois).items()
         ]
 
     def test_a_failed_lookup_fills_in_as_a_failure(self):
-        fill = whois_fill({"error": "RIR RDAP temporarily unavailable"})
+        whois = {"error": "RIR RDAP temporarily unavailable"}
+        fill = whois_fill(whois)
         assert fill["hint"] == "lookup failed"
-        assert fill["column"][0]["value"] == "unavailable"
         assert fill["rows"] == [
             {"label": "Error", "value": "RIR RDAP temporarily unavailable"}
         ]
+        card = overview.registration_card(whois, is_ip=True)
+        assert (card["state"], card["value"]) == ("unknown", "?")
 
 
 # --- static/js/app.js, in node ----------------------------------------------------
@@ -716,15 +722,17 @@ NODE = shutil.which("node")
 needs_node = pytest.mark.skipif(NODE is None, reason="needs node")
 
 # Just enough of a browser to load app.js on a self page that went out with
-# the registration loading: the elements it looks up by id, and a scripted
-# fetch. Every other id is absent, as on a page without that panel.
+# the registration loading: the elements it looks up by id, the Registration
+# card, the section's two hints and two dots, and a scripted fetch. Every
+# other id is absent, as on a page without that panel.
 HARNESS = r"""
 const fetched = [];
 function el(tag, id) {
+  const classes = new Set();
   const node = {
-    tag, id: id || "", textContent: "", className: "", hidden: false,
+    tag, id: id || "", textContent: "", className: "", hidden: false, title: "",
     dataset: {}, children: [], attributes: {}, colSpan: 1, href: "",
-    replacedWith: null, removed: false,
+    replacedWith: null, removed: false, parts: {},
     append(...nodes) { this.children.push(...nodes); },
     appendChild(node) { this.children.push(node); return node; },
     replaceWith(node) { this.replacedWith = node; },
@@ -732,31 +740,32 @@ function el(tag, id) {
     setAttribute(name, value) { this.attributes[name] = String(value); },
     removeAttribute(name) { delete this.attributes[name]; },
     addEventListener() {},
-    querySelectorAll(selector) {
-      const cls = selector.replace(/^\./, "");
-      return this.children.filter(
-        (child) => !child.removed && child.className.split(" ").includes(cls));
+    querySelector(selector) { return this.parts[selector] || null; },
+    classList: {
+      add: (...names) => names.forEach((name) => classes.add(name)),
+      remove: (...names) => names.forEach((name) => classes.delete(name)),
+      list: () => [...classes],
     },
-    classList: { add() {}, remove() {} },
   };
   return node;
 }
-function kv(value) {
-  const row = el("div");
-  row.className = "kv";
-  const label = el("span");
-  label.className = "kv-label";
-  const cell = el("span");
-  cell.className = "kv-value tone-muted";
-  cell.textContent = value;
-  row.append(label, cell);
-  row.querySelector = () => cell;
-  return row;
-}
-const column = el("div", "facts-whois");
-const title = el("h2");
-title.className = "facts__title";
-column.append(title, kv("loading…"), kv("…"), kv("…"));
+// The Registration card as the server draws it for a pending lookup.
+const card = el("a", "card-whois");
+card.classList.add("card", "card--pending");
+card.parts[".dot"] = el("span");
+card.parts[".dot"].classList.add("dot", "dot--pending");
+card.parts[".card__value"] = el("span");
+card.parts[".card__value"].textContent = "loading…";
+card.parts[".card__sub"] = el("span");
+// The section's hint in the contents list and in its heading, and its dots.
+const hints = [el("span"), el("span")];
+for (const hint of hints) { hint.textContent = "loading…"; hint.title = "loading…"; }
+const dots = [el("span"), el("span")];
+for (const dot of dots) dot.classList.add("dot", "dot--pending");
+const queries = {
+  '[data-hint="whois"]': hints,
+  '.toc__item[data-section="whois"] .dot, #h-whois .dot': dots,
+};
 const pageData = el("script", "page-data");
 pageData.textContent = JSON.stringify({ address: "8.8.8.8", whois: { pending: true } });
 const elements = {
@@ -764,16 +773,14 @@ const elements = {
   "lookup-error": el("p"), "lookup-status": el("p"), "progress": el("div"),
   "whois-pending": el("div", "whois-pending"),
   "whois-status": el("p", "whois-status"),
-  "hint-whois": el("span", "hint-whois"),
-  "facts-whois": column, "page-data": pageData,
+  "card-whois": card, "page-data": pageData,
 };
-elements["hint-whois"].textContent = "loading…";
 global.window = global;
 global.addEventListener = () => {};
 global.document = {
   getElementById: (id) => elements[id] || null,
   createElement: (tag) => el(tag),
-  querySelectorAll: () => [],
+  querySelectorAll: (selector) => queries[selector] || [],
   addEventListener() {},
   head: el("head"), body: el("body"),
 };
@@ -793,13 +800,18 @@ setTimeout(() => {
   const rows = table
     ? table.children[0].children.map((tr) => tr.children.map(text))
     : null;
-  const live = column.children.filter(
-    (child) => !child.removed && child.className === "kv");
+  const value = card.parts[".card__value"];
+  const sub = card.parts[".card__sub"];
   console.log(JSON.stringify({
     fetched,
-    hint: text(elements["hint-whois"]),
-    column: live.map((row) => [text(row.children[0]), text(row.children[1]),
-                               row.children[1].className]),
+    hints: hints.map((hint) => [hint.textContent, hint.title]),
+    card: {
+      classes: card.classList.list(),
+      dot: card.parts[".dot"].classList.list(),
+      value: [value.textContent, value.title],
+      sub: [sub.textContent, sub.title],
+    },
+    dots: dots.map((dot) => dot.classList.list()),
     rows,
     status: text(elements["whois-status"]),
     statusLinks: elements["whois-status"].children.map((a) => [a.href, a.textContent]),
@@ -822,11 +834,31 @@ def _load(status=200, body=None, network_error=False):
 
 
 def _payload(whois):
-    return {"address": CLIENT_IP, "whois": whois, "display": whois_fill(whois)}
+    return {
+        "address": CLIENT_IP,
+        "whois": whois,
+        "display": {
+            **whois_fill(whois),
+            "card": overview.registration_card(whois, is_ip=True),
+        },
+    }
 
 
 def _jsonable(whois):
     return json.loads(json.dumps(whois, default=lambda d: d.isoformat()))
+
+
+def _shown(run):
+    """The card as app.js left it: (state, value, sub), each text with its
+    title, the card's class, its dot's and the section's two dots agreeing."""
+    state = next(c for c in run["card"]["classes"] if c != "card").removeprefix(
+        "card--"
+    )
+    assert run["card"]["dot"] == ["dot", f"dot--{state}"]
+    assert run["dots"] == [["dot", f"dot--{state}"]] * 2
+    for text, title in (run["card"]["value"], run["card"]["sub"]):
+        assert text == title
+    return state, run["card"]["value"][0], run["card"]["sub"][0]
 
 
 @needs_node
@@ -835,22 +867,21 @@ class TestFillIn:
         run = _load(body=_jsonable(_payload(RECORD)))
         assert run["fetched"] == [{"url": "/?whois=only", "accept": "application/json"}]
 
-    def test_an_answer_fills_the_column_the_hint_and_the_panel(self):
-        fill = whois_fill(RECORD)
-        run = _load(body=_jsonable(_payload(RECORD)))
-        assert run["hint"] == fill["hint"]
-        assert run["column"] == [
-            [row["label"], row["value"], f"kv-value tone-{row['tone']}"]
-            for row in fill["column"]
-        ]
+    def test_an_answer_fills_the_card_the_hints_and_the_panel(self):
+        payload = _jsonable(_payload(RECORD))
+        fill, shown = payload["display"], payload["display"]["card"]
+        run = _load(body=payload)
+        assert run["hints"] == [[fill["hint"], fill["hint"]]] * 2
+        assert _shown(run) == (shown["state"], shown["value"], shown["sub"])
+        assert _shown(run) == ("info", "8.8.8.0/24", shown["sub"])
         assert run["rows"] == [[row["label"], row["value"]] for row in fill["rows"]]
         assert run["pageWhois"]["network"] == "8.8.8.0/24"
 
     def test_a_failed_lookup_is_shown_as_one(self):
         whois = {"error": "RIR RDAP temporarily unavailable"}
         run = _load(body=_payload(whois))
-        assert run["hint"] == "lookup failed"
-        assert run["column"][0][1] == "unavailable"
+        assert run["hints"] == [["lookup failed", "lookup failed"]] * 2
+        assert _shown(run) == ("unknown", "?", "lookup failed")
         assert run["rows"] == [["Error", "RIR RDAP temporarily unavailable"]]
 
     @pytest.mark.parametrize(
@@ -859,12 +890,15 @@ class TestFillIn:
             (503, {"error": "busy", "code": "busy"}),
             (429, {"error": "Too many requests"}),
             (200, {"address": CLIENT_IP, "whois": {}}),
-            (200, {"display": {"hint": "x", "column": "not a list", "rows": []}}),
+            (200, {"display": {"hint": "x", "rows": []}}),
+            (200, {"display": {"hint": "x", "rows": [], "card": {"id": "whois"}}}),
+            (200, {"display": {"hint": "x", "rows": "not a list", "card": None}}),
         ],
     )
     def test_no_answer_is_never_shown_as_an_empty_record(self, status, body):
-        """A refusal, or a 200 without its rows, is "could not load", with a
-        way to try again: never a blank panel that reads as no registration."""
+        """A refusal, or a 200 without its rows or its card, is "could not
+        load", with a way to try again: never a blank panel that reads as no
+        registration."""
         run = _load(status=status, body=body)
         self._assert_could_not_load(run)
 
@@ -874,9 +908,8 @@ class TestFillIn:
     @staticmethod
     def _assert_could_not_load(run):
         assert run["rows"] is None
-        assert run["hint"] == "lookup failed"
-        assert run["column"][0][1] == "unavailable"
-        assert {row[1] for row in run["column"][1:]} == {"—"}
+        assert run["hints"] == [["lookup failed", "lookup failed"]] * 2
+        assert _shown(run) == ("unknown", "?", "lookup failed")
         assert "Could not load" in run["status"]
         assert run["statusLinks"] == [["/", "Reload"]]
         assert run["pageWhois"] == {"pending": True}

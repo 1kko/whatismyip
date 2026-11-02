@@ -799,3 +799,19 @@ def test_expiring_certificate_tone_follows_the_chip():
     response["ssl"] = _cert(5)
     segments = sentence(response, False)
     assert next(s for s in segments if s["text"] == "5 days")["tone"] == "warning"
+
+
+def test_section_state():
+    """A section takes its card's state; one without a card is `request` when
+    it holds nothing until asked, `info` otherwise."""
+    states = build(_page())["states"]
+    assert overview.section_state("security", states) == "warn"
+    assert overview.section_state("whois", states) == "info"
+    for sid in ("subdomains", "raw", "browser"):
+        assert overview.section_state(sid, states) == "request"
+    assert overview.section_state("domains", {}) == "info"
+    assert overview.section_state("location", {"location": "unknown"}) == "unknown"
+    assert all(
+        overview.section_state(sid, states) in overview.STATES
+        for sid in ("whois", "dns", "raw", "anything")
+    )

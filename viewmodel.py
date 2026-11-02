@@ -37,7 +37,6 @@ APPROXIMATE_LINE = "approximate · country-level"
 # sends the page before a slow RDAP answer and app.js fills it in from
 # /?whois=only. It is neither an answer nor a failure, so it reads as neither.
 LOADING = "loading…"
-PENDING_VALUE = "…"
 
 # The self page describes whoever opens it, so its <title> and link-preview
 # text are fixed. A preview card is built from the <head>, and a shared link to
@@ -75,7 +74,7 @@ def _href(link_for: LinkFor | None, value: Any) -> str | None:
 
 
 def _linked(item: dict, link_for: LinkFor | None, value: Any) -> dict:
-    """A facts row or a hero tag with an `href` when `value` links, else the
+    """A row or a hero tag with an `href` when `value` links, else the
     dict exactly as it was: no href key at all, so a view built without
     link_for -- and every row and tag tests compare whole -- is unchanged."""
     href = _href(link_for, value)
@@ -162,13 +161,6 @@ def format_meta(elapsed_ms: int | None, when: Any) -> str:
     if isinstance(when, datetime.datetime):
         parts.append(f"{when.astimezone(datetime.timezone.utc):%Y-%m-%d %H:%M} UTC")
     return " · ".join(parts)
-
-
-def _count(items: Any, unit: str = "record") -> str:
-    total = len(items or [])
-    if not total:
-        return DASH
-    return f"{total} {unit}{'s' if total != 1 else ''}"
 
 
 def _is_ip(address: str) -> bool:
@@ -376,7 +368,7 @@ def _ssl_status(ssl_data: dict) -> tuple[str, str]:
 
 
 def ssl_rows(ssl_data: dict | None, address: str | None = None) -> list[dict]:
-    """Detailed certificate rows for the SSL accordion. Empty when no handshake
+    """Detailed certificate rows for the Certificate section. Empty when no handshake
     was attempted (IP lookups, private/reserved targets, no A record)."""
     if not ssl_data:
         return []
@@ -483,10 +475,11 @@ def _org_row(location: dict, link_for: LinkFor | None) -> dict:
     return {**row, "value": f"AS{number}", "suffix": f" {name}", "href": href}
 
 
-def _network_column(
-    location: dict, address: str, link_for: LinkFor | None = None
-) -> dict:
-    rows = [
+def org_rows(location: dict, link_for: LinkFor | None = None) -> list[dict]:
+    """An address's network as GeoLite2 has it: its block, the AS block and
+    the AS holder. What the Organization section draws when there is no AS
+    card (AS information off, or not built yet)."""
+    return [
         {"label": "CIDR", "value": location.get("cidr") or DASH, "tone": "default"},
         {
             "label": "AS block",
@@ -495,27 +488,21 @@ def _network_column(
         },
         _org_row(location, link_for),
     ]
-    if _is_ip(address):
-        rows.append(
-            {
-                "label": "Scope",
-                "value": "private" if location.get("is_private") else "public",
-                "tone": "warning" if location.get("is_private") else "default",
-            }
-        )
-    else:
-        rows.append(
-            _linked(
-                {
-                    "label": "rDNS",
-                    "value": location.get("reverse_dns") or DASH,
-                    "tone": "default" if location.get("reverse_dns") else "muted",
-                },
-                link_for,
-                location.get("reverse_dns"),
-            )
-        )
-    return {"title": "NETWORK", "rows": rows}
+
+
+def rdns_row(location: dict, link_for: LinkFor | None = None) -> dict:
+    """The resolved address's PTR name, linked to its own lookup: the first
+    row of a domain's GeoIP block."""
+    reverse = location.get("reverse_dns")
+    return _linked(
+        {
+            "label": "rDNS",
+            "value": reverse or DASH,
+            "tone": "default" if reverse else "muted",
+        },
+        link_for,
+        reverse,
+    )
 
 
 def dns_failure_text(domain: dict | None, key: str) -> str | None:
@@ -590,10 +577,11 @@ def fcrdns_state(
     return "unconfirmed"
 
 
-# How the REVERSE DNS column's PTR row words a verdict. "Does not point back"
-# and no further: CDNs and shared hosts fail the check legitimately, so the row
-# never says spoofed or forged. "unknown" adds nothing, because the A/AAAA row
-# under it already reads "(timed out)" or the like.
+# How the PTR row (an IP's Domains section) words a verdict. "Does not point
+# back" and no further: CDNs and shared hosts fail the check legitimately, so
+# the row never says spoofed or forged. "unknown" adds nothing, because the
+# A/AAAA row of the PTR name's DNS table below it already reads "(timed out)"
+# or the like.
 _FCRDNS_SUFFIX = {
     "confirmed": (" → confirmed", "success"),
     "unconfirmed": (" → does not point back", "warning"),
@@ -614,13 +602,6 @@ def _ptr_row(
         suffix, tone = verdict
         row = {"label": "PTR", "value": reverse, "suffix": suffix, "tone": tone}
     return _linked(row, link_for, reverse)
-
-
-def _dns_count_row(label: str, domain: dict, key: str) -> dict:
-    failure = dns_failure_text(domain, key)
-    if failure:
-        return {"label": label, "value": failure, "tone": "warning"}
-    return {"label": label, "value": _count(domain.get(key)), "tone": "default"}
 
 
 # The tags read from a DMARC record (RFC 7489 §6.3). Any other tag is
@@ -689,175 +670,10 @@ def dmarc_policy(domain: dict | None) -> dict | None:
     }
 
 
-def _dmarc_text(domain: dict) -> str | None:
-    """The DMARC half of the Mail row: a failure, the policy, or None when
-    there is no record."""
-    failure = dns_failure_text(domain, "dmarc")
-    if failure:
-        return failure
-    records = domain.get("dmarc") or []
-    if not records:
-        return None
-    policy = dmarc_policy(domain)
-    if policy is None:
-        return f"{len(records)} records"
-    text = f"{policy['tag']}={policy['policy']}" if policy["policy"] else "no p= tag"
-    if policy["pct"]:
-        text += f" pct={policy['pct']}"
-    if policy["inherited_from"]:
-        text += f" ({policy['inherited_from']})"
-    return text
-
-
-def _mail_row(domain: dict) -> dict:
-    """SPF and DMARC on one line: whether the name has an SPF policy (its own
-    or its zone's), and the DMARC policy that governs it, as published. A
-    failed query says so and warns, as a count row does; p=none asks for
-    reports only, so it is an answer like any other policy, never a warning."""
-    spf_failure = dns_failure_text(domain, "spf")
-    dmarc_failure = dns_failure_text(domain, "dmarc")
-    spf = spf_failure or ("yes" if domain.get("spf") else None)
-    dmarc = _dmarc_text(domain)
-    if spf is None and dmarc is None:
-        return {"label": "Mail", "value": DASH, "tone": "default"}
-    return {
-        "label": "Mail",
-        "value": f"SPF {spf or DASH} · DMARC {dmarc or DASH}",
-        "tone": "warning" if spf_failure or dmarc_failure else "default",
-    }
-
-
-def _dns_column(domain: dict) -> dict:
-    domain = domain or {}
-    return {
-        "title": "DNS",
-        "rows": [
-            _dns_count_row("A", domain, "a"),
-            _dns_count_row("AAAA", domain, "aaaa"),
-            _dns_count_row("MX", domain, "mx"),
-            _dns_count_row("NS", domain, "ns"),
-            _dns_count_row("TXT", domain, "txt"),
-            _mail_row(domain),
-        ],
-    }
-
-
-def _reverse_column(
-    location: dict, domain: dict, address: str, link_for: LinkFor | None = None
-) -> dict:
-    domain = domain or {}
-    reverse = location.get("reverse_dns")
-    # The PTR name's own addresses of the looked-up address's family: the
-    # ones fcrdns_state() compares with the address for the PTR row.
-    label, key = ("AAAA", "aaaa") if _ip_version(address) == 6 else ("A", "a")
-    ttl = next(iter(domain.get(key) or []), {}).get("ttl")
-    return {
-        "title": "REVERSE DNS",
-        "rows": [
-            _ptr_row(reverse, domain, address, link_for),
-            _dns_count_row(label, domain, key),
-            _dns_count_row("NS", domain, "ns"),
-            {
-                "label": "TTL",
-                "value": f"{ttl}s" if ttl else DASH,
-                "tone": "default" if ttl else "muted",
-            },
-        ],
-    }
-
-
-_WHOIS_COLUMN_ROWS = (
-    ("network", "Network"),
-    ("rir", "RIR"),
-    ("abuse_email", "Abuse"),
-    ("updated", "Updated"),
-)
-
-
 def whois_pending(whois_data: dict | None) -> bool:
     """Whether the page went out before its registration lookup answered (see
     _self_lookup in main.py)."""
     return bool(whois_data) and whois_data.get("pending") is True
-
-
-def _whois_column(whois_data: dict | None) -> dict:
-    # Registration data only. This takes no GeoIP `location` on purpose: the
-    # column used to fill Netblock and Country from GeoIP, which made a column
-    # titled WHOIS disagree with the WHOIS accordion below it. GeoIP values
-    # live in the NETWORK column and the GeoIP accordion.
-    #
-    # The id is how app.js finds the column to fill a pending one.
-    if whois_pending(whois_data):
-        rows = [{"label": "Status", "value": LOADING, "tone": "muted"}]
-        rows += [
-            {"label": label, "value": PENDING_VALUE, "tone": "muted"}
-            for _, label in _WHOIS_COLUMN_ROWS
-        ]
-        return {"title": "WHOIS", "id": "whois", "rows": rows}
-    whois_data = whois_data or {}
-    error = whois_data.get("error")
-    # Four states. "not registered" is an answer -- the registry was
-    # reached and found no registration for the registrable domain -- while
-    # "unavailable" means we could not find out.
-    if error == NOT_REGISTERED:
-        status, tone = "not registered", "muted"
-    elif error or not whois_data:
-        status, tone = "unavailable", "warning"
-    elif whois_data.get("thin"):
-        status, tone = "no details", "muted"
-    else:
-        # "record found", not "available": this Status is the lookup's, and
-        # "available" beside a name reads as "available to register".
-        status, tone = "record found", "success"
-    # Separate from the status above: this one only asks whether there is a
-    # usable record to draw values from, and there isn't in either failing case.
-    no_record = bool(error) or not whois_data
-    rows = [{"label": "Status", "value": status, "tone": tone}]
-    for key, label in _WHOIS_COLUMN_ROWS:
-        # Same renderer as the accordion, so a value reads identically in both.
-        value = DASH if no_record else _whois_value(key, whois_data.get(key))
-        rows.append(
-            {
-                "label": label,
-                "value": value,
-                "tone": "muted" if value == DASH else "default",
-            }
-        )
-    return {"title": "WHOIS", "id": "whois", "rows": rows}
-
-
-def _certificate_column(ssl_data: dict | None) -> dict:
-    if not ssl_data or ssl_data.get("error"):
-        # No handshake attempted ("none"), or one that failed before any
-        # certificate arrived ("port 443 unreachable").
-        failure = (ssl_data or {}).get("error")
-        return {
-            "title": "CERTIFICATE",
-            "rows": [
-                {
-                    "label": "Status",
-                    "value": failure or "none",
-                    "tone": "warning" if failure else "muted",
-                },
-                {"label": "Issuer", "value": DASH, "tone": "muted"},
-                {"label": "SAN", "value": DASH, "tone": "muted"},
-                {"label": "Expires", "value": DASH, "tone": "muted"},
-            ],
-        }
-
-    expires, _ = _cert_expiry(ssl_data)
-    status, tone = _ssl_status(ssl_data)
-
-    san = ssl_data.get("subjectAltName") or ()
-    return {
-        "title": "CERTIFICATE",
-        "rows": [
-            {"label": "Status", "value": status, "tone": tone},
-            {"label": "Issuer", "value": _cert_issuer(ssl_data), "tone": "default"},
-            {"label": "SAN", "value": _count(san, unit="name"), "tone": "default"},
-            {"label": "Expires", "value": expires, "tone": "default"},
-        ],
-    }
 
 
 # A reputation signal's tag, and the card's level, take the colour of the
@@ -915,7 +731,7 @@ def _reputation_tags(response: dict, informational: bool) -> list[dict]:
 def _status_tags(whois_data: dict | None) -> list[dict]:
     """One red tag when a domain's registry status says the name is out of the
     DNS or about to be dropped (clientHold, serverHold, pendingDelete,
-    redemptionPeriod): the code itself, which the WHOIS accordion glosses. It
+    redemptionPeriod): the code itself, which the Registration section glosses. It
     names the status, not a verdict, and it is no reputation signal:
     reputation.grade() never sees it."""
     whois_data = whois_data or {}
@@ -1142,7 +958,7 @@ def _covering_registration(whois_data: dict) -> str | None:
 
 def whois_display(whois_data: dict | None) -> dict:
     """Turn a canonical registration record into ordered, labelled strings for
-    the WHOIS accordion. Returns an error row on failure and {} when absent."""
+    the Registration section. Returns an error row on failure and {} when absent."""
     if not whois_data:
         return {}
     error = whois_data.get("error")
@@ -1208,7 +1024,7 @@ def name_server_links(
 
 
 def geoip_rows(location: dict | None, domain: dict | None = None) -> list[dict]:
-    """Detailed geolocation for the GeoIP accordion: country, region, city,
+    """Detailed geolocation for the GeoIP block: country, region, city,
     coordinates, accuracy radius, time zone and network from GeoLite2-City, and
     the AS org from GeoLite2-ASN. Until GeoLite2-City loads, the bundled
     geoip2fast snapshot fills in the country and network alone.
@@ -1295,13 +1111,13 @@ def _whois_hint(whois_data: dict | None) -> str:
 
 def whois_fill(whois_data: dict | None) -> dict:
     """What a self page sent with its registration still loading needs in
-    order to show it: the WHOIS accordion's hint, the WHOIS column's rows and
-    the accordion's rows, worded exactly as a page that waited has them.
-    /?whois=only carries this beside the record, so app.js only writes text
-    into the page and never words a registration itself."""
+    order to show it: the Registration section's hint and rows, worded
+    exactly as a page that waited has them. /?whois=only carries this beside
+    the record, with the section's card (overview.registration_card, which
+    main adds: this module does not import overview), so app.js only writes
+    text into the page and never words a registration itself."""
     return {
         "hint": _whois_hint(whois_data),
-        "column": _whois_column(whois_data)["rows"],
         "rows": [
             {"label": label, "value": value}
             for label, value in whois_display(whois_data).items()
@@ -1984,21 +1800,41 @@ _SECURITY_TONES = {
 _SECURITY_STATES = ("pass", "warn", "fail", "info", "unknown")
 
 
+# The order the DNS security section draws its rows in: what to review first
+# (a warning and a failure alike, as the review chips list them), then the
+# passes, then the checks that could not be graded, then the rest. Within a
+# group the rows keep the check order (dnssecurity.CHECKS).
+_SECURITY_ORDER = {"warn": 0, "fail": 0, "pass": 1, "unknown": 2, "info": 3}
+
+# dnssecurity's summary for an opt-in record (MTA-STS, TLS-RPT, BIMI) that is
+# not there: an `info`, not a finding, so the section folds them into one row.
+_NOT_PUBLISHED = ": not published"
+
+
 def dns_security_view(data: dict | None) -> dict | None:
-    """The DNS security accordion: one row per check, with its state, summary
-    and findings, and the counts for the hint. None when nothing was graded
-    (an IP, the self page, a name that does not exist)."""
+    """The DNS security section: one row per check, with its state, summary
+    and findings, warnings and failures first (_SECURITY_ORDER), and the
+    counts for the hint, which count every check. The `info` checks that are
+    simply not published fold into `folded`, one "Not published" row naming
+    them, or None when there are none. None when nothing was graded (an IP,
+    the self page, a name that does not exist)."""
     if not data:
         return None
     rows = []
+    unpublished = []
     for check, result in data.items():
         state = result.get("state", "unknown")
+        label = _SECURITY_LABELS.get(check, check)
+        summary = result.get("summary", "")
+        if state == "info" and str(summary).endswith(_NOT_PUBLISHED):
+            unpublished.append(label)
+            continue
         rows.append(
             {
-                "label": _SECURITY_LABELS.get(check, check),
+                "label": label,
                 "state": state,
                 "tone": _SECURITY_TONES.get(state, "muted"),
-                "summary": result.get("summary", ""),
+                "summary": summary,
                 "findings": [
                     {
                         "text": f.get("text", ""),
@@ -2008,9 +1844,21 @@ def dns_security_view(data: dict | None) -> dict | None:
                 ],
             }
         )
-    counts = [(s, sum(r["state"] == s for r in rows)) for s in _SECURITY_STATES]
+    states = [result.get("state", "unknown") for result in data.values()]
+    counts = [(s, states.count(s)) for s in _SECURITY_STATES]
     hint = " · ".join(f"{n} {s}" for s, n in counts if n)
-    return {"hint": hint, "rows": rows}
+    rows.sort(key=lambda row: _SECURITY_ORDER.get(row["state"], 2))
+    folded = (
+        {
+            "label": "Not published",
+            "state": "info",
+            "tone": _SECURITY_TONES["info"],
+            "value": " · ".join(unpublished),
+        }
+        if unpublished
+        else None
+    )
+    return {"hint": hint, "rows": rows, "folded": folded}
 
 
 def _by_reason(unavailable: list[dict]) -> list[tuple[str, str]]:
@@ -2150,13 +1998,13 @@ def _geoip_hint(location: dict) -> str:
 
 
 def _subdomains_hint(subdomain_data: dict | None) -> str:
-    """The Subdomains hint doubles as the panel's call to action: nothing is
-    fetched until the panel is asked for, so before that it says what asking
-    will do rather than where the data comes from. static/js/app.js rewrites
-    it to the same "N subdomains found" wording once the fetch lands, so the
-    two paths read identically."""
+    """The Subdomains hint: nothing is fetched until "Look up subdomains" is
+    pressed, so before that it says the section is on request rather than
+    where the data comes from. static/js/app.js rewrites it to the same "N
+    subdomains found" wording once the fetch lands, so the two paths read
+    identically."""
     if not subdomain_data:
-        return "click to lookup"
+        return "on request"
     count = subdomain_found_count(subdomain_data)
     if count is None:
         return "lookup failed"
@@ -2171,76 +2019,6 @@ def _offers_subdomains(response: dict, subdomains_enabled: bool) -> bool:
     gated on the kill switch: SUBDOMAIN_ENABLED=false must not leave the page
     advertising a panel whose only outcome is a 400 from the route."""
     return subdomains_enabled and not _is_ip(response.get("address") or "")
-
-
-def _accordions(
-    response: dict, subdomains_enabled: bool, reverseip: dict | None = None
-) -> list[dict]:
-    domain = response.get("domain") or {}
-    headers = response.get("headers") or {}
-    header_count = len(headers)
-    accordions = [
-        {
-            "id": "whois",
-            "title": "WHOIS",
-            "hint": _whois_hint(response.get("whois")),
-        },
-        {"id": "dns", "title": "DNS records", "hint": _dns_hint(domain)},
-        {
-            "id": "ssl",
-            "title": "SSL certificate",
-            "hint": _ssl_hint(response.get("ssl")),
-        },
-        {
-            "id": "geoip",
-            "title": "GeoIP",
-            "hint": _geoip_hint(response.get("location") or {}),
-        },
-    ]
-    # Right after GeoIP: the AS behind the address (asinfo.py).
-    as_card = as_view(response.get("as_info"))
-    if as_card:
-        accordions.append({"id": "as", "title": "AS", "hint": as_card["hint"]})
-    # Then the names listed at this address (reverseip.py), an IP target only.
-    if reverseip:
-        accordions.append(
-            {
-                "id": "reverseip",
-                "title": "Domains on this address",
-                "hint": reverseip["hint"],
-            }
-        )
-    # Beside the DNS records it grades (dnssecurity.py).
-    security = dns_security_view(response.get("dns_security"))
-    if security:
-        accordions.insert(
-            2, {"id": "security", "title": "DNS security", "hint": security["hint"]}
-        )
-    reputation = reputation_view(response.get("reputation"))
-    if reputation:
-        accordions.append(
-            {"id": "reputation", "title": "Reputation", "hint": reputation["hint"]}
-        )
-    if _offers_subdomains(response, subdomains_enabled):
-        accordions.append(
-            {
-                "id": "subdomains",
-                "title": "Subdomains",
-                "hint": _subdomains_hint(response.get("subdomains")),
-            }
-        )
-
-    accordions.extend(
-        [
-            {
-                "id": "headers",
-                "title": "Your headers",
-                "hint": f"{header_count} header{'s' if header_count != 1 else ''}",
-            },
-            {"id": "raw", "title": "Raw JSON", "hint": "full response"},
-        ]
-    )
-    return accordions
 
 
 def _block(name: str, heading: str | None = None) -> dict:
@@ -2261,8 +2039,8 @@ def _sections(
     reverseip: dict | None,
 ) -> list[dict]:
     """The page's sections in reading order, each with the blocks (macros in
-    templates/_blocks.html) it holds. Beside _accordions, which keeps the old
-    page; both read the same hint helpers, so the two cannot drift."""
+    templates/_blocks.html) it holds, its hint (also the contents entry's) and
+    its group: "request" for what is fetched only when asked."""
     domain = response.get("domain") or {}
     location = response.get("location") or {}
     address = response.get("address") or ""
@@ -2319,9 +2097,7 @@ def _sections(
                 _section(
                     "subdomains",
                     "Subdomains",
-                    "on request"
-                    if not response.get("subdomains")
-                    else _subdomains_hint(response.get("subdomains")),
+                    _subdomains_hint(response.get("subdomains")),
                     [_block("subdomains")],
                     group="request",
                 )
@@ -2380,19 +2156,6 @@ def build_view(
     dns_queried_name, dns_zone = dns_names(domain, address)
     reverseip = reverse_ip_view(response.get("reverse_ip"), link_for) if is_ip else None
 
-    if is_ip:
-        facts = [
-            _network_column(location, address, link_for),
-            _reverse_column(location, domain, address, link_for),
-            _whois_column(response.get("whois")),
-        ]
-    else:
-        facts = [
-            _network_column(location, address, link_for),
-            _dns_column(domain),
-            _certificate_column(response.get("ssl")),
-        ]
-
     return {
         "is_self": is_self,
         "eyebrow": "YOUR IP ADDRESS" if is_self else "LOOKUP",
@@ -2417,22 +2180,23 @@ def build_view(
         ),
         "map_link": osm_link(location),
         "meta_line": format_meta(response.get("elapsed_ms"), response.get("datetime")),
-        "facts": facts,
         "dns_banner": dns_banner(domain),
         "dns_queried_name": dns_queried_name,
         "dns_zone": dns_zone,
         "whois_pending": whois_pending(response.get("whois")),
         "whois_name_servers": name_server_links(response.get("whois"), link_for),
-        "accordions": _accordions(response, subdomains_enabled, reverseip),
         "sections": _sections(
             response,
             is_self=is_self,
             subdomains_enabled=subdomains_enabled,
             reverseip=reverseip,
         ),
-        # The domain's linked rDNS row (None for an IP) and the IP's PTR row,
-        # for the blocks that draw them outside the facts columns.
-        "rdns_row": None if is_ip else facts[0]["rows"][-1],
+        # The rows the blocks draw beside the response's own: a domain's
+        # linked rDNS row (geoip), an IP's PTR row (ptr) and its GeoLite2
+        # network rows (org, when there is no AS card); None where the page
+        # type has no such block.
+        "rdns_row": None if is_ip else rdns_row(location, link_for),
+        "org_rows": org_rows(location, link_for) if is_ip else None,
         "ptr_row": (
             _ptr_row(location.get("reverse_dns"), domain, address, link_for)
             if is_ip

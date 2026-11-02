@@ -573,6 +573,20 @@ def sentence(response: dict, is_ip: bool) -> list[dict]:
     return _ip_sentence(response) if is_ip else _domain_sentence(response)
 
 
+# The sections that have no card. Subdomains and Raw JSON hold nothing until
+# the visitor asks; "Your browser" measures nothing until "Measure" is pressed
+# (static/js/fingerprint.js then turns its dots to `info`).
+_REQUEST_SECTIONS = frozenset({"subdomains", "raw", "browser"})
+
+
+def section_state(section_id: str, states: dict[str, str]) -> str:
+    """A section's dot: its card's state, else `request` for a section that
+    is fetched or measured on request, else `info`."""
+    if section_id in states:
+        return states[section_id]
+    return "request" if section_id in _REQUEST_SECTIONS else "info"
+
+
 def build(response: dict) -> dict:
     """Everything the overview block renders: sentence, chips, cards and each
     card's state by id."""

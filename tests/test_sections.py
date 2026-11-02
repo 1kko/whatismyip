@@ -1,10 +1,12 @@
-"""viewmodel._sections and the keys build_view adds beside the accordions."""
+"""viewmodel._sections, the page sections they render, and the keys build_view
+adds for the blocks (rdns_row, ptr_row, org_rows)."""
 
 import re
 
 import pytest
 
 import main
+import overview
 from test_viewmodel import ANSWER_4_NAMES, DOMAIN_RESPONSE, IP_RESPONSE
 from viewmodel import build_view
 
@@ -182,13 +184,18 @@ def test_rdns_row_domain_only():
     assert ip["rdns_row"] is None
 
 
-@pytest.mark.xfail(strict=True, reason="sections render from Task 7")
 @pytest.mark.parametrize("kind", ["domain", "ip", "self"])
 def test_blocks_never_hold_a_section(kind):
     response = _domain() if kind == "domain" else _ip()
     view = build_view(response, is_self=kind == "self", subdomains_enabled=True)
+    summary = overview.build(response)
     html = main.templates.env.get_template("browser.html").render(
         view=view,
+        overview=summary,
+        section_states={
+            s["id"]: overview.section_state(s["id"], summary["states"])
+            for s in view["sections"]
+        },
         view_map=False,
         mcp_tools=[],
         stun_url="",
@@ -203,6 +210,6 @@ def test_blocks_never_hold_a_section(kind):
         nonce="",
     )
     found = re.findall(r'id="sec-[^"]+".*?</section>', html, flags=re.S)
-    assert found, "no sections rendered"
+    assert [re.match(r'id="sec-([^"]+)"', f).group(1) for f in found] == _ids(view)
     for body in found:
         assert "<section" not in body[len('id="sec-') :].split(">", 1)[1]

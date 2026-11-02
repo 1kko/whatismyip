@@ -26,14 +26,17 @@
     </p>
     <p class="device__note">
         Computed in your browser and never sent to {{ site_domain }}. The canvas,
-        audio, WebGL and font probes run only when you open this panel; the other
+        audio, WebGL and font probes run only when you press Measure; the other
         signals are read as the page loads.
     </p>
+    {# static/js/fingerprint.js starts the active probes inside this button's
+       click, the only moment Firefox's resistFingerprinting asks. #}
+    <button type="button" class="btn" id="fp-measure">Measure</button>
     {% if stun_url %}
     {# Opt-in: static/js/webrtc.js reads the STUN server and the address
        this page saw from here, and only acts on a click. #}
     <div class="webrtc" id="webrtc" data-stun="{{ stun_url }}" data-observed="{{ view.target }}">
-        <h3 class="facts__title">WEBRTC LEAK TEST</h3>
+        <h3 class="report-section__sub">WebRTC leak test</h3>
         <p class="device__note">
             Asks the STUN server {{ stun_host }} which address your browser's WebRTC
             traffic comes from, and compares it with the address this page saw. Runs
@@ -54,6 +57,9 @@
 {% endmacro %}
 
 {% macro raw() %}
+    {# The lookup page opens the tree with a button (static/js/app.js);
+       as.html includes the same file inside an accordion and has none. #}
+    {% set raw_open_button = true %}
     {% include "_raw_json.html" %}
 {% endmacro %}
 
@@ -110,6 +116,9 @@
       </div>
       {% endif %}
     {% else %}
+      {# Pressing it is the opt-in: static/js/app.js asks crt.sh then and
+         not before. Without JavaScript the link below asks the server. #}
+      <button type="button" class="btn" id="subdomains-run">Look up subdomains</button>
       <div id="subdomains-slot" data-target="{{ view.target }}">
           <noscript>
               <a href="/{{ view.target }}?subdomains=include">Load subdomains</a>
@@ -168,8 +177,19 @@
 {% endmacro %}
 
 {% macro geoip() %}
+    {% if view_map %}
+    {# The map's phone card (MOBILE_CANVAS); under 900px the band's map is
+       hidden and static/js/map.js paints this one instead. #}
+    <div class="mobile-map">
+        <div class="mobile-map__card map" id="mobile-map"></div>
+    </div>
+    {% endif %}
     <table class="records">
         <tbody>
+        {% set rdns = view.rdns_row %}
+        {% if rdns %}
+        <tr><td>{{ rdns.label }}</td><td colspan="3" class="tone-{{ rdns.tone }}">{% if rdns.href %}<a class="lookup-link" href="{{ rdns.href }}" rel="nofollow">{{ rdns.value }}</a>{% else %}{{ rdns.value }}{% endif %}</td></tr>
+        {% endif %}
         {% for row in view.geoip_rows %}
         <tr><td>{{ row.label }}</td><td colspan="3" class="tone-{{ row.tone }}">{{ row.value }}</td></tr>
         {% endfor %}
@@ -178,14 +198,19 @@
 {% endmacro %}
 
 {% macro security() %}
-    {# viewmodel.dns_security_view: one row per check (dnssecurity.py).
-       "unknown" is a query that failed or a DKIM selector not on the
-       list, never "not set up". #}
+    {# viewmodel.dns_security_view: one row per check (dnssecurity.py),
+       warnings and failures first, and the opt-ins that are not published
+       folded into one row. "unknown" is a query that failed or a DKIM
+       selector not on the list, never "not set up". #}
     <table class="records">
         <tbody>
         {% for row in view.dns_security.rows %}
         <tr><td>{{ row.label }}</td><td class="tone-{{ row.tone }}">{{ row.state }}</td><td colspan="2">{{ row.summary }}{% for finding in row.findings %}<br><span class="tone-{{ finding.tone }}">{{ finding.text }}</span>{% endfor %}</td></tr>
         {% endfor %}
+        {% set folded = view.dns_security.folded %}
+        {% if folded %}
+        <tr><td>{{ folded.label }}</td><td class="tone-{{ folded.tone }}">{{ folded.state }}</td><td colspan="2" class="tone-muted">{{ folded.value }}</td></tr>
+        {% endif %}
         </tbody>
     </table>
     <p class="api-note tone-muted">DKIM is checked at common selectors only: DNS cannot list a domain's selectors.</p>
@@ -285,8 +310,9 @@
 {% endmacro %}
 
 {% macro org() %}
-{# An IP's network rows (viewmodel._network_column) without Scope. #}
-{% for row in view.facts[0].rows if row.label != 'Scope' %}
+{# An IP's network as GeoLite2 has it (viewmodel.org_rows), when there is no
+   AS card to draw. #}
+{% for row in view.org_rows %}
 <div class="kv">
     <span class="kv-label">{{ row.label }}</span>
     <span class="kv-value tone-{{ row.tone }}">{% if row.href %}<a class="lookup-link" href="{{ row.href }}" rel="nofollow">{{ row.value }}</a>{% else %}{{ row.value }}{% endif %}{% if row.suffix %}{{ row.suffix }}{% endif %}</span>
@@ -295,7 +321,7 @@
 {% endmacro %}
 
 {% macro ptr() %}
-{# The PTR row, as the REVERSE DNS column draws it: the name links, the
+{# The PTR row (viewmodel._ptr_row): the name links, the
    forward-confirmation verdict follows as plain text. #}
 {% set row = view.ptr_row %}
 {% if row %}

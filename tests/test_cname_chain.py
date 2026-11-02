@@ -30,6 +30,7 @@ import lookup
 import managers
 import mcp_server
 from main import app
+from pagehelpers import section
 
 QNAME = "www.microsoft.com"
 # The chain production served on 2026-10-10: two hops, each with the TTL the
@@ -324,13 +325,16 @@ def _dns_rows_of(html: str, rdtype: str) -> list[list[str]]:
 
 
 def _geoip_rows_of(html: str) -> dict[str, str]:
-    panel = re.search(r'id="acc-geoip".*?</details>', html, re.S)
-    assert panel, "no GeoIP accordion"
+    """The rows of the domain page's GeoIP block, in its Network section."""
+    panel = section(html, "network").split(
+        '<h3 class="report-section__sub">Location</h3>'
+    )[1]
+    panel = panel.split('<h3 class="report-section__sub">')[0]
     return {
         label.strip(): value.strip()
         for label, value in re.findall(
             r'<tr><td>(.*?)</td><td colspan="3" class="tone-\w+">(.*?)</td></tr>',
-            panel.group(0),
+            panel,
             re.S,
         )
     }

@@ -26,6 +26,7 @@ import main
 import managers
 import mcp_server
 import viewmodel
+from pagehelpers import card
 from main import app
 
 RAISE = {
@@ -661,15 +662,15 @@ def _dns_table_row(html: str, rdtype: str) -> list[str]:
     ]
 
 
-def _facts_value(html: str, label: str) -> str:
-    match = re.search(
-        rf'<span class="kv-label">{label}</span>\s*'
-        r'<span class="kv-value tone-(\w+)">(.*?)</span>',
-        html,
-        re.S,
-    )
-    assert match, f"no {label} fact"
-    return match.group(1), match.group(2).strip()
+def _dns_card(html: str) -> tuple[str, str]:
+    """The DNS card's (state, sub line)."""
+    state = re.search(r'class="card card--(\w+)" id="card-dns"', html).group(1)
+    sub = re.search(r'class="card__sub" title="([^"]*)">', card(html, "dns")).group(1)
+    return state, sub
+
+
+def _dns_hint(html: str) -> str:
+    return re.search(r'id="hint-dns"[^>]*>([^<]*)<', html).group(1)
 
 
 @pytest.mark.parametrize(
@@ -681,7 +682,10 @@ def test_page_says_a_type_failed_instead_of_dashing_it(offline, outcome, text):
     html = client.get("/example.com", headers=BROWSER_UA).text
 
     assert _dns_table_row(html, "MX") == ["MX", "example.com", text, ""]
-    assert _facts_value(html, "MX") == ("warning", text)
+    # The section's hint names the failure, and the card is unknown, never
+    # "pass" with a count of 0 the query could not vouch for.
+    assert f"MX {text}" in _dns_hint(html)
+    assert _dns_card(html)[0] == "unknown"
     # The types that did answer are untouched.
     assert _dns_table_row(html, "A")[2] == "93.184.216.34"
     assert "does not resolve" not in html
@@ -692,7 +696,9 @@ def test_page_keeps_the_dash_for_a_type_that_has_no_records(offline):
 
     html = client.get("/example.com", headers=BROWSER_UA).text
 
-    assert _facts_value(html, "MX") == ("default", viewmodel.DASH)
+    assert "MX 0" in _dns_hint(html)
+    assert "MX 0" in _dns_card(html)[1]
+    assert _dns_card(html)[0] != "unknown"
     assert "<td>MX</td>" not in html
     for text in viewmodel.DNS_FAILURE_TEXT.values():
         assert text not in html
@@ -736,16 +742,12 @@ def test_four_outcomes_render_four_different_pages(offline):
 
 
 class TestDmarcOnThePage:
-    """The Mail fact and the DMARC table rows say what the query said: a
-    policy, no record, or a query that failed -- never one for another."""
+    """The DMARC table rows say what the query said: a policy, no record, or
+    a query that failed -- never one for another."""
 
-    def test_the_policy_is_a_mail_fact_and_a_table_row(self, offline):
+    def test_the_policy_is_a_table_row(self, offline):
         html = client.get("/example.com", headers=BROWSER_UA).text
 
-        assert _facts_value(html, "Mail") == (
-            "default",
-            "SPF yes · DMARC p=none",
-        )
         assert _dns_table_row(html, "DMARC") == [
             "DMARC",
             "_dmarc.example.com",
@@ -754,14 +756,13 @@ class TestDmarcOnThePage:
         ]
 
     @pytest.mark.parametrize("outcome", ["nxdomain", "noanswer"])
-    def test_no_record_is_a_dash_and_no_row(self, offline, outcome):
+    def test_no_record_is_no_row(self, offline, outcome):
         offline.fail("_dmarc.example.com", outcome, "TXT")
 
         html = client.get("/example.com", headers=BROWSER_UA).text
 
-        assert _facts_value(html, "Mail") == ("default", "SPF yes · DMARC —")
-        # The DNS table only: the DNS security panel grades DMARC in a row of
-        # its own, which says "no record" there.
+        # The DNS table only: the DNS security section grades DMARC in a row
+        # of its own, which says "no record" there.
         table = re.search(
             r'<table class="records records--dns">.*?</table>', html, re.S
         )
@@ -775,7 +776,6 @@ class TestDmarcOnThePage:
 
         html = client.get("/example.com", headers=BROWSER_UA).text
 
-        assert _facts_value(html, "Mail") == ("warning", f"SPF yes · DMARC {text}")
         assert _dns_table_row(html, "DMARC") == [
             "DMARC",
             "_dmarc.example.com",
@@ -791,10 +791,6 @@ class TestDmarcOnThePage:
         test, carries no such mark."""
         html = client.get("/www.example.com", headers=BROWSER_UA).text
 
-        assert _facts_value(html, "Mail") == (
-            "default",
-            "SPF yes · DMARC p=none (example.com)",
-        )
         assert _dns_table_row(html, "DMARC") == [
             "DMARC",
             "_dmarc.example.com",

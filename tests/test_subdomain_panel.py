@@ -25,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from main import app
+from pagehelpers import section
 
 client = TestClient(app, client=("118.235.14.201", 41234))
 
@@ -76,13 +77,12 @@ def _subdomains(n, count=None, **extra):
 
 
 def _panel(data):
-    """The subdomain accordion's body, server-rendered with `data`."""
+    """The Subdomains section's body, server-rendered with `data`."""
     with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
         with patch("main.get_subdomains", new_callable=AsyncMock, return_value=data):
             html = client.get("/example.com?subdomains=include", headers=BROWSER_UA)
     assert html.status_code == 200
-    body = html.text.split('id="acc-subdomains"')[1]
-    return body.split("</details>")[0]
+    return section(html.text, "subdomains")
 
 
 # --- The server-rendered panel (?subdomains=include, works without JS) --------
@@ -98,6 +98,7 @@ class TestServerRenderedPanel:
         assert DEAD_END not in _panel(_subdomains(500))
         assert DEAD_END not in APP_JS.read_text(encoding="utf-8")
         assert DEAD_END not in Path("templates/browser.html").read_text("utf-8")
+        assert DEAD_END not in Path("templates/_blocks.html").read_text("utf-8")
 
     def test_a_list_that_fits_needs_no_link(self):
         panel = _panel(_subdomains(3))
@@ -160,7 +161,11 @@ class TestServerRenderedPanel:
                     "/example.com?subdomains=include", headers=BROWSER_UA
                 ).text
         assert (
-            '<span class="hint" id="hint-subdomains" '
+            '<span class="hint" id="hint-subdomains" data-hint="subdomains" '
+            'title="6,002 subdomains found">6,002 subdomains found' in html
+        )
+        assert (
+            '<span class="toc__hint" data-hint="subdomains" '
             'title="6,002 subdomains found">6,002 subdomains found' in html
         )
 
@@ -555,11 +560,11 @@ def test_a_crtsh_failure_with_listed_names_is_not_a_failed_panel():
     """Both the lazy handler and the server-rendered path ask whether the
     lists answered before they give up."""
     source = APP_JS.read_text(encoding="utf-8")
-    handler = source.split("subdomainAccordion.addEventListener")[1]
+    handler = source.split("subdomainRun.addEventListener")[1]
     assert "subdomainsFailedOutright(data)" in handler
     assert "openintel" in _function("subdomainsFailedOutright")
     rendered = source.split('getElementById("subdomains-rendered")')[1].split(
-        "if (subdomainAccordion"
+        "if (subdomainRun"
     )[0]
     assert "subdomainsFailedOutright(data)" in rendered
 
@@ -602,7 +607,7 @@ def test_the_wait_is_marked_busy_and_the_timer_always_stops():
     network failure and an aborted fetch all stop it; the busy flag comes off
     on the same path."""
     source = APP_JS.read_text(encoding="utf-8")
-    handler = source.split('subdomainAccordion.addEventListener("toggle"')[1]
+    handler = source.split('subdomainRun.addEventListener("click"')[1]
     assert '"aria-busy", "true"' in handler
     final = handler.split("} finally {")[1].split("}")[0]
     assert "clearInterval(" in final
@@ -612,7 +617,7 @@ def test_the_wait_is_marked_busy_and_the_timer_always_stops():
 def test_the_counter_is_hidden_from_the_live_region():
     """A twenty-second wait is one announcement, not twenty."""
     source = APP_JS.read_text(encoding="utf-8")
-    handler = source.split('subdomainAccordion.addEventListener("toggle"')[1]
+    handler = source.split('subdomainRun.addEventListener("click"')[1]
     assert 'elapsed.setAttribute("aria-hidden", "true")' in handler
 
 
@@ -636,3 +641,18 @@ def test_the_slash_shortcut_leaves_the_filter_alone():
     source = APP_JS.read_text(encoding="utf-8")
     shortcut = source.split('event.key === "/"')[1].split("\n")[0]
     assert "input, textarea" in shortcut
+
+
+def test_crtsh_is_asked_only_on_the_button_and_once():
+    """Pressing "Look up subdomains" is the opt-in: the fetch is in the
+    button's click handler alone, which disables the button and runs once,
+    and nothing listens for a panel opening any more."""
+    source = APP_JS.read_text(encoding="utf-8")
+    assert 'getElementById("subdomains-run")' in source
+    handler = source.split('subdomainRun.addEventListener("click"')[1]
+    start = handler.split("fetch(")[0]
+    assert "if (subdomainsBooted)" in start
+    assert "subdomainRun.disabled = true" in start
+    assert source.count("?subdomains=only`") == 2  # this fetch and fullListHref
+    assert "acc-subdomains" not in source
+    assert '"toggle", async' not in source

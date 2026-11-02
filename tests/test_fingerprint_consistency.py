@@ -253,14 +253,15 @@ if (!SHORT_OFFSET) {
   };
 }
 const calls = { created: 0, sent: [], stored: [] };
+const listeners = {};
 function el(tag, id) {
   const node = {
     tag, id: id || "", className: "", children: [], dataset: {}, disabled: false,
-    colSpan: 1, style: {}, offsetWidth: 0, offsetHeight: 0, _text: "",
+    colSpan: 1, style: {}, offsetWidth: 0, offsetHeight: 0, _text: "", title: "",
     append(...nodes) { this.children.push(...nodes); },
     appendChild(child) { this.children.push(child); return child; },
     removeChild() {},
-    addEventListener() {},
+    addEventListener(type, fn) { listeners[this.id + ":" + type] = fn; },
     getContext() { return null; },
     classList: { add() {}, remove() {} },
   };
@@ -272,14 +273,12 @@ function el(tag, id) {
   return node;
 }
 const ids = SELF_PAGE
-  ? ["acc-fingerprint", "fp-signals", "fp-hash", "fp-bits", "fp-unique",
-     "fp-acc-hint", "fp-copy"]
+  ? ["sec-browser", "fp-measure", "fp-signals", "fp-hash", "fp-bits", "fp-unique",
+     "fp-copy"]
   : [];
 const elements = Object.fromEntries(ids.map((id) => [id, el("div", id)]));
-// Open, as a visitor who expanded the panel has it: the UNIQUE ID, the bit
-// estimate and the hint's signal count are what these tests compare, and a
-// script may hold that measurement until the panel is opened.
-if (elements["acc-fingerprint"]) elements["acc-fingerprint"].open = true;
+// The "Your browser" section's hint, as its heading has it.
+const hint = SELF_PAGE ? el("span", "browser-hint") : null;
 if (PAGE_DATA !== null) {
   elements["page-data"] = el("script", "page-data");
   elements["page-data"].textContent = JSON.stringify(PAGE_DATA).replace(/<\//g, "<\\/");
@@ -287,6 +286,8 @@ if (PAGE_DATA !== null) {
 global.window = global;
 global.document = {
   getElementById: (id) => elements[id] || null,
+  querySelectorAll: (selector) =>
+    selector === '[data-hint="browser"]' && hint ? [hint] : [],
   createElement: (tag) => { calls.created += 1; return el(tag); },
   body: el("body"),
 };
@@ -313,6 +314,10 @@ for (const name of ["localStorage", "sessionStorage", "indexedDB"]) {
 require(FINGERPRINT_JS);
 const text = (id) => (elements[id] ? elements[id].textContent : null);
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Pressed, as a visitor who measured has it: the UNIQUE ID, the bit estimate
+// and the hint's signal count are what these tests compare, and the script
+// holds that measurement until "Measure" is pressed.
+if (listeners["fp-measure:click"]) listeners["fp-measure:click"]();
 (async () => {
   // The measurement ends by writing the UNIQUE ID (a dash when it fails), so
   // wait for that rather than for a fixed time; a lookup page has no ID.
@@ -329,7 +334,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     : null;
   console.log(JSON.stringify({
     created: calls.created, sent: calls.sent, stored: calls.stored, rows,
-    hint: text("fp-acc-hint"), hash: text("fp-hash"), bits: text("fp-bits"),
+    hint: hint ? hint.textContent : null, hash: text("fp-hash"), bits: text("fp-bits"),
   }));
 })();
 """

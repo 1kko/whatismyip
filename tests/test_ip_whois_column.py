@@ -1,15 +1,18 @@
-"""The WHOIS facts column on an IP lookup shows the registration record only.
+"""An IP lookup's registration shows the registration record only.
 
-It used to read a key the canonical record never has ('updated_date'), so every
-IP lookup rendered 'Updated —', and it filled Netblock and Country from GeoIP,
-so a column titled WHOIS was mostly showing geolocation data. Pure and
-deterministic: no network.
+The WHOIS facts column it once had used to read a key the canonical record
+never has ('updated_date'), so every IP lookup rendered 'Updated —', and it
+filled Netblock and Country from GeoIP, so a column titled WHOIS was mostly
+showing geolocation data. The Registration card (overview.registration_card)
+and section that replace it read the record alone. Pure and deterministic: no
+network.
 """
 
 import datetime
 
+import overview
 import rdap
-from viewmodel import DASH, build_view, geoip_rows, whois_display, whois_fill
+from viewmodel import build_view, geoip_rows, whois_display, whois_fill
 
 UTC = datetime.timezone.utc
 
@@ -52,10 +55,10 @@ def _response(whois):
     }
 
 
-def _column(whois):
-    view = build_view(_response(whois), is_self=False)
-    column = next(c for c in view["facts"] if c["title"] == "WHOIS")
-    return {row["label"]: row for row in column["rows"]}
+def _card(whois):
+    """The IP page's Registration card, as overview.build words it."""
+    cards = overview.build(_response(whois))["cards"]
+    return next(card for card in cards if card["id"] == "whois")
 
 
 class TestRdapIpNormaliser:
@@ -76,45 +79,46 @@ class TestRdapIpNormaliser:
         assert "parent_handle" in rdap.CANONICAL_FIELDS
 
 
-class TestIpWhoisColumn:
+class TestIpRegistrationCard:
     def test_updated_is_filled_from_a_normalised_record(self):
-        rows = _column(rdap._normalize_rdap_ip(WHOISIT_IP, "8.8.8.8"))
-        assert rows["Updated"]["value"] != DASH
-        assert "2024-03-05" in rows["Updated"]["value"]
-        assert rows["Updated"]["tone"] == "default"
+        card = _card(rdap._normalize_rdap_ip(WHOISIT_IP, "8.8.8.8"))
+        assert "2024-03-05" in card["sub"]
 
-    def test_rows_come_from_the_registration_record_not_geoip(self):
-        rows = _column(rdap._normalize_rdap_ip(WHOISIT_IP, "8.8.8.8"))
-        assert rows["Network"]["value"] == "8.8.8.0/24"  # GeoIP says /23
-        assert rows["RIR"]["value"] == "ARIN"
-        assert rows["Abuse"]["value"] == "network-abuse@google.com"
-        values = {row["value"] for row in rows.values()}
-        assert LOCATION["cidr"] not in values
-        assert LOCATION["country_code"] not in values
-        # The GeoIP-sourced rows are gone from this column altogether.
-        assert "Netblock" not in rows
-        assert "Country" not in rows
+    def test_it_comes_from_the_registration_record_not_geoip(self):
+        record = rdap._normalize_rdap_ip(WHOISIT_IP, "8.8.8.8")
+        card = _card(record)
+        assert card["value"] == "8.8.8.0/24"  # GeoIP says /23
+        assert card["sub"] == "ARIN · 2024-03-05"
+        assert card["state"] == "info"
+        shown = {card["value"], card["sub"], *whois_display(record).values()}
+        assert LOCATION["cidr"] not in shown
+        assert LOCATION["country_code"] not in shown
+        assert whois_display(record)["Abuse contact"] == "network-abuse@google.com"
+        # GeoIP-sourced rows are no part of the registration.
+        assert "Netblock" not in whois_display(record)
+        assert "Country" not in whois_display(record)
 
     def test_failed_lookup_does_not_fall_back_to_geoip(self):
-        rows = _column({"error": "WHOIS lookup timed out"})
-        assert rows["Status"]["value"] == "unavailable"
-        for label in ("Network", "RIR", "Abuse", "Updated"):
-            assert rows[label]["value"] == DASH
-            assert rows[label]["tone"] == "muted"
+        card = _card({"error": "WHOIS lookup timed out"})
+        assert (card["value"], card["sub"], card["state"]) == (
+            "?",
+            "lookup failed",
+            "unknown",
+        )
 
     def test_geoip_values_are_still_on_the_page(self):
-        # What left the WHOIS column must still be shown where it belongs.
+        # What is not the registration's is still shown where it belongs: the
+        # Organization section's network rows, and the GeoIP rows.
         view = build_view(_response({"error": "x"}), is_self=False)
-        network = next(c for c in view["facts"] if c["title"] == "NETWORK")
         assert {"label": "CIDR", "value": "8.8.8.0/23", "tone": "default"} in (
-            network["rows"]
+            view["org_rows"]
         )
         geo = {row["label"]: row["value"] for row in geoip_rows(LOCATION)}
         assert geo["Network"] == "8.8.8.0/23"
         assert "(US)" in geo["Country"]
 
 
-class TestWhoisAccordion:
+class TestRegistrationRows:
     def test_ip_record_shows_assignment_and_parent(self):
         out = whois_display(rdap._normalize_rdap_ip(WHOISIT_IP, "8.8.8.8"))
         assert out["Assignment"] == "direct allocation"
@@ -150,19 +154,3 @@ class TestWhoisAccordion:
             "Registrar": "MarkMonitor Inc.",
             "Updated": "2024-08-02 02:17 UTC",
         }
-
-    def test_domain_lookup_still_has_no_whois_facts_column(self):
-        view = build_view(
-            {
-                "address": "google.com",
-                "location": dict(LOCATION),
-                "domain": {"a": [{"ip": "142.250.207.46", "ttl": 300}]},
-                "whois": {"source": "rdap", "name": "google.com"},
-            },
-            is_self=False,
-        )
-        assert [c["title"] for c in view["facts"]] == [
-            "NETWORK",
-            "DNS",
-            "CERTIFICATE",
-        ]

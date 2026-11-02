@@ -1,4 +1,7 @@
-{% import "_blocks.html" as blocks with context %}
+{% import "_blocks.html" as blocks with context -%}
+{% macro toc_item(item) -%}
+<a class="toc__item" href="#sec-{{ item.id }}" data-section="{{ item.id }}"><span class="dot dot--{{ section_states[item.id] }}" aria-hidden="true"></span><span class="toc__name">{{ item.title }}</span><span class="toc__hint" data-hint="{{ item.id }}" title="{{ item.hint }}">{{ item.hint }}</span></a>
+{%- endmacro %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -75,57 +78,79 @@
     </section>
 
     <main class="inset">
-        {% if view_map %}
-        <section class="mobile-map">
-            <div class="mobile-map__header">
-                <h2 class="facts__title">LOCATION</h2>
-            </div>
-            <div class="mobile-map__card map" id="mobile-map"></div>
-        </section>
-        {% endif %}
-
         {% if view.dns_banner %}
         <p class="dns-banner" role="status">{{ view.dns_banner }}</p>
         {% endif %}
 
-        <section class="facts">
-            {% for column in view.facts %}
-            <div class="facts__col"{% if column.id %} id="facts-{{ column.id }}"{% endif %}>
-                <h2 class="facts__title">{{ column.title }}</h2>
-                {% for row in column.rows %}
-                <div class="kv">
-                    <span class="kv-label">{{ row.label }}</span>
-                    <span class="kv-value tone-{{ row.tone }}">{% if row.href %}<a class="lookup-link" href="{{ row.href }}" rel="nofollow">{{ row.value }}</a>{% else %}{{ row.value }}{% endif %}{% if row.suffix %}{{ row.suffix }}{% endif %}</span>
-                </div>
+        {#- The answer first (overview.py): one sentence, the findings to
+            review, and a status card per section. Every card and chip is a
+            link to its section, so the page works without JavaScript; app.js
+            fills the WHOIS card of a self page that went out early. #}
+        <section class="summary" aria-label="Summary">
+            {% if overview.sentence %}
+            <p class="summary__sentence">
+                {%- for segment in overview.sentence -%}
+                {%- if segment.strong -%}<strong{% if segment.tone %} class="tone-{{ segment.tone }}"{% endif %}>{{ segment.text }}</strong>
+                {%- elif segment.tone -%}<span class="tone-{{ segment.tone }}">{{ segment.text }}</span>
+                {%- else -%}{{ segment.text }}{%- endif -%}
+                {%- endfor -%}
+            </p>
+            {% endif %}
+            <div class="review" id="review"{% if not overview.chips %} hidden{% endif %}>
+                <span class="review__label">To review</span>
+                {% for chip in overview.chips %}
+                <a class="chip chip--{{ chip.tone }}" href="#sec-{{ chip.section }}">{{ chip.text }}</a>
                 {% endfor %}
+                <span id="chips-reputation"></span>
             </div>
-            {% endfor %}
+            {% if view.meta_line %}<p class="summary__meta mono">{{ view.meta_line }}</p>{% endif %}
         </section>
 
-        <section class="accordions">
-            {% if view.is_self %}
-            <details class="accordion" id="acc-fingerprint">
-                <summary class="accordion__header">
-                    <span class="accordion__title">Fingerprint</span>
-                    <span class="hint" id="fp-acc-hint" title="open to measure">open to measure</span>
-                </summary>
-                <div class="accordion__body">
-                    {{ blocks.fingerprint() }}
-                </div>
-            </details>
-            {% endif %}
-            {% for item in view.accordions %}
-            <details class="accordion" id="acc-{{ item.id }}">
-                <summary class="accordion__header">
-                    <span class="accordion__title">{{ item.title }}</span>
-                    <span class="hint" id="hint-{{ item.id }}" title="{{ item.hint }}">{{ item.hint }}</span>
-                </summary>
-                <div class="accordion__body">
-                    {{ blocks.render(item.id) }}
-                </div>
-            </details>
+        <div class="cards">
+            {% for card in overview.cards %}
+            <a class="card card--{{ card.state }}" id="card-{{ card.id }}" href="{{ card.href }}">
+                <span class="card__top"><span class="dot dot--{{ card.state }}" aria-hidden="true"></span><span class="card__label">{{ card.label }}</span></span>
+                <span class="card__value" title="{{ card.value }}">{{ card.value }}</span>
+                <span class="card__sub" title="{{ card.sub }}">{{ card.sub }}</span>
+            </a>
             {% endfor %}
-        </section>
+        </div>
+
+        {#- Every section expanded, in the page type's fixed order
+            (viewmodel._sections), with a contents list that carries each
+            one's dot and hint. The hint is one line with an ellipsis where it
+            does not fit, so its title repeats it, and everything that writes
+            a hint writes every [data-hint] of that section. #}
+        <div class="report">
+            <nav class="toc" aria-label="On this page">
+                <h2 class="toc__title">On this page</h2>
+                {% for item in view.sections if item.group != "request" %}
+                {{ toc_item(item) }}
+                {% endfor %}
+                {% set on_request = view.sections | selectattr("group", "equalto", "request") | list %}
+                {% if on_request %}
+                <h2 class="toc__group">On request</h2>
+                {% for item in on_request %}
+                {{ toc_item(item) }}
+                {% endfor %}
+                {% endif %}
+            </nav>
+
+            <div class="report__body">
+                {% for item in view.sections %}
+                <section class="report-section" id="sec-{{ item.id }}" aria-labelledby="h-{{ item.id }}">
+                    <div class="report-section__head">
+                        <h2 id="h-{{ item.id }}" class="report-section__title"><span class="dot dot--{{ section_states[item.id] }}" aria-hidden="true"></span>{{ item.title }}</h2>
+                        <span class="hint" id="hint-{{ item.id }}" data-hint="{{ item.id }}" title="{{ item.hint }}">{{ item.hint }}</span>
+                    </div>
+                    {% for block in item.blocks %}
+                    {% if block.heading %}<h3 class="report-section__sub">{{ block.heading }}</h3>{% endif %}
+                    {{ blocks.render(block.name) }}
+                    {% endfor %}
+                </section>
+                {% endfor %}
+            </div>
+        </div>
     </main>
 
     {% include "_footer.html" %}

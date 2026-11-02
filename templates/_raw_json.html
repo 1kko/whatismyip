@@ -1,6 +1,7 @@
 {# The Raw JSON panel's body, shared by browser.html and as.html: how to get
    the same answer from curl and over MCP, and the tree static/js/app.js draws
-   from #page-data when the panel first opens. #}
+   from #page-data when the panel first opens (as.html's accordion) or its
+   button is pressed (the lookup page's raw block sets raw_open_button). #}
 <p class="api-note">Any non-browser client gets JSON — curl, wget and friends already qualify:</p>
 <div class="code">
     <pre id="curl-example">curl {{ api_base }}{{ view.target }}</pre>
@@ -19,4 +20,9 @@
             data-value="claude mcp add --transport http whatismyip {{ api_base }}mcp">Copy</button>
 </div>
 <p class="api-note tone-muted">Tools: <span id="mcp-tool-list">{{ mcp_tools | join(', ') }}</span>. whoami_caller reports whoever opened the connection — your own machine from a local client like Claude Code, a datacenter from a hosted one like claude.ai. It flags an address on a datacenter list as likely hosted, but cannot be sure otherwise, so open this page in a browser when you need certainty.</p>
+{% if raw_open_button is defined and raw_open_button -%}
+<button type="button" class="btn" id="raw-open">Show the JSON tree</button>
+<div id="raw-json" hidden></div>
+{%- else -%}
 <div id="raw-json"></div>
+{%- endif %}

@@ -3,6 +3,7 @@ import re
 
 import pytest
 
+import overview
 import viewmodel
 from rdap import _normalize_rdap_domain, _normalize_rdap_ip, normalize_whois
 from viewmodel import (
@@ -221,61 +222,47 @@ class TestDnsCaption:
             )
 
 
-class TestFacts:
-    def test_ip_columns(self):
-        titles = [
-            column["title"] for column in build_view(IP_RESPONSE, is_self=True)["facts"]
-        ]
-        assert titles == ["NETWORK", "REVERSE DNS", "WHOIS"]
-
-    def test_domain_columns(self):
-        titles = [
-            column["title"]
-            for column in build_view(DOMAIN_RESPONSE, is_self=False)["facts"]
-        ]
-        assert titles == ["NETWORK", "DNS", "CERTIFICATE"]
-
-    def test_failed_whois_is_a_warning_not_an_error_page(self):
-        whois_column = build_view(IP_RESPONSE, is_self=True)["facts"][2]
-        status = whois_column["rows"][0]
-        assert status["value"] == "unavailable"
-        assert status["tone"] == "warning"
-
-    def test_certificate_column_reads_the_raw_getpeercert_dict(self):
-        cert = build_view(DOMAIN_RESPONSE, is_self=False)["facts"][2]
-        rows = {row["label"]: row for row in cert["rows"]}
-        assert rows["Issuer"]["value"] == "Google Trust Services"
-        assert rows["SAN"]["value"] == "2 names"
-        assert rows["Expires"]["value"] == "2026-09-14"
-        assert rows["Status"]["tone"] in ("success", "warning", "danger")
-
-    def test_dns_column_counts_records(self):
-        dns_column = build_view(DOMAIN_RESPONSE, is_self=False)["facts"][1]
-        rows = {row["label"]: row["value"] for row in dns_column["rows"]}
-        assert rows["A"] == "1 record"
-        assert rows["NS"] == "4 records"
-        assert rows["TXT"] == "12 records"
-
-    def test_empty_dns_records_render_as_dash(self):
-        response = dict(DOMAIN_RESPONSE, domain={})
-        dns_column = build_view(response, is_self=False)["facts"][1]
-        assert all(row["value"] == "—" for row in dns_column["rows"])
+def _hints(view):
+    """Each section's hint, by section id (the contents list and the heading
+    both print it)."""
+    return {section["id"]: section["hint"] for section in view["sections"]}
 
 
-class TestAccordions:
-    def test_accordions_in_order(self):
-        ids = [
-            item["id"] for item in build_view(IP_RESPONSE, is_self=True)["accordions"]
-        ]
-        assert ids == ["whois", "dns", "ssl", "geoip", "headers", "raw"]
+class TestCardsOfTheFixtures:
+    """What the facts columns used to say, now on the status cards
+    (overview.py) and in the Certificate section's rows."""
 
-    def test_hints_summarise_content(self):
-        items = {
-            i["id"]: i["hint"]
-            for i in build_view(DOMAIN_RESPONSE, is_self=False)["accordions"]
+    def test_failed_whois_is_a_failure_not_an_error_page(self):
+        card = overview.registration_card(IP_RESPONSE["whois"], is_ip=True)
+        assert (card["value"], card["sub"], card["state"]) == (
+            "?",
+            "lookup failed",
+            "unknown",
+        )
+
+    def test_the_certificate_reads_the_raw_getpeercert_dict(self):
+        card = overview.certificate_card(DOMAIN_RESPONSE["ssl"])
+        assert card["sub"] == "Google Trust Services"
+        assert card["state"] in ("pass", "warn", "danger")
+        rows = {
+            row["label"]: row["value"]
+            for row in build_view(DOMAIN_RESPONSE, is_self=False)["ssl_rows"]
         }
-        assert "MarkMonitor" in items["whois"]
-        assert items["dns"] == "A 1 · AAAA 0 · MX 1 · NS 4 · TXT 12"
+        assert rows["Issuer (CA)"] == "Google Trust Services"
+        assert rows["Valid until"].startswith("2026-09-14")
+        assert len(rows["SAN"].split(", ")) == 2
+
+    def test_the_dns_card_counts_records(self):
+        card = overview.dns_card(DOMAIN_RESPONSE["domain"])
+        assert card["value"] == "18 records"
+        assert card["sub"] == "A 1 · AAAA 0 · MX 1 · NS 4 · TXT 12"
+
+
+class TestSectionHints:
+    def test_hints_summarise_content(self):
+        hints = _hints(build_view(DOMAIN_RESPONSE, is_self=False))
+        assert "MarkMonitor" in hints["whois"]
+        assert hints["dns"] == "A 1 · AAAA 0 · MX 1 · NS 4 · TXT 12"
 
     def test_list_valued_whois_dates_are_flattened(self):
         # python-whois hands back lists for some domains; normalize_whois folds
@@ -290,31 +277,18 @@ class TestAccordions:
             "expiration_date": [datetime.datetime(2028, 9, 14, 4, 0, tzinfo=UTC)],
         }
         response = dict(DOMAIN_RESPONSE, whois=normalize_whois(raw, "google.com"))
-        hint = {
-            i["id"]: i["hint"]
-            for i in build_view(response, is_self=False)["accordions"]
-        }["whois"]
+        hint = _hints(build_view(response, is_self=False))["whois"]
         assert hint == "MarkMonitor Inc. · 1997 → 2028"
 
     def test_failed_whois_hint(self):
-        items = {
-            i["id"]: i["hint"]
-            for i in build_view(IP_RESPONSE, is_self=True)["accordions"]
-        }
-        assert items["whois"] == "lookup failed"
-        assert items["headers"] == "1 header"
+        assert _hints(build_view(IP_RESPONSE, is_self=True))["whois"] == (
+            "lookup failed"
+        )
 
-    def test_ssl_hint_present_for_domain_and_absent_for_ip(self):
-        dom = {
-            i["id"]: i["hint"]
-            for i in build_view(DOMAIN_RESPONSE, is_self=False)["accordions"]
-        }
+    def test_ssl_hint_present_for_domain_and_no_section_for_ip(self):
+        dom = _hints(build_view(DOMAIN_RESPONSE, is_self=False))
         assert "Google Trust Services" in dom["ssl"]
-        ip = {
-            i["id"]: i["hint"]
-            for i in build_view(IP_RESPONSE, is_self=True)["accordions"]
-        }
-        assert ip["ssl"] == "no certificate"
+        assert "ssl" not in _hints(build_view(IP_RESPONSE, is_self=True))
 
 
 FULL_SSL = {
@@ -856,7 +830,7 @@ class TestSelfFlag:
         assert view["is_self"] is False
 
 
-def test_a_domain_lookup_offers_the_subdomains_accordion():
+def test_a_domain_lookup_offers_the_subdomains_section():
     view = build_view(
         {
             # "a" holds {"ip": ...} dicts, not bare strings -- see IP_RESPONSE /
@@ -867,21 +841,21 @@ def test_a_domain_lookup_offers_the_subdomains_accordion():
         },
         is_self=False,
     )
-    ids = [item["id"] for item in view["accordions"]]
+    ids = [item["id"] for item in view["sections"]]
     assert "subdomains" in ids
 
 
-def test_an_ip_lookup_does_not_offer_the_subdomains_accordion():
+def test_an_ip_lookup_does_not_offer_the_subdomains_section():
     """An IP address has no subdomains; offering the panel would invite a
     request that can only fail."""
     view = build_view(
         {"address": "8.8.8.8", "domain": {}, "location": {}}, is_self=False
     )
-    ids = [item["id"] for item in view["accordions"]]
+    ids = [item["id"] for item in view["sections"]]
     assert "subdomains" not in ids
 
 
-def test_the_kill_switch_removes_the_subdomains_accordion_for_a_domain():
+def test_the_kill_switch_removes_the_subdomains_section_for_a_domain():
     """Review M2. SUBDOMAIN_ENABLED=false must not leave the page still
     offering a panel whose only possible outcome is a 400 from the route --
     the flag gets flipped exactly when something is on fire."""
@@ -894,12 +868,12 @@ def test_the_kill_switch_removes_the_subdomains_accordion_for_a_domain():
         is_self=False,
         subdomains_enabled=False,
     )
-    ids = [item["id"] for item in view["accordions"]]
+    ids = [item["id"] for item in view["sections"]]
     assert "subdomains" not in ids
 
 
 def _subdomain_hint(subdomains=None):
-    """The hint on the Subdomains accordion for a domain lookup."""
+    """The hint on the Subdomains section for a domain lookup."""
     response = {
         "address": "example.com",
         "domain": {"a": [{"ip": "1.2.3.4", "ttl": 300}]},
@@ -908,13 +882,13 @@ def _subdomain_hint(subdomains=None):
     if subdomains is not None:
         response["subdomains"] = subdomains
     view = build_view(response, is_self=False)
-    return next(i["hint"] for i in view["accordions"] if i["id"] == "subdomains")
+    return next(i["hint"] for i in view["sections"] if i["id"] == "subdomains")
 
 
-def test_the_unopened_panel_invites_a_click_rather_than_naming_its_source():
-    """Nothing is fetched until the accordion opens, so the hint says what
-    opening it does. Where the data comes from is inside the panel."""
-    assert _subdomain_hint() == "click to lookup"
+def test_the_unasked_panel_says_on_request_rather_than_naming_its_source():
+    """Nothing is fetched until "Look up subdomains" is pressed, so the hint
+    says the section is on request. Where the data comes from is inside it."""
+    assert _subdomain_hint() == "on request"
 
 
 def test_a_loaded_panel_reports_the_count():
@@ -984,39 +958,32 @@ class TestWhoisNotRegistered:
 
     @staticmethod
     def _hint(view):
-        return next(i["hint"] for i in view["accordions"] if i["id"] == "whois")
+        return next(i["hint"] for i in view["sections"] if i["id"] == "whois")
 
     @staticmethod
-    def _status(whois):
-        """The WHOIS facts column is only built for an IP target -- a domain
-        gets DNS and certificate columns instead -- so this path is reached by
-        an unallocated address, not by a subdomain."""
-        view = build_view(
-            {"address": "192.0.2.1", "domain": {}, "location": {}, "whois": whois},
-            is_self=False,
-        )
-        col = next(c for c in view["facts"] if c["title"] == "WHOIS")
-        return next(r for r in col["rows"] if r["label"] == "Status")
+    def _card(whois):
+        """The Registration card of an address (an unallocated one, not a
+        subdomain), as overview.py words it."""
+        return overview.registration_card(whois, is_ip=True)
 
-    def test_the_accordion_hint_distinguishes_the_two(self):
+    def test_the_section_hint_distinguishes_the_two(self):
         assert self._hint(self._view({"error": "not registered"})) == "not registered"
         assert self._hint(self._view({"error": "WHOIS lookup timed out"})) == (
             "lookup failed"
         )
         assert self._hint(self._view(None)) == "lookup failed"
 
-    def test_the_facts_column_has_three_states_not_two(self):
-        not_reg = self._status({"error": "not registered"})
-        assert not_reg["value"] == "not registered"
-        assert not_reg["tone"] != "warning"  # nothing is wrong
+    def test_the_card_has_three_states_not_two(self):
+        not_reg = self._card({"error": "not registered"})
+        assert (not_reg["value"], not_reg["sub"]) == ("no record", "not registered")
+        assert not_reg["state"] == "info"  # nothing is wrong
 
-        failed = self._status({"error": "WHOIS lookup timed out"})
-        assert failed["value"] == "unavailable"
-        assert failed["tone"] == "warning"
+        failed = self._card({"error": "WHOIS lookup timed out"})
+        assert (failed["value"], failed["state"]) == ("?", "unknown")
 
-        ok = self._status({"registrar": "Example Registrar"})
+        ok = self._card({"registrar": "Example Registrar"})
         assert ok["value"] == "record found"  # the lookup's status, not the name's
-        assert ok["tone"] == "success"
+        assert ok["state"] == "info"
 
 
 class TestWhoisOfTheRegistrableDomain:
@@ -1039,7 +1006,7 @@ class TestWhoisOfTheRegistrableDomain:
             },
             is_self=False,
         )
-        return next(i["hint"] for i in view["accordions"] if i["id"] == "whois")
+        return next(i["hint"] for i in view["sections"] if i["id"] == "whois")
 
     def test_the_hint_leads_with_whose_registration_it_is(self):
         labelled = {
@@ -1089,16 +1056,11 @@ class TestWhoisThinRecord:
             },
             is_self=False,
         )
-        return next(i["hint"] for i in view["accordions"] if i["id"] == "whois")
+        return next(i["hint"] for i in view["sections"] if i["id"] == "whois")
 
     @staticmethod
-    def _status(whois):
-        view = build_view(
-            {"address": "192.0.2.1", "domain": {}, "location": {}, "whois": whois},
-            is_self=False,
-        )
-        column = next(c for c in view["facts"] if c["title"] == "WHOIS")
-        return next(row for row in column["rows"] if row["label"] == "Status")
+    def _card(whois):
+        return overview.registration_card(whois, is_ip=True)
 
     def test_the_hint_says_no_details_rather_than_registry_data(self):
         assert self._hint(THIN_RECORD) == "no details over WHOIS"
@@ -1110,27 +1072,24 @@ class TestWhoisThinRecord:
             "registration of admin.ch · no details over WHOIS"
         )
 
-    def test_the_facts_column_has_a_fourth_state(self):
-        thin = self._status(THIN_RECORD)
-        assert (thin["value"], thin["tone"]) == ("no details", "muted")
-        assert (
-            self._status({"registrar": "Example Registrar"})["value"] == "record found"
-        )
-        assert self._status({"error": "not registered"})["value"] == "not registered"
-        failed = self._status({"error": "WHOIS lookup timed out"})
-        assert (failed["value"], failed["tone"]) == ("unavailable", "warning")
+    def test_the_card_has_a_fourth_state(self):
+        thin = self._card(THIN_RECORD)
+        assert (thin["value"], thin["state"]) == ("no details", "info")
+        assert self._card({"registrar": "Example Registrar"})["value"] == "record found"
+        assert self._card({"error": "not registered"})["value"] == "no record"
+        failed = self._card({"error": "WHOIS lookup timed out"})
+        assert (failed["value"], failed["state"]) == ("?", "unknown")
 
-    def test_the_accordion_rows_are_the_two_facts_there_are(self):
+    def test_the_section_rows_are_the_two_facts_there_are(self):
         assert whois_display(THIN_RECORD) == {"Source": "WHOIS", "Name": "admin.ch"}
 
     def test_whois_fill_words_it_the_same(self):
         fill = whois_fill(THIN_RECORD)
         assert fill["hint"] == "no details over WHOIS"
-        assert fill["column"][0] == {
-            "label": "Status",
-            "value": "no details",
-            "tone": "muted",
-        }
+        assert fill["rows"] == [
+            {"label": label, "value": value}
+            for label, value in whois_display(THIN_RECORD).items()
+        ]
 
 
 class TestStatusRow:
@@ -1197,8 +1156,8 @@ class TestStatusRow:
 
 class TestStatusTag:
     """A hold or a pending delete is the one registry status a visitor needs
-    to see before opening the WHOIS accordion: the name is out of the DNS or
-    about to be dropped. The tag is the code, which the accordion glosses."""
+    to see before reading the Registration section: the name is out of the DNS or
+    about to be dropped. The tag is the code, which the section glosses."""
 
     @staticmethod
     def _view(status, reputation=None):
@@ -1417,16 +1376,15 @@ class TestFcrdnsState:
         assert fcrdns_state("dns.google.", {}, "8.8.8.8") is None
 
 
-def _reverse_rows(response, is_self=False):
-    column = build_view(response, is_self=is_self)["facts"][1]
-    assert column["title"] == "REVERSE DNS"
-    return {row["label"]: row for row in column["rows"]}
+def _ptr(response, is_self=False):
+    """The PTR row an IP's Domains section draws (the ptr block)."""
+    return build_view(response, is_self=is_self)["ptr_row"]
 
 
-class TestReverseColumnVerdict:
+class TestPtrRowVerdict:
     def test_a_ptr_that_points_back_says_confirmed(self):
         # IP_RESPONSE's PTR is dns.google., whose A records include 8.8.8.8.
-        assert _reverse_rows(IP_RESPONSE)["PTR"] == {
+        assert _ptr(IP_RESPONSE) == {
             "label": "PTR",
             "value": "dns.google.",
             "suffix": " → confirmed",
@@ -1435,7 +1393,7 @@ class TestReverseColumnVerdict:
 
     def test_a_ptr_that_points_elsewhere_says_it_does_not_point_back(self):
         response = {**IP_RESPONSE, "domain": _sweep(a=["216.239.32.10"])}
-        assert _reverse_rows(response)["PTR"] == {
+        assert _ptr(response) == {
             "label": "PTR",
             "value": "dns.google.",
             "suffix": " → does not point back",
@@ -1445,44 +1403,38 @@ class TestReverseColumnVerdict:
     def test_the_wording_never_accuses(self):
         """CDNs and shared hosts fail this legitimately."""
         response = {**IP_RESPONSE, "domain": _sweep(a=["216.239.32.10"])}
-        text = " ".join(
-            f"{row['value']}{row.get('suffix', '')}".lower()
-            for row in _reverse_rows(response).values()
-        )
+        row = _ptr(response)
+        text = f"{row['value']}{row.get('suffix', '')}".lower()
         for word in ("spoof", "forged", "fake", "invalid"):
             assert word not in text
 
     def test_a_failed_forward_query_leaves_the_name_as_it_was(self):
-        """The A row already says the query failed; the PTR row claims nothing."""
-        rows = _reverse_rows({**IP_RESPONSE, "domain": _sweep(a_status="timeout")})
-        assert rows["PTR"] == {
+        """The PTR name's DNS table already says the A query failed (its A
+        row reads dns_failure_text); the PTR row claims nothing."""
+        domain = _sweep(a_status="timeout")
+        assert _ptr({**IP_RESPONSE, "domain": domain}) == {
             "label": "PTR",
             "value": "dns.google.",
             "tone": "default",
         }
-        assert rows["A"] == {"label": "A", "value": "(timed out)", "tone": "warning"}
+        assert viewmodel.dns_failure_text(domain, "a") == "(timed out)"
 
     def test_no_ptr_is_still_a_muted_dash(self):
         location = {**IP_RESPONSE["location"], "reverse_dns": None}
         response = {**IP_RESPONSE, "location": location, "domain": {}}
-        assert _reverse_rows(response)["PTR"] == {
+        assert _ptr(response) == {
             "label": "PTR",
             "value": DASH,
             "tone": "muted",
         }
 
     def test_the_self_page_judges_the_visitors_own_address(self):
-        """build_view gives the self page the same column; its address can be
+        """build_view gives the self page the same row; its address can be
         the ::ffff: form a dual-stack socket reports."""
         response = {**IP_RESPONSE, "address": "::ffff:8.8.8.8"}
-        row = _reverse_rows(response, is_self=True)["PTR"]
+        row = _ptr(response, is_self=True)
         assert row["value"] == "dns.google."
         assert row["suffix"] == " → confirmed"
-
-
-def _fact(view, title, label):
-    column = next(c for c in view["facts"] if c["title"] == title)
-    return next(r for r in column["rows"] if r["label"] == label)
 
 
 class TestLookupLinks:
@@ -1495,11 +1447,21 @@ class TestLookupLinks:
         return "/" + value.rstrip(".")
 
     def test_without_a_link_function_nothing_carries_an_href(self):
-        """Not even href=None: every facts row and tag is the dict it always
-        was, and tests across the suite compare those dicts whole."""
+        """Not even href=None: every row the blocks draw and every tag is the
+        dict it always was, and tests across the suite compare those dicts
+        whole."""
         for response in (IP_RESPONSE, DOMAIN_RESPONSE):
             view = build_view(response, is_self=False)
-            rows = [row for column in view["facts"] for row in column["rows"]]
+            rows = [
+                row
+                for row in (
+                    view["rdns_row"],
+                    view["ptr_row"],
+                    *(view["org_rows"] or []),
+                )
+                if row
+            ]
+            assert rows
             assert not any("href" in row for row in rows)
             assert not any("href" in tag for tag in view["tags"])
             assert not any(ns["href"] for ns in view["whois_name_servers"])
@@ -1509,7 +1471,7 @@ class TestLookupLinks:
         view = build_view(
             dict(IP_RESPONSE, domain={}), is_self=True, link_for=self._link_for
         )
-        ptr = _fact(view, "REVERSE DNS", "PTR")
+        ptr = view["ptr_row"]
         assert (ptr["value"], ptr["href"]) == ("dns.google.", "/dns.google")
         assert "suffix" not in ptr
 
@@ -1517,7 +1479,7 @@ class TestLookupLinks:
         """The href is the name's; the verdict stays its own `suffix`, which
         the template prints after the anchor as plain text."""
         view = build_view(IP_RESPONSE, is_self=True, link_for=self._link_for)
-        assert _fact(view, "REVERSE DNS", "PTR") == {
+        assert view["ptr_row"] == {
             "label": "PTR",
             "value": "dns.google.",
             "suffix": " → confirmed",
@@ -1532,7 +1494,7 @@ class TestLookupLinks:
             is_self=False,
             link_for=self._link_for,
         )
-        rdns = _fact(view, "NETWORK", "rDNS")
+        rdns = view["rdns_row"]
         assert rdns["value"] == "lhr25s34.1e100.net."
         assert rdns["href"] == "/lhr25s34.1e100.net"
 
@@ -1541,7 +1503,7 @@ class TestLookupLinks:
         view = build_view(
             dict(IP_RESPONSE, location=location), is_self=True, link_for=self._link_for
         )
-        ptr = _fact(view, "REVERSE DNS", "PTR")
+        ptr = view["ptr_row"]
         assert ptr["value"] == DASH
         assert "href" not in ptr
 
@@ -1549,7 +1511,7 @@ class TestLookupLinks:
         """link_for's None (a private address, a name with no public suffix)
         leaves the row as it was, not with href=None."""
         view = build_view(IP_RESPONSE, is_self=True, link_for=lambda value: None)
-        assert "href" not in _fact(view, "REVERSE DNS", "PTR")
+        assert "href" not in view["ptr_row"]
 
     def test_the_address_tag_links_to_the_address(self):
         view = build_view(DOMAIN_RESPONSE, is_self=False, link_for=self._link_for)
@@ -1945,57 +1907,6 @@ class TestDmarcPolicy:
         assert dmarc_policy(None) is None
 
 
-def _mail_fact(domain):
-    column = build_view(dict(DOMAIN_RESPONSE, domain=domain), is_self=False)
-    rows = {row["label"]: row for row in column["facts"][1]["rows"]}
-    return rows["Mail"]["value"], rows["Mail"]["tone"]
-
-
-SPF = [{"text": "v=spf1 -all", "ttl": 300}]
-
-
-class TestMailRow:
-    def test_spf_and_the_policy_on_one_line(self):
-        domain = {**_dmarc_domain("v=DMARC1; p=reject"), "spf": SPF}
-        assert _mail_fact(domain) == ("SPF yes · DMARC p=reject", "default")
-
-    def test_p_none_is_an_answer_not_a_warning(self):
-        """p=none asks receivers for reports only: monitoring, not a fault."""
-        domain = {**_dmarc_domain("v=DMARC1; p=none"), "spf": SPF}
-        assert _mail_fact(domain) == ("SPF yes · DMARC p=none", "default")
-
-    def test_an_inherited_policy_names_the_domain_it_came_from(self):
-        domain = _dmarc_domain(
-            "v=DMARC1; p=reject; sp=quarantine; pct=50", queried="www.example.com"
-        )
-        assert _mail_fact(domain) == (
-            "SPF — · DMARC sp=quarantine pct=50 (example.com)",
-            "default",
-        )
-
-    def test_no_record_is_a_dash(self):
-        domain = {"spf": SPF, "dmarc": [], "status": {"dmarc": "nxdomain"}}
-        assert _mail_fact(domain) == ("SPF yes · DMARC —", "default")
-
-    def test_neither_is_a_single_dash(self):
-        domain = {"spf": [], "dmarc": [], "status": {"spf": "noanswer"}}
-        assert _mail_fact(domain) == ("—", "default")
-
-    def test_a_failed_query_says_so_and_warns(self):
-        domain = {"spf": SPF, "dmarc": [], "status": {"dmarc": "timeout"}}
-        assert _mail_fact(domain) == ("SPF yes · DMARC (timed out)", "warning")
-        domain = {"spf": [], "dmarc": [], "status": {"spf": "servfail"}}
-        assert _mail_fact(domain) == ("SPF (server failure) · DMARC —", "warning")
-
-    def test_two_records_are_counted_not_read(self):
-        domain = _dmarc_domain("v=DMARC1; p=none", "v=DMARC1; p=reject")
-        assert _mail_fact(domain) == ("SPF — · DMARC 2 records", "default")
-
-    def test_a_record_without_a_policy_says_so(self):
-        domain = _dmarc_domain("v=DMARC1; rua=mailto:d@example.com")
-        assert _mail_fact(domain) == ("SPF — · DMARC no p= tag", "default")
-
-
 class TestDnsSecurityView:
     DATA = {
         "spf": {"state": "pass", "summary": "SPF: -all", "findings": []},
@@ -2016,14 +1927,15 @@ class TestDnsSecurityView:
         assert viewmodel.dns_security_view(None) is None
 
     def test_rows_labels_tones(self):
+        """Each row in its state's tone, warnings and failures first."""
         view = viewmodel.dns_security_view(self.DATA)
         assert [(r["label"], r["tone"]) for r in view["rows"]] == [
-            ("SPF", "success"),
             ("DMARC", "warning"),
-            ("DKIM", "muted"),
             ("CAA", "danger"),
+            ("SPF", "success"),
+            ("DKIM", "muted"),
         ]
-        assert view["rows"][1]["findings"] == [
+        assert view["rows"][0]["findings"] == [
             {"text": "p=none asks for reports only", "tone": "warning"}
         ]
 
@@ -2033,21 +1945,69 @@ class TestDnsSecurityView:
             == "1 pass · 1 warn · 1 fail · 1 unknown"
         )
 
-    def test_accordion_follows_dns(self):
-        response = {"address": "example.com", "dns_security": self.DATA}
-        ids = [
-            a["id"] for a in viewmodel.build_view(response, is_self=False)["accordions"]
+    def test_security_rows_warnings_first(self):
+        """nasa.gov: DKIM and CAA warn, SPF, DMARC and DNSSEC pass, and the
+        three opt-ins are not published. The warnings come first, the passes
+        after them, each in the check order, and the unpublished opt-ins fold
+        into one row. The hint still counts every check."""
+        data = {
+            "spf": {"state": "pass", "summary": "SPF: -all", "findings": []},
+            "dmarc": {"state": "pass", "summary": "DMARC: p=reject", "findings": []},
+            "dkim": {"state": "warn", "summary": "DKIM: 1024-bit", "findings": []},
+            "caa": {"state": "warn", "summary": "CAA: none", "findings": []},
+            "dnssec": {"state": "pass", "summary": "DNSSEC: signed", "findings": []},
+            "mta_sts": {"state": "info", "summary": "MTA-STS: not published"},
+            "tls_rpt": {"state": "info", "summary": "TLS-RPT: not published"},
+            "bimi": {"state": "info", "summary": "BIMI: not published"},
+        }
+        view = viewmodel.dns_security_view(data)
+        assert [r["label"] for r in view["rows"]] == [
+            "DKIM",
+            "CAA",
+            "SPF",
+            "DMARC",
+            "DNSSEC",
         ]
+        assert view["folded"] == {
+            "label": "Not published",
+            "state": "info",
+            "tone": "muted",
+            "value": "MTA-STS · TLS-RPT · BIMI",
+        }
+        assert view["hint"] == "3 pass · 2 warn · 3 info"
+
+    def test_fail_and_warn_share_the_first_group_in_check_order(self):
+        """Warnings and failures together, in the check order, as the review
+        chips list them; an unknown after the passes; an info row that is not
+        an unpublished opt-in stays a row of its own, after the unknowns."""
+        data = {
+            **self.DATA,
+            "mta_sts": {"state": "info", "summary": "MTA-STS: not published"},
+            "spf": {"state": "info", "summary": "SPF: none for this name"},
+            "dnssec": {"state": "pass", "summary": "DNSSEC: signed", "findings": []},
+        }
+        view = viewmodel.dns_security_view(data)
+        assert [(r["label"], r["state"]) for r in view["rows"]] == [
+            ("DMARC", "warn"),
+            ("CAA", "fail"),
+            ("DNSSEC", "pass"),
+            ("DKIM", "unknown"),
+            ("SPF", "info"),
+        ]
+        assert view["folded"]["value"] == "MTA-STS"
+
+    def test_nothing_unpublished_folds_nothing(self):
+        assert viewmodel.dns_security_view(self.DATA)["folded"] is None
+
+    def test_section_follows_dns(self):
+        response = {"address": "example.com", "dns_security": self.DATA}
+        ids = list(_hints(viewmodel.build_view(response, is_self=False)))
         assert ids[ids.index("dns") + 1] == "security"
 
-    def test_no_accordion_without_data(self):
-        ids = [
-            a["id"]
-            for a in viewmodel.build_view({"address": "1.1.1.1"}, is_self=False)[
-                "accordions"
-            ]
-        ]
-        assert "security" not in ids
+    def test_no_section_without_data(self):
+        for response in ({"address": "1.1.1.1"}, {"address": "example.com"}):
+            ids = list(_hints(viewmodel.build_view(response, is_self=False)))
+            assert "security" not in ids
 
 
 # ---------------------------------------------------------------------------
