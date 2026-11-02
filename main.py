@@ -2276,9 +2276,10 @@ async def head_lookup(request: Request):
     whether the page is there. Running WHOIS, DNS and TLS for a body that is
     then thrown away would make the cheapest request the most expensive one.
     So the answer is 200 with the Content-Type GET would answer with, or GET's
-    400 for a query parameter it refuses; whether this particular target would
-    get a 400 is not checked, since finding out takes the lookup this exists
-    to skip.
+    400 for a query parameter it refuses, or for ?abuseipdb=only while
+    AbuseIPDB is off (a switch read locally, no lookup); whether this
+    particular target would get a 400 is not checked, since finding out takes
+    the lookup this exists to skip.
 
     This is a route, not a middleware, so it runs after the security
     middleware like everything else: a banned or geo-blocked address still
@@ -2315,6 +2316,10 @@ async def head_lookup(request: Request):
             if fmt == "text":
                 return _text_error("abuseipdb must be: only")
             raise HTTPException(status_code=400, detail="abuseipdb must be: only")
+        if abuseipdb_only is not None and not abuseipdb_client.enabled:
+            if fmt == "text":
+                return _text_error("AbuseIPDB is not configured")
+            raise HTTPException(status_code=400, detail="AbuseIPDB is not configured")
         json_only = whois_only is not None or abuseipdb_only is not None
     if json_only:
         media_type = "application/json"

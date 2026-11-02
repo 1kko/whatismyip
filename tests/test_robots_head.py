@@ -210,7 +210,10 @@ class TestHead:
             ("/?whois=all&format=text", CURL, 400, "text/plain"),
             # ?abuseipdb=only answers 200 JSON only with a key; see
             # test_abuseipdb_self.py::test_head_answers_json. Here the key is
-            # empty, GET's 400, and HEAD does not check the switch.
+            # empty, so GET says "AbuseIPDB is not configured" with a 400,
+            # and HEAD reads the same switch.
+            ("/?abuseipdb=only", BROWSER, 400, "application/json"),
+            ("/?abuseipdb=only&format=text", CURL, 400, "text/plain"),
             ("/?abuseipdb=all", BROWSER, 400, "application/json"),
             ("/?abuseipdb=all&format=text", CURL, 400, "text/plain"),
             ("/?fields=ip", BROWSER, 200, "application/json"),

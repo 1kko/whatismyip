@@ -160,6 +160,20 @@ def test_head_answers_json(abuse):
     assert proxy.head("/?abuseipdb=no", headers=visitor(**BROWSER)).status_code == 400
 
 
+def test_head_without_a_key_answers_400_like_get():
+    """HEAD answers what GET would: with AbuseIPDB off, GET's 400 and its
+    words, decided from the client's switch alone, so still no lookup."""
+    for headers, media_type in ((BROWSER, "application/json"), (CURL, "text/plain")):
+        query = "" if media_type == "application/json" else "&format=text"
+        get = proxy.get(f"/?abuseipdb=only{query}", headers=visitor(**headers))
+        head = proxy.head(f"/?abuseipdb=only{query}", headers=visitor(**headers))
+        assert get.status_code == head.status_code == 400
+        assert head.headers["content-type"] == get.headers["content-type"]
+        assert head.headers["content-type"].startswith(media_type)
+        assert "AbuseIPDB is not configured" in get.text
+        assert head.content == b""
+
+
 def test_whoami_caller_unchanged(abuse):
     from test_mcp import INIT, MCP_HEADERS, _rpc
 
