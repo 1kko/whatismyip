@@ -456,3 +456,153 @@ def test_ip_registration_card():
 def test_organization_without_asinfo():
     card = overview.ip_cards(_ip_response())[1]
     assert (card["value"], card["state"]) == ("AS4766", "info")
+
+
+# review chips
+
+from overview import review_chips, reputation_chips  # noqa: E402
+
+
+def _texts(chips):
+    return [(c["text"], c["tone"], c["section"]) for c in chips]
+
+
+def test_nasa_chips():
+    chips = review_chips(_nasa(), is_ip=False)
+    assert _texts(chips) == [
+        ("DKIM: found at selector1 (1024-bit)", "warning", "security"),
+        ("CAA: none", "warning", "security"),
+    ]
+
+
+def test_fail_check_is_a_danger_chip():
+    response = _nasa()
+    response["dns_security"] = _security(spf=_check("fail", "SPF: none"))
+    assert _texts(review_chips(response, False)) == [
+        ("SPF: none", "danger", "security")
+    ]
+
+
+def test_unconfirmed_ptr_is_no_chip():
+    response = _ip_response()
+    response["domain"] = {"a": [{"ip": "10.0.0.1"}], "status": {"a": "ok"}}
+    assert review_chips(response, is_ip=True) == []
+
+
+def test_failed_query_is_no_chip():
+    response = _nasa()
+    response["domain"]["status"]["a"] = "timeout"
+    response["dns_security"] = _security(caa=_check("unknown", "CAA: query failed"))
+    assert review_chips(response, False) == []
+
+
+def test_dkim_not_found_is_no_chip():
+    response = _nasa()
+    response["dns_security"] = _security(dkim=_check("unknown", DKIM_NOT_FOUND))
+    assert review_chips(response, False) == []
+
+
+def test_info_checks_are_no_chip():
+    response = _nasa()
+    response["dns_security"] = _security(bimi=_check("info", "BIMI: absent"))
+    assert review_chips(response, False) == []
+
+
+def _clean():
+    """nasa.gov with every check passing, so a test sees only its own chip."""
+    return {**_nasa(), "dns_security": _security()}
+
+
+def test_expired_certificate_chip():
+    response = _clean()
+    response["ssl"] = _cert(-3)
+    assert _texts(review_chips(response, False)) == [("TLS expired", "danger", "ssl")]
+
+
+def test_expiring_certificate_chip():
+    response = _clean()
+    response["ssl"] = _cert(5)
+    assert _texts(review_chips(response, False)) == [
+        ("certificate: 5d left", "warning", "ssl")
+    ]
+
+
+def test_young_domain_chip():
+    response = _clean()
+    response["whois"]["created"] = _ago(6).isoformat()
+    assert _texts(review_chips(response, False)) == [
+        ("registered 6 days ago", "warning", "whois")
+    ]
+
+
+def test_epp_danger_chip():
+    response = _clean()
+    response["whois"]["status"] = ["clientHold"]
+    assert _texts(review_chips(response, False)) == [("clientHold", "danger", "whois")]
+
+
+def test_chips_follow_section_order():
+    response = _nasa()
+    response["ssl"] = _cert(-3)
+    response["whois"]["created"] = _ago(2).isoformat()
+    sections = [c["section"] for c in review_chips(response, False)]
+    assert sections == ["whois", "security", "security", "ssl"]
+
+
+def test_reputation_chip():
+    reputation = {
+        "level": "medium",
+        "signals": [{"label": "Tor exit", "weight": 40}],
+    }
+    assert _texts(reputation_chips(reputation, is_ip=True)) == [
+        ("on Tor exit", "warning", "reputation")
+    ]
+    response = _nasa()
+    response["reputation"] = reputation
+    assert _texts(review_chips(response, False)) == [
+        ("DKIM: found at selector1 (1024-bit)", "warning", "security"),
+        ("CAA: none", "warning", "security"),
+        ("on Tor exit", "warning", "reputation"),
+    ]
+
+
+def test_informational_signal_on_a_domain_is_no_chip():
+    reputation = {
+        "level": "low",
+        "signals": [{"label": "Datacenter", "weight": 0}],
+    }
+    assert reputation_chips(reputation, is_ip=False) == []
+    # on an IP it is kept
+    assert _texts(reputation_chips(reputation, is_ip=True)) == [
+        ("on Datacenter", "warning", "reputation")
+    ]
+
+
+def test_reputation_levels_and_gaps():
+    sig = [{"label": "Spamhaus DROP", "weight": 90, "score": None}]
+    high = reputation_chips({"level": "high", "signals": sig}, True)
+    assert high[0]["tone"] == "danger"
+    assert reputation_chips({"level": "none", "signals": []}, True) == []
+    assert reputation_chips({"level": None, "signals": []}, True) == []
+    assert reputation_chips(None, True) == []
+    abuse = [{"label": "AbuseIPDB", "weight": 30, "score": 87}]
+    assert reputation_chips({"level": "low", "signals": abuse}, True)[0]["text"] == (
+        "on AbuseIPDB 87%"
+    )
+
+
+def test_rpki_invalid_chip_section_by_kind():
+    info = _as_info("invalid")
+    info["route"]["origins"][0]["rpki"]["reason"] = "origin"
+    domain = {**_nasa(), "as_info": info}
+    assert _texts(review_chips(domain, False))[-1] == (
+        "RPKI invalid (origin)",
+        "danger",
+        "network",
+    )
+    ip = _ip_response(as_info=info)
+    assert _texts(review_chips(ip, True)) == [
+        ("RPKI invalid (origin)", "danger", "organization")
+    ]
+    info["route"]["origins"][0]["rpki"].pop("reason")
+    assert review_chips(_ip_response(as_info=info), True)[0]["text"] == "RPKI invalid"

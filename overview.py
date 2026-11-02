@@ -180,13 +180,19 @@ def certificate_card(ssl: dict | None) -> dict:
     return _card("ssl", label, value, viewmodel._cert_issuer(ssl), state)
 
 
-def _rpki_state(as_info: dict) -> str | None:
-    """The RPKI state of the route's origin that is the card's AS."""
+def _rpki(as_info: dict) -> dict:
+    """The RPKI answer ({state, reason}) of the route's origin that is the
+    card's AS; empty when there is none."""
     origins = (as_info.get("route") or {}).get("origins") or []
     for origin in origins:
         if origin.get("asn") == as_info.get("asn"):
-            return (origin.get("rpki") or {}).get("state")
-    return None
+            return origin.get("rpki") or {}
+    return {}
+
+
+def _rpki_state(as_info: dict) -> str | None:
+    """The RPKI state of the route's origin that is the card's AS."""
+    return _rpki(as_info).get("state")
 
 
 def network_card(
@@ -321,3 +327,65 @@ def ip_cards(response: dict) -> list[dict]:
         registration_card(response.get("whois"), is_ip=True),
     ]
     return [card for card in cards if card is not None]
+
+
+_DOMAIN_ORDER = ("whois", "dns", "security", "ssl", "network", "reputation")
+_IP_ORDER = ("location", "organization", "domains", "reputation", "whois")
+
+
+def _chip(text: str, section: str, tone: str) -> dict:
+    return {"text": text, "section": section, "tone": tone}
+
+
+def reputation_chips(reputation: dict | None, is_ip: bool) -> list[dict]:
+    """One chip naming the lists an address is on, when the level is low or
+    above. A domain keeps only the signals that carry weight, as its hero
+    tags do: a datacenter listing says nothing about a website."""
+    reputation = reputation or {}
+    tone = viewmodel._LEVEL_TONES.get(reputation.get("level"))
+    if tone is None:
+        return []
+    signals = [
+        s for s in reputation.get("signals") or [] if is_ip or s.get("weight", 0) > 0
+    ]
+    if not signals:
+        return []
+    names = ", ".join(viewmodel._signal_name(s) for s in signals)
+    return [_chip(f"on {names}", "reputation", tone)]
+
+
+def review_chips(response: dict, is_ip: bool) -> list[dict]:
+    """The "To review" chips: findings only, ordered by the page's sections.
+    An unknown, a failed query, DKIM not found and an `info` check are never
+    chips: they are gaps, not findings."""
+    chips: list[dict] = []
+    if not is_ip:
+        for check in (response.get("dns_security") or {}).values():
+            tone = {"warn": "warning", "fail": "danger"}.get(check.get("state"))
+            if tone:
+                chips.append(_chip(str(check.get("summary", "")), "security", tone))
+        whois = response.get("whois")
+        for tag in viewmodel._status_tags(whois):
+            chips.append(_chip(tag["text"], "whois", "danger"))
+        if viewmodel._young_domain_tag(whois):
+            created, _ = viewmodel.registration_age(whois)
+            chips.append(
+                _chip(f"registered {viewmodel._ago(created)}", "whois", "warning")
+            )
+        ssl = response.get("ssl")
+        if ssl and not ssl.get("error"):
+            _, tone = viewmodel._ssl_status(ssl)
+            if tone == "danger":
+                chips.append(_chip(f"TLS {viewmodel._ssl_problem(ssl)}", "ssl", tone))
+            elif tone == "warning":
+                _, days_left = viewmodel._cert_expiry(ssl)
+                chips.append(_chip(f"certificate: {days_left}d left", "ssl", tone))
+    as_info = response.get("as_info") or {}
+    rpki = _rpki(as_info) if as_info.get("announced") is not False else {}
+    if rpki.get("state") == "invalid":
+        reason = rpki.get("reason")
+        text = "RPKI invalid" + (f" ({reason})" if reason else "")
+        chips.append(_chip(text, "organization" if is_ip else "network", "danger"))
+    chips.extend(reputation_chips(response.get("reputation"), is_ip))
+    order = _IP_ORDER if is_ip else _DOMAIN_ORDER
+    return sorted(chips, key=lambda c: order.index(c["section"]))
