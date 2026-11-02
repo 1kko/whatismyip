@@ -1611,6 +1611,13 @@ class TestMobileLayout:
         rule = re.search(r"\.as-filter[^{]*\{\s*font-size:\s*16px", css)
         assert rule.start() > base.start()
 
+    def test_a_sub_heading_breaks_a_long_name(self):
+        # "Records for <PTR name>" is one unbroken word at phone width.
+        css = CSS.read_text(encoding="utf-8")
+        assert re.search(
+            r"^\.report-section__sub\s*\{[^}]*overflow-wrap:\s*anywhere", css, re.M
+        )
+
     def test_the_desktop_box_is_unchanged(self):
         css = CSS.read_text(encoding="utf-8")
         assert re.search(r"\.search-wrap\s*\{[^}]*width:\s*440px", css)
@@ -2146,6 +2153,30 @@ class TestSubdomainPanel:
                     "/example.com?subdomains=include", headers=BROWSER_UA
                 ).text
         assert "29 subdomains found" in html
+
+    def test_a_loaded_panel_has_a_data_dot(self):
+        """The list is on the page, so the section's dots, in the contents and
+        the heading, read as data rather than "on request"."""
+        payload = {
+            "names": ["a.example.com"],
+            "count": 1,
+            "truncated": False,
+            "source": "crt.sh",
+            "fetched_at": "2026-09-29T00:00:00+00:00",
+            "stale": False,
+            "error": None,
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=payload
+            ):
+                html = client.get(
+                    "/example.com?subdomains=include", headers=BROWSER_UA
+                ).text
+        assert re.search(r'data-section="subdomains"><span class="dot dot--info"', html)
+        assert re.search(
+            r'<h2 id="h-subdomains"[^>]*><span class="dot dot--info"', html
+        )
 
     def test_the_unasked_panel_says_on_request(self):
         """static/js/app.js rewrites this hint by its data-hint once its fetch
@@ -2910,9 +2941,9 @@ class TestLookupLayout:
     def test_self_page_browser_section(self):
         html = _self_page()
         browser = section(html, "browser")
-        assert '<button type="button" class="btn" id="fp-measure">Measure</button>' in (
-            browser
-        )
+        assert (
+            '<button type="button" class="btn" id="fp-measure" hidden>Measure</button>'
+        ) in browser
         assert '<h3 class="report-section__sub">Headers your browser sent</h3>' in (
             browser
         )
@@ -3025,7 +3056,7 @@ class TestLookupLayout:
         domain = _page(_nasa(), "/nasa.gov")
         subdomains = section(domain, "subdomains")
         assert (
-            '<button type="button" class="btn" id="subdomains-run">'
+            '<button type="button" class="btn" id="subdomains-run" hidden>'
             "Look up subdomains</button>"
         ) in subdomains
         assert subdomains.index('id="subdomains-run"') < subdomains.index(
@@ -3033,11 +3064,68 @@ class TestLookupLayout:
         )
         raw = section(domain, "raw")
         assert (
-            '<button type="button" class="btn" id="raw-open">'
+            '<button type="button" class="btn" id="raw-open" hidden>'
             "Show the JSON tree</button>"
         ) in raw
         assert raw.index('id="raw-open"') < raw.index('id="raw-json"')
         assert '<div id="raw-json" hidden></div>' in raw
+
+    def test_on_request_buttons_wait_for_their_script(self):
+        """The three buttons only work with JavaScript, so each is drawn
+        `hidden` (above) and shown by the script that wires it, before its
+        click listener; a page without scripts keeps its <noscript> lines."""
+        app = Path("static/js/app.js").read_text(encoding="utf-8")
+        fingerprint = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        for source, name in (
+            (app, "rawOpen"),
+            (app, "subdomainRun"),
+            (fingerprint, "button"),
+        ):
+            shown = source.index(f"{name}.hidden = false;")
+            wired = source.index(f'{name}.addEventListener("click"')
+            assert shown < wired, name
+        assert 'getElementById("fp-measure")' in fingerprint
+        assert "<noscript>" in section(_page(_nasa(), "/nasa.gov"), "subdomains")
+        assert "<noscript>" in section(_self_page(), "browser")
+
+    def test_shown_data_moves_the_dots(self):
+        """Subdomains and Raw JSON have no card, so app.js moves their dots
+        itself once their data is on the page: `info` after a lookup (or
+        `unknown` when it failed), and `info` once the tree is drawn."""
+        app = Path("static/js/app.js").read_text(encoding="utf-8")
+        helper = app.split("function setSectionState(", 1)[1].split("\n}\n", 1)[0]
+        assert '`.toc__item[data-section="${id}"] .dot, #h-${id} .dot`' in helper
+        assert 'setState(dot, "dot", state)' in helper
+        loaded = app.split('script.addEventListener("load"', 1)[1]
+        loaded = loaded.split("\n  });\n", 1)[0]
+        assert 'setSectionState("raw", "info");' in loaded
+        click = app.split('subdomainRun.addEventListener("click"', 1)[1]
+        assert (
+            "renderSubdomainPanel(subdomainBody, subdomainLine, data, target);\n"
+            '      setSectionState("subdomains", "info");'
+        ) in click
+        failed = app.split("function subdomainFailed(", 1)[1].split("\n}\n", 1)[0]
+        assert 'setSectionState("subdomains", "unknown");' in failed
+        assert "setSectionState(card.id, card.state);" in app
+
+    def test_late_answers_reach_raw_json(self):
+        """What the page fills in after it loaded goes into #page-data, and
+        into the tree when it is open: the registration (fillWhois) and the
+        merged reputation an AbuseIPDB press answers (fillAbuseipdb)."""
+        app = Path("static/js/app.js").read_text(encoding="utf-8")
+        helper = app.split("function updatePageData(key, value) {", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        assert 'getElementById("page-data")' in helper
+        assert "data[key] = value;" in helper
+        assert "pageData.textContent = JSON.stringify(data);" in helper
+        assert "rawEditor.set(data);" in helper
+        whois = app.split("function fillWhois(", 1)[1].split("\n}\n", 1)[0]
+        assert 'updatePageData("whois", whois);' in whois
+        abuse = app.split("function fillAbuseipdb(display, reputation) {", 1)[1]
+        abuse = abuse.split("\n}\n", 1)[0]
+        assert 'updatePageData("reputation", reputation);' in abuse
+        assert "fillAbuseipdb(display, payload.reputation);" in app
 
     def test_domain_rdns_row_in_network(self):
         html = _page(LINKED, "/naver.com")

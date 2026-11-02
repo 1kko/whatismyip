@@ -293,6 +293,9 @@ function bootRawEditor() {
     });
     rawEditor.set(JSON.parse(document.getElementById("page-data").textContent));
     rawEditor.expandAll();
+    // The tree is on the page now: the section's dots read as data rather
+    // than "on request". The /AS<n> page has neither, and this finds nothing.
+    setSectionState("raw", "info");
   });
   document.body.appendChild(script);
 }
@@ -303,10 +306,31 @@ rawAccordion?.addEventListener("toggle", () => {
   }
 });
 
-rawOpen?.addEventListener("click", () => {
-  rawOpen.hidden = true;
-  bootRawEditor();
-});
+// The button is drawn hidden: without this script it could only do nothing.
+if (rawOpen) {
+  rawOpen.hidden = false;
+  rawOpen.addEventListener("click", () => {
+    rawOpen.hidden = true;
+    bootRawEditor();
+  });
+}
+
+// Raw JSON is "the full response", so what the page fills in after it loaded
+// (the registration, an AbuseIPDB answer) goes into #page-data too, and into
+// the tree when it is already open.
+function updatePageData(key, value) {
+  const pageData = document.getElementById("page-data");
+  if (!pageData) {
+    return;
+  }
+  const data = JSON.parse(pageData.textContent);
+  data[key] = value;
+  pageData.textContent = JSON.stringify(data);
+  if (rawEditor) {
+    rawEditor.set(data);
+    rawEditor.expandAll();
+  }
+}
 
 // A section's hint sits twice on the page, in the contents list and under the
 // section's heading, each one line with an ellipsis where it does not fit
@@ -332,6 +356,18 @@ function setState(node, prefix, state) {
   node.classList.add(`${prefix}--${state}`);
 }
 
+// A section's dots, in the contents list and in its heading. A card moves
+// them with its state (setCard); a section without one moves them itself
+// once its data is shown, as fingerprint.js's markMeasured does for "Your
+// browser": Subdomains after a lookup, Raw JSON once the tree is drawn.
+function setSectionState(id, state) {
+  for (const dot of document.querySelectorAll(
+    `.toc__item[data-section="${id}"] .dot, #h-${id} .dot`,
+  )) {
+    setState(dot, "dot", state);
+  }
+}
+
 // A status card, worded by the server (overview.py): its value, its sub line
 // and its state, which the section's dots in the contents list and the
 // heading follow. textContent throughout, and the title repeats the text a
@@ -353,11 +389,7 @@ function setCard(card) {
       part.title = text;
     }
   }
-  for (const dot of document.querySelectorAll(
-    `.toc__item[data-section="${card.id}"] .dot, #h-${card.id} .dot`,
-  )) {
-    setState(dot, "dot", card.state);
-  }
+  setSectionState(card.id, card.state);
 }
 
 // The self page goes out before a slow registration lookup has answered (see
@@ -431,17 +463,7 @@ function fillWhois(display, whois) {
   setWhoisHint(display.hint);
   setCard(display.card);
   whoisPending.replaceWith(whoisTable(display.rows));
-  // Raw JSON is "the full response", so it gets the record too.
-  const pageData = document.getElementById("page-data");
-  if (pageData) {
-    const data = JSON.parse(pageData.textContent);
-    data.whois = whois;
-    pageData.textContent = JSON.stringify(data);
-    if (rawEditor) {
-      rawEditor.set(data);
-      rawEditor.expandAll();
-    }
-  }
+  updatePageData("whois", whois);
 }
 
 // Could not ask, which is not the same as no record: the words the server
@@ -535,7 +557,7 @@ function abuseipdbRows(rows) {
   return table;
 }
 
-function fillAbuseipdb(display) {
+function fillAbuseipdb(display, reputation) {
   const view = display.reputation;
   const target = document.getElementById("reputation-body");
   if (target) {
@@ -566,6 +588,11 @@ function fillAbuseipdb(display) {
   if (typeof view.hint === "string") {
     setHint("reputation", view.hint);
   }
+  // The merged answer replaces the lists' own in Raw JSON, as the section's
+  // rows replaced theirs.
+  if (reputation && typeof reputation === "object") {
+    updatePageData("reputation", reputation);
+  }
 }
 
 if (abuseipdbRun) {
@@ -580,11 +607,12 @@ if (abuseipdbRun) {
       const response = await fetch("/?abuseipdb=only", {
         headers: { Accept: "application/json" },
       });
-      const display = response.ok ? abuseipdbDisplay(await response.json()) : null;
+      const payload = response.ok ? await response.json() : null;
+      const display = abuseipdbDisplay(payload);
       if (!display) {
         throw new Error("no display");
       }
-      fillAbuseipdb(display);
+      fillAbuseipdb(display, payload.reputation);
       if (status) {
         status.textContent = "";
       }
@@ -853,6 +881,9 @@ function subdomainFailed(line, message) {
   line.querySelector('[role="status"]').textContent = message;
   line.classList.add("subdomains__error");
   setSubdomainHint("lookup failed");
+  // Asked and not answered, as overview.section_state says for a page that
+  // carries a failed list.
+  setSectionState("subdomains", "unknown");
 }
 
 // ?subdomains=include draws the panel on the server, so it works without
@@ -871,6 +902,9 @@ if (renderedSubdomains && pageDataScript) {
 }
 
 if (subdomainRun && subdomainSlot) {
+  // The button is drawn hidden: without this script it could only do nothing,
+  // and the slot's <noscript> link asks the server instead.
+  subdomainRun.hidden = false;
   // Both made now, before the button is pressed, so the live region exists
   // well before the lookup writes to it.
   const subdomainBody = document.createElement("div");
@@ -932,6 +966,7 @@ if (subdomainRun && subdomainSlot) {
 
       setSubdomainHint(subdomainHintText(mergeSubdomains(data).total));
       renderSubdomainPanel(subdomainBody, subdomainLine, data, target);
+      setSectionState("subdomains", "info");
     } catch (err) {
       subdomainFailed(subdomainLine, "Lookup failed.");
     } finally {

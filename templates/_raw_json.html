@@ -21,7 +21,7 @@
 </div>
 <p class="api-note tone-muted">Tools: <span id="mcp-tool-list">{{ mcp_tools | join(', ') }}</span>. whoami_caller reports whoever opened the connection — your own machine from a local client like Claude Code, a datacenter from a hosted one like claude.ai. It flags an address on a datacenter list as likely hosted, but cannot be sure otherwise, so open this page in a browser when you need certainty.</p>
 {% if raw_open_button is defined and raw_open_button -%}
-<button type="button" class="btn" id="raw-open">Show the JSON tree</button>
+<button type="button" class="btn" id="raw-open" hidden>Show the JSON tree</button>
 <div id="raw-json" hidden></div>
 {%- else -%}
 <div id="raw-json"></div>

@@ -229,6 +229,36 @@ def test_button_needs_no_request_on_load(abuse, reputation_on):
     assert api.calls == []
 
 
+def test_app_js_asks_abuseipdb_only_from_the_click():
+    """/?abuseipdb=only is in app.js once, inside the function passed to
+    abuseipdbRun.addEventListener("click", ...), and nothing presses the
+    button for the visitor. The handler's span runs from the first "{" after
+    the registration to the brace that closes it. A brace counter does not
+    parse JavaScript, but the handler's strings and template literals hold
+    balanced braces only, so the span ends where the handler does; a request
+    made anywhere else (on load, from another listener) falls outside it or
+    makes the count two."""
+    from pathlib import Path
+
+    scripts = {p.name: p.read_text() for p in Path("static/js").glob("*.js")}
+    assert [n for n, text in scripts.items() if "abuseipdb=only" in text] == ["app.js"]
+    source = scripts["app.js"]
+    assert source.count("/?abuseipdb=only") == 1
+    assert source.count("abuseipdbRun.addEventListener(") == 1
+    registered = source.index('abuseipdbRun.addEventListener("click"')
+    start = source.index("{", registered)
+    depth = 0
+    for end in range(start, len(source)):
+        depth += {"{": 1, "}": -1}.get(source[end], 0)
+        if depth == 0:
+            break
+    handler = source[start : end + 1]
+    assert handler.endswith("}")
+    assert "/?abuseipdb=only" in handler
+    for press in ("abuseipdbRun.click(", "abuseipdbRun.dispatchEvent("):
+        assert press not in source
+
+
 def test_app_js_writes_text_only():
     source = open("static/js/app.js").read()
     start = source.index("abuseipdb-run")

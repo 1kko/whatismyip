@@ -82,7 +82,9 @@
     // Only the chip row scrolls sideways; never the page-scrolling call, which would
     // move the page. In the desktop column this is a no-op (nothing overflows).
     if (active && toc.scrollWidth > toc.clientWidth) {
-      const left = active.offsetLeft - toc.offsetLeft;
+      // The sticky .toc is the items' offsetParent, so offsetLeft is already
+      // measured from the row's own left edge.
+      const left = active.offsetLeft;
       const right = left + active.offsetWidth;
       if (left < toc.scrollLeft) {
         toc.scrollLeft = left - 20;

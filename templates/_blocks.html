@@ -31,7 +31,7 @@
     </p>
     {# static/js/fingerprint.js starts the active probes inside this button's
        click, the only moment Firefox's resistFingerprinting asks. #}
-    <button type="button" class="btn" id="fp-measure">Measure</button>
+    <button type="button" class="btn" id="fp-measure" hidden>Measure</button>
     {% if stun_url %}
     {# Opt-in: static/js/webrtc.js reads the STUN server and the address
        this page saw from here, and only acts on a click. #}
@@ -118,7 +118,7 @@
     {% else %}
       {# Pressing it is the opt-in: static/js/app.js asks crt.sh then and
          not before. Without JavaScript the link below asks the server. #}
-      <button type="button" class="btn" id="subdomains-run">Look up subdomains</button>
+      <button type="button" class="btn" id="subdomains-run" hidden>Look up subdomains</button>
       <div id="subdomains-slot" data-target="{{ view.target }}">
           <noscript>
               <a href="/{{ view.target }}?subdomains=include">Load subdomains</a>

@@ -258,6 +258,8 @@
   let measured = false;
   const button = document.getElementById("fp-measure");
   if (button) {
+    // Drawn hidden: without this script it could only do nothing.
+    button.hidden = false;
     button.addEventListener("click", () => {
       if (measured) return;
       measured = true;

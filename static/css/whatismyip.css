@@ -442,6 +442,8 @@ body {
   letter-spacing: 1.6px;
   text-transform: uppercase;
   color: var(--text-secondary);
+  /* "Records for <PTR name>" is one long word at phone width. */
+  overflow-wrap: anywhere;
 }
 .review__label { margin-right: 4px; }
 .chip {
@@ -645,8 +647,9 @@ body {
 .report-section__head + .report-section__sub { margin-top: 0; }
 
 /* "Look up subdomains", "Show the JSON tree", "Measure": a press is the only
-   thing that starts them. Inline-flex, so `hidden` (the tree's button once
-   pressed) needs saying again. */
+   thing that starts them. Inline-flex, so `hidden` (each is drawn hidden
+   until the script that wires it shows it, and the tree's button hides again
+   once pressed) needs saying again. */
 .btn {
   display: inline-flex;
   align-items: center;
