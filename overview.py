@@ -548,7 +548,10 @@ def _ip_sentence(response: dict) -> list[dict]:
     total = (response.get("reverse_ip") or {}).get("total")
     listed = isinstance(total, int) and not isinstance(total, bool) and total > 0
     if ptr:
-        out += [_seg(" Its reverse DNS name is "), _seg(str(ptr), True)]
+        # Without the root dot a PTR answer ends with: the sentence's own
+        # full stop follows the name.
+        name = str(ptr).rstrip(".") or str(ptr)
+        out += [_seg(" Its reverse DNS name is "), _seg(name, True)]
     if listed:
         noun = "name" if total == 1 else "names"
         verb = "points" if total == 1 else "point"

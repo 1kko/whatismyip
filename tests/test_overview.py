@@ -755,6 +755,16 @@ def test_ip_sentence_with_ptr_only():
     assert text.endswith("Its reverse DNS name is ptr.example.net.")
 
 
+def test_ip_sentence_drops_the_ptr_root_dot():
+    """A PTR answer ends with the root dot ("dns.google."); the sentence's own
+    full stop follows the name, so the name is written without it."""
+    response = _ip_response()
+    response["location"]["reverse_dns"] = "ptr.example.net."
+    text = _joined(sentence(response, True))
+    assert text.endswith("Its reverse DNS name is ptr.example.net.")
+    assert ".." not in text
+
+
 def test_third_party_text_is_data():
     response = _page()
     response["whois"]["registrar"] = "<b>x</b>"
