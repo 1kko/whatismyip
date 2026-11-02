@@ -85,6 +85,11 @@ class TestRobotsTxt:
         assert "User-agent: *" in lines
         assert "Disallow: /*?subdomains=" in lines
 
+    def test_keeps_crawlers_off_the_abuseipdb_button(self):
+        """?abuseipdb=only asks a third party about the caller's address."""
+        lines = client.get("/robots.txt", headers=CURL).text.splitlines()
+        assert "Disallow: /*?abuseipdb=" in lines
+
     def test_same_for_a_browser(self, lookups):
         response = client.get("/robots.txt", headers=BROWSER)
         assert response.headers["content-type"].startswith("text/plain")
@@ -203,6 +208,11 @@ class TestHead:
             ("/?whois=all", BROWSER, 400, "application/json"),
             ("/?whois=", BROWSER, 400, "application/json"),
             ("/?whois=all&format=text", CURL, 400, "text/plain"),
+            # ?abuseipdb=only answers 200 JSON only with a key; see
+            # test_abuseipdb_self.py::test_head_answers_json. Here the key is
+            # empty, GET's 400, and HEAD does not check the switch.
+            ("/?abuseipdb=all", BROWSER, 400, "application/json"),
+            ("/?abuseipdb=all&format=text", CURL, 400, "text/plain"),
             ("/?fields=ip", BROWSER, 200, "application/json"),
             ("/?fields=ip&format=text", BROWSER, 200, "text/plain"),
             ("/?fields=nope", BROWSER, 400, "application/json"),

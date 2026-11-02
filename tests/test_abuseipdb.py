@@ -744,7 +744,12 @@ class TestPrivacy:
         abuse()
         text = page_text(web.get("/privacy", headers=CHROME).text)
         assert re.search(r"(?<![\w.])api\.abuseipdb\.com(?!\w)", text)
-        assert "Never your own address on the home page" in text
+        assert "an IP address you look up directly" in text
+        assert (
+            'your own address only when you press "Check with AbuseIPDB" '
+            "on the home page" in text
+        )
+        assert "never the address a domain resolves to" in text
         assert "kept in memory for 24 hours" in text
 
     def test_not_named_when_off(self):

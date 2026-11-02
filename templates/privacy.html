@@ -97,8 +97,9 @@
             {% endif %}
             {% if abuseipdb_enabled %}
             <li><strong>api.abuseipdb.com</strong> (AbuseIPDB, in the United States): an IP address
-                you look up directly, to read how often it has been reported for abuse. Never
-                your own address on the home page, and never the address a domain resolves to.
+                you look up directly, to read how often it has been reported for abuse; your own
+                address only when you press "Check with AbuseIPDB" on the home page; never the
+                address a domain resolves to.
                 Each answer is kept in memory for {{ abuseipdb_cache }}, so an address is asked
                 about at most once in that time.</li>
             {% endif %}

@@ -77,6 +77,7 @@ from config import (
 )
 from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from lookup import (
+    abuse_report,
     EMAIL_LIKE_TARGET,
     InvalidTargetError,
     PrivateAddressError,
@@ -116,6 +117,7 @@ from mcp_server import (
 )
 from models import GeoRulesUpdate
 import overview
+from abuseipdb import merge as merge_abuseipdb
 from rdap import rdap_breaker, refresh_rdap_bootstrap
 from security import (
     GeoBlockManager,
@@ -146,6 +148,7 @@ from viewmodel import (
     build_view,
     dns_failure_text,
     dns_names,
+    reputation_view,
     whois_display,
     whois_fill,
 )
@@ -1799,7 +1802,7 @@ async def healthz():
 # crt.sh round trip. There is deliberately no sitemap: it would need an
 # exception to the detector's `\.xml$` rule, and all it would do is send
 # crawlers to the expensive pages.
-_ROBOTS_TXT = "User-agent: *\nDisallow: /*?subdomains=\n"
+_ROBOTS_TXT = "User-agent: *\nDisallow: /*?subdomains=\nDisallow: /*?abuseipdb=\n"
 
 
 @app.api_route("/robots.txt", methods=["GET", "HEAD"])
@@ -2304,7 +2307,12 @@ async def head_lookup(request: Request):
             if fmt == "text":
                 return _text_error("whois must be: only")
             raise HTTPException(status_code=400, detail="whois must be: only")
-        json_only = whois_only is not None
+        abuseipdb_only = request.query_params.get("abuseipdb")
+        if abuseipdb_only is not None and abuseipdb_only.lower() != "only":
+            if fmt == "text":
+                return _text_error("abuseipdb must be: only")
+            raise HTTPException(status_code=400, detail="abuseipdb must be: only")
+        json_only = whois_only is not None or abuseipdb_only is not None
     if json_only:
         media_type = "application/json"
     elif fmt == "text":
@@ -2337,6 +2345,15 @@ async def get_self_info(request: Request):
         if fmt == "text":
             return _text_error("whois must be: only")
         raise HTTPException(status_code=400, detail="whois must be: only")
+    abuseipdb_only = request.query_params.get("abuseipdb")
+    if abuseipdb_only is not None and abuseipdb_only.lower() != "only":
+        if fmt == "text":
+            return _text_error("abuseipdb must be: only")
+        raise HTTPException(status_code=400, detail="abuseipdb must be: only")
+    if abuseipdb_only is not None and not abuseipdb_client.enabled:
+        if fmt == "text":
+            return _text_error("AbuseIPDB is not configured")
+        raise HTTPException(status_code=400, detail="AbuseIPDB is not configured")
     started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
@@ -2348,8 +2365,34 @@ async def get_self_info(request: Request):
         "client=%s lookup=%s (%s)",
         sanitized_ip,
         sanitized_ip,
-        "self, whois only" if whois_only is not None else "self",
+        "self, abuseipdb"
+        if abuseipdb_only is not None
+        else "self, whois only"
+        if whois_only is not None
+        else "self",
     )
+
+    if abuseipdb_only is not None:
+        # The "Check with AbuseIPDB" button. The only way the visitor's own
+        # address reaches AbuseIPDB: a page load never does. The address is
+        # the caller's, never a query parameter. Always JSON, like
+        # ?whois=only. No lookup_gate slot: AbuseIPDB's pool, cache and daily
+        # quota bound it, and the GeoIP and list reads are local.
+        if is_safe_ip(client_ip):
+            answer = await abuse_report(client_ip)
+        else:
+            answer = {"ok": False, "reason": "not a public address"}
+        location = await lookup_location(client_ip)
+        merged = merge_abuseipdb(ip_reputation(client_ip, location or None), answer)
+        return {
+            "address": client_ip,
+            "reputation": merged,
+            "display": {
+                "reputation": reputation_view(merged),
+                "card": overview.reputation_card(merged),
+                "chips": overview.reputation_chips(merged, is_ip=True),
+            },
+        }
 
     if whois_only is not None:
         # The page's fill-in for a registration it went out without. Always
