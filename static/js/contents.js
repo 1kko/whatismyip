@@ -9,8 +9,12 @@
 
   // The last section whose top is at or above the line one pixel under the
   // view's top; before any section has reached it, the first section whose
-  // bottom is still below the view; null when there is none.
-  function currentSection(sections, viewTop) {
+  // bottom is still below the view; null when there is none. At the end of the
+  // page a short last section never reaches the line, so it is the last one.
+  function currentSection(sections, viewTop, atBottom = false) {
+    if (atBottom && sections.length > 0) {
+      return sections[sections.length - 1].id;
+    }
     let current = null;
     for (const s of sections) {
       if (s.top <= viewTop + 1) {
@@ -50,7 +54,9 @@
       const r = el.getBoundingClientRect();
       return { id: el.id.replace(/^sec-/, ""), top: r.top, bottom: r.bottom };
     });
-    const id = currentSection(rects, LINE);
+    const atBottom =
+      window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
+    const id = currentSection(rects, LINE, atBottom);
     if (id === shown) {
       return;
     }

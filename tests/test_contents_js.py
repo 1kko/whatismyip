@@ -23,11 +23,12 @@ SECTIONS = [
 ]
 
 
-def _current(sections, view_top):
+def _current(sections, view_top, at_bottom=None):
     script = (
         f"const m = require({json.dumps(str(CONTENTS_JS))});"
         f"console.log(JSON.stringify(m.currentSection("
-        f"{json.dumps(sections)}, {json.dumps(view_top)})));"
+        f"{json.dumps(sections)}, {json.dumps(view_top)}"
+        f"{'' if at_bottom is None else ', ' + json.dumps(at_bottom)})));"
     )
     out = subprocess.run(  # noqa: S603
         [NODE, "-e", script], capture_output=True, text=True, check=True, timeout=30
@@ -55,3 +56,12 @@ def test_no_sections_is_null():
 
 def test_never_scrolls_the_page():
     assert "scrollIntoView" not in CONTENTS_JS.read_text()  # no call, no mention
+
+
+def test_at_bottom_marks_the_last_section():
+    assert _current(SECTIONS, 450, True) == "c"
+    assert _current(SECTIONS, 450, False) == "b"
+
+
+def test_at_bottom_without_sections_is_null():
+    assert _current([], 0, True) is None
