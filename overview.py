@@ -150,15 +150,17 @@ def security_card(dns_security: dict | None) -> dict | None:
     else:
         state = "pass"
     answered = len(states) - states.count("unknown")
-    value = f"{states.count('pass')} / {answered}" + (
-        " · DKIM ?" if dkim_dropped else ""
-    )
+    value = f"{states.count('pass')} / {answered}"
     if review:
         sub = f"{review} to review"
     elif "unknown" in states:
         sub = "some checks did not run"
     else:
         sub = "graded checks pass"
+    # DKIM left out of the count is said beside it, at the front of the sub
+    # line: the value stays the bare fraction, which fits a card at 20px.
+    if dkim_dropped:
+        sub = f"DKIM ? · {sub}"
     return _card("security", label, value, sub, state)
 
 

@@ -2984,6 +2984,25 @@ class TestLookupLayout:
             spans = re.findall(r"<span [^>]*data-hint=", html)
             assert len(spans) == len(hints)
 
+    def test_the_dkim_marker_leads_the_security_sub_line(self):
+        """DKIM not found at the common selectors is out of the count, and
+        the card says so at the front of its sub line: the value is the bare
+        fraction, which fits the card."""
+        response = _clean_nasa()
+        response["dns_security"]["dkim"] = {
+            "state": "unknown",
+            "summary": "DKIM: not found at the common selectors",
+            "findings": [],
+        }
+        html = _page(response, "/nasa.gov")
+        security = card(html, "security")
+        assert '<span class="card__value" title="4 / 4">4 / 4</span>' in security
+        assert (
+            '<span class="card__sub" title="DKIM ? · graded checks pass">'
+            "DKIM ? · graded checks pass</span>"
+        ) in security
+        assert re.search(r'class="card card--pass" id="card-security"', html)
+
     def test_card_value_and_sub_carry_titles(self):
         html = _page(_nasa(), "/nasa.gov")
         whois = card(html, "whois")

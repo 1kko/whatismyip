@@ -129,10 +129,28 @@ def test_one_year_reads_singular():
 
 
 def test_dkim_not_found_is_left_out():
+    """Out of the count and the dot, and said at the front of the sub line:
+    the value stays the bare fraction, which fits a card at 20px."""
     card = security_card(_security(dkim=_check("unknown", DKIM_NOT_FOUND)))
-    assert card["value"] == "4 / 4 · DKIM ?"
+    assert card["value"] == "4 / 4"
     assert card["state"] == "pass"
-    assert card["sub"] == "graded checks pass"
+    assert card["sub"] == "DKIM ? · graded checks pass"
+
+
+def test_dkim_not_found_leads_every_sub():
+    review = security_card(
+        _security(dkim=_check("unknown", DKIM_NOT_FOUND), caa=_check("warn"))
+    )
+    assert (review["value"], review["state"]) == ("3 / 4", "warn")
+    assert review["sub"] == "DKIM ? · 1 to review"
+    gap = security_card(
+        _security(
+            dkim=_check("unknown", DKIM_NOT_FOUND),
+            caa=_check("unknown", "CAA: lookup timed out"),
+        )
+    )
+    assert (gap["value"], gap["state"]) == ("3 / 3", "unknown")
+    assert gap["sub"] == "DKIM ? · some checks did not run"
 
 
 def test_other_unknown_makes_the_card_unknown():
@@ -653,10 +671,12 @@ def test_nasa_sentence():
 
 def test_dkim_dropped_fraction_and_clean_tone():
     response = _page()
-    response["dns_security"] = _security(dkim=_check("pass", DKIM_NOT_FOUND))
-    segments = sentence(response, False)
-    assert "passes 4 of 4 graded DNS security checks" in _joined(segments)
-    assert {s["text"]: s["tone"] for s in segments}["4 of 4"] is None
+    for state in ("pass", "unknown"):
+        response["dns_security"] = _security(dkim=_check(state, DKIM_NOT_FOUND))
+        segments = sentence(response, False)
+        assert "passes 4 of 4 graded DNS security checks." in _joined(segments)
+        assert "DKIM" not in _joined(segments)
+        assert {s["text"]: s["tone"] for s in segments}["4 of 4"] is None
 
 
 def test_sentence_drops_failed_whois():
