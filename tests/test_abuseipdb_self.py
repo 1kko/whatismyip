@@ -235,3 +235,58 @@ def test_app_js_writes_text_only():
     handler = source[start : source.index("Look up subdomains", start)]
     assert "innerHTML" not in handler
     assert "insertAdjacentHTML" not in handler
+
+
+# --- where the chips render --------------------------------------------------
+
+
+def slot(html):
+    start = html.index('id="chips-reputation"')
+    return html[start : html.index("</span>", start)]
+
+
+def test_reputation_chip_renders_in_its_slot(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "ip_reputation",
+        lambda ip, location=None: {
+            "level": "medium",
+            "score": 40,
+            "signals": [
+                {
+                    "id": "tor",
+                    "label": "Tor exit",
+                    "source": "Tor Project",
+                    "as_of": "2026-11-02T00:00:00+00:00",
+                    "weight": 40,
+                }
+            ],
+            "checked": [
+                {
+                    "id": "tor",
+                    "label": "Tor exit",
+                    "source": "Tor Project",
+                    "as_of": "2026-11-02T00:00:00+00:00",
+                }
+            ],
+            "unavailable": [],
+            "attribution": [],
+        },
+    )
+    html = page("/", False)
+    assert "on Tor exit" in slot(html)
+    assert html.count("on Tor exit</a>") == 1
+
+
+def test_other_chips_render_outside_the_slot(monkeypatch):
+    import dnssecurity
+
+    graded = {
+        c: {"state": "pass", "summary": c, "findings": []} for c in dnssecurity.CHECKS
+    }
+    graded["spf"] = {"state": "warn", "summary": "SPF soft-fail ?all", "findings": []}
+    monkeypatch.setattr(dnssecurity, "evaluate", lambda *a, **k: graded)
+    monkeypatch.setattr(dnssecurity, "fetch", lambda *a, **k: {})
+    html = proxy.get("/example.com", headers=BROWSER).text
+    assert "SPF soft-fail ?all</a>" in html
+    assert "SPF soft-fail" not in slot(html)

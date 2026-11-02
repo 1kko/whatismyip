@@ -98,10 +98,13 @@
             {% endif %}
             <div class="review" id="review"{% if not overview.chips %} hidden{% endif %}>
                 <span class="review__label">To review</span>
-                {% for chip in overview.chips %}
+                {% for chip in overview.chips if chip.section != 'reputation' %}
                 <a class="chip chip--{{ chip.tone }}" href="#sec-{{ chip.section }}">{{ chip.text }}</a>
                 {% endfor %}
-                <span id="chips-reputation"></span>
+                {# The reputation chips sit in their own slot: a press on
+                   "Check with AbuseIPDB" replaces the lists' chip with the
+                   merged one (static/js/app.js). #}
+                <span id="chips-reputation">{% for chip in overview.chips if chip.section == 'reputation' %}<a class="chip chip--{{ chip.tone }}" href="#sec-{{ chip.section }}">{{ chip.text }}</a>{% endfor %}</span>
             </div>
             {% if view.meta_line %}<p class="summary__meta mono">{{ view.meta_line }}</p>{% endif %}
         </section>
