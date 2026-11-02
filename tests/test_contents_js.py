@@ -65,3 +65,28 @@ def test_at_bottom_marks_the_last_section():
 
 def test_at_bottom_without_sections_is_null():
     assert _current([], 0, True) is None
+
+
+def _at_bottom(*args):
+    script = (
+        f"const m = require({json.dumps(str(CONTENTS_JS))});"
+        f"console.log(JSON.stringify(m.isAtBottom(...{json.dumps(args)})));"
+    )
+    out = subprocess.run(  # noqa: S603
+        [NODE, "-e", script], capture_output=True, text=True, check=True, timeout=30
+    )
+    return json.loads(out.stdout)
+
+
+def test_a_page_that_does_not_scroll_is_never_at_bottom():
+    assert _at_bottom(0, 900, 700) is False
+    assert _at_bottom(0, 900, 900) is False
+
+
+def test_scrolled_to_the_end_is_at_bottom():
+    assert _at_bottom(1100, 900, 2000) is True
+    assert _at_bottom(1098, 900, 2000) is True
+
+
+def test_mid_page_is_not_at_bottom():
+    assert _at_bottom(500, 900, 2000) is False

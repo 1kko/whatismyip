@@ -32,8 +32,14 @@
     return null;
   }
 
+  // True at the end of a page that can scroll; a page that fits the window
+  // has no end to reach, so the first-section rule applies there.
+  function isAtBottom(scrollY, innerHeight, scrollHeight) {
+    return scrollHeight > innerHeight && scrollY + innerHeight >= scrollHeight - 2;
+  }
+
   if (typeof module === "object" && module.exports) {
-    module.exports = { currentSection };
+    module.exports = { currentSection, isAtBottom };
   }
   if (typeof document === "undefined") {
     return;
@@ -54,8 +60,11 @@
       const r = el.getBoundingClientRect();
       return { id: el.id.replace(/^sec-/, ""), top: r.top, bottom: r.bottom };
     });
-    const atBottom =
-      window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
+    const atBottom = isAtBottom(
+      window.scrollY,
+      window.innerHeight,
+      document.documentElement.scrollHeight,
+    );
     const id = currentSection(rects, LINE, atBottom);
     if (id === shown) {
       return;
