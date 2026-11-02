@@ -681,6 +681,9 @@ def test_self_page_shows_listed_names(reverseip_enabled, legs):
     html = proxy_client.get("/", headers=_visitor(**BROWSER)).text
     domains = section(html, "domains")
     assert LISTED_BLOCK in domains
-    assert "example.com" in domains
+    # The name's lookup link, not the bare hostname: CodeQL reads a hostname
+    # literal tested with `in` as URL sanitisation
+    # (py/incomplete-url-substring-sanitization).
+    assert 'href="/example.com"' in domains
     assert config.OPENINTEL_ATTRIBUTION in domains
     assert 'href="/static/licenses/openintel-terms.html"' in domains
