@@ -2115,54 +2115,87 @@ def subdomain_found_count(data: dict) -> int | None:
     return (len(crt_names) if count is None else count) + len(listed_only)
 
 
+def _dns_hint(domain: dict) -> str:
+    """The DNS records hint: the record counts, or the NXDOMAIN verdict."""
+    if dns_banner(domain):
+        return "does not resolve"
+    return " · ".join(
+        f"{label} {dns_failure_text(domain, key) or len(domain.get(key) or [])}"
+        for label, key in (
+            ("A", "a"),
+            ("AAAA", "aaaa"),
+            ("MX", "mx"),
+            ("NS", "ns"),
+            ("TXT", "txt"),
+        )
+    )
+
+
+def _ssl_hint(ssl_data: dict | None) -> str:
+    if not ssl_data:
+        return "no certificate"
+    if ssl_data.get("error"):
+        return ssl_data["error"]
+    issuer = _cert_issuer(ssl_data)
+    _, days_left = _cert_expiry(ssl_data)
+    problem = _ssl_problem(ssl_data)
+    if problem:
+        return f"{issuer} · {problem}"
+    return issuer if days_left is None else f"{issuer} · {days_left}d left"
+
+
+def _geoip_hint(location: dict) -> str:
+    parts = (location.get("city_name"), location.get("country_code"))
+    return " · ".join(p for p in parts if p) or "no data"
+
+
+def _subdomains_hint(subdomain_data: dict | None) -> str:
+    """The Subdomains hint doubles as the panel's call to action: nothing is
+    fetched until the panel is asked for, so before that it says what asking
+    will do rather than where the data comes from. static/js/app.js rewrites
+    it to the same "N subdomains found" wording once the fetch lands, so the
+    two paths read identically."""
+    if not subdomain_data:
+        return "click to lookup"
+    count = subdomain_found_count(subdomain_data)
+    if count is None:
+        return "lookup failed"
+    return f"{count:,} subdomain{'s' if count != 1 else ''} found"
+
+
+def _offers_subdomains(response: dict, subdomains_enabled: bool) -> bool:
+    """Only for a domain: an IP address has no subdomains, so offering the
+    panel would invite a request that can only fail. `domain` truthiness alone
+    isn't a reliable signal (an IP lookup still carries a populated `domain`
+    dict, its own A record), so this checks the address shape instead. Also
+    gated on the kill switch: SUBDOMAIN_ENABLED=false must not leave the page
+    advertising a panel whose only outcome is a 400 from the route."""
+    return subdomains_enabled and not _is_ip(response.get("address") or "")
+
+
 def _accordions(
     response: dict, subdomains_enabled: bool, reverseip: dict | None = None
 ) -> list[dict]:
     domain = response.get("domain") or {}
     headers = response.get("headers") or {}
-
-    whois_hint = _whois_hint(response.get("whois"))
-
-    dns_hint = (
-        "does not resolve"
-        if dns_banner(domain)
-        else " · ".join(
-            f"{label} {dns_failure_text(domain, key) or len(domain.get(key) or [])}"
-            for label, key in (
-                ("A", "a"),
-                ("AAAA", "aaaa"),
-                ("MX", "mx"),
-                ("NS", "ns"),
-                ("TXT", "txt"),
-            )
-        )
-    )
-
-    ssl_data = response.get("ssl")
-    if not ssl_data:
-        ssl_hint = "no certificate"
-    elif ssl_data.get("error"):
-        ssl_hint = ssl_data["error"]
-    else:
-        issuer = _cert_issuer(ssl_data)
-        _, days_left = _cert_expiry(ssl_data)
-        problem = _ssl_problem(ssl_data)
-        if problem:
-            ssl_hint = f"{issuer} · {problem}"
-        else:
-            ssl_hint = issuer if days_left is None else f"{issuer} · {days_left}d left"
-
-    location = response.get("location") or {}
-    geo_city = location.get("city_name")
-    geo_country = location.get("country_code")
-    geoip_hint = " · ".join(p for p in (geo_city, geo_country) if p) or "no data"
-
     header_count = len(headers)
     accordions = [
-        {"id": "whois", "title": "WHOIS", "hint": whois_hint},
-        {"id": "dns", "title": "DNS records", "hint": dns_hint},
-        {"id": "ssl", "title": "SSL certificate", "hint": ssl_hint},
-        {"id": "geoip", "title": "GeoIP", "hint": geoip_hint},
+        {
+            "id": "whois",
+            "title": "WHOIS",
+            "hint": _whois_hint(response.get("whois")),
+        },
+        {"id": "dns", "title": "DNS records", "hint": _dns_hint(domain)},
+        {
+            "id": "ssl",
+            "title": "SSL certificate",
+            "hint": _ssl_hint(response.get("ssl")),
+        },
+        {
+            "id": "geoip",
+            "title": "GeoIP",
+            "hint": _geoip_hint(response.get("location") or {}),
+        },
     ]
     # Right after GeoIP: the AS behind the address (asinfo.py).
     as_card = as_view(response.get("as_info"))
@@ -2188,32 +2221,14 @@ def _accordions(
         accordions.append(
             {"id": "reputation", "title": "Reputation", "hint": reputation["hint"]}
         )
-
-    # Only for a domain. An IP address has no subdomains, so offering the panel
-    # would invite a request that can only fail. `domain` truthiness alone
-    # isn't a reliable signal here: an IP lookup still carries a populated
-    # `domain` dict (its own A record, used for the DNS accordion's hint
-    # above), so this checks the address shape instead, same as build_view().
-    #
-    # Also gated on the kill switch: SUBDOMAIN_ENABLED=false must not leave
-    # the page still advertising a panel whose only possible outcome is a 400
-    # from the route.
-    subdomain_data = response.get("subdomains")
-    if subdomains_enabled and not _is_ip(response.get("address") or ""):
-        # The hint doubles as the panel's call to action: nothing is fetched
-        # until the accordion is opened, so before that it says what opening it
-        # will do rather than where the data comes from. static/js/app.js
-        # rewrites it to the same "N subdomains found" wording once the lazy
-        # fetch lands, so the two paths read identically.
-        if subdomain_data:
-            count = subdomain_found_count(subdomain_data)
-            if count is None:
-                hint = "lookup failed"
-            else:
-                hint = f"{count:,} subdomain{'s' if count != 1 else ''} found"
-        else:
-            hint = "click to lookup"
-        accordions.append({"id": "subdomains", "title": "Subdomains", "hint": hint})
+    if _offers_subdomains(response, subdomains_enabled):
+        accordions.append(
+            {
+                "id": "subdomains",
+                "title": "Subdomains",
+                "hint": _subdomains_hint(response.get("subdomains")),
+            }
+        )
 
     accordions.extend(
         [
@@ -2226,6 +2241,125 @@ def _accordions(
         ]
     )
     return accordions
+
+
+def _block(name: str, heading: str | None = None) -> dict:
+    return {"name": name, "heading": heading}
+
+
+def _section(
+    id: str, title: str, hint: str, blocks: list[dict], group: str = "main"
+) -> dict:
+    return {"id": id, "title": title, "hint": hint, "group": group, "blocks": blocks}
+
+
+def _sections(
+    response: dict,
+    *,
+    is_self: bool,
+    subdomains_enabled: bool,
+    reverseip: dict | None,
+) -> list[dict]:
+    """The page's sections in reading order, each with the blocks (macros in
+    templates/_blocks.html) it holds. Beside _accordions, which keeps the old
+    page; both read the same hint helpers, so the two cannot drift."""
+    domain = response.get("domain") or {}
+    location = response.get("location") or {}
+    address = response.get("address") or ""
+    whois = _section(
+        "whois",
+        "Registration",
+        _whois_hint(response.get("whois")),
+        [_block("whois")],
+    )
+    as_card = as_view(response.get("as_info"))
+    reputation = reputation_view(response.get("reputation"))
+    reputation_section = (
+        [
+            _section(
+                "reputation", "Reputation", reputation["hint"], [_block("reputation")]
+            )
+        ]
+        if reputation
+        else []
+    )
+    raw = _section("raw", "Raw JSON", "full response", [_block("raw")], group="request")
+
+    if not _is_ip(address):
+        sections = [
+            whois,
+            _section("dns", "DNS records", _dns_hint(domain), [_block("dns")]),
+        ]
+        security = dns_security_view(response.get("dns_security"))
+        if security:
+            sections.append(
+                _section(
+                    "security", "DNS security", security["hint"], [_block("security")]
+                )
+            )
+        sections.append(
+            _section(
+                "ssl", "Certificate", _ssl_hint(response.get("ssl")), [_block("ssl")]
+            )
+        )
+        network = [_block("geoip", "Location")]
+        if as_card:
+            network.append(_block("as", "Autonomous system"))
+        sections.append(
+            _section(
+                "network",
+                "Network",
+                as_card["hint"] if as_card else _geoip_hint(location),
+                network,
+            )
+        )
+        sections += reputation_section
+        if _offers_subdomains(response, subdomains_enabled):
+            sections.append(
+                _section(
+                    "subdomains",
+                    "Subdomains",
+                    "on request"
+                    if not response.get("subdomains")
+                    else _subdomains_hint(response.get("subdomains")),
+                    [_block("subdomains")],
+                    group="request",
+                )
+            )
+        sections.append(raw)
+        return sections
+
+    ptr = location.get("reverse_dns")
+    domains_blocks = [_block("ptr", "Reverse DNS")]
+    domains_hint = ptr or "no PTR"
+    if reverseip:
+        domains_blocks.append(_block("reverseip", "Listed names"))
+        domains_hint += f" · {reverseip['hint']}"
+    if ptr:
+        domains_blocks.append(_block("dns", f"Records for {ptr}"))
+    sections = [
+        _section("location", "Location", _geoip_hint(location), [_block("geoip")]),
+        _section(
+            "organization",
+            "Organization",
+            as_card["hint"] if as_card else _asn_org(location),
+            [_block("as" if as_card else "org")],
+        ),
+        _section("domains", "Domains", domains_hint, domains_blocks),
+        *reputation_section,
+        whois,
+    ]
+    if is_self:
+        sections.append(
+            _section(
+                "browser",
+                "Your browser",
+                "not measured yet",
+                [_block("fingerprint"), _block("headers", "Headers your browser sent")],
+            )
+        )
+    sections.append(raw)
+    return sections
 
 
 def build_view(
@@ -2290,6 +2424,20 @@ def build_view(
         "whois_pending": whois_pending(response.get("whois")),
         "whois_name_servers": name_server_links(response.get("whois"), link_for),
         "accordions": _accordions(response, subdomains_enabled, reverseip),
+        "sections": _sections(
+            response,
+            is_self=is_self,
+            subdomains_enabled=subdomains_enabled,
+            reverseip=reverseip,
+        ),
+        # The domain's linked rDNS row (None for an IP) and the IP's PTR row,
+        # for the blocks that draw them outside the facts columns.
+        "rdns_row": None if is_ip else facts[0]["rows"][-1],
+        "ptr_row": (
+            _ptr_row(location.get("reverse_dns"), domain, address, link_for)
+            if is_ip
+            else None
+        ),
         "reverse_ip": reverseip,
         "ssl_rows": ssl_rows(response.get("ssl"), response.get("address")),
         # A domain's address may have been found under another name (a CNAME
