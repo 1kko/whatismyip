@@ -361,25 +361,45 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `location_card`, `domains_card`, `reputation_card`), the "To review" chips
   (`review_chips`, `reputation_chips`), the one-sentence `sentence` and
   `build(response)`, which returns all three and each card's state by id.
-  `section_state(id, states)` is a section's dot: its card's state, else
-  `request` for `subdomains`, `raw` and `browser`, else `info`. A card is
+  `section_state(id, states, response)` is a section's dot: its card's
+  state, else `request` for `subdomains`, `raw` and `browser`, else `info`;
+  a Subdomains section whose response carries the list (`?subdomains=include`)
+  is `info`, or `unknown` when neither crt.sh nor the top lists answered
+  (`viewmodel.subdomain_found_count` is None). `static/js/app.js` moves the
+  same dots once the data is shown (`setSectionState`): Subdomains after a
+  lookup, Raw JSON once the tree is drawn. A card is
   `{id, label, value, sub, state, href}`, `state` one of `STATES` (`pass`,
   `warn`, `danger`, `info`, `unknown`, `request`, `pending`); `href` is the
   section it scrolls to. The rules, each pinned in `tests/test_overview.py`:
   `unknown` is never `pass` and reputation is never `pass` (no signals on a few
   lists is `info`); the DNS card reads only the a/aaaa/mx/ns/txt statuses
   (`ptr`, `cname`, `dmarc` and `spf` failing say nothing about those records);
+  a DNS card with no sweep at all (`domain` None: `get_records` raised) is
+  `?`, "lookup failed", `unknown`, never "0 records";
   the security card counts `GRADED_CHECKS` (`spf, dmarc, dkim, caa, dnssec`)
   with `info` checks left out, and leaves DKIM's "not found at the common
   selectors" (`DKIM_NOT_FOUND`) out of the count and says so with a `DKIM ?`
-  prefix on its sub line; a chip is a finding, never an unknown, so a failed
-  query, an FCrDNS `unknown`, DKIM not found and an `info` check are never
-  chips; the domain sentence names a place only as the city at city
-  precision. The WHOIS card of a self page that went out early is `pending`
-  until `static/js/app.js` fills it. Pure, with no I/O: imports `viewmodel` and
-  the standard library, never `lookup`, `main`, `managers`, `dnssecurity` or
-  `asinfo` (what those own is mirrored and pinned by a test), and `viewmodel`
-  must not import it back.
+  prefix on its sub line; with no graded check answered its value is `?`,
+  never `0 / 0`, and its state `unknown`. `_security_counts` is that count,
+  read by the card and the sentence alike; a chip is a finding, never an
+  unknown, so a failed query, an FCrDNS `unknown`, DKIM not found and an
+  `info` check are never chips. A Location card with no country (none, or
+  GeoIP's `--`, `_NO_COUNTRY`, which no card prints) is `unknown` with an
+  empty sub line. The sentence leaves out a clause whose data is missing or
+  failed: the security clause when the card is absent or `unknown`, the IP
+  sentence's place when the Location card is `unknown` (never "in Private
+  network"). It names the city alone at city precision (the IP sentence
+  "City, Country"), else the country in running English
+  (`countrynames.country_name_in_text`: "the United States"), GeoLite2's own
+  name when there is no code. An expired certificate "serves an expired
+  certificate"; any other problem "serves a certificate that fails
+  verification (hostname mismatch)", the problem in the danger tone. The
+  WHOIS card of a self page that went out early is `pending` until
+  `static/js/app.js` fills it. Pure, with no I/O: imports `viewmodel`,
+  `countrynames` and the standard library, never `lookup`, `main`,
+  `managers`, `dnssecurity` or `asinfo` (what those own is mirrored and
+  pinned by a test, `app.js`'s `STATES` too), and `viewmodel` must not import
+  it back.
 - `viewmodel.py`: `build_view()` turns a response dict into what
   `templates/browser.html` renders: `sections` (`_sections`: per page type, in
   reading order, each `{id, title, hint, blocks, group}` with the macro names
@@ -445,9 +465,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   `display` (`reputation_view`, `overview.reputation_card` and
   `overview.reputation_chips`) for `app.js` to place. A `400` unless the value
   is `only` and `ABUSEIPDB_API_KEY` is set; no lookup-gate slot (AbuseIPDB's
-  pool, cache and daily quota bound it). `HEAD` answers it as JSON with `200`
-  even when AbuseIPDB is off, since `head_lookup` checks the query's shape,
-  not the configuration. `robots.txt` disallows `?abuseipdb=` as it does
+  pool, cache and daily quota bound it). `HEAD` answers as GET does: JSON
+  with `200` while the key is set, GET's `400` ("AbuseIPDB is not
+  configured") while it is not, read from `abuseipdb_client.enabled`, so
+  still no lookup. `robots.txt` disallows `?abuseipdb=` as it does
   `?subdomains=`
 - `GET /?whois=only` - the caller's own registration, JSON only: the self page
   waits `SELF_WHOIS_SOFT_DEADLINE_SECONDS` (1.5) for WHOIS, then goes out with
@@ -496,9 +517,10 @@ poetry run ruff format .         # CI runs `ruff format --check .`
   lists. The map's data reaches none of the JSON, the text or MCP.
 - `?format=html|json|text` and `?fields=` on both lookup routes
 - `HEAD /`, `HEAD /{domain_ip}` - `main.head_lookup`: `200` with the
-  Content-Type GET would answer with (JSON for the `?whois=only` and
-  `?subdomains=only` modes, whatever was negotiated), GET's `400` for a bad
-  query parameter, and no lookup
+  Content-Type GET would answer with (JSON for the `?whois=only`,
+  `?abuseipdb=only` and `?subdomains=only` modes, whatever was negotiated),
+  GET's `400` for a bad query parameter or for `?abuseipdb=only` while
+  AbuseIPDB is off, and no lookup
 - `GET /healthz` - `ok` or `degraded` with `reasons` (`main.health_reasons`,
   no network calls), the deployed `version`, and which datasets are loaded
 - `GET /robots.txt`, `GET /favicon.ico` (a `301` to `/static/favicon.ico`),
@@ -888,9 +910,9 @@ below by text:
 - Every hostname and address the page prints links to its own lookup: the
   DNS table's A/AAAA/NS/MX/CNAME values (the record's field, so an MX links
   its host, never `10 host.`; a CNAME hop row its hop's target), the rDNS and
-  PTR rows, the hero's `A → ip` tag, the WHOIS name servers, the names in
-  the "Domains on this address" panel (`viewmodel.reverse_ip_view`) and the
-  subdomain list, the top lists' names in it included. TXT rows and failed
+  PTR rows, the hero's `A → ip` tag, the WHOIS name servers, the "Domains"
+  section's listed names (`viewmodel.reverse_ip_view`) and the subdomain
+  list, the top lists' names in it included. TXT rows and failed
   (`tone: warning`) rows never link.
 - `lookup_href(value)` is the one rule: `/{value}` only when `classify_target`
   calls it a domain (written as `lookup.canonical_hostname` spells it: no
@@ -945,11 +967,14 @@ self page's "Your browser" section, `#sec-browser`):
   that promise (`tests/test_page.py::TestFingerprintPanel::test_module_is_display_only`
   and the `sent`/`stored` tripwires in `tests/test_fingerprint_consistency.py`).
 - The passive signals are read on load. The active probes (canvas, audio,
-  WebGL parameters, fonts) wait for the "Measure" button (`#fp-measure`):
-  `measure()` reads the canvas before its first `await`, so it happens inside
-  the click, the only moment Firefox's resistFingerprinting asks. The section
-  starts as `request` ("not measured yet") and `setHint` turns it to the
-  signal count when the measurement ends.
+  WebGL parameters, fonts) wait for the "Measure" button (`#fp-measure`),
+  drawn `hidden` and shown by the script that wires it, like "Look up
+  subdomains" and "Show the JSON tree" (a page without JavaScript keeps its
+  `<noscript>` line): `measure()` reads the canvas before its first `await`,
+  so it happens inside the click, the only moment Firefox's
+  resistFingerprinting asks. The section starts as `request` ("not measured
+  yet") and `setHint` turns it to the signal count when the measurement
+  ends, and `markMeasured` its dots to `info`.
 - Its first two rows, "Clock vs address" and "Languages vs address", compare
   `Intl`'s time zone, `getTimezoneOffset()` and the region subtags of
   `navigator.languages` with `location.time_zone`, `country_code` and
@@ -1137,7 +1162,7 @@ whatismyip/
 ├── mapgeom.py           # Web Mercator tiles, antimeridian wrap, great-circle arcs, weighted-point canvas and frame
 ├── asmap.py             # where an AS's IPv4 space geolocates (sampled, by city, each city with its prefixes)
 ├── countrynames.py      # ISO 3166 code -> name (pure data)
-├── overview.py          # the lookup page's status cards, review chips and sentence (pure, imports viewmodel)
+├── overview.py          # the lookup page's status cards, review chips and sentence (pure, imports viewmodel and countrynames)
 ├── viewmodel.py         # response_data -> template view (pure, no I/O)
 ├── healthcheck.py       # Docker HEALTHCHECK: /healthz answers 200 or not
 ├── server.json          # official MCP Registry entry (see mcp-publish.yml)
@@ -1157,7 +1182,7 @@ whatismyip/
 ├── static/
 │   ├── css/whatismyip.css  # design tokens + layout (dark only); jsoneditor.css is vendored
 │   ├── css/leaflet.css     # vendored Leaflet 1.9.4, loaded only on an /AS<n> page with a map
-│   ├── js/app.js           # search, copy, hints and cards (`setHint`, `setCard`), WHOIS fill-in, AbuseIPDB button, subdomain panel, lazy JSONEditor (`bootRawEditor`)
+│   ├── js/app.js           # search, copy, hints, cards and dots (`setHint`, `setCard`, `setSectionState`), WHOIS fill-in, AbuseIPDB button, subdomain panel, lazy JSONEditor (`bootRawEditor`, `updatePageData`)
 │   ├── js/contents.js      # marks the section in view in the contents list (`currentSection`, run in node)
 │   ├── js/map.js           # paints the server's map payload, with the attribution
 │   ├── js/fingerprint.js   # self page's browser fingerprint + clock/languages vs address rows, client-side only; the active probes wait for the Measure button
@@ -1339,10 +1364,13 @@ on demand, so a periodic sweep would re-fetch domains nobody asked about again.
 is served immediately, with a refresh kicked off in the background.
 
 **Nothing is asked before the press.** The page's Subdomains section (group
-`request`) holds the "Look up subdomains" button (`#subdomains-run`);
-`static/js/app.js` requests `?subdomains=only` only from its click, so an ordinary
-page load never reaches crt.sh (`?subdomains=include` is the caller's own ask), and `setHint("subdomains", ...)` updates the hint
-beside it.
+`request`) holds the "Look up subdomains" button (`#subdomains-run`), drawn
+`hidden` and shown by `static/js/app.js`, which wires it (without scripts the
+slot's `<noscript>` link asks for `?subdomains=include`). It requests
+`?subdomains=only` only from that click, so an ordinary page load never reaches
+crt.sh (`?subdomains=include` is the caller's own ask); `setHint("subdomains",
+...)` updates the hint beside it and `setSectionState` the section's dots
+(`info` once the list is drawn, `unknown` when the lookup failed).
 
 **A failure is never an empty list.** Both the page's panel and the MCP
 `subdomains` tool distinguish "no subdomains" from "could not ask" — an empty
@@ -1410,7 +1438,9 @@ unasked. The one way the visitor's own address reaches it is the self page's
 takes the address from the connection, never from a parameter, sends it
 only if `is_safe_ip` passes, and answers the merged `reputation` with the
 section's rows, card and chips (`tests/test_abuseipdb_self.py`; a press
-replaces the lists' chip in `#chips-reputation`). Keep it that way. And only
+replaces the lists' chip in `#chips-reputation`, and the merged `reputation`
+replaces the lists' own in `#page-data` and an open Raw JSON tree,
+`updatePageData`, as `fillWhois` does for `whois`). Keep it that way. And only
 when the `reputation` leg is wanted: MCP `dns_records` and `ssl_certificate`
 of an IP, and `?fields=` without a reputation field, ask nothing. The free plan allows 1,000 checks a UTC day, so an answer is cached a day
 per address and no request goes out past `ABUSEIPDB_DAILY_LIMIT` or after
@@ -1929,8 +1959,8 @@ Test files:
 - Units: `test_geo.py` (gazetteer, distance, coordinate precision), `test_mapgeom.py` (projection,
   tiles, arcs, the AS map's frame), `test_viewmodel.py` (view model, WHOIS/SSL rendering, the
   FCrDNS verdict, registration and certificate ages), `test_overview.py` (each
-  card's state, the chips, the sentence, `section_state`, and the module's
-  imports), `test_sections.py` (`viewmodel._sections` and the sections they
+  card's state, the chips, the sentence, `section_state`, the module's
+  imports and the constants it mirrors), `test_sections.py` (`viewmodel._sections` and the sections they
   render, `rdns_row`/`ptr_row`/`org_rows`), `test_contents_js.py`
   (`static/js/contents.js`'s `currentSection`, in node),
   `test_rdap.py` (RDAP/WHOIS normalisation, fallback routing, override and
@@ -1957,7 +1987,8 @@ Test files:
   Content-Type and status it shares with GET),
   `test_self_first_paint.py` (self page before WHOIS, `/?whois=only`, and
   `?fields=` joining the self lookup), `test_abuseipdb_self.py`
-  (`/?abuseipdb=only` and the button: nothing is asked without a press),
+  (`/?abuseipdb=only` and the button: nothing is asked without a press, and
+  app.js fetches the route only inside the button's click handler),
   `test_ip_whois_column.py` (an IP's Registration section), `test_subdomain_panel.py`
   (the subdomain panel), `test_webrtc_leak.py` (the WebRTC leak test),
   `test_map_pin.py` (map.js's approximate pin and its page wiring, run in
