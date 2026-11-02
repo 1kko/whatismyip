@@ -16,6 +16,9 @@ import lookup
 import mcp_server
 from main import app, build_map_payload, classify_target, normalize_lookup_target
 from main import _is_route
+from pagehelpers import card, section
+from test_overview import _page as nasa_response
+from test_viewmodel import ANSWER_4_NAMES
 from viewmodel import SITE_DESCRIPTION
 
 CSS = Path("static/css/whatismyip.css")
@@ -803,17 +806,15 @@ class TestDnsRows:
         assert "NS/MX from zone" not in html
         assert "(zone)" not in html
 
-    def test_an_ip_without_a_ptr_gets_a_caption_over_no_records(self):
+    def test_an_ip_without_a_ptr_gets_no_records_table(self):
         # conftest's offline defaults fail the PTR, so gather() hands the page
-        # domain={}: the caption falls back to the address, nothing is marked.
+        # domain={}: there is no name whose records the Domains section could
+        # list, so it draws the PTR row alone, never a table of the address's
+        # own name that says "No records".
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        table = re.search(
-            r'<table class="records records--dns">.*?</table>', html, re.S
-        ).group(0)
-        assert "records for 8.8.8.8" in table
-        assert "No records" in table
-        assert "NS/MX from zone" not in table
-        assert "(zone)" not in table
+        assert '<table class="records records--dns">' not in html
+        assert "No records" not in html
+        assert "PTR" in section(html, "domains")
 
     def test_a_hostile_ptr_name_is_escaped_in_the_caption_and_name_cells(self):
         # Whoever holds an address writes its PTR record, and dnspython keeps
@@ -824,6 +825,7 @@ class TestDnsRows:
         gathered = {
             **GATHERED,
             "address": "8.8.8.8",
+            "location": {**GATHERED["location"], "reverse_dns": hostile},
             "domain": {
                 "queried_name": hostile,
                 "zone": hostile,
@@ -1050,7 +1052,8 @@ class TestBrowserPage:
         assert "WhatIsMyIP" in html
         assert "8.8.8.8" in html
         assert "IPv4" in html  # a hero tag, rendered above the address
-        assert "NETWORK" in html
+        assert 'id="card-organization"' in html
+        assert "Organization" in section(html, "organization")
         assert "Raw JSON" in html
 
     def test_the_stylesheet_url_carries_the_deployed_version(self):
@@ -1101,18 +1104,18 @@ class TestBrowserPage:
 
     def test_footer_no_longer_carries_the_mcp_link(self):
         # A bare "MCP server" link told a visitor nothing and left the site to
-        # explain itself. The JSON accordion and the head metadata carry it now.
+        # explain itself. The Raw JSON section and the head metadata carry it now.
         html = client.get("/", headers=BROWSER_UA).text
         footer = html.split("<footer")[1].split("</footer>")[0]
         assert "MCP" not in footer
         assert "github.com/1kko/whatismyip" in footer  # the source link stays
 
-    def test_json_accordion_advertises_the_mcp_endpoint(self):
+    def test_raw_json_section_advertises_the_mcp_endpoint(self):
         # A visitor's route to the MCP server. It sits with the curl example
         # because both answer the same question: how do I use this from
         # something that isn't a browser?
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        body = html.split('id="acc-raw"')[1].split("</details>")[0]
+        body = section(html, "raw")
         assert 'id="mcp-endpoint"' in body
         assert "/mcp</pre>" in body
         assert "claude mcp add --transport http whatismyip" in body
@@ -1128,18 +1131,11 @@ class TestBrowserPage:
         # to survive, because stating only one of them is how this note was
         # wrong the first time.
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        body = html.split('id="acc-raw"')[1].split("</details>")[0]
+        body = section(html, "raw")
         assert "whoami_caller" in body
         assert "your own machine" in body  # local client
         assert "datacenter" in body  # hosted client
         assert "browser" in body  # the definitive answer
-
-    def test_ssl_certificate_section_renders_and_reports_absence_for_an_ip(self):
-        html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        assert "SSL certificate" in html  # the accordion is always present
-        # An IP lookup never has a certificate, so the section says so.
-        section = html.split('id="acc-ssl"')[1].split("</details>")[0]
-        assert "No certificate" in section
 
     def test_footer_wordmark_shows_the_current_domain(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
@@ -1163,12 +1159,12 @@ class TestBrowserPage:
         assert "resolved in" in html
         assert "UTC" in html
         assert 'aria-label="Source on GitHub"' in html
-        # The curl example moved into the Raw JSON accordion.
+        # The curl example moved into the Raw JSON section.
         assert "curl" not in html.split("<footer")[1]
 
-    def test_curl_example_lives_in_the_raw_json_accordion(self):
+    def test_curl_example_lives_in_the_raw_json_section(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        raw_block = html.split('id="acc-raw"')[1]
+        raw_block = section(html, "raw")
         assert 'id="curl-example"' in raw_block
         assert "curl http://testserver/8.8.8.8" in raw_block
 
@@ -1241,21 +1237,25 @@ class TestBrowserPage:
 class TestFingerprintPanel:
     def test_self_page_shows_the_browser_fingerprint_panel(self):
         html = client.get("/", headers=BROWSER_UA).text
-        assert 'id="acc-fingerprint"' in html
-        assert "UNIQUE ID" in html
-        assert 'id="fp-hash"' in html
+        browser = section(html, "browser")
+        assert "UNIQUE ID" in browser
+        assert 'id="fp-hash"' in browser
+        assert 'id="fp-measure"' in browser
         assert "/static/js/fingerprint.js" in html
-        assert "noscript" in html  # JS-required fallback lives in the accordion
+        # The JS-required fallback lives in the section.
+        assert "<noscript>" in browser
 
-    def test_fingerprint_accordion_sits_above_whois(self):
-        # The Fingerprint accordion renders first in the accordion list, ahead
-        # of WHOIS (the first server-side accordion).
+    def test_your_browser_comes_after_the_registration(self):
+        # The self page leads with who the address is; the browser's own
+        # signals come after the address's sections, before "On request".
         html = client.get("/", headers=BROWSER_UA).text
-        assert html.index('id="acc-fingerprint"') < html.index('id="acc-whois"')
+        assert html.index('id="sec-whois"') < html.index('id="sec-browser"')
+        assert html.index('id="sec-browser"') < html.index('id="sec-raw"')
 
     def test_lookup_page_has_no_fingerprint_panel(self):
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        assert 'id="acc-fingerprint"' not in html
+        assert 'id="sec-browser"' not in html
+        assert 'id="fp-measure"' not in html
         assert "/static/js/fingerprint.js" not in html
 
     def test_fingerprint_panel_does_not_change_the_csp(self):
@@ -1290,8 +1290,8 @@ class TestFingerprintPanel:
 
     def test_module_no_ops_off_the_self_page(self):
         js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
-        # Must bail immediately if the fingerprint accordion isn't on the page.
-        assert 'getElementById("acc-fingerprint")' in js
+        # Must bail immediately if the "Your browser" section isn't on the page.
+        assert 'getElementById("sec-browser")' in js
         assert "if (!panel) return" in js
 
     def test_fingerprint_id_hashes_only_stable_signals(self):
@@ -1311,28 +1311,27 @@ class TestFingerprintPanel:
         js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
         assert "copyBtn.disabled = false" in js
 
-    def test_hint_reads_open_to_measure_before_the_panel_is_opened(self):
+    def test_hint_reads_not_measured_yet_before_the_press(self):
         """The "N signals · ≈ N bits" summary needs the active probes, which
-        wait for the first opening; until then the header says what opening
-        the panel does."""
+        wait for "Measure"; until then both of the section's hints, in the
+        contents list and under its heading, say nothing was measured."""
         html = client.get("/", headers=BROWSER_UA).text
-        hint = re.search(r'id="fp-acc-hint"[^>]*>([^<]*)</span>', html)
-        assert hint, html
-        assert hint.group(1) == "open to measure"
+        hints = re.findall(r'data-hint="browser" title="([^"]*)">([^<]*)</span>', html)
+        assert hints == [("not measured yet", "not measured yet")] * 2
 
-    def test_active_probes_run_from_measure_on_the_first_opening(self):
+    def test_active_probes_run_from_measure_on_the_press(self):
         """Canvas, audio, WebGL-parameter and font probes live in measure(),
-        started by a click on the accordion's header, or by its toggle for an
-        opening with no click; never by an idle callback at load. Firefox
-        with resistFingerprinting (and Tor Browser) asks before a canvas read
-        only inside a click or a key and declines one anywhere else unasked,
-        and a <details> fires toggle after the click, not in it.
-        tests/test_fingerprint_probes.py runs the script to check the timing;
-        this pins the shape."""
+        started by a click on #fp-measure and nothing else; never by an idle
+        callback at load. Firefox with resistFingerprinting (and Tor Browser)
+        asks before a canvas read only inside a click or a key and declines
+        one anywhere else unasked. tests/test_fingerprint_probes.py runs the
+        script to check the timing; this pins the shape."""
         js = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
-        assert 'header.addEventListener("click"' in js
-        assert 'panel.addEventListener("toggle"' in js
-        assert "if (!panel.open || measured)" in js  # the app.js accordion pattern
+        assert 'getElementById("fp-measure")' in js
+        assert 'button.addEventListener("click"' in js
+        assert "button.disabled = true" in js
+        assert '"toggle"' not in js
+        assert 'querySelector("summary")' not in js
         assert "async function measure()" in js
         assert '"measuring…"' in js
         assert "requestIdleCallback" not in js
@@ -1612,6 +1611,13 @@ class TestMobileLayout:
         rule = re.search(r"\.as-filter[^{]*\{\s*font-size:\s*16px", css)
         assert rule.start() > base.start()
 
+    def test_a_sub_heading_breaks_a_long_name(self):
+        # "Records for <PTR name>" is one unbroken word at phone width.
+        css = CSS.read_text(encoding="utf-8")
+        assert re.search(
+            r"^\.report-section__sub\s*\{[^}]*overflow-wrap:\s*anywhere", css, re.M
+        )
+
     def test_the_desktop_box_is_unchanged(self):
         css = CSS.read_text(encoding="utf-8")
         assert re.search(r"\.search-wrap\s*\{[^}]*width:\s*440px", css)
@@ -1662,23 +1668,31 @@ class TestMobileLayout:
         # both the same way, so the two strings are equal as markup.
         html = client.get("/8.8.8.8", headers=BROWSER_UA).text
         spans = re.findall(
-            r'<span class="hint" id="(hint-[a-z]+)" title="([^"]*)">([^<]*)</span>',
+            r'<span class="hint" id="(hint-[a-z]+)" data-hint="[a-z]+" '
+            r'title="([^"]*)">([^<]*)</span>',
             html,
         )
         assert {name for name, _, _ in spans} >= {
+            "hint-location",
+            "hint-organization",
+            "hint-domains",
             "hint-whois",
-            "hint-dns",
-            "hint-ssl",
-            "hint-geoip",
-            "hint-headers",
             "hint-raw",
         }
-        for name, title, text in spans:
+        toc = re.findall(
+            r'<span class="toc__hint" data-hint="([a-z]+)" '
+            r'title="([^"]*)">([^<]*)</span>',
+            html,
+        )
+        assert {name for name, _, _ in toc} == {
+            name.removeprefix("hint-") for name, _, _ in spans
+        }
+        for name, title, text in spans + toc:
             assert title == text, name
         self_page = client.get("/", headers=BROWSER_UA).text
         assert (
-            '<span class="hint" id="fp-acc-hint" title="open to measure">'
-            "open to measure</span>" in self_page
+            '<span class="hint" id="hint-browser" data-hint="browser" '
+            'title="not measured yet">not measured yet</span>' in self_page
         )
 
     def test_a_quote_in_a_hint_cannot_leave_its_title(self):
@@ -1692,25 +1706,35 @@ class TestMobileLayout:
             html = client.get("/example.com", headers=BROWSER_UA).text
         escaped = "Acme &#34;Names&#34; &lt;b&gt;&amp;&lt;/b&gt; Co&#39;s"
         assert (
-            f'<span class="hint" id="hint-whois" title="{escaped}">{escaped}</span>'
-            in html
+            f'<span class="hint" id="hint-whois" data-hint="whois" title="{escaped}">'
+            f"{escaped}</span>" in html
+        )
+        assert (
+            f'<span class="toc__hint" data-hint="whois" title="{escaped}">'
+            f"{escaped}</span>" in html
         )
 
     def test_the_scripts_that_rewrite_a_hint_rewrite_its_title(self):
         # app.js fills the WHOIS hint on the self page and the Subdomains hint
-        # when that panel opens; fingerprint.js fills the Fingerprint hint. No
-        # JS runtime here (see the fingerprint.js checks above), so by source
-        # text, the way tests/test_subdomain_panel.py pins app.js's wiring.
+        # when that lookup lands; fingerprint.js fills the "Your browser" hint.
+        # Each writes every [data-hint] of its section, the contents entry's
+        # and the heading's, text and title alike. No JS runtime here (see the
+        # fingerprint.js checks above), so by source text, the way
+        # tests/test_subdomain_panel.py pins app.js's wiring.
         js = Path("static/js/app.js").read_text(encoding="utf-8")
-        for name, element in (
-            ("setWhoisHint", "hint"),
-            ("setSubdomainHint", "subdomainHint"),
+        body = re.search(r"^function setHint\(.*?^\}$", js, re.M | re.S).group(0)
+        assert 'querySelectorAll(`[data-hint="${id}"]`)' in body
+        assert "hint.textContent = text" in body
+        assert "hint.title = text" in body
+        for name, sid in (
+            ("setWhoisHint", "whois"),
+            ("setSubdomainHint", "subdomains"),
         ):
-            body = re.search(rf"^function {name}\(.*?^\}}$", js, re.M | re.S).group(0)
-            assert f"{element}.textContent = text" in body, name
-            assert f"{element}.title = text" in body, name
+            wrapper = re.search(rf"^function {name}\(.*?^\}}$", js, re.M | re.S)
+            assert f'setHint("{sid}", text)' in wrapper.group(0), name
         fp = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
-        assert 'setHint("fp-acc-hint"' in fp
+        assert "querySelectorAll('[data-hint=\"browser\"]')" in fp
+        assert "el.textContent = text" in fp
         assert "el.title = text" in fp
 
     def test_the_copy_icon_is_a_24px_target(self):
@@ -2037,13 +2061,15 @@ class TestSubdomainPanel:
     TestSubdomainsParameter's rationale: no network in the suite.
     """
 
-    def test_the_panel_renders_collapsed_and_inert_for_a_domain(self):
-        """Discoverable but costing nothing: no fetch happens until it opens."""
+    def test_the_panel_renders_inert_for_a_domain(self):
+        """Discoverable but costing nothing: no fetch happens until the
+        button is pressed."""
         with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
             with patch("main.get_subdomains", new_callable=AsyncMock) as fetch:
                 html = client.get("/example.com", headers=BROWSER_UA).text
-        assert 'id="acc-subdomains"' in html
-        assert "?subdomains=include" in html  # the no-JavaScript path
+        panel = section(html, "subdomains")
+        assert 'id="subdomains-run"' in panel
+        assert "?subdomains=include" in panel  # the no-JavaScript path
         fetch.assert_not_called()
 
     def test_the_rendered_list_is_capped(self):
@@ -2052,7 +2078,7 @@ class TestSubdomainPanel:
 
         Scoped to the <ul id="subdomains-list"> markup rather than the whole
         page: main.py separately embeds the complete, uncapped response_data
-        (subdomains included) as pageData for the Raw JSON accordion -- that
+        (subdomains included) as pageData for the Raw JSON section -- that
         is that feature's job (showing the true raw response) and is out of
         scope here, so h499 legitimately still appears elsewhere in `html`.
         """
@@ -2128,14 +2154,39 @@ class TestSubdomainPanel:
                 ).text
         assert "29 subdomains found" in html
 
-    def test_the_unopened_panel_says_click_to_lookup(self):
-        """static/js/app.js rewrites this hint by id once its fetch lands, so
-        the id has to be in the markup for the lazy path to work at all."""
+    def test_a_loaded_panel_has_a_data_dot(self):
+        """The list is on the page, so the section's dots, in the contents and
+        the heading, read as data rather than "on request"."""
+        payload = {
+            "names": ["a.example.com"],
+            "count": 1,
+            "truncated": False,
+            "source": "crt.sh",
+            "fetched_at": "2026-09-29T00:00:00+00:00",
+            "stale": False,
+            "error": None,
+        }
+        with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
+            with patch(
+                "main.get_subdomains", new_callable=AsyncMock, return_value=payload
+            ):
+                html = client.get(
+                    "/example.com?subdomains=include", headers=BROWSER_UA
+                ).text
+        assert re.search(r'data-section="subdomains"><span class="dot dot--info"', html)
+        assert re.search(
+            r'<h2 id="h-subdomains"[^>]*><span class="dot dot--info"', html
+        )
+
+    def test_the_unasked_panel_says_on_request(self):
+        """static/js/app.js rewrites this hint by its data-hint once its fetch
+        lands, so both hints (the contents entry's and the heading's) have to
+        be in the markup for the lazy path to work at all."""
         with patch("main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)):
             with patch("main.get_subdomains", new_callable=AsyncMock):
                 html = client.get("/example.com", headers=BROWSER_UA).text
-        assert 'id="hint-subdomains"' in html
-        assert "click to lookup" in html
+        hints = re.findall(r'data-hint="subdomains" title="([^"]*)">([^<]*)<', html)
+        assert hints == [("on request", "on request")] * 2
 
     def test_a_failed_fetch_is_reported_not_rendered_as_empty(self):
         """Review I2. static/js/app.js reaches this same JSON endpoint from
@@ -2154,7 +2205,7 @@ class TestSubdomainPanel:
     def test_disabling_the_feature_removes_the_panel_and_the_tool_advertisement(self):
         """Review M2. SUBDOMAIN_ENABLED=false already turns off the route and
         the MCP tool registration (main.py, mcp_server.py); the page must not
-        keep selling a feature that is off -- no accordion to click, and no
+        keep selling a feature that is off -- no section or button, and no
         discovery meta tag telling an agent the tool still exists. The flag
         gets flipped exactly when something is on fire, the worst moment to
         find the UI still advertising it.
@@ -2170,7 +2221,8 @@ class TestSubdomainPanel:
                     "main.gather", new_callable=AsyncMock, return_value=dict(GATHERED)
                 ):
                     html = client.get("/example.com", headers=BROWSER_UA).text
-        assert 'id="acc-subdomains"' not in html
+        assert 'id="sec-subdomains"' not in html
+        assert 'id="subdomains-run"' not in html
         meta = html.split('name="mcp-tools"')[1].split(">")[0]
         assert "subdomains" not in meta
 
@@ -2204,7 +2256,8 @@ class TestSubdomainRegistration:
             html = client.get("/www.example.com", headers=BROWSER_UA).text
 
         hint = (
-            'id="hint-whois" title="registration of example.com · Example Registrar">'
+            'id="hint-whois" data-hint="whois" '
+            'title="registration of example.com · Example Registrar">'
             "registration of example.com · Example Registrar<"
         )
         assert hint in html
@@ -2233,14 +2286,16 @@ class TestWhoisColumnWording:
     }
 
     def test_a_found_record_is_not_called_available(self):
-        """The column's Status is the lookup's, and "available" beside an
-        address or a name reads as "available to register", so it says what
-        the lookup did. The accordion keeps an IP allocation's own word."""
+        """ "available" beside an address or a name reads as "available to
+        register", so the Registration card names the allocation the lookup
+        found. The section keeps an IP allocation's own word."""
         with patch(
             "main.gather", new_callable=AsyncMock, return_value=self.GATHERED_IP
         ):
             html = client.get("/8.8.8.8", headers=BROWSER_UA).text
-        assert 'class="kv-value tone-success">record found<' in html
+        assert '<span class="card__value" title="8.8.8.0/24">8.8.8.0/24</span>' in card(
+            html, "whois"
+        )
         assert ">available<" not in html
         assert '<td>Status</td><td colspan="3">active</td>' in html
 
@@ -2507,7 +2562,7 @@ def _link(href: str, text: str) -> str:
 
 
 def _fact(html: str, label: str) -> str:
-    """The value markup of one row of the facts strip."""
+    """The value markup of one label/value row (the ptr and org blocks)."""
     match = re.search(
         rf'<span class="kv-label">{label}</span>\s*'
         r'<span class="kv-value tone-\w+">(.*?)</span>',
@@ -2605,9 +2660,13 @@ class TestLookupLinks:
             + ' <span class="tone-muted">(of alias.example.net)</span>',
         ]
 
-    def test_the_rdns_fact_links(self):
+    def test_the_rdns_row_links(self):
         html = _page(LINKED, "/naver.com")
-        assert _fact(html, "rDNS") == _link("/www.naver.com", "www.naver.com.")
+        row = re.search(
+            r"<tr><td>rDNS</td><td[^>]*>(.*?)</td></tr>", section(html, "network")
+        )
+        assert row, "no rDNS row"
+        assert row.group(1) == _link("/www.naver.com", "www.naver.com.")
 
     def test_the_address_tag_is_a_link_and_the_other_tags_are_not(self):
         html = _page(LINKED, "/naver.com")
@@ -2674,7 +2733,7 @@ class TestLookupLinks:
 
 
 class TestDnsSecurityPanel:
-    """The DNS security accordion: one row per check, its state in its tone."""
+    """The DNS security section: one row per check, its state in its tone."""
 
     def test_rows_render(self):
         gathered = {
@@ -2688,10 +2747,444 @@ class TestDnsSecurityPanel:
             },
         }
         html = _page(gathered, "/naver.com")
-        assert 'id="acc-security"' in html
-        assert "SPF: no record" in html
+        body = section(html, "security")
+        assert "SPF: no record" in body
         assert '<td class="tone-danger">fail</td>' in html
         assert '<span class="tone-danger">No v=spf1 record</span>' in html
 
     def test_no_panel_without_data(self):
-        assert 'id="acc-security"' not in _page(LINKED, "/naver.com")
+        html = _page(LINKED, "/naver.com")
+        assert 'id="sec-security"' not in html
+        assert 'id="card-security"' not in html
+
+
+# --- the lookup page's layout ----------------------------------------------------
+# A summary (sentence, review chips, meta line), a row of status cards, a
+# contents list and the sections, each expanded. nasa.gov as the real lookup
+# answered it (tests/test_overview.py), with DKIM and CAA warning and the three
+# opt-in checks unpublished.
+def _nasa():
+    response = nasa_response()
+    for check, label in (
+        ("mta_sts", "MTA-STS"),
+        ("tls_rpt", "TLS-RPT"),
+        ("bimi", "BIMI"),
+    ):
+        response["dns_security"][check] = {
+            "state": "info",
+            "summary": f"{label}: not published",
+            "findings": [],
+        }
+    return response
+
+
+def _clean_nasa():
+    """nasa.gov with every graded check passing: nothing to review."""
+    response = _nasa()
+    for check in ("dkim", "caa"):
+        response["dns_security"][check] = {
+            "state": "pass",
+            "summary": f"{check}: ok",
+            "findings": [],
+        }
+    return response
+
+
+DOMAIN_SECTIONS = ["whois", "dns", "security", "ssl", "network", "reputation"]
+
+
+def _self_page(**location):
+    """The self page with its legs mocked: GeoIP's answer for the visitor, no
+    PTR, and a registration that has not answered (whois None: pending)."""
+    place = {
+        "ip": SEOUL_IP,
+        "country_code": "KR",
+        "country_name": "South Korea",
+        "is_private": False,
+        **location,
+    }
+    with patch(
+        "main._self_lookup",
+        new_callable=AsyncMock,
+        return_value=(place, {}, None),
+    ):
+        return client.get("/", headers=BROWSER_UA).text
+
+
+class TestLookupLayout:
+    def test_domain_page_order(self):
+        html = _page(_nasa(), "/nasa.gov")
+        marks = [
+            'class="summary"',
+            'class="cards"',
+            'class="toc"',
+            *[f'id="sec-{sid}"' for sid in DOMAIN_SECTIONS],
+            'id="sec-subdomains"',
+            'id="sec-raw"',
+        ]
+        positions = [html.index(mark) for mark in marks]
+        assert positions == sorted(positions)
+
+    def test_cards_link_to_sections(self):
+        for html in (_page(_nasa(), "/nasa.gov"), _page(IP_LINKED, "/8.8.8.8")):
+            cards = re.findall(
+                r'<a class="card card--(\w+)" id="card-([\w-]+)" href="#sec-([\w-]+)">',
+                html,
+            )
+            assert len(cards) >= 4
+            for state, cid, sid in cards:
+                assert cid == sid
+                assert f'id="sec-{sid}"' in html
+                assert f'<span class="dot dot--{state}"' in card(html, cid)
+
+    def test_contents_entries_link_to_sections(self):
+        html = _page(_nasa(), "/nasa.gov")
+        toc = html.split('<nav class="toc"')[1].split("</nav>")[0]
+        entries = re.findall(
+            r'<a class="toc__item" href="#sec-([\w-]+)" data-section="([\w-]+)">'
+            r'<span class="dot dot--(\w+)"',
+            toc,
+        )
+        assert [sid for sid, _, _ in entries] == [
+            *DOMAIN_SECTIONS,
+            "subdomains",
+            "raw",
+        ]
+        assert all(sid == data for sid, data, _ in entries)
+        states = {sid: state for sid, _, state in entries}
+        # A section with a card takes the card's state; the on-request ones
+        # are "request", whatever they hold.
+        assert states["security"] == "warn"
+        assert states["dns"] == "pass"
+        assert states["subdomains"] == "request"
+        assert states["raw"] == "request"
+        # "On request" heads the request group, after the main sections.
+        assert toc.index('<h2 class="toc__group">On request</h2>') < toc.index(
+            'href="#sec-subdomains"'
+        )
+        assert toc.index('href="#sec-reputation"') < toc.index("toc__group")
+
+    def test_section_headings_carry_the_dot_and_the_hint(self):
+        html = _page(_nasa(), "/nasa.gov")
+        body = section(html, "security")
+        assert '<section class="report-section"' in html
+        assert re.search(
+            r'<section class="report-section" id="sec-security" '
+            r'aria-labelledby="h-security">',
+            html,
+        )
+        assert re.search(
+            r'<h2 id="h-security"[^>]*><span class="dot dot--warn"[^>]*></span>'
+            r"DNS security</h2>",
+            body,
+        )
+        assert 'id="hint-security" data-hint="security"' in body
+
+    def test_block_headings(self):
+        html = _page(_nasa(), "/nasa.gov")
+        assert '<h3 class="report-section__sub">Location</h3>' in section(
+            html, "network"
+        )
+
+    def test_review_chips_rendered(self):
+        html = _page(_nasa(), "/nasa.gov")
+        review = html.split('id="review"')[1].split("</div>")[0]
+        assert not review.startswith(" hidden")
+        chips = re.findall(r'<a class="chip chip--(\w+)" href="#sec-(\w+)">', review)
+        assert chips == [("warning", "security"), ("warning", "security")]
+        assert "DKIM: found at selector1 (1024-bit)" in review
+        assert "CAA: none" in review
+        # The slot the AbuseIPDB press fills, inside the review row.
+        assert '<span id="chips-reputation"></span>' in review
+
+    def test_no_chips_hides_review(self):
+        html = _page(_clean_nasa(), "/nasa.gov")
+        assert re.search(r'<div class="review" id="review" hidden>', html)
+        assert 'class="chip ' not in html
+        assert '<span id="chips-reputation"></span>' in html
+
+    def test_the_sentence_and_the_meta_line(self):
+        html = _page(_nasa(), "/nasa.gov")
+        summary = html.split('<section class="summary"')[1].split("</section>")[0]
+        assert 'aria-label="Summary"' in summary
+        sentence = re.search(
+            r'<p class="summary__sentence">(.*?)</p>', summary, re.S
+        ).group(1)
+        assert "<strong>nasa.gov</strong> has been registered through get.gov" in (
+            sentence
+        )
+        assert '<strong class="tone-warning">3 of 5</strong>' in sentence
+        assert summary.index("summary__sentence") < summary.index('id="review"')
+        assert summary.index('id="review"') < summary.index("summary__meta")
+
+    def test_an_empty_sentence_draws_no_paragraph(self):
+        """overview.sentence() is [] when every clause is missing: no empty
+        paragraph is drawn for it."""
+        with patch("main.overview.sentence", return_value=[]):
+            html = _page(_nasa(), "/nasa.gov")
+        assert "summary__sentence" not in html
+
+    def test_ip_page_has_no_ssl_and_no_headers(self):
+        html = _page(IP_LINKED, "/8.8.8.8")
+        assert 'id="sec-ssl"' not in html
+        assert 'id="card-ssl"' not in html
+        assert 'id="sec-headers"' not in html
+        assert 'id="sec-browser"' not in html
+        assert "Your headers" not in html
+        assert "Headers your browser sent" not in html
+
+    def test_domain_page_has_no_headers(self):
+        html = _page(_nasa(), "/nasa.gov")
+        assert "Your headers" not in html
+        assert "Headers your browser sent" not in html
+
+    def test_self_page_browser_section(self):
+        html = _self_page()
+        browser = section(html, "browser")
+        assert (
+            '<button type="button" class="btn" id="fp-measure" hidden>Measure</button>'
+        ) in browser
+        assert '<h3 class="report-section__sub">Headers your browser sent</h3>' in (
+            browser
+        )
+        assert "<td>user-agent</td>" in browser
+        # Its dot says nothing was measured yet, in the contents and the heading.
+        toc = html.split('<nav class="toc"')[1].split("</nav>")[0]
+        assert re.search(r'data-section="browser"><span class="dot dot--request"', toc)
+        assert re.search(
+            r'<h2 id="h-browser"[^>]*><span class="dot dot--request"', browser
+        )
+        assert 'id="card-browser"' not in html
+        assert html.index('id="sec-browser"') < html.index('id="sec-raw"')
+
+    def test_no_details_accordion_on_lookup_pages(self):
+        for html in (
+            _page(_nasa(), "/nasa.gov"),
+            _page(IP_LINKED, "/8.8.8.8"),
+            _self_page(),
+        ):
+            assert "<details" not in html
+            assert 'class="facts' not in html
+            assert 'id="acc-' not in html
+
+    def test_mobile_map_inside_geoip_block(self):
+        domain = _page(_nasa(), "/nasa.gov")
+        ip = _page(IP_LINKED, "/8.8.8.8")
+        assert '<div class="mobile-map">' in section(domain, "network")
+        assert 'id="mobile-map"' in section(domain, "network")
+        assert 'id="mobile-map"' in section(ip, "location")
+        for html in (domain, ip):
+            assert '<section class="mobile-map"' not in html
+            assert html.count('id="mobile-map"') == 1
+
+    def test_third_party_text_escaped(self):
+        response = _nasa()
+        response["whois"]["registrar"] = "<script>x</script>"
+        html = _page(response, "/nasa.gov")
+        escaped = "&lt;script&gt;x&lt;/script&gt;"
+        sentence = html.split('<p class="summary__sentence">')[1].split("</p>")[0]
+        assert escaped in sentence
+        assert escaped in card(html, "whois")
+        assert "<script>x</script>" not in html
+
+    def test_long_ptr_card_has_title(self):
+        ptr = ".".join(["a" * 63] * 3 + ["b" * 60]) + "."
+        assert len(ptr) == 253
+        location = {**IP_LINKED["location"], "reverse_dns": ptr}
+        html = _page({**IP_LINKED, "location": location}, "/8.8.8.8")
+        assert f'<span class="card__value" title="{ptr}">{ptr}</span>' in card(
+            html, "domains"
+        )
+
+    def test_hint_titles(self):
+        for html in (
+            _page(_nasa(), "/nasa.gov"),
+            _page(IP_LINKED, "/8.8.8.8"),
+            _self_page(),
+        ):
+            hints = re.findall(
+                r'<span class="(?:hint|toc__hint)"[^>]*data-hint="([\w-]+)" '
+                r'title="([^"]*)">([^<]*)</span>',
+                html,
+            )
+            assert len(hints) >= 10
+            assert all(title == text for _, title, text in hints)
+            # One hint in the contents and one in the heading, per section.
+            ids = [sid for sid, _, _ in hints]
+            assert all(ids.count(sid) == 2 for sid in ids)
+            spans = re.findall(r"<span [^>]*data-hint=", html)
+            assert len(spans) == len(hints)
+
+    def test_the_dkim_marker_leads_the_security_sub_line(self):
+        """DKIM not found at the common selectors is out of the count, and
+        the card says so at the front of its sub line: the value is the bare
+        fraction, which fits the card."""
+        response = _clean_nasa()
+        response["dns_security"]["dkim"] = {
+            "state": "unknown",
+            "summary": "DKIM: not found at the common selectors",
+            "findings": [],
+        }
+        html = _page(response, "/nasa.gov")
+        security = card(html, "security")
+        assert '<span class="card__value" title="4 / 4">4 / 4</span>' in security
+        assert (
+            '<span class="card__sub" title="DKIM ? · graded checks pass">'
+            "DKIM ? · graded checks pass</span>"
+        ) in security
+        assert re.search(r'class="card card--pass" id="card-security"', html)
+
+    def test_card_value_and_sub_carry_titles(self):
+        html = _page(_nasa(), "/nasa.gov")
+        whois = card(html, "whois")
+        assert '<span class="card__value" title="29 years">29 years</span>' in whois
+        assert (
+            '<span class="card__sub" title="get.gov · expires 2027-07-31">'
+            "get.gov · expires 2027-07-31</span>"
+        ) in whois
+
+    def test_noscript_paths(self):
+        domain = section(_page(_nasa(), "/nasa.gov"), "subdomains")
+        noscript = domain.split("<noscript>")[1].split("</noscript>")[0]
+        assert '<a href="/nasa.gov?subdomains=include">' in noscript
+        pending = section(_self_page(), "whois")
+        assert 'id="whois-pending"' in pending
+        reload = pending.split("<noscript>")[1].split("</noscript>")[0]
+        assert '<a href="/">Reload</a>' in reload
+
+    def test_on_request_buttons(self):
+        domain = _page(_nasa(), "/nasa.gov")
+        subdomains = section(domain, "subdomains")
+        assert (
+            '<button type="button" class="btn" id="subdomains-run" hidden>'
+            "Look up subdomains</button>"
+        ) in subdomains
+        assert subdomains.index('id="subdomains-run"') < subdomains.index(
+            'id="subdomains-slot"'
+        )
+        raw = section(domain, "raw")
+        assert (
+            '<button type="button" class="btn" id="raw-open" hidden>'
+            "Show the JSON tree</button>"
+        ) in raw
+        assert raw.index('id="raw-open"') < raw.index('id="raw-json"')
+        assert '<div id="raw-json" hidden></div>' in raw
+
+    def test_on_request_buttons_wait_for_their_script(self):
+        """The three buttons only work with JavaScript, so each is drawn
+        `hidden` (above) and shown by the script that wires it, before its
+        click listener; a page without scripts keeps its <noscript> lines."""
+        app = Path("static/js/app.js").read_text(encoding="utf-8")
+        fingerprint = Path("static/js/fingerprint.js").read_text(encoding="utf-8")
+        for source, name in (
+            (app, "rawOpen"),
+            (app, "subdomainRun"),
+            (fingerprint, "button"),
+        ):
+            shown = source.index(f"{name}.hidden = false;")
+            wired = source.index(f'{name}.addEventListener("click"')
+            assert shown < wired, name
+        assert 'getElementById("fp-measure")' in fingerprint
+        assert "<noscript>" in section(_page(_nasa(), "/nasa.gov"), "subdomains")
+        assert "<noscript>" in section(_self_page(), "browser")
+
+    def test_shown_data_moves_the_dots(self):
+        """Subdomains and Raw JSON have no card, so app.js moves their dots
+        itself once their data is on the page: `info` after a lookup (or
+        `unknown` when it failed), and `info` once the tree is drawn."""
+        app = Path("static/js/app.js").read_text(encoding="utf-8")
+        helper = app.split("function setSectionState(", 1)[1].split("\n}\n", 1)[0]
+        assert '`.toc__item[data-section="${id}"] .dot, #h-${id} .dot`' in helper
+        assert 'setState(dot, "dot", state)' in helper
+        loaded = app.split('script.addEventListener("load"', 1)[1]
+        loaded = loaded.split("\n  });\n", 1)[0]
+        assert 'setSectionState("raw", "info");' in loaded
+        click = app.split('subdomainRun.addEventListener("click"', 1)[1]
+        assert (
+            "renderSubdomainPanel(subdomainBody, subdomainLine, data, target);\n"
+            '      setSectionState("subdomains", "info");'
+        ) in click
+        failed = app.split("function subdomainFailed(", 1)[1].split("\n}\n", 1)[0]
+        assert 'setSectionState("subdomains", "unknown");' in failed
+        assert "setSectionState(card.id, card.state);" in app
+
+    def test_late_answers_reach_raw_json(self):
+        """What the page fills in after it loaded goes into #page-data, and
+        into the tree when it is open: the registration (fillWhois) and the
+        merged reputation an AbuseIPDB press answers (fillAbuseipdb)."""
+        app = Path("static/js/app.js").read_text(encoding="utf-8")
+        helper = app.split("function updatePageData(key, value) {", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        assert 'getElementById("page-data")' in helper
+        assert "data[key] = value;" in helper
+        assert "pageData.textContent = JSON.stringify(data);" in helper
+        assert "rawEditor.set(data);" in helper
+        whois = app.split("function fillWhois(", 1)[1].split("\n}\n", 1)[0]
+        assert 'updatePageData("whois", whois);' in whois
+        abuse = app.split("function fillAbuseipdb(display, reputation) {", 1)[1]
+        abuse = abuse.split("\n}\n", 1)[0]
+        assert 'updatePageData("reputation", reputation);' in abuse
+        assert "fillAbuseipdb(display, payload.reputation);" in app
+
+    def test_domain_rdns_row_in_network(self):
+        html = _page(LINKED, "/naver.com")
+        network = section(html, "network")
+        assert (
+            "<tr><td>rDNS</td>"
+            '<td colspan="3" class="tone-default">'
+            + _link("/www.naver.com", "www.naver.com.")
+            + "</td></tr>"
+        ) in network
+        # The first row of the GeoIP block.
+        table = network.split("<tbody>")[1]
+        assert table.lstrip().startswith("<tr><td>rDNS</td>")
+
+    def test_ip_page_without_an_as_card_draws_org(self):
+        gathered = {
+            **IP_LINKED,
+            "location": {
+                **IP_LINKED["location"],
+                "cidr": "8.8.8.0/24",
+                "asn_cidr": "8.8.8.0/24",
+                "asn_number": 15169,
+                "asn_name": "GOOGLE",
+            },
+        }
+        organization = section(_page(gathered, "/8.8.8.8"), "organization")
+        assert re.search(
+            r'<span class="kv-label">CIDR</span>\s*'
+            r'<span class="kv-value tone-default">8\.8\.8\.0/24</span>',
+            organization,
+        )
+        assert '<span class="kv-label">AS block</span>' in organization
+        assert '<span class="kv-label">Org</span>' in organization
+        assert "Scope" not in organization
+
+    def test_every_ip_page_draws_its_ptr(self):
+        domains = section(_page(IP_LINKED, "/8.8.8.8"), "domains")
+        assert '<span class="kv-label">PTR</span>' in domains
+        assert _link("/dns.google", "dns.google.") in domains
+        location = {**IP_LINKED["location"], "reverse_dns": None}
+        bare = section(
+            _page({**IP_LINKED, "location": location}, "/8.8.8.8"), "domains"
+        )
+        assert re.search(
+            r'<span class="kv-label">PTR</span>\s*'
+            r'<span class="kv-value tone-muted">—</span>',
+            bare,
+        )
+
+    def test_a_listed_count_carries_the_openintel_lines(self):
+        """The sentence may name the listed-name count, so the Domains section
+        draws the reverse IP block, with its coverage, attribution, licence and
+        terms lines, whenever the answer is there."""
+        html = _page({**IP_LINKED, "reverse_ip": ANSWER_4_NAMES}, "/8.8.8.8")
+        sentence = html.split('<p class="summary__sentence">')[1].split("</p>")[0]
+        assert "<strong>4 names</strong>" in sentence
+        domains = section(html, "domains")
+        assert '<h3 class="report-section__sub">Listed names</h3>' in domains
+        assert ANSWER_4_NAMES["attribution"] in domains
+        assert ANSWER_4_NAMES["license"] in domains
+        assert 'href="/static/licenses/openintel-terms.html"' in domains
+        assert ANSWER_4_NAMES["coverage"] in domains

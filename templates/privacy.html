@@ -72,8 +72,9 @@
                 scripts.</li>
             <li>The fingerprint panel{% if stun_url %} and the WebRTC leak test{% endif %} run in
                 your browser. What they find is never sent to {{ site_domain }}. The panel's
-                canvas, audio, WebGL and font probes run only when you open it{% if stun_url %},
-                and the WebRTC test only when you press its button{% endif %}.</li>
+                canvas, audio, WebGL and font probes run only when you press its Measure
+                button{% if stun_url %}, and the WebRTC test only when you press its
+                button{% endif %}.</li>
         </ul>
 
         <h2>Who else the server contacts</h2>
@@ -96,8 +97,9 @@
             {% endif %}
             {% if abuseipdb_enabled %}
             <li><strong>api.abuseipdb.com</strong> (AbuseIPDB, in the United States): an IP address
-                you look up directly, to read how often it has been reported for abuse. Never
-                your own address on the home page, and never the address a domain resolves to.
+                you look up directly, to read how often it has been reported for abuse; your own
+                address only when you press "Check with AbuseIPDB" on the home page; never the
+                address a domain resolves to.
                 Each answer is kept in memory for {{ abuseipdb_cache }}, so an address is asked
                 about at most once in that time.</li>
             {% endif %}

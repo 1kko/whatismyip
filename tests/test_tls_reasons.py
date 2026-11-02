@@ -35,6 +35,7 @@ import managers
 from config import TIMEOUT_SECONDS, TLS_CONNECT_TIMEOUT_SECONDS
 from main import app
 from managers import SSLManager
+from pagehelpers import section as page_section
 from viewmodel import _cert_expiry
 
 HOST = "example.com"
@@ -732,8 +733,7 @@ def _page(ssl_data):
     with patch("main.gather", new_callable=AsyncMock, return_value=_gathered(ssl_data)):
         html = client.get(f"/{HOST}", headers=BROWSER_UA).text
     hero = html.split('class="tags"')[1].split("</div>")[0]
-    section = html.split('id="acc-ssl"')[1].split("</details>")[0]
-    return hero, section
+    return hero, page_section(html, "ssl")
 
 
 class TestPage:

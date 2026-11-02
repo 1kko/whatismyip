@@ -32,6 +32,7 @@ import mcp_server
 import reputation
 import textfmt
 import viewmodel
+from pagehelpers import card, section
 from reputation import (
     Intervals,
     ReputationManager,
@@ -809,14 +810,21 @@ class TestPage:
 
     def test_the_reputation_card(self, rep, legs):
         html = client.get(f"/{TOR_IP}", headers=CHROME).text
-        assert 'id="acc-reputation"' in html
-        text = page_text(html)
+        assert 'id="sec-reputation"' in html
+        # The status card: the score out of 100 and never the pass colour.
+        assert re.search(
+            r'<a class="card card--(warn|danger)" id="card-reputation"', html
+        )
+        assert '<span class="card__value" title="50 / 100">50 / 100</span>' in card(
+            html, "reputation"
+        )
+        text = page_text(section(html, "reputation"))
         assert "Reputation" in text
         assert "50 of 100" in text
         assert "Listed on Tor exit (as of 2026-10-09 06:13 UTC)" in text
         assert "Not listed on Spamhaus DROP (as of 2026-10-09 06:13 UTC)" in text
         assert "(c) 2026 The Spamhaus Project SLU" in text
-        assert "malicious" not in text.lower()
+        assert "malicious" not in page_text(html).lower()
 
     def test_no_signals_does_not_read_as_safe(self, rep, legs):
         text = page_text(client.get(f"/{CLEAN_IP}", headers=CHROME).text)
@@ -837,12 +845,13 @@ class TestPage:
     def test_the_self_page(self, rep, legs):
         html = as_peer(TOR_IP).get("/", headers=CHROME).text
         assert ("warning", "Tor exit") in hero_tags(html)
-        assert 'id="acc-reputation"' in html
+        assert 'id="sec-reputation"' in html
+        assert 'id="card-reputation"' in html
 
     def test_disabled_has_no_card(self, legs):
-        assert (
-            'id="acc-reputation"' not in client.get(f"/{TOR_IP}", headers=CHROME).text
-        )
+        html = client.get(f"/{TOR_IP}", headers=CHROME).text
+        assert 'id="sec-reputation"' not in html
+        assert 'id="card-reputation"' not in html
 
     def test_the_csp_is_unchanged(self, rep, legs, monkeypatch):
         def csp(response):
@@ -852,14 +861,12 @@ class TestPage:
         with_card = client.get(f"/{TOR_IP}", headers=CHROME)
         monkeypatch.setattr(lookup.reputation_manager, "enabled", False)
         without = client.get(f"/{TOR_IP}", headers=CHROME)
-        assert 'id="acc-reputation"' not in without.text
+        assert 'id="sec-reputation"' not in without.text
         assert csp(with_card) == csp(without)
-        card = re.search(
-            r'<details class="accordion" id="acc-reputation">.*?</details>',
-            with_card.text,
-            re.S,
-        ).group(0)
-        assert "<script" not in card and "style=" not in card
+        body = section(with_card.text, "reputation") + card(
+            with_card.text, "reputation"
+        )
+        assert "<script" not in body and "style=" not in body
 
 
 class TestViewModel:

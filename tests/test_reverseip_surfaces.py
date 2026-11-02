@@ -18,6 +18,7 @@ import lookup
 import main
 import mcp_server
 import subdomains
+from pagehelpers import section
 from reverseip import ReverseIpManager, parse_sources
 from reverseip_fixtures import NOW, build_manager
 
@@ -202,17 +203,28 @@ def test_healthz_says_nothing_when_it_is_off(monkeypatch, tmp_path):
 BROWSER = {"user-agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/130 Safari/537.36"}
 
 
+LISTED_BLOCK = '<h3 class="report-section__sub">Listed names</h3>'
+
+
+def _domains_hint(html):
+    """The Domains section's hint: the PTR name, then the reverse IP hint."""
+    return (
+        section(html, "domains").split('data-hint="domains" title="')[1].split('"')[0]
+    )
+
+
 def test_the_page_panel(reverseip_enabled, legs):
     html = client.get(f"/{LISTED_IP}", headers=BROWSER).text
-    assert 'id="acc-reverseip"' in html
+    domains = section(html, "domains")
+    assert LISTED_BLOCK in domains
     assert (
         '<a class="lookup-link" href="/example.com" rel="nofollow">example.com</a>'
-        in html
+        in domains
     )
-    assert config.OPENINTEL_ATTRIBUTION in html
-    assert 'href="/static/licenses/openintel-terms.html"' in html
-    assert f'href="{config.OPENINTEL_LICENSE_URL}" rel="noopener noreferrer"' in html
-    assert html.index('id="acc-geoip"') < html.index('id="acc-reverseip"')
+    assert config.OPENINTEL_ATTRIBUTION in domains
+    assert 'href="/static/licenses/openintel-terms.html"' in domains
+    assert f'href="{config.OPENINTEL_LICENSE_URL}" rel="noopener noreferrer"' in domains
+    assert html.index('id="sec-location"') < html.index('id="sec-domains"')
 
 
 def test_the_page_panel_unknown_still_carries_the_licence_lines(
@@ -220,19 +232,24 @@ def test_the_page_panel_unknown_still_carries_the_licence_lines(
 ):
     monkeypatch.setattr(reverseip_enabled, "_availability", lambda *a: ({}, {}))
     html = client.get(f"/{LISTED_IP}", headers=BROWSER).text
-    assert 'id="acc-reverseip"' in html
-    assert 'title="unknown"' in html
-    assert config.OPENINTEL_ATTRIBUTION in html
-    assert 'href="/static/licenses/openintel-terms.html"' in html
+    domains = section(html, "domains")
+    assert LISTED_BLOCK in domains
+    assert _domains_hint(html).endswith(" · unknown")
+    assert config.OPENINTEL_ATTRIBUTION in domains
+    assert 'href="/static/licenses/openintel-terms.html"' in domains
 
 
-def test_no_panel_on_a_domain_or_the_self_page(reverseip_enabled, legs):
-    assert 'id="acc-reverseip"' not in client.get(f"/{DOMAIN}", headers=BROWSER).text
-    assert 'id="acc-reverseip"' not in client.get("/", headers=BROWSER).text
+def test_no_panel_on_a_domain_or_a_private_self_page(reverseip_enabled, legs):
+    """A domain is no address; a self page whose visitor is a private address
+    reads no list (test_self_private_client_reads_nothing)."""
+    assert LISTED_BLOCK not in client.get(f"/{DOMAIN}", headers=BROWSER).text
+    assert LISTED_BLOCK not in client.get("/", headers=BROWSER).text
 
 
 def test_no_panel_while_disabled(legs):
-    assert 'id="acc-reverseip"' not in client.get(f"/{LISTED_IP}", headers=BROWSER).text
+    html = client.get(f"/{LISTED_IP}", headers=BROWSER).text
+    assert LISTED_BLOCK not in html
+    assert config.OPENINTEL_ATTRIBUTION not in html
 
 
 # --- MCP lookup and ?fields= -------------------------------------------------
@@ -367,14 +384,14 @@ EMPTY_IP = "175.214.27.215"
 def test_the_page_says_which_lists_were_not_checked(partial):
     html = client.get(f"/{LISTED_IP}", headers=BROWSER).text
     assert "Not checked: Cisco Umbrella (not in the database)" in html
-    assert 'title="4 names"' in html
+    assert _domains_hint(html).endswith(" · 4 names")
     assert "Names on the Tranco top list only." in html
     assert "Cisco Umbrella and" not in html
 
 
 def test_the_page_none_found_counts_the_lists_read(partial):
     html = client.get(f"/{EMPTY_IP}", headers=BROWSER).text
-    assert 'title="none in 1 of 2 lists"' in html
+    assert _domains_hint(html).endswith(" · none in 1 of 2 lists")
     assert "none in top lists" not in html
     assert "Not checked: Cisco Umbrella (not in the database)" in html
     assert "No name on these lists resolved to this address" in html
@@ -382,7 +399,7 @@ def test_the_page_none_found_counts_the_lists_read(partial):
 
 def test_a_complete_answer_has_no_not_checked_line(reverseip_enabled, legs):
     html = client.get(f"/{EMPTY_IP}", headers=BROWSER).text
-    assert 'title="none in top lists"' in html
+    assert _domains_hint(html).endswith(" · none in top lists")
     assert "Not checked:" not in html
 
 
@@ -623,3 +640,50 @@ def test_both_sources_failing_is_still_a_failed_panel(crtsh_fails, legs):
     html = client.get(f"/{DOMAIN}?subdomains=include", headers=BROWSER).text
     assert 'id="subdomains-rendered"' not in html
     assert "Lookup failed: crt.sh timed out" in html
+
+
+# The self page: the visitor's own address, named by a trusted proxy header
+# (peer 127.0.0.1 is in TRUSTED_PROXIES).
+proxy_client = TestClient(main.app, client=("127.0.0.1", 41234))
+
+
+def _visitor(ip=LISTED_IP, **headers):
+    return {"x-real-ip": ip, **headers}
+
+
+def test_self_json_carries_reverse_ip(reverseip_enabled, legs):
+    body = proxy_client.get("/", headers=_visitor(**CURL)).json()
+    looked_up = client.get(f"/{LISTED_IP}", headers=CURL).json()
+    assert body["reverse_ip"]["total"] == looked_up["reverse_ip"]["total"]
+    assert body["reverse_ip"] == reverseip_enabled.for_address(LISTED_IP)
+
+
+def test_self_private_client_reads_nothing(reverseip_enabled, legs, monkeypatch):
+    def fail(*a, **k):
+        raise AssertionError("a private client must not be read")
+
+    monkeypatch.setattr(lookup.reverse_ip_manager, "for_address", fail)
+    body = proxy_client.get("/", headers=_visitor("127.0.0.1", **CURL)).json()
+    assert "reverse_ip" not in body
+
+
+def test_self_text_is_unchanged(reverseip_enabled, legs):
+    response = proxy_client.get("/?format=text", headers=_visitor(**CURL))
+    assert response.text.strip() == LISTED_IP
+
+
+def test_self_fields_are_unchanged(reverseip_enabled, legs):
+    response = proxy_client.get("/?fields=ip", headers=_visitor(**CURL))
+    assert "reverse_ip" not in response.text
+
+
+def test_self_page_shows_listed_names(reverseip_enabled, legs):
+    html = proxy_client.get("/", headers=_visitor(**BROWSER)).text
+    domains = section(html, "domains")
+    assert LISTED_BLOCK in domains
+    # The name's lookup link, not the bare hostname: CodeQL reads a hostname
+    # literal tested with `in` as URL sanitisation
+    # (py/incomplete-url-substring-sanitization).
+    assert 'href="/example.com"' in domains
+    assert config.OPENINTEL_ATTRIBUTION in domains
+    assert 'href="/static/licenses/openintel-terms.html"' in domains

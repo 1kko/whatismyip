@@ -256,18 +256,25 @@ for (const button of document.querySelectorAll(".copy-btn[data-value]")) {
   button.addEventListener("click", () => copyWithFeedback(button, button.dataset.value));
 }
 
-// JSONEditor is 200KB+; only pay for it if Raw JSON is actually opened.
+// JSONEditor is 200KB+; only pay for it once the tree is asked for: the
+// lookup page's "Show the JSON tree" button, or the first opening of the /AS<n>
+// page's Raw JSON accordion. Both start the one bootRawEditor().
 const rawAccordion = document.getElementById("acc-raw");
+const rawOpen = document.getElementById("raw-open");
 let rawBooted = false;
 // Kept so a registration filled in after the page loaded (below) reaches a
 // tree that was already open.
 let rawEditor = null;
 
-rawAccordion?.addEventListener("toggle", () => {
-  if (!rawAccordion.open || rawBooted) {
+function bootRawEditor() {
+  if (rawBooted) {
     return;
   }
   rawBooted = true;
+  const container = document.getElementById("raw-json");
+  // The lookup page draws the tree's box hidden, so the page does not carry
+  // an empty 420px panel until the button is pressed.
+  container.hidden = false;
 
   const styles = document.createElement("link");
   styles.rel = "stylesheet";
@@ -277,7 +284,7 @@ rawAccordion?.addEventListener("toggle", () => {
   const script = document.createElement("script");
   script.src = "/static/js/jsoneditor.min.js";
   script.addEventListener("load", () => {
-    rawEditor = new JSONEditor(document.getElementById("raw-json"), {
+    rawEditor = new JSONEditor(container, {
       mode: "view",
       search: false,
       navigationBar: false,
@@ -286,49 +293,141 @@ rawAccordion?.addEventListener("toggle", () => {
     });
     rawEditor.set(JSON.parse(document.getElementById("page-data").textContent));
     rawEditor.expandAll();
+    // The tree is on the page now: the section's dots read as data rather
+    // than "on request". The /AS<n> page has neither, and this finds nothing.
+    setSectionState("raw", "info");
   });
   document.body.appendChild(script);
+}
+
+rawAccordion?.addEventListener("toggle", () => {
+  if (rawAccordion.open) {
+    bootRawEditor();
+  }
 });
 
+// The button is drawn hidden: without this script it could only do nothing.
+if (rawOpen) {
+  rawOpen.hidden = false;
+  rawOpen.addEventListener("click", () => {
+    rawOpen.hidden = true;
+    bootRawEditor();
+  });
+}
+
+// Raw JSON is "the full response", so what the page fills in after it loaded
+// (the registration, an AbuseIPDB answer) goes into #page-data too, and into
+// the tree when it is already open.
+function updatePageData(key, value) {
+  const pageData = document.getElementById("page-data");
+  if (!pageData) {
+    return;
+  }
+  const data = JSON.parse(pageData.textContent);
+  data[key] = value;
+  pageData.textContent = JSON.stringify(data);
+  if (rawEditor) {
+    rawEditor.set(data);
+    rawEditor.expandAll();
+  }
+}
+
+// A section's hint sits twice on the page, in the contents list and under the
+// section's heading, each one line with an ellipsis where it does not fit
+// (.hint and .toc__hint in whatismyip.css). Both are [data-hint="<section>"],
+// and the title of each carries the full text wherever the text is written.
+function setHint(id, text) {
+  for (const hint of document.querySelectorAll(`[data-hint="${id}"]`)) {
+    hint.textContent = text;
+    hint.title = text;
+  }
+}
+
+// overview.STATES: the classes a card and a dot can carry.
+const STATES = ["pass", "warn", "danger", "info", "unknown", "request", "pending"];
+
+function setState(node, prefix, state) {
+  if (!node) {
+    return;
+  }
+  for (const name of STATES) {
+    node.classList.remove(`${prefix}--${name}`);
+  }
+  node.classList.add(`${prefix}--${state}`);
+}
+
+// A section's dots, in the contents list and in its heading. A card moves
+// them with its state (setCard); a section without one moves them itself
+// once its data is shown, as fingerprint.js's markMeasured does for "Your
+// browser": Subdomains after a lookup, Raw JSON once the tree is drawn.
+function setSectionState(id, state) {
+  for (const dot of document.querySelectorAll(
+    `.toc__item[data-section="${id}"] .dot, #h-${id} .dot`,
+  )) {
+    setState(dot, "dot", state);
+  }
+}
+
+// A status card, worded by the server (overview.py): its value, its sub line
+// and its state, which the section's dots in the contents list and the
+// heading follow. textContent throughout, and the title repeats the text a
+// narrow card cuts with an ellipsis.
+function setCard(card) {
+  const node = document.getElementById(`card-${card.id}`);
+  if (!node) {
+    return;
+  }
+  setState(node, "card", card.state);
+  setState(node.querySelector(".dot"), "dot", card.state);
+  for (const [selector, text] of [
+    [".card__value", card.value],
+    [".card__sub", card.sub],
+  ]) {
+    const part = node.querySelector(selector);
+    if (part) {
+      part.textContent = text;
+      part.title = text;
+    }
+  }
+  setSectionState(card.id, card.state);
+}
+
 // The self page goes out before a slow registration lookup has answered (see
-// _self_lookup in main.py), with the WHOIS column and panel saying "loading".
-// They are filled from ?whois=only, which joins the lookup the page left
-// running instead of asking the registry again. The rows arrive worded by the
-// server (whois_fill in viewmodel.py), so a page filled in reads the same as
-// one that waited. textContent throughout: a registry record is third-party
-// text, not markup.
+// _self_lookup in main.py), with the Registration card and section saying
+// "loading". They are filled from ?whois=only, which joins the lookup the page
+// left running instead of asking the registry again. The rows and the card
+// arrive worded by the server (whois_fill in viewmodel.py, registration_card
+// in overview.py), so a page filled in reads the same as one that waited.
+// textContent throughout: a registry record is third-party text, not markup.
 const whoisPending = document.getElementById("whois-pending");
 
-// The payload's display rows, or null when it has none: a 200 without them is
-// as much a failure as an error status, and must not render as an empty record.
+function isCard(card) {
+  return Boolean(
+    card &&
+      typeof card.id === "string" &&
+      typeof card.value === "string" &&
+      typeof card.sub === "string" &&
+      STATES.includes(card.state),
+  );
+}
+
+// The payload's display, or null when it has none: a 200 without its rows or
+// its card is as much a failure as an error status, and must not render as an
+// empty record.
 function whoisDisplay(payload) {
   const display = payload && payload.display;
   if (
     !display ||
     typeof display.hint !== "string" ||
-    !Array.isArray(display.column) ||
-    !Array.isArray(display.rows)
+    !Array.isArray(display.rows) ||
+    !isCard(display.card)
   ) {
     return null;
   }
   return display;
 }
 
-// One label/value row of the facts strip, as browser.html draws it.
-function factRow(row) {
-  const line = document.createElement("div");
-  line.className = "kv";
-  const label = document.createElement("span");
-  label.className = "kv-label";
-  label.textContent = row.label;
-  const value = document.createElement("span");
-  value.className = `kv-value tone-${row.tone}`;
-  value.textContent = row.value;
-  line.append(label, value);
-  return line;
-}
-
-// The WHOIS panel's table, as browser.html draws it.
+// The Registration section's table, as the whois block draws it.
 function whoisTable(rows) {
   const table = document.createElement("table");
   table.className = "records";
@@ -356,51 +455,23 @@ function whoisTable(rows) {
   return table;
 }
 
-// A hint is one line with an ellipsis on a narrow screen (.hint in
-// whatismyip.css), so its title carries the full text wherever it is written.
 function setWhoisHint(text) {
-  const hint = document.getElementById("hint-whois");
-  if (hint) {
-    hint.textContent = text;
-    hint.title = text;
-  }
+  setHint("whois", text);
 }
 
 function fillWhois(display, whois) {
   setWhoisHint(display.hint);
-  const column = document.getElementById("facts-whois");
-  if (column) {
-    for (const row of column.querySelectorAll(".kv")) {
-      row.remove();
-    }
-    column.append(...display.column.map(factRow));
-  }
+  setCard(display.card);
   whoisPending.replaceWith(whoisTable(display.rows));
-  // Raw JSON is "the full response", so it gets the record too.
-  const pageData = document.getElementById("page-data");
-  if (pageData) {
-    const data = JSON.parse(pageData.textContent);
-    data.whois = whois;
-    pageData.textContent = JSON.stringify(data);
-    if (rawEditor) {
-      rawEditor.set(data);
-      rawEditor.expandAll();
-    }
-  }
+  updatePageData("whois", whois);
 }
 
-// Could not ask, which is not the same as no record: the same words the server
-// uses for a lookup that failed, and a way to try again.
+// Could not ask, which is not the same as no record: the words the server
+// uses for a lookup that failed (overview.registration_card), and a way to
+// try again.
 function whoisFailed() {
   setWhoisHint("lookup failed");
-  const column = document.getElementById("facts-whois");
-  if (column) {
-    column.querySelectorAll(".kv").forEach((row, index) => {
-      const value = row.querySelector(".kv-value");
-      value.textContent = index === 0 ? "unavailable" : "—";
-      value.className = `kv-value tone-${index === 0 ? "warning" : "muted"}`;
-    });
-  }
+  setCard({ id: "whois", value: "?", sub: "lookup failed", state: "unknown" });
   const line = document.getElementById("whois-status");
   if (line) {
     line.textContent = "Could not load the registration data. ";
@@ -430,23 +501,143 @@ if (whoisPending) {
   })();
 }
 
-// Opening the accordion is the opt-in: nothing is requested until then, so an
-// ordinary lookup never causes an outbound crt.sh fetch.
-const subdomainAccordion = document.getElementById("acc-subdomains");
+// "Check with AbuseIPDB" (self page, with a key configured): the visitor's own
+// address goes to AbuseIPDB only when they press the button. The answer arrives
+// worded by the server (reputation_view, reputation_card, reputation_chips) and
+// is drawn in the markup _blocks.html draws. textContent throughout: a list's
+// name and a source's text are not markup.
+const abuseipdbRun = document.getElementById("abuseipdb-run");
+
+function abuseipdbNode(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) {
+    node.className = className;
+  }
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
+
+function abuseipdbDisplay(payload) {
+  const display = payload && payload.display;
+  const view = display && display.reputation;
+  if (
+    !view ||
+    typeof view.summary !== "string" ||
+    typeof view.note !== "string" ||
+    !Array.isArray(view.rows) ||
+    !Array.isArray(view.attribution) ||
+    !isCard(display.card) ||
+    !Array.isArray(display.chips)
+  ) {
+    return null;
+  }
+  return display;
+}
+
+function abuseipdbRows(rows) {
+  const table = abuseipdbNode("table", "records");
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    const value = abuseipdbNode("td", `tone-${row.tone}`, String(row.value));
+    value.colSpan = 3;
+    if (row.href) {
+      value.append(" · ");
+      const link = abuseipdbNode("a", "", "reports");
+      link.href = row.href;
+      link.rel = "noopener noreferrer";
+      value.append(link);
+    }
+    tr.append(abuseipdbNode("td", "", String(row.label)), value);
+    body.append(tr);
+  }
+  table.append(body);
+  return table;
+}
+
+function fillAbuseipdb(display, reputation) {
+  const view = display.reputation;
+  const target = document.getElementById("reputation-body");
+  if (target) {
+    target.replaceChildren(
+      abuseipdbNode("p", "api-note", view.summary),
+      abuseipdbRows(view.rows),
+      abuseipdbNode("p", "api-note tone-muted", view.note),
+      ...view.attribution.map((line) =>
+        abuseipdbNode("p", "api-note tone-muted", String(line)),
+      ),
+    );
+  }
+  setCard(display.card);
+  const slot = document.getElementById("chips-reputation");
+  if (slot) {
+    slot.replaceChildren(
+      ...display.chips.map((chip) => {
+        const link = abuseipdbNode("a", `chip chip--${chip.tone}`, chip.text);
+        link.href = `#sec-${chip.section}`;
+        return link;
+      }),
+    );
+  }
+  const review = document.getElementById("review");
+  if (review && display.chips.length) {
+    review.hidden = false;
+  }
+  if (typeof view.hint === "string") {
+    setHint("reputation", view.hint);
+  }
+  // The merged answer replaces the lists' own in Raw JSON, as the section's
+  // rows replaced theirs.
+  if (reputation && typeof reputation === "object") {
+    updatePageData("reputation", reputation);
+  }
+}
+
+if (abuseipdbRun) {
+  abuseipdbRun.hidden = false;
+  abuseipdbRun.addEventListener("click", async () => {
+    const status = document.getElementById("abuseipdb-status");
+    abuseipdbRun.disabled = true;
+    if (status) {
+      status.textContent = "Checking with AbuseIPDB…";
+    }
+    try {
+      const response = await fetch("/?abuseipdb=only", {
+        headers: { Accept: "application/json" },
+      });
+      const payload = response.ok ? await response.json() : null;
+      const display = abuseipdbDisplay(payload);
+      if (!display) {
+        throw new Error("no display");
+      }
+      fillAbuseipdb(display, payload.reputation);
+      if (status) {
+        status.textContent = "";
+      }
+    } catch (err) {
+      abuseipdbRun.disabled = false;
+      if (status) {
+        status.textContent = "Could not check AbuseIPDB.";
+      }
+    }
+  });
+}
+
+// Pressing "Look up subdomains" is the opt-in: nothing is requested until
+// then, so an ordinary lookup never causes an outbound crt.sh fetch.
+const subdomainRun = document.getElementById("subdomains-run");
 const subdomainSlot = document.getElementById("subdomains-slot");
-const subdomainHint = document.getElementById("hint-subdomains");
 let subdomainsBooted = false;
 
-// The summary's hint starts as "click to lookup" and becomes the result once
-// the fetch lands, so the lazy path ends up reading the same as the
-// server-rendered one (see _accordions in viewmodel.py). A failed lookup must
-// say so there too: leaving "click to lookup" next to an error would invite
-// the reader to try again forever.
+// The section's hint starts as "on request" and becomes the result once the
+// fetch lands, so the lazy path ends up reading the same as the
+// server-rendered one (_subdomains_hint in viewmodel.py). A failed lookup must
+// say so there too: leaving "on request" next to an error would invite the
+// reader to try again forever.
 function setSubdomainHint(text) {
-  if (subdomainHint) {
-    subdomainHint.textContent = text;
-    subdomainHint.title = text;
-  }
+  setHint("subdomains", text);
 }
 
 // The lookup loads up to 5,000 names (SUBDOMAIN_MAX_NAMES), far more links
@@ -509,7 +700,7 @@ function subdomainCountText(shown, matched, total, filtering) {
   return `Showing ${formatCount(shown)} of ${formatCount(total)}.`;
 }
 
-// The same wording _accordions in viewmodel.py renders on the server path.
+// The same wording _subdomains_hint in viewmodel.py renders on the server path.
 function subdomainHintText(count) {
   return `${formatCount(count)} subdomain${count === 1 ? "" : "s"} found`;
 }
@@ -690,6 +881,9 @@ function subdomainFailed(line, message) {
   line.querySelector('[role="status"]').textContent = message;
   line.classList.add("subdomains__error");
   setSubdomainHint("lookup failed");
+  // Asked and not answered, as overview.section_state says for a page that
+  // carries a failed list.
+  setSectionState("subdomains", "unknown");
 }
 
 // ?subdomains=include draws the panel on the server, so it works without
@@ -707,18 +901,24 @@ if (renderedSubdomains && pageDataScript) {
   }
 }
 
-if (subdomainAccordion && subdomainSlot) {
-  // Both made now, while the panel is still closed, so the live region exists
+if (subdomainRun && subdomainSlot) {
+  // The button is drawn hidden: without this script it could only do nothing,
+  // and the slot's <noscript> link asks the server instead.
+  subdomainRun.hidden = false;
+  // Both made now, before the button is pressed, so the live region exists
   // well before the lookup writes to it.
   const subdomainBody = document.createElement("div");
   const subdomainLine = subdomainStatusLine();
   subdomainSlot.append(subdomainBody, subdomainLine);
 
-  subdomainAccordion.addEventListener("toggle", async () => {
-    if (!subdomainAccordion.open || subdomainsBooted) {
+  subdomainRun.addEventListener("click", async () => {
+    if (subdomainsBooted) {
       return;
     }
     subdomainsBooted = true;
+    // One lookup per page: the result stays below, and a second press would
+    // only ask crt.sh the same question again.
+    subdomainRun.disabled = true;
 
     // crt.sh takes anywhere from 3 to 20 seconds, and a static loading line
     // looks hung by about the fifth. The counter is aria-hidden so the live
@@ -766,6 +966,7 @@ if (subdomainAccordion && subdomainSlot) {
 
       setSubdomainHint(subdomainHintText(mergeSubdomains(data).total));
       renderSubdomainPanel(subdomainBody, subdomainLine, data, target);
+      setSectionState("subdomains", "info");
     } catch (err) {
       subdomainFailed(subdomainLine, "Lookup failed.");
     } finally {

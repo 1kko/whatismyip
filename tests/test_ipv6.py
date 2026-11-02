@@ -37,6 +37,7 @@ import lookup
 import main
 import managers
 import mcp_server
+import overview
 from main import app
 from viewmodel import build_view
 
@@ -674,7 +675,7 @@ def test_the_ip_tag_comes_from_the_address(address, version):
     assert tags[0] == version
 
 
-def test_the_dns_column_counts_aaaa():
+def test_the_dns_card_and_hint_count_aaaa():
     response = {
         "address": "dns.google",
         "location": {},
@@ -682,9 +683,8 @@ def test_the_dns_column_counts_aaaa():
         "ssl": None,
     }
     view = build_view(response, is_self=False)
-    rows = {row["label"]: row["value"] for row in view["facts"][1]["rows"]}
-    assert rows["AAAA"] == "2 records"
-    hints = {item["id"]: item["hint"] for item in view["accordions"]}
+    assert "AAAA 2" in overview.dns_card(response["domain"])["sub"]
+    hints = {item["id"]: item["hint"] for item in view["sections"]}
     assert "AAAA 2" in hints["dns"]
 
 
@@ -699,16 +699,22 @@ def test_an_ipv6_only_name_is_tagged_with_its_aaaa_address():
     assert f"AAAA → {V6}" in tags
 
 
-def test_the_reverse_column_of_an_ipv6_address_counts_aaaa():
-    response = dict(
+def test_the_ptr_verdict_of_an_ipv6_address_reads_aaaa():
+    """The PTR name's own addresses of the looked-up family: AAAA for an IPv6
+    address, whatever its A records say."""
+    location = {**_location(V6), "reverse_dns": "v6.example.net."}
+    confirmed = dict(
         _ip_response(V6),
+        location=location,
         domain={"a": [{"ip": "8.8.8.8", "ttl": 60}], "aaaa": [{"ip": V6, "ttl": 300}]},
     )
-    column = build_view(response, is_self=False)["facts"][1]
-    rows = {row["label"]: row["value"] for row in column["rows"]}
-    assert rows["AAAA"] == "1 record"
-    assert "A" not in rows
-    assert rows["TTL"] == "300s"
+    assert build_view(confirmed, is_self=False)["ptr_row"]["suffix"] == " → confirmed"
+    elsewhere = dict(
+        confirmed, domain={"a": [{"ip": "8.8.8.8", "ttl": 60}], "aaaa": []}
+    )
+    assert build_view(elsewhere, is_self=False)["ptr_row"]["suffix"] == (
+        " → does not point back"
+    )
 
 
 # --- the search box (static/js/app.js) --------------------------------------------

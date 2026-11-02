@@ -33,6 +33,7 @@ from asinfo_fixtures import (
     build_manager,
     rebuild,
 )
+from pagehelpers import section
 from test_boot import IMPORT_PROBE
 from test_mcp_iserror import _call, _failed
 from test_reputation import CHROME, SPAMHAUS_META, make_manager, page_text
@@ -476,8 +477,8 @@ def test_an_ip_routed_from_a_special_asn_keeps_its_route_and_names_the_purpose(
     assert as_info["special"]["code"] == "private_asn"
     assert as_info["special"]["first"] == 64512
     assert as_info["special"]["last"] == 65534
-    for section in AS_SECTIONS:
-        assert as_info[section] is None, section
+    for key in AS_SECTIONS:
+        assert as_info[key] is None, key
     # The route is a fact about the address, and RPKI's verdict on it stands.
     assert as_info["route"] == {
         "prefix": LEAKED_ROUTE,
@@ -525,8 +526,8 @@ def test_an_ip_routed_from_a_special_asn_keeps_its_route_and_names_the_purpose(
     assert fallback["route"] is None
     assert fallback["announced"] is False
     assert fallback["special"]["code"] == "private_asn"
-    for section in AS_SECTIONS:
-        assert fallback[section] is None, section
+    for key in AS_SECTIONS:
+        assert fallback[key] is None, key
     # No route, so no RPKI verdict to credit: only the dump that says so.
     assert list(fallback["datasets"]) == ["ris_v4"]
     assert fallback["attribution"] == ["Source: RIPE NCC"]
@@ -863,21 +864,24 @@ def test_as_view_for_a_special_origin_shows_its_purpose():
     assert viewmodel.as_view({**card, "attribution": None})["attribution"] == []
 
 
-def test_page_has_the_as_accordion_after_geoip(asinfo_enabled, legs):
+def test_page_has_the_as_card_in_organization_after_location(asinfo_enabled, legs):
     html = client.get(f"/{KT_IP}", headers=BROWSER).text
-    ids = re.findall(r'<details class="accordion" id="acc-([a-z]+)"', html)
-    assert ids.index("as") == ids.index("geoip") + 1
-    assert 'id="hint-as"' in html
-    assert "AS4766 · 3 prefixes" in html
-    assert "Korea Telecom" in html
-    assert "Source: RIPE NCC" in html
-    assert "RPKI data validated by rpki-client.org" in html
-    assert "The CAIDA UCSD AS Relationships Dataset, 2026-10-01" in html
+    ids = re.findall(r'<section class="report-section" id="sec-([a-z]+)"', html)
+    assert ids.index("organization") == ids.index("location") + 1
+    organization = section(html, "organization")
+    assert 'data-hint="organization" title="AS4766 · 3 prefixes' in organization
+    assert "Korea Telecom" in organization
+    assert "Source: RIPE NCC" in organization
+    assert "RPKI data validated by rpki-client.org" in organization
+    assert "The CAIDA UCSD AS Relationships Dataset, 2026-10-01" in organization
 
 
-def test_page_has_no_as_accordion_when_disabled(legs):
+def test_page_has_no_as_card_when_disabled(legs):
     html = client.get(f"/{KT_IP}", headers=BROWSER).text
-    assert 'id="acc-as"' not in html
+    organization = section(html, "organization")
+    # GeoLite2's rows stand in for it (the org block).
+    assert '<span class="kv-label">Org</span>' in organization
+    assert "Source: RIPE NCC" not in html
 
 
 def test_lookup_href_links_as_numbers_special_ones_included():
@@ -891,19 +895,24 @@ def test_lookup_href_links_as_numbers_special_ones_included():
     assert main.lookup_href("ASxyz") is None
 
 
-def test_network_org_row_links_its_as_number(asinfo_enabled, legs):
-    html = client.get(f"/{KT_IP}", headers=BROWSER).text
-    assert re.search(
-        r'<span class="kv-label">Org</span>\s*<span class="kv-value[^"]*">'
-        r'<a class="lookup-link" href="/AS4766" rel="nofollow">AS4766</a>'
-        r" GeoLite2&#39;s name</span>",
-        html,
-    )
+def test_network_org_row_links_its_as_number():
+    """The org block's Org row (an IP page with no AS card) links the number
+    alone when AS lookups exist; with AS information on, an IP page draws
+    the AS card instead, whose numbers link (below)."""
+    response = {
+        "address": KT_IP,
+        "location": {"asn_number": 4766, "asn_name": "GeoLite2's name"},
+    }
+    view = viewmodel.build_view(response, is_self=False, link_for=main.lookup_href)
+    org = next(row for row in view["org_rows"] if row["label"] == "Org")
+    assert org["value"] == "AS4766"
+    assert org["href"] == "/AS4766"
+    assert org["suffix"] == " GeoLite2's name"
 
 
 def test_as_links_are_nofollow_lookup_links(asinfo_enabled, legs):
     html = client.get(f"/{KT_IP}", headers=BROWSER).text
-    body = html.split('id="acc-as"')[1].split("</details>")[0]
+    body = section(html, "organization")
     # The card's rows; the credits after them link out (see below).
     anchors = re.findall(r"<a [^>]*>", body.split("</table>")[0])
     assert anchors
@@ -1433,7 +1442,7 @@ def test_privacy_omits_them_when_disabled(monkeypatch, tmp_path):
 
 def _credits_on(html: str) -> list[str]:
     """The credit paragraphs after the AS card's table."""
-    panel = html.split('id="acc-as"')[1].split("</details>")[0]
+    panel = section(html, "organization")
     return re.findall(
         r'<p class="api-note tone-muted">(.*?)</p>', panel.split("</table>")[1]
     )

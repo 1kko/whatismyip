@@ -23,6 +23,7 @@ import whoisit
 import lookup
 import mcp_server
 import rdap
+import overview
 import viewmodel
 from config import (
     RDAP_BREAKER_COOLDOWN_SECONDS,
@@ -179,8 +180,8 @@ class TestIpNeverFallsBackToWhois:
         record = {"error": rdap.RIR_RDAP_UNAVAILABLE}
 
         assert viewmodel.whois_display(record) == {"Error": rdap.RIR_RDAP_UNAVAILABLE}
-        column = viewmodel._whois_column(record)
-        assert column["rows"][0]["value"] == "unavailable"
+        card = overview.registration_card(record, is_ip=True)
+        assert (card["value"], card["state"]) == ("?", "unknown")
         assert mcp_server.compact_registration(record) == {
             "error": rdap.RIR_RDAP_UNAVAILABLE
         }

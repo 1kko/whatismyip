@@ -381,7 +381,7 @@ body {
 .origin__city { font-size: 13px; color: var(--text-secondary); }
 .origin__asn { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
 
-/* The queried name does not exist (NXDOMAIN): said once, above the facts,
+/* The queried name does not exist (NXDOMAIN): said once, above the summary,
    so the dashes below read as "nothing there" for a reason. */
 .dns-banner {
   margin: 24px 0 0;
@@ -393,23 +393,8 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* Facts */
-.facts {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  padding-block: 36px;
-}
-.facts__col { padding-inline: 34px; }
-.facts__col:first-child { padding-left: 0; }
-.facts__col:last-child { padding-right: 0; }
-.facts__col + .facts__col { border-left: 1px solid var(--border); }
-.facts__title {
-  margin: 0 0 16px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 1.6px;
-  color: var(--text-muted);
-}
+/* A label and its value, one row each: the UNIQUE ID row, an IP's network
+   rows (the org block) and its PTR row. */
 .kv { display: flex; gap: 16px; margin-bottom: 10px; }
 .kv-label {
   width: 64px;
@@ -420,7 +405,272 @@ body {
 }
 .kv-value { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
 
-/* Accordions */
+/* The summary (overview.py): one sentence, the findings to review, and the
+   timing line. A strong segment carries the tone of what it says. */
+.summary { padding-top: 32px; margin-bottom: 20px; }
+.summary__sentence {
+  margin: 0 0 14px;
+  max-width: 860px;
+  font-size: 20px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+.summary__sentence strong { color: var(--text-primary); font-weight: 600; }
+.summary__sentence .tone-warning { color: var(--warning); }
+.summary__sentence .tone-danger { color: var(--danger); }
+.summary__meta { margin: 0; font-size: 11.5px; color: var(--text-secondary); }
+
+/* "To review": a chip per finding, each a link to its section. Never an
+   unknown: a gap shows on its card, not here. The row is flex, so its
+   `hidden` (no chips) needs saying again. */
+.review {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.review[hidden] { display: none; }
+.review__label,
+.card__label,
+.toc__title,
+.toc__group,
+.report-section__sub {
+  font: 600 11px/1.3 var(--font-mono);
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  /* "Records for <PTR name>" is one long word at phone width. */
+  overflow-wrap: anywhere;
+}
+.review__label { margin-right: 4px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.3;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.chip::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.chip--warning { border-color: #FBBF2459; background: #FBBF2412; }
+.chip--warning::before { background: var(--warning); }
+.chip--warning:hover { border-color: var(--warning); }
+.chip--danger { border-color: #FB718559; background: #FB718512; }
+.chip--danger::before { background: var(--danger); }
+.chip--danger:hover { border-color: var(--danger); }
+.chip:focus-visible,
+.card:focus-visible,
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The status cards: a dot, a label, a value and a sub line, each a link to
+   its section. A value is one line (a 253-character PTR name truncates; its
+   title carries it whole), a sub line two. */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 40px;
+}
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 13px 14px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+.card:hover { background: var(--surface-2); border-color: var(--border-strong); }
+.card--warn { border-color: #FBBF2459; }
+.card--danger { border-color: #FB718559; }
+.card__top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.card__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 20px/1.25 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.card--warn .card__value { color: var(--warning); }
+.card--danger .card__value { color: var(--danger); }
+.card__sub {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+/* A state's dot, on its card, its contents entry and its heading. Unknown is a
+   ring with "?", never a colour that could read as a verdict; on request and
+   loading an empty ring. */
+.dot {
+  display: inline-block;
+  position: relative;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.dot--pass { background: var(--success); }
+.dot--warn { background: var(--warning); }
+.dot--danger { background: var(--danger); }
+.dot--info { background: var(--text-muted); }
+.dot--unknown {
+  width: 12px;
+  height: 12px;
+  background: transparent;
+  border: 1.5px solid var(--text-muted);
+}
+.dot--unknown::after {
+  content: "?";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-secondary);
+  font: 700 8px/1 var(--font-sans);
+}
+.dot--request,
+.dot--pending {
+  background: transparent;
+  border: 1.5px solid var(--text-secondary);
+}
+
+/* The contents list beside the sections: sticky, each entry its section's
+   dot, name and hint. Under 900px it becomes a chip bar (below). */
+.report {
+  display: flex;
+  align-items: flex-start;
+  gap: 36px;
+  padding-bottom: 72px;
+}
+.toc {
+  position: sticky;
+  top: 20px;
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+.toc__title { margin: 0 0 10px 10px; }
+.toc__group { margin: 14px 0 6px 10px; }
+.toc__item {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 10px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border-left: 2px solid transparent;
+  border-radius: 8px;
+  color: var(--text-primary);
+  text-decoration: none;
+}
+.toc__item .dot { justify-self: center; }
+.toc__item:hover { background: var(--surface); }
+.toc__item[aria-current="true"] { background: var(--surface); border-left-color: var(--accent); }
+.toc__item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.toc__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 13px/1.3 var(--font-sans);
+}
+.toc__hint {
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 11px/1.3 var(--font-mono);
+  color: var(--text-secondary);
+}
+
+/* The sections, always expanded. A card, a chip or a contents entry jumps to
+   one; the margin keeps its heading clear of the top (of the chip bar under
+   900px). */
+.report__body { flex: 1 1 0; min-width: 0; }
+.report-section {
+  padding: 26px 0 30px;
+  border-top: 1px solid var(--border);
+  scroll-margin-top: 16px;
+}
+.report-section:first-child { border-top: 0; padding-top: 4px; }
+.report-section__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 16px;
+}
+.report-section__head .hint { max-width: 100%; }
+.report-section__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--text-primary);
+  font: 600 18px/1.3 var(--font-sans);
+}
+.report-section__sub { margin: 22px 0 12px; }
+.report-section__head + .report-section__sub { margin-top: 0; }
+
+/* "Look up subdomains", "Show the JSON tree", "Measure": a press is the only
+   thing that starts them. Inline-flex, so `hidden` (each is drawn hidden
+   until the script that wires it shows it, and the tree's button hides again
+   once pressed) needs saying again. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  margin: 4px 0 12px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text-primary);
+  font: 600 13px/1 var(--font-sans);
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { cursor: default; opacity: 0.6; }
+.btn:disabled:hover { border-color: var(--border-strong); }
+.btn[hidden] { display: none; }
+
+/* Accordions: the /AS<n> page's (as.html). The lookup page's sections are
+   always expanded (.report-section above). */
 .accordions { display: flex; flex-direction: column; gap: 10px; padding-bottom: 72px; }
 .accordion {
   background: var(--surface);
@@ -448,11 +698,10 @@ body {
   transform: rotate(90deg);
   color: var(--accent);
 }
-/* One line each at 390px: the title never wraps, and a hint that does not fit
+/* One line each at 390px: a title never wraps, and a hint that does not fit
    ("A 0 · AAAA 0 · MX 0 · NS 0 · TXT 0" beside "DNS records") truncates with
    an ellipsis. The cut is visual only: the DOM text stays whole for a screen
-   reader, and the span's title attribute repeats it on hover; on a phone,
-   opening the accordion shows it all. */
+   reader, and the span's title attribute repeats it on hover. */
 .accordion__title { flex: 1; white-space: nowrap; }
 .hint {
   min-width: 0;
@@ -496,7 +745,7 @@ table.records td:first-child { color: var(--accent); width: 140px; }
 table.records a { color: var(--accent); }
 
 /* A hostname or address that is itself a lookup target links to its own page
-   (main.lookup_href): the DNS table's values, the rDNS and PTR facts, the
+   (main.lookup_href): the DNS table's values, the rDNS and PTR rows, the
    hero's A → tag, the WHOIS name servers and the subdomain list. Quiet on
    purpose -- a page of underlined blue values would be unreadable -- so they
    inherit their row's colour and announce themselves on hover and keyboard
@@ -754,6 +1003,8 @@ table.records--dns td:nth-child(4) {
   pointer-events: none;
 }
 
+/* The map's phone card, at the top of the GeoIP block: shown under 900px,
+   where the band's map is hidden. */
 .mobile-map { display: none; }
 
 /* Error page (error.html): the search box over a short explanation, with no
@@ -836,7 +1087,7 @@ table.records--dns td:nth-child(4) {
   .doc__title { font-size: 24px; }
 }
 
-/* Fingerprint accordion — caption under the UNIQUE ID row / entropy note */
+/* The fingerprint block — caption under the UNIQUE ID row / entropy note */
 .device__note {
   margin: 12px 0 0;
   font-size: 12px;
@@ -849,7 +1100,7 @@ table.records--dns td:nth-child(4) {
   padding-block: 16px;
   border-block: 1px solid var(--border);
 }
-.webrtc .facts__title { margin-bottom: 0; }
+.webrtc .report-section__sub { margin: 0; }
 .webrtc__run { margin-top: 12px; }
 .webrtc__run:disabled { cursor: progress; opacity: 0.6; }
 .webrtc__verdict { margin: 12px 0 0; font-size: 13px; }
@@ -872,21 +1123,7 @@ table.records--dns td:nth-child(4) {
   .mobile-map__card .map__attribution { right: 8px; bottom: 8px; }
   .hero { padding-top: 28px; padding-bottom: 8px; }
   .ip { font-size: 32px; }
-  .facts { grid-template-columns: 1fr; gap: 24px; padding-block: 24px; }
-  .facts__col { padding-inline: 0; }
-  .facts__col + .facts__col {
-    border-left: 0;
-    border-top: 1px solid var(--border);
-    padding-top: 24px;
-  }
-  .mobile-map { display: block; padding-bottom: 24px; }
-  .mobile-map__header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
-  }
-  .mobile-map__header .facts__title { margin: 0; }
+  .mobile-map { display: block; margin-bottom: 16px; }
   .mobile-map__card {
     position: relative;
     height: 255px;
@@ -895,6 +1132,42 @@ table.records--dns td:nth-child(4) {
     border-radius: 14px;
     background: var(--surface);
   }
+  .summary { padding-top: 24px; }
+  .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 24px; }
+  /* The contents list becomes a chip bar stuck to the top of the screen,
+     scrolling sideways; each chip is 40px tall. The hints stay in the
+     sections' headings. */
+  .report { flex-direction: column; align-items: stretch; gap: 12px; }
+  .toc {
+    top: 0;
+    z-index: 2;
+    flex: none;
+    flex-direction: row;
+    gap: 6px;
+    max-height: none;
+    margin-inline: -20px;
+    padding: 10px 20px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    scrollbar-width: none;
+  }
+  .toc::-webkit-scrollbar { display: none; }
+  .toc__title,
+  .toc__group,
+  .toc__hint { display: none; }
+  .toc__item {
+    display: flex;
+    flex: none;
+    gap: 8px;
+    min-height: 40px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+  .toc__item[aria-current="true"] { border-color: var(--accent); }
+  .report-section { scroll-margin-top: 72px; }
   /* One line, or it eats three. The wordmark is the first thing to go: the
      timing line and the source link carry more. */
   .footer { gap: 12px; font-size: 11px; }
@@ -996,6 +1269,10 @@ table.records--dns td:nth-child(4) {
 
 /* Too narrow to keep the timing line centred between the ends: stack it over
    the links, both centred. */
+@media (max-width: 760px) {
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (max-width: 520px) {
   .footer { grid-template-columns: 1fr; justify-items: center; row-gap: 8px; }
   .footer .mono,

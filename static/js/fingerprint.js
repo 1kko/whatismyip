@@ -4,7 +4,8 @@
 // default-src 'self' would allow a same-origin fetch, so do not add one.
 // No dependencies, no storage. Mirrors the map.js pattern: server renders empty
 // placeholders, this paints them. Two phases: the passive signals on load, the
-// active probes only once the visitor opens the panel.
+// active probes only once the visitor presses "Measure" in the self page's
+// "Your browser" section.
 //
 // The first two rows of the signal table compare this browser's clock and
 // languages with the address the page was served to, whose GeoIP record is in
@@ -125,7 +126,7 @@
     return;
   }
 
-  const panel = document.getElementById("acc-fingerprint");
+  const panel = document.getElementById("sec-browser");
   if (!panel) return; // lookup page, or not the self view — do nothing.
 
   const DASH = "—";
@@ -159,13 +160,23 @@
     const el = document.getElementById(id);
     if (el) el.textContent = text || DASH;
   };
-  // The accordion hint is one line with an ellipsis on a narrow screen (.hint
-  // in whatismyip.css), so its title carries the full text too.
-  const setHint = (id, text) => {
-    const el = document.getElementById(id);
-    if (el) {
+  // The section's hint, in the contents list and under its heading: each is
+  // one line with an ellipsis on a narrow screen (.hint and .toc__hint in
+  // whatismyip.css), so its title carries the full text too.
+  const setHint = (text) => {
+    for (const el of document.querySelectorAll('[data-hint="browser"]')) {
       el.textContent = text;
       el.title = text;
+    }
+  };
+  // The section's dots start "on request"; once measured they read as data
+  // with no verdict, like any other section without a card.
+  const markMeasured = () => {
+    for (const dot of document.querySelectorAll(
+      '.toc__item[data-section="browser"] .dot, #h-browser .dot',
+    )) {
+      dot.classList.remove("dot--request");
+      dot.classList.add("dot--info");
     }
   };
 
@@ -230,43 +241,37 @@
   add("PDF viewer",
     safe(() => (nav.pdfViewerEnabled != null ? (nav.pdfViewerEnabled ? "yes" : "no") : null)), 0);
 
-  // The full signal list lives in the Fingerprint accordion table.
+  // The full signal list lives in the fingerprint block's table.
   renderSignals();
 
-  // ---- Phase 2: active entropy, run once the visitor opens the panel ------
+  // ---- Phase 2: active entropy, run when the visitor presses Measure ------
   // Canvas, audio, WebGL parameters and the font probe are the active probes.
   // Firefox with resistFingerprinting, and so Tor Browser, asks before a page
   // reads a canvas, but only while it is handling a click or a key: a read at
   // any other time, such as right after load, is declined unasked and flagged
   // with the canvas icon in the address bar, to exactly the visitors this page
-  // is for. So the probes wait for the panel to be opened, the way the WebRTC
-  // test waits for its button and Raw JSON for its first opening. A click on
-  // the header (Enter or Space on it fires one too) starts them inside that
-  // click, before the browser opens the panel; the toggle event comes after,
-  // in a task of its own, too late to count as the visitor's action, and is
-  // left to an opening without a click (find in page, a script). The passive
-  // signals above stay on load.
+  // is for. So the probes wait for the button, the way the WebRTC test waits
+  // for its own, and its click handler calls measure() synchronously, which
+  // reads the canvas before its first await, inside that click (Enter or
+  // Space on the button fires one too). The passive signals above stay on
+  // load.
   let measured = false;
-  const measureOnOpen = () => {
-    if (!panel.open || measured) return;
-    measured = true;
-    measure();
-  };
-  const header = safe(() => panel.querySelector("summary"));
-  if (header) {
-    header.addEventListener("click", () => {
-      if (panel.open || measured) return; // closing it, or measured already
+  const button = document.getElementById("fp-measure");
+  if (button) {
+    // Drawn hidden: without this script it could only do nothing.
+    button.hidden = false;
+    button.addEventListener("click", () => {
+      if (measured) return;
       measured = true;
+      button.disabled = true;
       measure();
     });
   }
-  panel.addEventListener("toggle", measureOnOpen);
-  measureOnOpen(); // a panel already open (restored or scripted) sends no toggle
 
   // The canvas read stays the first thing measure() does, before any await, so
   // that it happens inside the click that called it.
   async function measure() {
-    setHint("fp-acc-hint", "measuring…");
+    setHint("measuring…");
     try {
       const canvasHash = await hashString(canvasFingerprint());
       add("Canvas", canvasHash ? canvasHash.slice(0, 16) : null, 8);
@@ -299,12 +304,14 @@
       }
       setText("fp-bits", "≈ " + bits + " bits");
       setText("fp-unique", "≈ 1 in " + formatCount(Math.pow(2, bits)) + " browsers");
-      setHint("fp-acc-hint", signals.length + " signals · ≈ " + bits + " bits");
+      setHint(signals.length + " signals · ≈ " + bits + " bits");
     } catch (_e) {
       // Phase 1 already painted; a failed measurement leaves the ID blank and
       // the hint without an estimate, never stuck on "measuring…".
       setText("fp-hash", DASH);
-      setHint("fp-acc-hint", signals.length + " signals");
+      setHint(signals.length + " signals");
+    } finally {
+      markMeasured();
     }
   }
 

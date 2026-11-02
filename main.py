@@ -77,11 +77,13 @@ from config import (
 )
 from geo import LOCAL_ROUTE_KM, MIN_ROUTE_KM, Gazetteer, haversine_km
 from lookup import (
+    abuse_report,
     EMAIL_LIKE_TARGET,
     InvalidTargetError,
     PrivateAddressError,
     abuseipdb_client,
     address_as_info,
+    address_reverse_ip,
     as_footprint,
     as_info_for_asn,
     asinfo_manager,
@@ -114,6 +116,8 @@ from mcp_server import (
     registered_tool_names,
 )
 from models import GeoRulesUpdate
+import overview
+from abuseipdb import merge as merge_abuseipdb
 from rdap import rdap_breaker, refresh_rdap_bootstrap
 from security import (
     GeoBlockManager,
@@ -144,6 +148,7 @@ from viewmodel import (
     build_view,
     dns_failure_text,
     dns_names,
+    reputation_view,
     whois_display,
     whois_fill,
 )
@@ -363,7 +368,7 @@ def lookup_href(value: str | None) -> str | None:
     """The page's link to a lookup of `value`, or None when it stays text.
 
     One rule for every hostname and address the page prints (the DNS table's
-    values, the rDNS and PTR facts, the hero's A → tag, the WHOIS name
+    values, the rDNS and PTR rows, the hero's A → tag, the WHOIS name
     servers): a link only to what GET /{domain_ip} would answer. classify_target
     admits a hostname under a public suffix, so ns1.corp.internal stays text --
     a path like that, matching a detector pattern, bans the visitor who follows
@@ -642,15 +647,29 @@ def render_page(request: Request, response_data: dict, is_self: bool):
             "origin_precision": origin.get("precision"),
         }
 
+    # The summary, the review chips and the status cards (overview.py), and
+    # the dot of every section, a card's state or what a section without one
+    # shows (overview.section_state).
+    summary = overview.build(response_data)
+    section_states = {
+        section["id"]: overview.section_state(
+            section["id"], summary["states"], response_data
+        )
+        for section in view["sections"]
+    }
+
     return templates.TemplateResponse(
         request,
         "browser.html",
         {
             "view": view,
+            "overview": summary,
+            "section_states": section_states,
             "view_map": map_data is not None,
             "mcp_tools": registered_tool_names(),
             "stun_url": WEBRTC_STUN_URL,
             "stun_host": WEBRTC_STUN_HOST,
+            "abuseipdb_enabled": abuseipdb_client.enabled,
             "api_base": public_base_url(request),
             "site_domain": site_domain(request),
             "dns_rows": _dns_rows(response_data),
@@ -1786,7 +1805,7 @@ async def healthz():
 # crt.sh round trip. There is deliberately no sitemap: it would need an
 # exception to the detector's `\.xml$` rule, and all it would do is send
 # crawlers to the expensive pages.
-_ROBOTS_TXT = "User-agent: *\nDisallow: /*?subdomains=\n"
+_ROBOTS_TXT = "User-agent: *\nDisallow: /*?subdomains=\nDisallow: /*?abuseipdb=\n"
 
 
 @app.api_route("/robots.txt", methods=["GET", "HEAD"])
@@ -2257,9 +2276,10 @@ async def head_lookup(request: Request):
     whether the page is there. Running WHOIS, DNS and TLS for a body that is
     then thrown away would make the cheapest request the most expensive one.
     So the answer is 200 with the Content-Type GET would answer with, or GET's
-    400 for a query parameter it refuses; whether this particular target would
-    get a 400 is not checked, since finding out takes the lookup this exists
-    to skip.
+    400 for a query parameter it refuses, or for ?abuseipdb=only while
+    AbuseIPDB is off (a switch read locally, no lookup); whether this
+    particular target would get a 400 is not checked, since finding out takes
+    the lookup this exists to skip.
 
     This is a route, not a middleware, so it runs after the security
     middleware like everything else: a banned or geo-blocked address still
@@ -2291,7 +2311,16 @@ async def head_lookup(request: Request):
             if fmt == "text":
                 return _text_error("whois must be: only")
             raise HTTPException(status_code=400, detail="whois must be: only")
-        json_only = whois_only is not None
+        abuseipdb_only = request.query_params.get("abuseipdb")
+        if abuseipdb_only is not None and abuseipdb_only.lower() != "only":
+            if fmt == "text":
+                return _text_error("abuseipdb must be: only")
+            raise HTTPException(status_code=400, detail="abuseipdb must be: only")
+        if abuseipdb_only is not None and not abuseipdb_client.enabled:
+            if fmt == "text":
+                return _text_error("AbuseIPDB is not configured")
+            raise HTTPException(status_code=400, detail="AbuseIPDB is not configured")
+        json_only = whois_only is not None or abuseipdb_only is not None
     if json_only:
         media_type = "application/json"
     elif fmt == "text":
@@ -2324,6 +2353,15 @@ async def get_self_info(request: Request):
         if fmt == "text":
             return _text_error("whois must be: only")
         raise HTTPException(status_code=400, detail="whois must be: only")
+    abuseipdb_only = request.query_params.get("abuseipdb")
+    if abuseipdb_only is not None and abuseipdb_only.lower() != "only":
+        if fmt == "text":
+            return _text_error("abuseipdb must be: only")
+        raise HTTPException(status_code=400, detail="abuseipdb must be: only")
+    if abuseipdb_only is not None and not abuseipdb_client.enabled:
+        if fmt == "text":
+            return _text_error("AbuseIPDB is not configured")
+        raise HTTPException(status_code=400, detail="AbuseIPDB is not configured")
     started = time.perf_counter()
     filter_manager = HeaderManager()
     request_headers = filter_manager.filter_out_unwanted(
@@ -2335,14 +2373,41 @@ async def get_self_info(request: Request):
         "client=%s lookup=%s (%s)",
         sanitized_ip,
         sanitized_ip,
-        "self, whois only" if whois_only is not None else "self",
+        "self, abuseipdb"
+        if abuseipdb_only is not None
+        else "self, whois only"
+        if whois_only is not None
+        else "self",
     )
+
+    if abuseipdb_only is not None:
+        # The "Check with AbuseIPDB" button. The only way the visitor's own
+        # address reaches AbuseIPDB: a page load never does. The address is
+        # the caller's, never a query parameter. Always JSON, like
+        # ?whois=only. No lookup_gate slot: AbuseIPDB's pool, cache and daily
+        # quota bound it, and the GeoIP and list reads are local.
+        if is_safe_ip(client_ip):
+            answer = await abuse_report(client_ip)
+        else:
+            answer = {"ok": False, "reason": "not a public address"}
+        location = await lookup_location(client_ip)
+        merged = merge_abuseipdb(ip_reputation(client_ip, location or None), answer)
+        return {
+            "address": client_ip,
+            "reputation": merged,
+            "display": {
+                "reputation": reputation_view(merged),
+                "card": overview.reputation_card(merged),
+                "chips": overview.reputation_chips(merged, is_ip=True),
+            },
+        }
 
     if whois_only is not None:
         # The page's fill-in for a registration it went out without. Always
         # JSON, whatever was negotiated, like ?subdomains=only: there is no
         # page to render for it. `display` is the same record as the page
-        # words it, so app.js only places text.
+        # words it, the section's hint and rows and its Registration card, so
+        # app.js only places text.
         try:
             whois_data = await _self_whois_only(client_ip)
         except LookupBusy:
@@ -2350,7 +2415,10 @@ async def get_self_info(request: Request):
         return {
             "address": client_ip,
             "whois": whois_data,
-            "display": whois_fill(whois_data),
+            "display": {
+                **whois_fill(whois_data),
+                "card": overview.registration_card(whois_data, is_ip=True),
+            },
         }
     if names is not None:
         try:
@@ -2407,6 +2475,12 @@ async def get_self_info(request: Request):
     as_info = address_as_info(client_ip, ip_data)
     if as_info is not None:
         response_data["as_info"] = as_info
+    # The names the top lists hold at the visitor's address: a local read too,
+    # for a public address only.
+    if is_safe_ip(client_ip):
+        reverse_ip = address_reverse_ip(client_ip)
+        if reverse_ip is not None:
+            response_data["reverse_ip"] = reverse_ip
 
     if fmt == "html":
         return render_page(request, response_data, is_self=True)
