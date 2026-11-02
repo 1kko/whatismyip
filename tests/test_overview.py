@@ -615,6 +615,8 @@ def _page():
     response["resolved_ip"] = "192.0.66.108"
     response["location"] = {
         **response["location"],
+        "country_code": "US",
+        "country_name": "United States",
         "city_name": "San Francisco",
         "precision": "city",
     }
@@ -773,3 +775,17 @@ def test_build_states_follow_cards():
     ip = build(_ip_response())
     assert list(ip["states"]) == [c["id"] for c in ip["cards"]]
     assert "location" in ip["states"]
+
+
+def test_domain_place_is_the_city_alone_or_the_country():
+    response = _page()
+    assert "in San Francisco," in _joined(sentence(response, False))
+    response["location"]["precision"] = "country"
+    assert " in United States," in _joined(sentence(response, False))
+
+
+def test_expiring_certificate_tone_follows_the_chip():
+    response = _page()
+    response["ssl"] = _cert(5)
+    segments = sentence(response, False)
+    assert next(s for s in segments if s["text"] == "5 days")["tone"] == "warning"

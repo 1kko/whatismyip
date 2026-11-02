@@ -425,12 +425,12 @@ def _organization(response: dict) -> str | None:
     return f"AS{asn}" if asn else None
 
 
-def _place(location: dict | None) -> str | None:
+def _place(location: dict | None, with_country: bool = True) -> str | None:
     location = location or {}
     country = location.get("country_name")
     city = location.get("city_name")
     if location.get("precision") == "city" and city:
-        return f"{city}, {country}" if country else str(city)
+        return f"{city}, {country}" if country and with_country else str(city)
     return country or None
 
 
@@ -466,7 +466,7 @@ def _resolve_clause(response: dict) -> list[dict] | None:
         return None
     clause = [_seg("resolves to "), _seg(str(ip), True)]
     org = _organization(response)
-    place = _place(response.get("location"))
+    place = _place(response.get("location"), with_country=False)
     if org:
         clause.append(_seg(f" at {org}"))
     if place:
@@ -488,7 +488,7 @@ def _certificate_clause(ssl: dict | None) -> list[dict] | None:
     _, days_left = viewmodel._cert_expiry(ssl)
     clause = [_seg(f"serves {kind}")]
     if days_left is not None:
-        tone = "warning" if days_left < 14 else None
+        tone = "warning" if viewmodel._ssl_status(ssl)[1] == "warning" else None
         clause += [_seg(" with "), _seg(viewmodel._days(days_left), True, tone)]
         clause.append(_seg(" left"))
     return clause
