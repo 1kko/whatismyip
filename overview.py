@@ -13,6 +13,7 @@ lists is not a clean bill. `href` is the section the card scrolls to.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import viewmodel
@@ -389,3 +390,194 @@ def review_chips(response: dict, is_ip: bool) -> list[dict]:
     chips.extend(reputation_chips(response.get("reputation"), is_ip))
     order = _IP_ORDER if is_ip else _DOMAIN_ORDER
     return sorted(chips, key=lambda c: order.index(c["section"]))
+
+
+def _seg(text: str, strong: bool = False, tone: str | None = None) -> dict:
+    return {"text": text, "strong": strong, "tone": tone}
+
+
+def _join_segments(clauses: list[list[dict]]) -> list[dict]:
+    """Clauses read as a list: "A", "A and B", "A, B, and C"."""
+    out: list[dict] = []
+    for index, clause in enumerate(clauses):
+        if index:
+            last = index == len(clauses) - 1
+            if not last:
+                joiner = ", "
+            else:
+                joiner = " and " if len(clauses) == 2 else ", and "
+            out.append(_seg(joiner))
+        out.extend(clause)
+    return out
+
+
+def _organization(response: dict) -> str | None:
+    """ "Automattic, Inc (AS2635)": the AS card's holder, else GeoLite2's
+    name, with the number when there is one."""
+    location = response.get("location") or {}
+    as_info = response.get("as_info") or {}
+    name = viewmodel.as_holder(as_info.get("name")) or location.get("asn_name")
+    asn = as_info.get("asn") or location.get("asn_number")
+    if name and asn:
+        return f"{name} (AS{asn})"
+    if name:
+        return str(name)
+    return f"AS{asn}" if asn else None
+
+
+def _place(location: dict | None) -> str | None:
+    location = location or {}
+    country = location.get("country_name")
+    city = location.get("city_name")
+    if location.get("precision") == "city" and city:
+        return f"{city}, {country}" if country else str(city)
+    return country or None
+
+
+def _registration_sentence(name: str, whois: dict | None) -> list[dict]:
+    """ "nasa.gov has been registered through get.gov for 29 years."; empty
+    when the record is missing, failed, pending or has no readable date."""
+    if not whois or whois.get("error") or whois.get("thin"):
+        return []
+    created, _ = viewmodel.registration_age(whois)
+    if created is None:
+        return []
+    who = whois.get("registrar") or whois.get("registrant")
+    tone = "warning" if viewmodel._young_domain_tag(whois) else None
+    through = f" through {who}" if who else ""
+    return [
+        _seg(name, True),
+        _seg(f" has been registered{through} for "),
+        _seg(_age_text(created), True, tone),
+        _seg("."),
+    ]
+
+
+def _resolve_clause(response: dict) -> list[dict] | None:
+    domain = response.get("domain") or {}
+    ip = response.get("resolved_ip")
+    for key in ("a", "aaaa"):
+        if not ip and domain.get(key):
+            ip = domain[key][0].get("ip")
+    if not ip:
+        status = domain.get("status") or {}
+        if status.get("a") == "noanswer" and status.get("aaaa") == "noanswer":
+            return [_seg("has no address record")]
+        return None
+    clause = [_seg("resolves to "), _seg(str(ip), True)]
+    org = _organization(response)
+    place = _place(response.get("location"))
+    if org:
+        clause.append(_seg(f" at {org}"))
+    if place:
+        clause.append(_seg(f" in {place}"))
+    return clause
+
+
+def _certificate_clause(ssl: dict | None) -> list[dict] | None:
+    if not ssl or ssl.get("error"):
+        return None
+    problem = viewmodel._ssl_problem(ssl)
+    if problem:
+        return [
+            _seg("serves a certificate that is "),
+            _seg(problem, True, "danger"),
+        ]
+    issuer = viewmodel._cert_issuer(ssl)
+    kind = "a valid certificate" if issuer == DASH else f"a valid {issuer} certificate"
+    _, days_left = viewmodel._cert_expiry(ssl)
+    clause = [_seg(f"serves {kind}")]
+    if days_left is not None:
+        tone = "warning" if days_left < 14 else None
+        clause += [_seg(" with "), _seg(viewmodel._days(days_left), True, tone)]
+        clause.append(_seg(" left"))
+    return clause
+
+
+def _security_clause(dns_security: dict | None) -> list[dict] | None:
+    card = security_card(dns_security)
+    if card is None:
+        return None
+    counts = re.match(r"(\d+) / (\d+)", card["value"])
+    if not counts or counts.group(2) == "0":
+        return None
+    passed, answered = counts.groups()
+    tone = "warning" if card["state"] in ("warn", "danger") else None
+    noun = "check" if answered == "1" else "checks"
+    return [
+        _seg("passes "),
+        _seg(f"{passed} of {answered}", True, tone),
+        _seg(f" graded DNS security {noun}"),
+    ]
+
+
+def _domain_sentence(response: dict) -> list[dict]:
+    domain = response.get("domain") or {}
+    name = response.get("address") or domain.get("queried_name") or ""
+    if viewmodel.dns_banner(domain):
+        return [_seg(name, True), _seg(" does not resolve.")]
+    out = _registration_sentence(name, response.get("whois"))
+    clauses = [
+        _resolve_clause(response),
+        _certificate_clause(response.get("ssl")),
+        _security_clause(response.get("dns_security")),
+    ]
+    clauses = [clause for clause in clauses if clause]
+    if not clauses:
+        return out
+    if out:
+        out.append(_seg(" "))
+        out.append(_seg("It "))
+    else:
+        out.append(_seg(name, True))
+        out.append(_seg(" "))
+    return out + _join_segments(clauses) + [_seg(".")]
+
+
+def _ip_sentence(response: dict) -> list[dict]:
+    location = response.get("location") or {}
+    out = [_seg(str(response.get("address") or ""), True), _seg(" is an address")]
+    org = _organization(response)
+    place = _place(location)
+    if org:
+        out.append(_seg(f" of {org}"))
+    if place:
+        out.append(_seg(f" in {place}"))
+    out.append(_seg("."))
+    ptr = location.get("reverse_dns")
+    total = (response.get("reverse_ip") or {}).get("total")
+    listed = isinstance(total, int) and not isinstance(total, bool) and total > 0
+    if ptr:
+        out += [_seg(" Its reverse DNS name is "), _seg(str(ptr), True)]
+    if listed:
+        noun = "name" if total == 1 else "names"
+        verb = "points" if total == 1 else "point"
+        out += [
+            _seg(" and " if ptr else " "),
+            _seg(f"{total:,} {noun}", True),
+            _seg(f" on public top lists {verb} to it"),
+        ]
+    if ptr or listed:
+        out.append(_seg("."))
+    return out
+
+
+def sentence(response: dict, is_ip: bool) -> list[dict]:
+    """The page's summary sentence as segments {text, strong, tone}; the
+    template joins the texts and wraps the strong ones. A clause whose data is
+    missing or failed is left out rather than written as a gap, and a failing
+    check never gets a positive verb."""
+    return _ip_sentence(response) if is_ip else _domain_sentence(response)
+
+
+def build(response: dict) -> dict:
+    """Everything the overview block renders: sentence, chips, cards and each
+    card's state by id."""
+    is_ip = viewmodel._is_ip(response.get("address") or "")
+    cards = ip_cards(response) if is_ip else domain_cards(response)
+    return {
+        "sentence": sentence(response, is_ip),
+        "chips": review_chips(response, is_ip),
+        "cards": cards,
+        "states": {card["id"]: card["state"] for card in cards},
+    }

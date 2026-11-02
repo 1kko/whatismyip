@@ -9,7 +9,7 @@ import pytest
 import dnssecurity
 import managers
 import overview
-from overview import DKIM_NOT_FOUND, domain_cards, security_card
+from overview import DKIM_NOT_FOUND, build, domain_cards, security_card, sentence
 
 UTC = datetime.timezone.utc
 
@@ -606,3 +606,170 @@ def test_rpki_invalid_chip_section_by_kind():
     ]
     info["route"]["origins"][0]["rpki"].pop("reason")
     assert review_chips(_ip_response(as_info=info), True)[0]["text"] == "RPKI invalid"
+
+
+def _page():
+    """nasa.gov as the page sees it: the fixture plus what the sentence reads."""
+    response = _nasa()
+    response["address"] = "nasa.gov"
+    response["resolved_ip"] = "192.0.66.108"
+    response["location"] = {
+        **response["location"],
+        "city_name": "San Francisco",
+        "precision": "city",
+    }
+    return response
+
+
+def _joined(segments):
+    return "".join(s["text"] for s in segments)
+
+
+def _strong(segments):
+    return [s["text"] for s in segments if s["strong"]]
+
+
+def test_nasa_sentence():
+    segments = sentence(_page(), False)
+    assert _joined(segments) == (
+        "nasa.gov has been registered through get.gov for 29 years. "
+        "It resolves to 192.0.66.108 at Automattic, Inc (AS2635) in San Francisco, "
+        "serves a valid Let's Encrypt certificate with 69 days left, "
+        "and passes 3 of 5 graded DNS security checks."
+    )
+    assert _strong(segments) == [
+        "nasa.gov",
+        "29 years",
+        "192.0.66.108",
+        "69 days",
+        "3 of 5",
+    ]
+    tones = {s["text"]: s["tone"] for s in segments if s["strong"]}
+    assert tones["3 of 5"] == "warning"
+    assert tones["29 years"] is None
+
+
+def test_dkim_dropped_fraction_and_clean_tone():
+    response = _page()
+    response["dns_security"] = _security(dkim=_check("pass", DKIM_NOT_FOUND))
+    segments = sentence(response, False)
+    assert "passes 4 of 4 graded DNS security checks" in _joined(segments)
+    assert {s["text"]: s["tone"] for s in segments}["4 of 4"] is None
+
+
+def test_sentence_drops_failed_whois():
+    response = _page()
+    response["whois"] = {"error": "RDAP timed out"}
+    text = _joined(sentence(response, False))
+    assert text.startswith("nasa.gov resolves to 192.0.66.108")
+    assert "registered" not in text and "?" not in text
+
+
+def test_sentence_drops_failed_tls():
+    for ssl in (None, {"error": "port 443 unreachable", "reason": "timed out"}):
+        response = _page()
+        response["ssl"] = ssl
+        text = _joined(sentence(response, False))
+        assert "certificate" not in text
+        assert text.endswith(
+            "in San Francisco and passes 3 of 5 graded DNS security checks."
+        )
+
+
+def test_sentence_drops_unknown_security():
+    response = _page()
+    response["dns_security"] = None
+    text = _joined(sentence(response, False))
+    assert "security" not in text
+    assert text.endswith("with 69 days left.")
+
+
+def test_nxdomain_sentence():
+    response = {
+        "address": "nasa.example",
+        "domain": {"queried_name": "nasa.example", "status": {"a": "nxdomain"}},
+    }
+    assert _joined(sentence(response, False)) == "nasa.example does not resolve."
+
+
+def test_expired_certificate_wording():
+    response = _page()
+    response["ssl"] = _cert(-3)
+    segments = sentence(response, False)
+    assert "serves a certificate that is expired" in _joined(segments)
+    assert "valid" not in _joined(segments)
+    problem = next(s for s in segments if s["text"] == "expired")
+    assert problem["tone"] == "danger"
+
+
+def test_untrusted_certificate_wording():
+    response = _page()
+    response["ssl"] = _cert(30, trusted=False, verify_error={"reason": "self-signed"})
+    text = _joined(sentence(response, False))
+    assert "serves a certificate that is " in text
+    assert "valid" not in text
+
+
+def test_young_domain_age_is_a_warning():
+    response = _page()
+    response["whois"]["created"] = _ago(6).isoformat()
+    segments = sentence(response, False)
+    assert "for 6 days." in _joined(segments)
+    assert next(s for s in segments if s["text"] == "6 days")["tone"] == "warning"
+
+
+def test_ip_sentence():
+    response = _ip_response(
+        reverse_ip={"total": 24783},
+        as_info={"asn": 4766, "name": "KIXS-AS-KR - Kakao Corp"},
+    )
+    response["location"]["country_name"] = "South Korea"
+    segments = sentence(response, True)
+    text = _joined(segments)
+    assert text.startswith("121.53.204.130 is an address of ")
+    assert text == (
+        "121.53.204.130 is an address of Kakao Corp (AS4766) in Seoul, South Korea. "
+        "Its reverse DNS name is ptr.example.net and 24,783 names on public top "
+        "lists point to it."
+    )
+    assert segments[0]["text"] == "121.53.204.130" and segments[0]["strong"]
+
+
+def test_ip_sentence_without_ptr():
+    response = _ip_response(reverse_ip={"total": 3})
+    del response["location"]["reverse_dns"]
+    text = _joined(sentence(response, True))
+    assert "reverse DNS" not in text
+    assert text.endswith("3 names on public top lists point to it.")
+    bare = _ip_response()
+    del bare["location"]["reverse_dns"]
+    plain = _joined(sentence(bare, True))
+    assert plain.endswith("South Korea.") or plain.endswith("Seoul.")
+    assert "reverse DNS" not in plain and "top lists" not in plain
+
+
+def test_ip_sentence_with_ptr_only():
+    text = _joined(sentence(_ip_response(), True))
+    assert text.endswith("Its reverse DNS name is ptr.example.net.")
+
+
+def test_third_party_text_is_data():
+    response = _page()
+    response["whois"]["registrar"] = "<b>x</b>"
+    segments = sentence(response, False)
+    assert "registered through <b>x</b> for" in _joined(segments)
+    assert all(s["text"] for s in segments)
+
+
+def test_build_states_follow_cards():
+    response = _page()
+    built = build(response)
+    assert set(built) == {"sentence", "chips", "cards", "states"}
+    assert built["states"] == {c["id"]: c["state"] for c in built["cards"]}
+    assert built["states"]["security"] == "warn"
+    assert [c["text"] for c in built["chips"]] == [
+        c["text"] for c in overview.review_chips(response, False)
+    ]
+    ip = build(_ip_response())
+    assert list(ip["states"]) == [c["id"] for c in ip["cards"]]
+    assert "location" in ip["states"]
