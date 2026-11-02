@@ -667,6 +667,7 @@ def render_page(request: Request, response_data: dict, is_self: bool):
             "mcp_tools": registered_tool_names(),
             "stun_url": WEBRTC_STUN_URL,
             "stun_host": WEBRTC_STUN_HOST,
+            "abuseipdb_enabled": abuseipdb_client.enabled,
             "api_base": public_base_url(request),
             "site_domain": site_domain(request),
             "dns_rows": _dns_rows(response_data),

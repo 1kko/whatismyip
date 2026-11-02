@@ -479,6 +479,124 @@ if (whoisPending) {
   })();
 }
 
+// "Check with AbuseIPDB" (self page, with a key configured): the visitor's own
+// address goes to AbuseIPDB only when they press the button. The answer arrives
+// worded by the server (reputation_view, reputation_card, reputation_chips) and
+// is drawn in the markup _blocks.html draws. textContent throughout: a list's
+// name and a source's text are not markup.
+const abuseipdbRun = document.getElementById("abuseipdb-run");
+
+function abuseipdbNode(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) {
+    node.className = className;
+  }
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
+
+function abuseipdbDisplay(payload) {
+  const display = payload && payload.display;
+  const view = display && display.reputation;
+  if (
+    !view ||
+    typeof view.summary !== "string" ||
+    typeof view.note !== "string" ||
+    !Array.isArray(view.rows) ||
+    !Array.isArray(view.attribution) ||
+    !isCard(display.card) ||
+    !Array.isArray(display.chips)
+  ) {
+    return null;
+  }
+  return display;
+}
+
+function abuseipdbRows(rows) {
+  const table = abuseipdbNode("table", "records");
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    const value = abuseipdbNode("td", `tone-${row.tone}`, String(row.value));
+    value.colSpan = 3;
+    if (row.href) {
+      value.append(" · ");
+      const link = abuseipdbNode("a", "", "reports");
+      link.href = row.href;
+      link.rel = "noopener noreferrer";
+      value.append(link);
+    }
+    tr.append(abuseipdbNode("td", "", String(row.label)), value);
+    body.append(tr);
+  }
+  table.append(body);
+  return table;
+}
+
+function fillAbuseipdb(display) {
+  const view = display.reputation;
+  const target = document.getElementById("reputation-body");
+  if (target) {
+    target.replaceChildren(
+      abuseipdbNode("p", "api-note", view.summary),
+      abuseipdbRows(view.rows),
+      abuseipdbNode("p", "api-note tone-muted", view.note),
+      ...view.attribution.map((line) =>
+        abuseipdbNode("p", "api-note tone-muted", String(line)),
+      ),
+    );
+  }
+  setCard(display.card);
+  const slot = document.getElementById("chips-reputation");
+  if (slot) {
+    slot.replaceChildren(
+      ...display.chips.map((chip) => {
+        const link = abuseipdbNode("a", `chip chip--${chip.tone}`, chip.text);
+        link.href = `#sec-${chip.section}`;
+        return link;
+      }),
+    );
+  }
+  const review = document.getElementById("review");
+  if (review && display.chips.length) {
+    review.hidden = false;
+  }
+  if (typeof view.hint === "string") {
+    setHint("reputation", view.hint);
+  }
+}
+
+if (abuseipdbRun) {
+  abuseipdbRun.hidden = false;
+  abuseipdbRun.addEventListener("click", async () => {
+    const status = document.getElementById("abuseipdb-status");
+    abuseipdbRun.disabled = true;
+    if (status) {
+      status.textContent = "Checking with AbuseIPDB…";
+    }
+    try {
+      const response = await fetch("/?abuseipdb=only", {
+        headers: { Accept: "application/json" },
+      });
+      const display = response.ok ? abuseipdbDisplay(await response.json()) : null;
+      if (!display) {
+        throw new Error("no display");
+      }
+      fillAbuseipdb(display);
+      if (status) {
+        status.textContent = "";
+      }
+    } catch (err) {
+      abuseipdbRun.disabled = false;
+      if (status) {
+        status.textContent = "Could not check AbuseIPDB.";
+      }
+    }
+  });
+}
+
 // Pressing "Look up subdomains" is the opt-in: nothing is requested until
 // then, so an ordinary lookup never causes an outbound crt.sh fetch.
 const subdomainRun = document.getElementById("subdomains-run");

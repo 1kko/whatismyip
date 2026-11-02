@@ -175,3 +175,63 @@ def test_whoami_caller_unchanged(abuse):
             )
     assert response.status_code == 200
     assert api.calls == []
+
+
+# --- the button --------------------------------------------------------------
+
+
+@pytest.fixture
+def reputation_on(monkeypatch):
+    # The Reputation section exists only while the lists are on.
+    monkeypatch.setattr(
+        main,
+        "ip_reputation",
+        lambda ip, location=None: {
+            "level": "none",
+            "signals": [],
+            "checked": [
+                {
+                    "id": "tor",
+                    "label": "Tor exit",
+                    "source": "Tor Project",
+                    "as_of": "2026-11-02T00:00:00+00:00",
+                }
+            ],
+            "attribution": [],
+            "unavailable": [],
+            "score": 0,
+        },
+    )
+
+
+def page(path, abuse_on, **headers):
+    return proxy.get(path, headers=visitor(**{**BROWSER, **headers})).text
+
+
+def test_button_only_on_self_page_with_a_key(abuse, reputation_on, monkeypatch):
+    abuse()
+    with_key = page("/", True)
+    assert 'id="abuseipdb-run"' in with_key
+    assert "Check with AbuseIPDB" in with_key
+    assert 'id="abuseipdb-status"' in with_key
+    assert 'role="status"' in with_key
+    assert "<noscript>" in with_key
+    for path in ("/example.com", f"/{OTHER}"):
+        assert 'id="abuseipdb-run"' not in page(path, True)
+    monkeypatch.setattr(main, "abuseipdb_client", make_client())
+    monkeypatch.setattr(main.abuseipdb_client, "enabled", False)
+    assert 'id="abuseipdb-run"' not in page("/", False)
+
+
+def test_button_needs_no_request_on_load(abuse, reputation_on):
+    api = abuse().api
+    page("/", True)
+    assert api.calls == []
+
+
+def test_app_js_writes_text_only():
+    source = open("static/js/app.js").read()
+    start = source.index("abuseipdb-run")
+    handler = source[start : source.index("Look up subdomains", start)]
+    assert "innerHTML" not in handler
+    assert "insertAdjacentHTML" not in handler

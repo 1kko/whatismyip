@@ -258,6 +258,7 @@
        on, or could not be checked, with its source and when the copy
        was taken. The credits are the lists' own terms: Spamhaus asks
        for its notice wherever its data is shown. #}
+    <div id="reputation-body">
     <p class="api-note">{{ view.reputation.summary }}</p>
     <table class="records">
         <tbody>
@@ -270,6 +271,14 @@
     {% for line in view.reputation.attribution %}
     <p class="api-note tone-muted">{{ line }}</p>
     {% endfor %}
+    </div>
+    {% if view.is_self and abuseipdb_enabled %}
+    {# Asked only on a press (static/js/app.js, /?abuseipdb=only): the
+       visitor's own address goes to a third party only when they choose. #}
+    <p class="api-note"><button type="button" class="btn" id="abuseipdb-run" hidden>Check with AbuseIPDB</button>
+    <noscript>Checking with AbuseIPDB needs JavaScript.</noscript></p>
+    <p class="api-note tone-muted" id="abuseipdb-status" role="status"></p>
+    {% endif %}
 {% endmacro %}
 
 {% macro whois() %}
