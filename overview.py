@@ -13,9 +13,9 @@ lists is not a clean bill. `href` is the section the card scrolls to.
 
 from __future__ import annotations
 
-import re
-from typing import Any
+from typing import Any, NamedTuple
 
+import countrynames
 import viewmodel
 from viewmodel import DASH
 
@@ -32,6 +32,10 @@ GRADED_CHECKS = ("spf", "dmarc", "dkim", "caa", "dnssec")
 # managers.DNS_FAILURES, mirrored because managers loads dnspython and the
 # GeoIP readers.
 _DNS_FAILURES = frozenset({"timeout", "servfail", "error"})
+
+# managers.NO_COUNTRY, GeoIP's marker for an address no database places (a
+# private one among them), mirrored for the same reason. It is no country.
+_NO_COUNTRY = "--"
 
 # The record types the DNS card counts, as the section's own hint does. The
 # sweep's other statuses (ptr, cname, dmarc, spf) say nothing about whether
@@ -105,8 +109,11 @@ def registration_card(whois: dict | None, is_ip: bool) -> dict:
 
 
 def dns_card(domain: dict | None) -> dict:
-    """The record sweep: how many records, or why there are none to count."""
-    domain = domain or {}
+    """The record sweep: how many records, or why there are none to count.
+    No sweep at all (lookup._run_legs leaves `domain` None when it raised) is
+    a lookup that failed, never "0 records"."""
+    if not domain:
+        return _card("dns", "DNS", "?", "lookup failed", "unknown")
     if viewmodel.dns_banner(domain):
         return _card("dns", "DNS", "does not exist", "NXDOMAIN", "danger")
     status = domain.get("status") or {}
@@ -120,48 +127,75 @@ def dns_card(domain: dict | None) -> dict:
     return _card("dns", "DNS", value, sub, "pass")
 
 
-def security_card(dns_security: dict | None) -> dict | None:
-    """SPF, DMARC, DKIM, CAA and DNSSEC as passes out of answers."""
-    if dns_security is None:
-        return None
-    label = "DNS security"
+def _not_checked(dns_security: dict) -> bool:
+    """The leg raised: every check is `unknown` and says "not checked"."""
     checks = list(dns_security.values())
-    if (
-        checks
-        and all(check.get("state") == "unknown" for check in checks)
-        and all(
-            str(check.get("summary", "")).endswith("not checked") for check in checks
-        )
-    ):
-        return _card("security", label, "?", "not checked", "unknown")
+    return bool(checks) and all(
+        check.get("state") == "unknown"
+        and str(check.get("summary", "")).endswith("not checked")
+        for check in checks
+    )
+
+
+class _SecurityCounts(NamedTuple):
+    """What the security card counts, which the sentence reads too."""
+
+    passes: int
+    answered: int
+    review: int
+    dkim_dropped: bool
+    state: str
+
+
+def _security_counts(dns_security: dict) -> _SecurityCounts:
+    """GRADED_CHECKS without the `info` ones and without DKIM not found:
+    the passes, the checks that answered, the ones to review (a warning or a
+    failure), whether DKIM was left out, and the card's state. With nothing
+    answered there is nothing to grade, and the state is `unknown`."""
     kept = {name: dns_security[name] for name in GRADED_CHECKS if name in dns_security}
     dkim_dropped = (kept.get("dkim") or {}).get("summary") == DKIM_NOT_FOUND
     if dkim_dropped:
         del kept["dkim"]
-    kept = {name: c for name, c in kept.items() if c.get("state") != "info"}
-    states = [check.get("state") for check in kept.values()]
-    review = states.count("fail") + states.count("warn")
+    states = [c.get("state") for c in kept.values() if c.get("state") != "info"]
+    answered = len(states) - states.count("unknown")
     if "fail" in states:
         state = "danger"
     elif "warn" in states:
         state = "warn"
-    elif "unknown" in states:
+    elif "unknown" in states or not answered:
         state = "unknown"
     else:
         state = "pass"
-    answered = len(states) - states.count("unknown")
-    value = f"{states.count('pass')} / {answered}"
-    if review:
-        sub = f"{review} to review"
-    elif "unknown" in states:
+    return _SecurityCounts(
+        passes=states.count("pass"),
+        answered=answered,
+        review=states.count("fail") + states.count("warn"),
+        dkim_dropped=dkim_dropped,
+        state=state,
+    )
+
+
+def security_card(dns_security: dict | None) -> dict | None:
+    """SPF, DMARC, DKIM, CAA and DNSSEC as passes out of answers; "?" when
+    none answered."""
+    if dns_security is None:
+        return None
+    label = "DNS security"
+    if _not_checked(dns_security):
+        return _card("security", label, "?", "not checked", "unknown")
+    counts = _security_counts(dns_security)
+    value = f"{counts.passes} / {counts.answered}" if counts.answered else "?"
+    if counts.review:
+        sub = f"{counts.review} to review"
+    elif counts.state == "unknown":
         sub = "some checks did not run"
     else:
         sub = "graded checks pass"
     # DKIM left out of the count is said beside it, at the front of the sub
     # line: the value stays the bare fraction, which fits a card at 20px.
-    if dkim_dropped:
+    if counts.dkim_dropped:
         sub = f"DKIM ? · {sub}"
-    return _card("security", label, value, sub, state)
+    return _card("security", label, value, sub, counts.state)
 
 
 def certificate_card(ssl: dict | None) -> dict:
@@ -223,7 +257,14 @@ def network_card(
         if as_info.get("route") is None and ris_missing:
             state = "unknown"
     name = viewmodel.as_holder(as_info.get("name")) or location.get("asn_name")
-    country = location.get("country_code") or as_info.get("country")
+    country = next(
+        (
+            code
+            for code in (location.get("country_code"), as_info.get("country"))
+            if code and code != _NO_COUNTRY
+        ),
+        None,
+    )
     rpki_word = (
         f"RPKI {_rpki_state(as_info)}" if as_info and _rpki_state(as_info) else None
     )
@@ -260,8 +301,16 @@ def domain_cards(response: dict) -> list[dict]:
     return [card for card in cards if card is not None]
 
 
+def _country_known(location: dict) -> bool:
+    """Whether GeoIP placed the address in a country: a code, and not "--"."""
+    code = location.get("country_code")
+    return bool(code) and code != _NO_COUNTRY
+
+
 def location_card(location: dict | None) -> dict:
-    """Where GeoIP puts the address: a city only when the fix is city-precise."""
+    """Where GeoIP puts the address: a city only when the fix is city-precise.
+    With no country (a private address, or one no database places) the card
+    is `unknown` and says nothing under its value."""
     location = location or {}
     country = location.get("country_name") or ""
     city = location.get("city_name")
@@ -270,6 +319,8 @@ def location_card(location: dict | None) -> dict:
     else:
         value = country or "?"
         city = None
+    if not _country_known(location):
+        return _card("location", "Location", value, "", "unknown")
     accuracy = location.get("accuracy_km")
     if city and accuracy is not None:
         reach = f"\u00b1{accuracy} km"
@@ -278,9 +329,7 @@ def location_card(location: dict | None) -> dict:
     else:
         reach = "country-level"
     sub = " \u00b7 ".join(part for part in (country if city else None, reach) if part)
-    code = location.get("country_code")
-    state = "unknown" if not code or code == "--" else "info"
-    return _card("location", "Location", value, sub, state)
+    return _card("location", "Location", value, sub, "info")
 
 
 _FCRDNS_WORDS = {"confirmed": "confirmed", "unconfirmed": "does not point back"}
@@ -427,9 +476,21 @@ def _organization(response: dict) -> str | None:
     return f"AS{asn}" if asn else None
 
 
+def _country_in_text(location: dict) -> str | None:
+    """The country as running English writes it ("the United States",
+    countrynames.country_name_in_text); GeoLite2's own name when there is no
+    code the table knows, and None for "--"."""
+    code = location.get("country_code")
+    if code == _NO_COUNTRY:
+        return None
+    if code and code.upper() in countrynames.COUNTRY_NAMES:
+        return countrynames.country_name_in_text(code)
+    return location.get("country_name") or None
+
+
 def _place(location: dict | None, with_country: bool = True) -> str | None:
     location = location or {}
-    country = location.get("country_name")
+    country = _country_in_text(location)
     city = location.get("city_name")
     if location.get("precision") == "city" and city:
         return f"{city}, {country}" if country and with_country else str(city)
@@ -480,10 +541,15 @@ def _certificate_clause(ssl: dict | None) -> list[dict] | None:
     if not ssl or ssl.get("error"):
         return None
     problem = viewmodel._ssl_problem(ssl)
+    if problem == "expired":
+        return [_seg("serves an "), _seg(problem, True, "danger"), _seg(" certificate")]
     if problem:
+        # Every other problem is why verification failed (hostname mismatch,
+        # untrusted root, ...), a noun phrase, so it goes in brackets.
         return [
-            _seg("serves a certificate that is "),
+            _seg("serves a certificate that fails verification ("),
             _seg(problem, True, "danger"),
+            _seg(")"),
         ]
     issuer = viewmodel._cert_issuer(ssl)
     kind = "a valid certificate" if issuer == DASH else f"a valid {issuer} certificate"
@@ -497,18 +563,19 @@ def _certificate_clause(ssl: dict | None) -> list[dict] | None:
 
 
 def _security_clause(dns_security: dict | None) -> list[dict] | None:
-    card = security_card(dns_security)
-    if card is None:
+    """ "passes 3 of 5 graded DNS security checks", from the counts the card
+    shows; none when the card is absent or `unknown`, since a fraction of the
+    checks that answered would read as the whole result."""
+    if dns_security is None or _not_checked(dns_security):
         return None
-    counts = re.match(r"(\d+) / (\d+)", card["value"])
-    if not counts or counts.group(2) == "0":
+    counts = _security_counts(dns_security)
+    if counts.state == "unknown":
         return None
-    passed, answered = counts.groups()
-    tone = "warning" if card["state"] in ("warn", "danger") else None
-    noun = "check" if answered == "1" else "checks"
+    tone = "warning" if counts.state in ("warn", "danger") else None
+    noun = "check" if counts.answered == 1 else "checks"
     return [
         _seg("passes "),
-        _seg(f"{passed} of {answered}", True, tone),
+        _seg(f"{counts.passes} of {counts.answered}", True, tone),
         _seg(f" graded DNS security {noun}"),
     ]
 
@@ -540,7 +607,9 @@ def _ip_sentence(response: dict) -> list[dict]:
     location = response.get("location") or {}
     out = [_seg(str(response.get("address") or ""), True), _seg(" is an address")]
     org = _organization(response)
-    place = _place(location)
+    # No place for an address GeoIP put in no country: its Location card is
+    # `unknown`, and "in Private network" is not a place.
+    place = _place(location) if _country_known(location) else None
     if org:
         out.append(_seg(f" of {org}"))
     if place:
@@ -576,16 +645,25 @@ def sentence(response: dict, is_ip: bool) -> list[dict]:
 
 
 # The sections that have no card. Subdomains and Raw JSON hold nothing until
-# the visitor asks; "Your browser" measures nothing until "Measure" is pressed
-# (static/js/fingerprint.js then turns its dots to `info`).
+# the visitor asks; "Your browser" measures nothing until "Measure" is pressed.
+# static/js/fingerprint.js turns the browser's dots to `info` once measured,
+# and static/js/app.js the other two once their data is shown.
 _REQUEST_SECTIONS = frozenset({"subdomains", "raw", "browser"})
 
 
-def section_state(section_id: str, states: dict[str, str]) -> str:
+def section_state(
+    section_id: str, states: dict[str, str], response: dict | None = None
+) -> str:
     """A section's dot: its card's state, else `request` for a section that
-    is fetched or measured on request, else `info`."""
+    is fetched or measured on request, else `info`. The Subdomains section of
+    a page that carries the list (?subdomains=include) is data, `info`, or
+    `unknown` when neither crt.sh nor the top lists answered."""
     if section_id in states:
         return states[section_id]
+    subdomains = (response or {}).get("subdomains")
+    if section_id == "subdomains" and subdomains:
+        found = viewmodel.subdomain_found_count(subdomains)
+        return "unknown" if found is None else "info"
     return "request" if section_id in _REQUEST_SECTIONS else "info"
 
 

@@ -1996,6 +1996,23 @@ class TestDnsSecurityView:
         ]
         assert view["folded"]["value"] == "MTA-STS"
 
+    def test_not_published_matches_dnssecurity(self):
+        """viewmodel._NOT_PUBLISHED mirrors dnssecurity's summary for an
+        opt-in record that is not there: graded by dnssecurity.evaluate, the
+        three fold into the one row."""
+        import dnssecurity
+
+        absent = {"records": [], "status": "noanswer"}
+        graded = dnssecurity.evaluate(
+            None, {check: absent for check in ("mta_sts", "tls_rpt", "bimi")}
+        )
+        view = viewmodel.dns_security_view(graded)
+        assert view["folded"]["value"] == "MTA-STS · TLS-RPT · BIMI"
+        assert all(
+            not row["summary"].endswith(viewmodel._NOT_PUBLISHED)
+            for row in view["rows"]
+        )
+
     def test_nothing_unpublished_folds_nothing(self):
         assert viewmodel.dns_security_view(self.DATA)["folded"] is None
 

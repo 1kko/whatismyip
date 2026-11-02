@@ -151,9 +151,20 @@ def test_domains_blocks_with_ptr():
     assert domains["blocks"] == [
         {"name": "ptr", "heading": "Reverse DNS"},
         {"name": "reverseip", "heading": "Listed names"},
-        {"name": "dns", "heading": "Records for dns.google."},
+        {"name": "dns", "heading": "Records for dns.google"},
     ]
     assert domains["hint"].startswith("dns.google. · ")
+
+
+def test_records_heading_drops_one_root_dot():
+    """The heading names the PTR name without the root dot it was answered
+    with, as the summary sentence writes it; one dot only."""
+    response = _ip()
+    response["location"] = {**response["location"], "reverse_dns": "a.example.."}
+    domains = _section(
+        build_view(response, is_self=False, subdomains_enabled=True), "domains"
+    )
+    assert domains["blocks"][-1]["heading"] == "Records for a.example."
 
 
 def test_domains_blocks_without_ptr():

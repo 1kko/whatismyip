@@ -2112,7 +2112,10 @@ def _sections(
         domains_blocks.append(_block("reverseip", "Listed names"))
         domains_hint += f" · {reverseip['hint']}"
     if ptr:
-        domains_blocks.append(_block("dns", f"Records for {ptr}"))
+        # Without the root dot the PTR answer ends with, as the summary
+        # sentence writes the name.
+        name = ptr.removesuffix(".") or ptr
+        domains_blocks.append(_block("dns", f"Records for {name}"))
     sections = [
         _section("location", "Location", _geoip_hint(location), [_block("geoip")]),
         _section(

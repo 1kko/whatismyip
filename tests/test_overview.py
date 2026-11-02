@@ -699,10 +699,19 @@ def test_sentence_drops_failed_tls():
 
 
 def test_sentence_drops_unknown_security():
+    """No security clause when there is no card, and none when the card is
+    `unknown`: a CAA query that timed out leaves four passes out of four
+    answers, but the card says some checks did not run, and "passes 4 of 4"
+    would read as a clean result."""
     response = _page()
     response["dns_security"] = None
     text = _joined(sentence(response, False))
     assert "security" not in text
+    assert text.endswith("with 69 days left.")
+    response["dns_security"] = _security(caa=_check("unknown", "CAA: lookup timed out"))
+    assert security_card(response["dns_security"])["state"] == "unknown"
+    text = _joined(sentence(response, False))
+    assert "passes" not in text and "security" not in text
     assert text.endswith("with 69 days left.")
 
 
@@ -718,18 +727,36 @@ def test_expired_certificate_wording():
     response = _page()
     response["ssl"] = _cert(-3)
     segments = sentence(response, False)
-    assert "serves a certificate that is expired" in _joined(segments)
+    assert "serves an expired certificate" in _joined(segments)
     assert "valid" not in _joined(segments)
     problem = next(s for s in segments if s["text"] == "expired")
     assert problem["tone"] == "danger"
 
 
 def test_untrusted_certificate_wording():
+    """A reason the table does not know reads "not trusted"."""
     response = _page()
     response["ssl"] = _cert(30, trusted=False, verify_error={"reason": "self-signed"})
     text = _joined(sentence(response, False))
-    assert "serves a certificate that is " in text
-    assert "valid" not in text
+    assert "serves a certificate that fails verification (not trusted)" in text
+    assert "valid" not in text.replace("fails verification", "")
+
+
+def test_hostname_mismatch_wording():
+    """Every problem but expiry is a reason the verification failed, so the
+    sentence names it in brackets after the verb rather than as an adjective
+    ("a certificate that is hostname mismatch")."""
+    response = _page()
+    response["ssl"] = _cert(
+        30, trusted=False, verify_error={"reason": "hostname_mismatch"}
+    )
+    segments = sentence(response, False)
+    assert (
+        "serves a certificate that fails verification (hostname mismatch)"
+        in _joined(segments)
+    )
+    problem = next(s for s in segments if s["text"] == "hostname mismatch")
+    assert (problem["strong"], problem["tone"]) == (True, "danger")
 
 
 def test_young_domain_age_is_a_warning():
@@ -811,7 +838,23 @@ def test_domain_place_is_the_city_alone_or_the_country():
     response = _page()
     assert "in San Francisco," in _joined(sentence(response, False))
     response["location"]["precision"] = "country"
-    assert " in United States," in _joined(sentence(response, False))
+    assert " in the United States," in _joined(sentence(response, False))
+
+
+def test_place_names_the_country_in_running_english():
+    """countrynames.country_name_in_text: "the United States", but "South
+    Korea"; GeoLite2's own name when there is no code to read."""
+    ip = _ip_response()
+    ip["location"].update(
+        country_code="US", country_name="United States", city_name="Ashburn"
+    )
+    assert " of AS4766 in Ashburn, the United States." in _joined(sentence(ip, True))
+    ip["location"]["precision"] = "country"
+    assert " in the United States." in _joined(sentence(ip, True))
+    response = _page()
+    response["location"].update(precision="country", country_name="Freedonia")
+    del response["location"]["country_code"]
+    assert " in Freedonia," in _joined(sentence(response, False))
 
 
 def test_expiring_certificate_tone_follows_the_chip():
@@ -835,3 +878,121 @@ def test_section_state():
         overview.section_state(sid, states) in overview.STATES
         for sid in ("whois", "dns", "raw", "anything")
     )
+
+
+def test_no_country_matches_managers():
+    assert overview._NO_COUNTRY == managers.NO_COUNTRY
+
+
+@pytest.mark.parametrize("domain", [None, {}])
+def test_failed_sweep_dns_card_is_unknown(domain):
+    """lookup._run_legs leaves `domain` None when the sweep raised: no
+    records counted, not "0 records" in green."""
+    card = overview.dns_card(domain)
+    assert (card["value"], card["sub"], card["state"]) == (
+        "?",
+        "lookup failed",
+        "unknown",
+    )
+
+
+_LEGS = (
+    "whois",
+    "domain",
+    "dns_security",
+    "ssl",
+    "location",
+    "as_info",
+    "reputation",
+    "reverse_ip",
+    "resolved_ip",
+)
+
+
+@pytest.mark.parametrize("address", ["example.com", "203.0.113.5"])
+@pytest.mark.parametrize("absent", ["missing", "none"])
+def test_everything_missing(address, absent):
+    """A response with every leg missing or None: no card says `pass`, there
+    is no chip, and the sentence prints no gap ("None", "?", "—"); saying
+    nothing is fine."""
+    response = {"address": address}
+    if absent == "none":
+        response.update(dict.fromkeys(_LEGS))
+    built = build(response)
+    assert built["cards"]
+    assert [c["id"] for c in built["cards"] if c["state"] == "pass"] == []
+    assert built["chips"] == []
+    text = _joined(built["sentence"])
+    for gap in ("None", "?", "\u2014"):
+        assert gap not in text
+
+
+def test_no_graded_answer_is_a_question_mark():
+    """Not "0 / 0": with no graded check answered there is no fraction."""
+    checks = _security(
+        **{
+            name: _check("unknown", f"{name}: lookup timed out")
+            for name in overview.GRADED_CHECKS
+        }
+    )
+    card = security_card(checks)
+    assert (card["value"], card["state"]) == ("?", "unknown")
+    assert security_card({})["value"] == "?"
+    assert security_card({})["state"] == "unknown"
+
+
+def test_network_sub_skips_no_country():
+    """GeoIP's "--" (managers.NO_COUNTRY) is no country, like a missing one."""
+    card = overview.network_card(
+        {"country_code": "--", "country_name": "Private network"},
+        None,
+        card_id="organization",
+        label="Organization",
+    )
+    assert card["sub"] == ""
+    card = overview.network_card(
+        {"country_code": "--"}, _as_info("valid", country="KR")
+    )
+    assert card["sub"] == "Automattic, Inc · RPKI valid · KR"
+
+
+def test_unknown_location_says_no_place():
+    """A location with no country (a private address, GeoIP's "--") is
+    `unknown`: its card says nothing under the value, not "country-level",
+    and the IP sentence names no place ("in Private network")."""
+    private = {
+        "country_code": "--",
+        "country_name": "Private network",
+        "is_private": True,
+    }
+    card = overview.location_card(private)
+    assert (card["state"], card["sub"]) == ("unknown", "")
+    assert overview.location_card(None)["sub"] == ""
+    response = {"address": "127.0.0.1", "location": private}
+    assert _joined(sentence(response, True)) == "127.0.0.1 is an address."
+
+
+def test_subdomains_section_reads_its_data():
+    """The ?subdomains=include page carries the list, so its dot is data
+    (`info`), or `unknown` when neither crt.sh nor the top lists answered;
+    without it the section is still on request."""
+    states = build(_page())["states"]
+    found = {"subdomains": {"names": ["a.nasa.gov"], "count": 1, "error": None}}
+    assert overview.section_state("subdomains", states, found) == "info"
+    failed = {"subdomains": {"names": [], "count": 0, "error": "crt.sh timed out"}}
+    assert overview.section_state("subdomains", states, failed) == "unknown"
+    for response in ({"subdomains": None}, {}, None):
+        assert overview.section_state("subdomains", states, response) == "request"
+    assert overview.section_state("raw", states, found) == "request"
+
+
+def test_app_js_states_match():
+    """static/js/app.js's STATES is the list of classes setCard and
+    setSectionState clear before adding one: overview.STATES, in its order."""
+    import json
+    import re
+
+    source = (pathlib.Path(__file__).parent.parent / "static/js/app.js").read_text()
+    match = re.search(r"^const STATES = (\[[^\]]*\]);$", source, re.M)
+    assert match, "no STATES array in app.js"
+    assert tuple(json.loads(match.group(1))) == overview.STATES

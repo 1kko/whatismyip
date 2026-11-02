@@ -652,7 +652,9 @@ def render_page(request: Request, response_data: dict, is_self: bool):
     # shows (overview.section_state).
     summary = overview.build(response_data)
     section_states = {
-        section["id"]: overview.section_state(section["id"], summary["states"])
+        section["id"]: overview.section_state(
+            section["id"], summary["states"], response_data
+        )
         for section in view["sections"]
     }
 
