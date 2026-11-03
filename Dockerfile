@@ -1,7 +1,7 @@
 # Use an official Python runtime as a parent image.
 # Pinned to the multi-arch manifest digest for supply-chain reproducibility;
 # Dependabot keeps this up to date.
-FROM python:3.12-slim@sha256:12316debbfb86890f6b2d825820612741ba527ad5a44e3902759141d572bfe8f
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
 
 # Set the working directory in the container
 WORKDIR /app
